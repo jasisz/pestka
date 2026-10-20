@@ -2,12 +2,12 @@ module Main
     intent =
         "Pestka's command line: read one lean4export file and give a verdict."
         "The verdict is the last line printed: accepted, rejected: <why> or"
-        "declined: <why>. A rejected file also makes main return an error,"
-        "so the status is 1; bin/pestka turns declined into status 2."
+        "declined: <why>. main returns the exit status: 0 accepted, 1 rejected,"
+        "2 declined."
     depends [Core.Names, Check.State, Check.Decl, Export.Stream, Export.Tables]
     effects [Args.get, Console.print, Disk.readText]
 
-fn main() -> Result<Unit, String>
+fn main() -> Int
     ! [Args.get, Console.print, Disk.readText]
     match Args.get()
         [path] -> report(Export.Stream.readFile(path, 8), 8)
@@ -25,7 +25,7 @@ verify workersOf
     workersOf("0") => 1
     workersOf("x") => 8
 
-fn report(o: Outcome, workers: Int) -> Result<Unit, String>
+fn report(o: Outcome, workers: Int) -> Int
     ? "Prints the verdict."
     ! [Console.print]
     match o
@@ -33,13 +33,13 @@ fn report(o: Outcome, workers: Int) -> Result<Unit, String>
         Outcome.Declined(why) -> declined(why)
         Outcome.Read(t) -> summary(t, workers)
 
-fn summary(p: Parsed, workers: Int) -> Result<Unit, String>
+fn summary(p: Parsed, workers: Int) -> Int
     ? "Counts of what the file defines, then the checking verdict."
     ! [Console.print]
     Console.print("constants {p.constants}, declarations {List.len(p.decls)}, names {p.names}, levels {p.levels}, expressions {p.exprs}")
     verdict(Check.Decl.checkParallel(p.decls, workers))
 
-fn verdict(r: Result<Run, Fail>) -> Result<Unit, String>
+fn verdict(r: Result<Run, Fail>) -> Int
     ? "Accepted only when every declaration was checked; admitted inductive blocks make it a decline."
     ! [Console.print]
     match r
@@ -47,7 +47,7 @@ fn verdict(r: Result<Run, Fail>) -> Result<Unit, String>
         Result.Err(Fail.Decline(m)) -> declined(m)
         Result.Ok(run) -> counted(run)
 
-fn counted(run: Run) -> Result<Unit, String>
+fn counted(run: Run) -> Int
     ? "Prints what was checked, trusted and skipped."
     ! [Console.print]
     Console.print("checked {run.checked}, admitted unchecked {run.trusted}, skipped {run.skipped}")
@@ -55,20 +55,20 @@ fn counted(run: Run) -> Result<Unit, String>
         true -> accepted()
         false -> declined("{run.trusted} nested inductive blocks are not checked yet")
 
-fn accepted() -> Result<Unit, String>
-    ? "Every declaration was checked."
+fn accepted() -> Int
+    ? "Every declaration was checked: status 0."
     ! [Console.print]
     Console.print("accepted")
-    Result.Ok(Unit)
+    0
 
-fn rejected(why: String) -> Result<Unit, String>
-    ? "Prints the rejection and fails, which gives status 1."
+fn rejected(why: String) -> Int
+    ? "Prints the rejection: status 1."
     ! [Console.print]
     Console.print("rejected: {why}")
-    Result.Err(why)
+    1
 
-fn declined(why: String) -> Result<Unit, String>
-    ? "Prints that the input is outside what Pestka handles."
+fn declined(why: String) -> Int
+    ? "Prints that the input is outside what Pestka handles: status 2."
     ! [Console.print]
     Console.print("declined: {why}")
-    Result.Ok(Unit)
+    2

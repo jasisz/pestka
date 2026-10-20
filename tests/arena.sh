@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs bin/pestka over the small Lean Kernel Arena test files and tallies the
+# Runs the compiled checker over the small Lean Kernel Arena test files and tallies the
 # answers. DIR is the unpacked lean-arena-tests.tar.gz, with good/ and bad/
 # subdirectories. Every file runs under bin/capped: MB megabytes of resident
 # memory (default 2000) and SECONDS seconds (default 20). The perf/ tests and
@@ -14,11 +14,12 @@ dir=${1:?usage: tests/arena.sh DIR [MB] [SECONDS]}
 mb=${2:-2000}
 secs=${3:-20}
 root=$(cd "$(dirname "$0")/.." && pwd)
+bin="${PESTKA_BIN:-$root/.build/target/release/main}"
 ok=0; declined=0; wrong=0; crashed=0
 for kind in good bad; do
   [ "$kind" = good ] && want=0 || want=1
   for f in $(find "$dir/$kind" -name '*.ndjson' -not -path '*/perf/*' -size -4000k | sort); do
-    "$root/bin/capped" "$mb" "$secs" "$root/bin/pestka" "$f" >/dev/null 2>&1
+    "$root/bin/capped" "$mb" "$secs" "$bin" "$f" >/dev/null 2>&1
     got=$?
     name=${f#"$dir"/}
     if [ "$got" -eq "$want" ]; then

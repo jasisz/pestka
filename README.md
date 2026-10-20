@@ -78,7 +78,7 @@ Compiled to Rust, which is the build meant for large inputs:
 
 ```bash
 bin/build                  # aver compile + cargo build --release into .build/
-bin/pestka FILE.ndjson [WORKERS]   # runs .build/target/release/main, maps the verdict to the exit status
+.build/target/release/main FILE.ndjson [WORKERS]
 tests/run.sh               # every export under tests/export against its expected status
 tests/arena.sh DIR         # the small Lean Kernel Arena tests, each under bin/capped
 ```
@@ -112,9 +112,8 @@ preopens the current directory, so pass a relative path.
 ## Exit codes
 
 The last line printed is the verdict: `accepted`, `rejected: <why>` or
-`declined: <why>`. `bin/pestka` turns it into the exit status the Lean Kernel
-Arena and `lake comparator` read, and reports any other ending, such as a
-crash, as 3:
+`declined: <why>`. `main` returns the matching exit status, the one the Lean
+Kernel Arena and `lake comparator` read:
 
 | Code | Meaning |
 |---|---|
@@ -143,7 +142,7 @@ crash, as 3:
   equality), `Check.Decl` (adding declarations), `Check.Induct`,
   `Check.Recursor`, `Check.Nested`, `Check.IndAdd` (inductive blocks),
   `Check.Quot`, `Check.Lits` (Nat and String literals).
-- `bin/` — `build`, the `pestka` wrapper, and `capped` (kills a run above a
-  memory or time cap; macOS does not enforce `ulimit -v`).
+- `bin/` — `build`, and `capped` (kills a run above a memory or time cap;
+  macOS does not enforce `ulimit -v`).
 - `proto/` — scouting prototypes used for early measurements. Not part of the
   checker.
