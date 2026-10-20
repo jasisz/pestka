@@ -141,6 +141,7 @@ record St
     coreCache: PMap
     eqOk: PMap
     eqFail: PMap
+    eqNo: PMap
     unfoldCache: PMap
     closed: PMap
     open: Int
@@ -159,7 +160,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, block = {}, lctx = {}, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.PMap.empty(), checkCache = Core.PMap.empty(), whnfCache = Core.PMap.empty(), coreCache = Core.PMap.empty(), eqOk = Core.PMap.empty(), eqFail = Core.PMap.empty(), unfoldCache = Core.PMap.empty(), closed = Core.PMap.empty(), open = 0)
+    St(env = env, block = {}, lctx = {}, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.PMap.empty(), checkCache = Core.PMap.empty(), whnfCache = Core.PMap.empty(), coreCache = Core.PMap.empty(), eqOk = Core.PMap.empty(), eqFail = Core.PMap.empty(), eqNo = Core.PMap.empty(), unfoldCache = Core.PMap.empty(), closed = Core.PMap.empty(), open = 0)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0

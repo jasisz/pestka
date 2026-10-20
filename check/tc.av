@@ -2002,13 +2002,26 @@ fn isDefEq(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
         false -> remembered(eqBoolTrue(q.st, t, s)?, t, s)
 
 fn remembered(r: RB, t: Expr, s: Expr) -> Result<RB, Fail>
-    ? "Records a success, and keeps either answer for later declarations when both terms are closed."
+    ? "Records either answer for this declaration, and keeps it for later declarations when both terms are closed."
     match r.b
         true -> yes(St.update(r.st, eqOk = Check.State.pairPut(r.st.eqOk, t, s), closed = keptPair(r.st.closed, t, s)))
-        false -> Result.Ok(RB(b = false, st = St.update(r.st, closed = keptFail(r.st.closed, t, s))))
+        false -> Result.Ok(RB(b = false, st = St.update(r.st, closed = keptFail(r.st.closed, t, s), eqNo = keptNo(r.st.eqNo, t, s))))
 
 verify remembered
     resultBool(remembered(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => false
+
+fn keptNo(fails: PMap, t: Expr, s: Expr) -> PMap
+    ? "Failures of this declaration. Its free variables are its own, each with one type and value, so a pair that was different stays different; terms with loose bound variables are left out, as are pairs too small to be worth an entry."
+    match Bool.and(Core.Exprs.looseRange(t) == 0, Core.Exprs.looseRange(s) == 0)
+        false -> fails
+        true -> match Bool.or(worthKeeping(t), worthKeeping(s))
+            true -> Check.State.pairPut(fails, t, s)
+            false -> fails
+
+verify keptNo
+    Core.PMap.size(keptNo(Core.PMap.empty(), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.fvar(3))) => 1
+    Core.PMap.size(keptNo(Core.PMap.empty(), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.fvar(3))) => 0
+    Core.PMap.size(keptNo(Core.PMap.empty(), Core.Exprs.fvar(0), Core.Exprs.fvar(3))) => 0
 
 verify isDefEq
     resultBool(isDefEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Max(Level.Zero, Level.Zero)), Core.Exprs.bvar(0), Binder.Implicit))) => true
@@ -2246,10 +2259,10 @@ verify known
     known(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
 
 fn knownDifferent(st: St, t: Expr, s: Expr) -> Bool
-    ? "Closed terms an earlier declaration found different."
+    ? "Closed terms an earlier declaration found different, or terms this declaration found different. Not while reducing eagerly: that finds more equalities, so a failure without it does not hold with it."
     match sharedPair(t, s)
         true -> Check.State.closedFailGet(st.closed, t, s)
-        false -> false
+        false -> Bool.and(Bool.not(st.eager), Check.State.pairGet(st.eqNo, t, s))
 
 verify knownDifferent
     knownDifferent(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
