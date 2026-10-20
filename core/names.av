@@ -1,0 +1,136 @@
+module Names
+    intent =
+        "Hierarchical Lean names, each node carrying its structural hash."
+        "A component is any string, dots and spaces included, so a name is"
+        "never split or joined on '.' except for display."
+    exposes [Name, anon, str, num, hashOf, render, cmp]
+    depends [Core.Hash]
+    effects []
+
+decision HashInsideName
+    date = "2026-10-19"
+    reason =
+        "Constants are looked up and compared by name constantly, and"
+        "rebuilding an expression rebuilds its constants. Keeping the hash"
+        "in the node makes both a field read instead of a walk over the"
+        "components."
+    chosen = "HashInsideName"
+    rejected = ["HashOnDemand"]
+    impacts = [str, num, hashOf]
+
+type Name
+    Anon
+    Str(Name, String, Int)
+    Num(Name, Int, Int)
+
+fn anon() -> Name
+    ? "The empty name."
+    Name.Anon
+
+verify anon
+    anon() => Name.Anon
+
+fn str(pre: Name, s: String) -> Name
+    ? "Extends a name with a string component."
+    Name.Str(pre, s, Core.Hash.mix(Core.Hash.mix(hashOf(pre), 7), Core.Hash.ofText(s)))
+
+verify str
+    hashOf(str(anon(), "Nat")) == hashOf(str(anon(), "Nat")) => true
+    hashOf(str(anon(), "Nat")) == hashOf(str(anon(), "Int")) => false
+    str(anon(), "a") == str(anon(), "a") => true
+
+fn num(pre: Name, i: Int) -> Name
+    ? "Extends a name with a numeric component."
+    Name.Num(pre, i, Core.Hash.mix(Core.Hash.mix(hashOf(pre), 11), Int.mod(i, 1099511627689)))
+
+verify num
+    hashOf(num(anon(), 1)) == hashOf(num(anon(), 2)) => false
+    hashOf(num(anon(), 1)) == hashOf(str(anon(), "1")) => false
+
+fn hashOf(n: Name) -> Int
+    ? "The stored hash; the empty name hashes to 1."
+    match n
+        Name.Anon -> 1
+        Name.Str(_, _, h) -> h
+        Name.Num(_, _, h) -> h
+
+verify hashOf
+    hashOf(anon()) => 1
+    hashOf(Name.Str(Name.Anon, "x", 42)) => 42
+    hashOf(Name.Num(Name.Anon, 3, 43)) => 43
+
+fn render(n: Name) -> String
+    ? "Dotted form for messages; not parseable back when a component holds a dot."
+    match n
+        Name.Anon -> "[anonymous]"
+        Name.Str(Name.Anon, s, _) -> s
+        Name.Num(Name.Anon, i, _) -> String.fromInt(i)
+        Name.Str(pre, s, _) -> "{render(pre)}.{s}"
+        Name.Num(pre, i, _) -> "{render(pre)}.{i}"
+
+verify render
+    render(anon()) => "[anonymous]"
+    render(str(str(anon(), "Nat"), "succ")) => "Nat.succ"
+    render(num(str(anon(), "_hyg"), 12)) => "_hyg.12"
+
+fn cmp(a: Name, b: Name) -> Int
+    ? "Total order: -1, 0 or 1. Prefixes first, then a numeric component before a string one."
+    match a
+        Name.Anon -> match b
+            Name.Anon -> 0
+            _ -> -1
+        Name.Num(pa, ia, _) -> cmpNum(pa, ia, b)
+        Name.Str(pa, sa, _) -> cmpStr(pa, sa, b)
+
+verify cmp
+    cmp(anon(), anon()) => 0
+    cmp(anon(), str(anon(), "a")) => -1
+    cmp(str(anon(), "a"), str(anon(), "b")) => -1
+    cmp(num(anon(), 9), str(anon(), "a")) => -1
+    cmp(str(str(anon(), "b"), "a"), str(str(anon(), "a"), "z")) => 1
+    cmp(num(anon(), 2), num(anon(), 10)) => -1
+
+fn cmpNum(pa: Name, ia: Int, b: Name) -> Int
+    ? "Order when a ends in a number."
+    match b
+        Name.Anon -> 1
+        Name.Str -> -1
+        Name.Num(pb, ib, _) -> thenBy(cmp(pa, pb), order(ia < ib, ia == ib))
+
+verify cmpNum
+    cmpNum(anon(), 1, anon()) => 1
+    cmpNum(anon(), 1, num(anon(), 1)) => 0
+
+fn cmpStr(pa: Name, sa: String, b: Name) -> Int
+    ? "Order when a ends in a string."
+    match b
+        Name.Anon -> 1
+        Name.Num -> 1
+        Name.Str(pb, sb, _) -> thenBy(cmp(pa, pb), order(sa < sb, sa == sb))
+
+verify cmpStr
+    cmpStr(anon(), "a", num(anon(), 1)) => 1
+    cmpStr(anon(), "a", str(anon(), "a")) => 0
+
+fn thenBy(first: Int, second: Int) -> Int
+    ? "The first comparison unless it ties."
+    match first == 0
+        true -> second
+        false -> first
+
+verify thenBy
+    thenBy(0, 1) => 1
+    thenBy(-1, 1) => -1
+
+fn order(less: Bool, same: Bool) -> Int
+    ? "-1, 0 or 1 from two tests."
+    match less
+        true -> -1
+        false -> match same
+            true -> 0
+            false -> 1
+
+verify order
+    order(true, false) => -1
+    order(false, true) => 0
+    order(false, false) => 1

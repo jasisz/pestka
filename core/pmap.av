@@ -1,0 +1,126 @@
+module PMap
+    intent =
+        "A persistent hash trie from Int keys to buckets of expression pairs,"
+        "for the checker's caches. Sixteen-way branching on four bits of the"
+        "key at a time; an update copies one path of at most ten nodes. A"
+        "copy of the trie is a copy of its root, so a state record holding"
+        "it can be shared freely: an update never copies the whole table,"
+        "as a Map whose owner was cloned would."
+    exposes [PMap, empty, get, add, size, find]
+    depends [Core.Exprs]
+    effects []
+
+decision PersistentCaches
+    date = "2026-10-19"
+    reason =
+        "The checker threads its state through mutually recursive functions;"
+        "where the generated Rust borrows the state and clones it, the next"
+        "Map.set on a cache copies the whole map. A trie of small nodes makes"
+        "that clone cost nothing and an update cost one path."
+    chosen = "PersistentCaches"
+    rejected = ["MapCaches"]
+    impacts = [add, get]
+
+type PMap
+    Empty
+    Leaf(Int, List<Tuple<Expr, Expr>>)
+    Branch(Vector<PMap>, Int)
+
+fn empty() -> PMap
+    ? "The empty trie."
+    PMap.Empty
+
+verify empty
+    size(empty()) => 0
+
+fn size(m: PMap) -> Int
+    ? "Number of entries."
+    match m
+        PMap.Empty -> 0
+        PMap.Leaf(_, b) -> List.len(b)
+        PMap.Branch(_, n) -> n
+
+verify size
+    size(add(add(empty(), 1, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 17, (Core.Exprs.bvar(2), Core.Exprs.bvar(3)))) => 2
+
+fn nibble(key: Int, shift: Int) -> Int
+    ? "Four bits of the key starting at bit shift."
+    Bits.and(Result.withDefault(Bits.shiftRight(key, shift), 0), 15)
+
+verify nibble
+    nibble(255, 4) => 15
+    nibble(16, 4) => 1
+    nibble(16, 0) => 0
+
+fn get(m: PMap, key: Int) -> List<Tuple<Expr, Expr>>
+    ? "The bucket stored under key, or an empty one."
+    getAt(m, key, 0)
+
+verify get
+    get(empty(), 3) => []
+    get(add(empty(), 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 3) => [(Core.Exprs.bvar(0), Core.Exprs.bvar(1))]
+    get(add(add(empty(), 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 19, (Core.Exprs.bvar(2), Core.Exprs.bvar(3))), 19) => [(Core.Exprs.bvar(2), Core.Exprs.bvar(3))]
+
+fn getAt(m: PMap, key: Int, shift: Int) -> List<Tuple<Expr, Expr>>
+    ? "Descends by the key's nibbles."
+    match m
+        PMap.Empty -> []
+        PMap.Leaf(k, b) -> match k == key
+            true -> b
+            false -> []
+        PMap.Branch(v, _) -> getAt(Option.withDefault(Vector.get(v, nibble(key, shift)), PMap.Empty), key, shift + 4)
+
+verify getAt
+    getAt(PMap.Leaf(5, []), 6, 0) => []
+
+fn add(m: PMap, key: Int, entry: Tuple<Expr, Expr>) -> PMap
+    ? "Prepends entry to key's bucket."
+    addAt(m, key, entry, 0)
+
+verify add
+    size(add(add(empty(), 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 3, (Core.Exprs.bvar(2), Core.Exprs.bvar(3)))) => 2
+
+fn addAt(m: PMap, key: Int, entry: Tuple<Expr, Expr>, shift: Int) -> PMap
+    ? "Inserts below this node; a leaf with another key becomes a branch."
+    match m
+        PMap.Empty -> PMap.Leaf(key, [entry])
+        PMap.Leaf(k, b) -> match k == key
+            true -> PMap.Leaf(k, List.prepend(entry, b))
+            false -> addAt(split(k, b, shift), key, entry, shift)
+        PMap.Branch(v, n) -> PMap.Branch(setChild(v, nibble(key, shift), addAt(Option.withDefault(Vector.get(v, nibble(key, shift)), PMap.Empty), key, entry, shift + 4)), n + 1)
+
+verify addAt
+    size(addAt(PMap.Leaf(1, [(Core.Exprs.bvar(0), Core.Exprs.bvar(0))]), 17, (Core.Exprs.bvar(1), Core.Exprs.bvar(1)), 0)) => 2
+
+fn split(k: Int, b: List<Tuple<Expr, Expr>>, shift: Int) -> PMap
+    ? "A branch holding the old leaf under its nibble."
+    PMap.Branch(setChild(Vector.new(16, PMap.Empty), nibble(k, shift), PMap.Leaf(k, b)), List.len(b))
+
+verify split
+    size(split(1, [(Core.Exprs.bvar(0), Core.Exprs.bvar(0))], 0)) => 1
+
+fn setChild(v: Vector<PMap>, i: Int, child: PMap) -> Vector<PMap>
+    ? "Replaces one child; the index is always in range."
+    Option.withDefault(Vector.set(v, i, child), v)
+
+verify setChild
+    Vector.len(setChild(Vector.new(16, PMap.Empty), 3, PMap.Empty)) => 16
+
+fn find(m: PMap, key: Int, e: Expr) -> Option<Expr>
+    ? "The value paired with an expression equal to e in key's bucket."
+    findIn(get(m, key), e)
+
+verify find
+    find(add(empty(), 4, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 4, Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
+    find(add(empty(), 4, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 4, Core.Exprs.bvar(2)) => Option.None
+
+fn findIn(bucket: List<Tuple<Expr, Expr>>, e: Expr) -> Option<Expr>
+    ? "Linear search of a bucket."
+    match bucket
+        [] -> Option.None
+        [(k, v), ..rest] -> match k == e
+            true -> Option.Some(v)
+            false -> findIn(rest, e)
+
+verify findIn
+    findIn([], Core.Exprs.bvar(0)) => Option.None

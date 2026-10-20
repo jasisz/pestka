@@ -1,0 +1,186 @@
+module Lits
+    intent =
+        "Names the kernel knows by heart, the expansion of Nat and String"
+        "literals into constructor applications, and the Nat operations the"
+        "reference kernel computes on literals instead of unfolding."
+    exposes [name1, name2, natLitToCtor, strToCtor, natValue, natOp, isNatOp, boolExpr]
+    depends [Core.Names, Core.Levels, Core.Exprs, Check.State]
+    effects []
+
+fn name1(a: String) -> Name
+    ? "A one-component name."
+    Core.Names.str(Core.Names.anon(), a)
+
+verify name1
+    Core.Names.render(name1("Nat")) => "Nat"
+
+fn name2(a: String, b: String) -> Name
+    ? "A two-component name."
+    Core.Names.str(name1(a), b)
+
+verify name2
+    Core.Names.render(name2("Nat", "succ")) => "Nat.succ"
+
+fn natLitToCtor(n: Int) -> Expr
+    ? "0 is Nat.zero; n+1 is Nat.succ applied to the literal n."
+    match n == 0
+        true -> Core.Exprs.cnst(name2("Nat", "zero"), [])
+        false -> Core.Exprs.app(Core.Exprs.cnst(name2("Nat", "succ"), []), Core.Exprs.natLit(n - 1))
+
+verify natLitToCtor
+    natLitToCtor(0) => Core.Exprs.cnst(name2("Nat", "zero"), [])
+    natLitToCtor(2) => Core.Exprs.app(Core.Exprs.cnst(name2("Nat", "succ"), []), Core.Exprs.natLit(1))
+
+fn strToCtor(s: String) -> Expr
+    ? "String.ofList of the characters, each Char.ofNat of its code point."
+    Core.Exprs.app(Core.Exprs.cnst(name2("String", "ofList"), []), charList(List.reverse(String.chars(s)), listOfChar("nil")))
+
+verify strToCtor
+    strToCtor("") => Core.Exprs.app(Core.Exprs.cnst(name2("String", "ofList"), []), listOfChar("nil"))
+
+fn listOfChar(ctor: String) -> Expr
+    ? "List.nil or List.cons at universe 0, applied to Char."
+    Core.Exprs.app(Core.Exprs.cnst(name2("List", ctor), [Level.Zero]), Core.Exprs.cnst(name1("Char"), []))
+
+verify listOfChar
+    listOfChar("nil") == listOfChar("cons") => false
+
+fn charList(revChars: List<String>, acc: Expr) -> Expr
+    ? "Builds the list from the last character back."
+    match revChars
+        [] -> acc
+        [c, ..rest] -> charList(rest, Core.Exprs.app(Core.Exprs.app(listOfChar("cons"), Core.Exprs.app(Core.Exprs.cnst(name2("Char", "ofNat"), []), Core.Exprs.natLit(Option.withDefault(String.firstCodePoint(c), 0)))), acc))
+
+verify charList
+    charList([], Core.Exprs.bvar(0)) => Core.Exprs.bvar(0)
+
+fn natValue(e: Expr) -> Option<Int>
+    ? "A literal or Nat.zero as a number."
+    match e
+        Expr.NatLit(n) -> Option.Some(n)
+        Expr.Const(n, []) -> match n == name2("Nat", "zero")
+            true -> Option.Some(0)
+            false -> Option.None
+        _ -> Option.None
+
+verify natValue
+    natValue(Core.Exprs.natLit(4)) => Option.Some(4)
+    natValue(Core.Exprs.cnst(name2("Nat", "zero"), [])) => Option.Some(0)
+    natValue(Core.Exprs.bvar(0)) => Option.None
+
+fn isNatOp(op: String) -> Bool
+    ? "The binary Nat functions the kernel computes on literals."
+    List.contains(["add", "sub", "mul", "div", "mod", "gcd", "beq", "ble", "land", "lor", "xor", "shiftLeft", "shiftRight", "pow"], op)
+
+verify isNatOp
+    isNatOp("add") => true
+    isNatOp("log2") => false
+
+fn boolExpr(b: Bool) -> Expr
+    ? "Bool.true or Bool.false."
+    match b
+        true -> Core.Exprs.cnst(name2("Bool", "true"), [])
+        false -> Core.Exprs.cnst(name2("Bool", "false"), [])
+
+verify boolExpr
+    boolExpr(true) => Core.Exprs.cnst(name2("Bool", "true"), [])
+
+fn natOp(op: String, a: Int, b: Int) -> Result<Expr, Fail>
+    ? "One operation on two literals, with Lean's conventions: truncated subtraction, x / 0 = 0, x % 0 = x."
+    match op
+        "add" -> Result.Ok(Core.Exprs.natLit(a + b))
+        "sub" -> Result.Ok(Core.Exprs.natLit(Int.max(a - b, 0)))
+        "mul" -> Result.Ok(Core.Exprs.natLit(a * b))
+        "div" -> Result.Ok(Core.Exprs.natLit(divNat(a, b)))
+        "mod" -> Result.Ok(Core.Exprs.natLit(modNat(a, b)))
+        "gcd" -> Result.Ok(Core.Exprs.natLit(gcd(a, b)))
+        "beq" -> Result.Ok(boolExpr(a == b))
+        "ble" -> Result.Ok(boolExpr(a <= b))
+        "land" -> Result.Ok(Core.Exprs.natLit(Bits.and(a, b)))
+        "lor" -> Result.Ok(Core.Exprs.natLit(Bits.or(a, b)))
+        "xor" -> Result.Ok(Core.Exprs.natLit(Bits.xor(a, b)))
+        "shiftRight" -> shifted(Bits.shiftRight(a, b))
+        "shiftLeft" -> shiftLeft(a, b)
+        "pow" -> pow(a, b)
+        _ -> Result.Err(Fail.Decline("unknown Nat operation {op}"))
+
+verify natOp
+    natOp("sub", 2, 5) => Result.Ok(Core.Exprs.natLit(0))
+    natOp("div", 7, 0) => Result.Ok(Core.Exprs.natLit(0))
+    natOp("mod", 7, 0) => Result.Ok(Core.Exprs.natLit(7))
+    natOp("gcd", 12, 18) => Result.Ok(Core.Exprs.natLit(6))
+    natOp("shiftRight", 8, 2) => Result.Ok(Core.Exprs.natLit(2))
+    natOp("pow", 2, 10) => Result.Ok(Core.Exprs.natLit(1024))
+    natOp("ble", 3, 3) => Result.Ok(boolExpr(true))
+
+fn divNat(a: Int, b: Int) -> Int
+    ? "Floor division with x / 0 = 0."
+    match b == 0
+        true -> 0
+        false -> Result.withDefault(Int.div(a, b), 0)
+
+verify divNat
+    divNat(7, 2) => 3
+
+fn modNat(a: Int, b: Int) -> Int
+    ? "Remainder with x % 0 = x."
+    match b == 0
+        true -> a
+        false -> Result.withDefault(Int.mod(a, b), 0)
+
+verify modNat
+    modNat(7, 2) => 1
+
+fn gcd(a: Int, b: Int) -> Int
+    ? "Euclid."
+    match b == 0
+        true -> a
+        false -> gcd(b, modNat(a, b))
+
+verify gcd
+    gcd(0, 5) => 5
+
+fn shifted(r: Result<Int, String>) -> Result<Expr, Fail>
+    ? "A shift result, or a decline when Aver refuses it."
+    match r
+        Result.Ok(n) -> Result.Ok(Core.Exprs.natLit(n))
+        Result.Err(e) -> Result.Err(Fail.Decline("Nat shift out of range: {e}"))
+
+verify shifted
+    shifted(Result.Ok(4)) => Result.Ok(Core.Exprs.natLit(4))
+
+fn shiftLeft(a: Int, b: Int) -> Result<Expr, Fail>
+    ? "The reference refuses a shift count beyond 32 bits."
+    match b > 4294967295
+        true -> Result.Err(Fail.Reject("Nat.shiftLeft count does not fit in 32 bits"))
+        false -> shifted(Bits.shiftLeft(a, b))
+
+verify shiftLeft
+    shiftLeft(1, 4) => Result.Ok(Core.Exprs.natLit(16))
+
+fn pow(a: Int, b: Int) -> Result<Expr, Fail>
+    ? "The reference refuses an exponent beyond 32 bits."
+    match b > 4294967295
+        true -> Result.Err(Fail.Reject("Nat.pow exponent does not fit in 32 bits"))
+        false -> Result.Ok(Core.Exprs.natLit(powLoop(a, b, 1)))
+
+verify pow
+    pow(3, 0) => Result.Ok(Core.Exprs.natLit(1))
+
+fn powLoop(base: Int, e: Int, acc: Int) -> Int
+    ? "Square and multiply."
+    match e == 0
+        true -> acc
+        false -> powLoop(base * base, Int.div(e, 2), powAcc(acc, base, Int.mod(e, 2)))
+
+verify powLoop
+    powLoop(2, 5, 1) => 32
+
+fn powAcc(acc: Int, base: Int, bit: Int) -> Int
+    ? "Multiplies in the base when the exponent bit is set."
+    match bit == 1
+        true -> acc * base
+        false -> acc
+
+verify powAcc
+    powAcc(3, 2, 1) => 6

@@ -1,0 +1,189 @@
+module Escapes
+    intent =
+        "The body of a JSON string, from just after its opening quote to just"
+        "after its closing one. Strings without a backslash are sliced out"
+        "whole; the first backslash switches to decoding character by"
+        "character, so the common case costs one scan and one slice."
+    exposes [Scan, text]
+    effects []
+
+type Scan
+    Done(String, Int)
+    Bad(String, Int)
+
+fn text(s: String, start: Int) -> Scan
+    ? "Reads a string body starting after the opening quote."
+    plain(s, start, start)
+
+verify text
+    text("ab\"", 0) => Scan.Done("ab", 3)
+    text("a\\nb\"", 0) => Scan.Done("a\nb", 5)
+    text("x", 0) => Scan.Bad("unterminated string", 1)
+
+fn plain(s: String, start: Int, i: Int) -> Scan
+    ? "Scans to the closing quote; switches to decoding at the first backslash."
+    match String.charAt(s, i)
+        Option.Some("\"") -> Scan.Done(String.slice(s, start, i), i + 1)
+        Option.Some("\\") -> decode(s, i, [String.slice(s, start, i)])
+        Option.Some -> plain(s, start, i + 1)
+        Option.None -> Scan.Bad("unterminated string", i)
+
+verify plain
+    plain("x\"", 0, 0) => Scan.Done("x", 2)
+    plain("x", 0, 0) => Scan.Bad("unterminated string", 1)
+
+fn decode(s: String, i: Int, chunks: List<String>) -> Scan
+    ? "Slow path: collects decoded pieces, newest first, until the closing quote."
+    match String.charAt(s, i)
+        Option.Some("\"") -> Scan.Done(String.join(List.reverse(chunks), ""), i + 1)
+        Option.Some("\\") -> escape(s, i + 1, chunks)
+        Option.Some(c) -> decode(s, i + 1, List.prepend(c, chunks))
+        Option.None -> Scan.Bad("unterminated string", i)
+
+verify decode
+    decode("\\tx\"", 0, ["a"]) => Scan.Done("a\tx", 4)
+    decode("\\", 0, []) => Scan.Bad("unterminated escape", 1)
+
+fn escape(s: String, i: Int, chunks: List<String>) -> Scan
+    ? "The character after a backslash."
+    match String.charAt(s, i)
+        Option.Some("\"") -> decode(s, i + 1, List.prepend("\"", chunks))
+        Option.Some("\\") -> decode(s, i + 1, List.prepend("\\", chunks))
+        Option.Some("/") -> decode(s, i + 1, List.prepend("/", chunks))
+        Option.Some("n") -> decode(s, i + 1, List.prepend("\n", chunks))
+        Option.Some("r") -> decode(s, i + 1, List.prepend("\r", chunks))
+        Option.Some("t") -> decode(s, i + 1, List.prepend("\t", chunks))
+        Option.Some("b") -> withCode(s, i + 1, chunks, 8)
+        Option.Some("f") -> withCode(s, i + 1, chunks, 12)
+        Option.Some("u") -> unicode(s, i + 1, chunks, hex4(s, i + 1))
+        Option.Some -> Scan.Bad("invalid escape", i)
+        Option.None -> Scan.Bad("unterminated escape", i)
+
+verify escape
+    escape("\"\"", 0, []) => Scan.Done("\"", 2)
+    escape("b\"", 0, []) => Scan.Done(Option.withDefault(String.fromCodePoint(8), "?"), 2)
+    escape("q", 0, []) => Scan.Bad("invalid escape", 0)
+
+fn withCode(s: String, i: Int, chunks: List<String>, cp: Int) -> Scan
+    ? "Appends one decoded code point and continues."
+    match String.fromCodePoint(cp)
+        Option.Some(c) -> decode(s, i, List.prepend(c, chunks))
+        Option.None -> Scan.Bad("invalid code point", i)
+
+verify withCode
+    withCode("\"", 0, [], 65) => Scan.Done("A", 1)
+    withCode("\"", 0, [], 55296) => Scan.Bad("invalid code point", 0)
+
+fn unicode(s: String, i: Int, chunks: List<String>, cp: Int) -> Scan
+    ? "After \\u: four hex digits, and a second escape for a high surrogate."
+    match cp < 0
+        true -> Scan.Bad("invalid \\u escape", i)
+        false -> match isHigh(cp)
+            true -> pair(s, i + 4, chunks, cp)
+            false -> withCode(s, i + 4, chunks, cp)
+
+verify unicode
+    unicode("00e9\"", 0, [], 233) => Scan.Done("é", 5)
+    unicode("zz", 0, [], -1) => Scan.Bad("invalid \\u escape", 0)
+    unicode("DC00\"", 0, [], 56320) => Scan.Bad("invalid code point", 4)
+
+fn pair(s: String, i: Int, chunks: List<String>, high: Int) -> Scan
+    ? "The low half of a surrogate pair, written as a second \\u escape."
+    low = hex4(s, i + 2)
+    match String.slice(s, i, i + 2) == "\\u"
+        true -> joinPair(s, i + 6, chunks, high, low)
+        false -> Scan.Bad("lone surrogate", i)
+
+verify pair
+    pair("\\uDE00\"", 0, [], 55357) => Scan.Done("😀", 7)
+    pair("x", 0, [], 55357) => Scan.Bad("lone surrogate", 0)
+
+fn joinPair(s: String, i: Int, chunks: List<String>, high: Int, low: Int) -> Scan
+    ? "Combines a high and a low surrogate into one code point."
+    match isLow(low)
+        true -> withCode(s, i, chunks, 65536 + (high - 55296) * 1024 + (low - 56320))
+        false -> Scan.Bad("lone surrogate", i)
+
+verify joinPair
+    joinPair("\"", 0, [], 55357, 56832) => Scan.Done("😀", 1)
+    joinPair("\"", 0, [], 55357, 65) => Scan.Bad("lone surrogate", 0)
+
+fn isHigh(cp: Int) -> Bool
+    ? "A UTF-16 high surrogate."
+    Bool.and(cp >= 55296, cp <= 56319)
+
+verify isHigh
+    isHigh(55357) => true
+    isHigh(65) => false
+
+fn isLow(cp: Int) -> Bool
+    ? "A UTF-16 low surrogate."
+    Bool.and(cp >= 56320, cp <= 57343)
+
+verify isLow
+    isLow(56832) => true
+    isLow(55357) => false
+
+fn hex4(s: String, i: Int) -> Int
+    ? "Four hex digits at i as a number, or -1."
+    combine([hexVal(String.charAt(s, i)), hexVal(String.charAt(s, i + 1)), hexVal(String.charAt(s, i + 2)), hexVal(String.charAt(s, i + 3))], 0)
+
+verify hex4
+    hex4("00e9", 0) => 233
+    hex4("D83D", 0) => 55357
+    hex4("00g9", 0) => -1
+    hex4("00", 0) => -1
+
+fn combine(ds: List<Int>, acc: Int) -> Int
+    ? "Folds hex digits; any -1 poisons the result."
+    match ds
+        [] -> acc
+        [d, ..rest] -> match d < 0
+            true -> -1
+            false -> combine(rest, acc * 16 + d)
+
+verify combine
+    combine([1, 0], 0) => 16
+    combine([1, -1], 0) => -1
+
+fn hexVal(c: Option<String>) -> Int
+    ? "Value of one hex digit, either case, or -1."
+    match c
+        Option.Some(d) -> hexDigit(d)
+        Option.None -> -1
+
+verify hexVal
+    hexVal(Option.Some("f")) => 15
+    hexVal(Option.None) => -1
+
+fn hexDigit(d: String) -> Int
+    ? "Value of one hex digit character, or -1."
+    match d
+        "0" -> 0
+        "1" -> 1
+        "2" -> 2
+        "3" -> 3
+        "4" -> 4
+        "5" -> 5
+        "6" -> 6
+        "7" -> 7
+        "8" -> 8
+        "9" -> 9
+        "a" -> 10
+        "b" -> 11
+        "c" -> 12
+        "d" -> 13
+        "e" -> 14
+        "f" -> 15
+        "A" -> 10
+        "B" -> 11
+        "C" -> 12
+        "D" -> 13
+        "E" -> 14
+        "F" -> 15
+        _ -> -1
+
+verify hexDigit
+    hexDigit("a") => 10
+    hexDigit("F") => 15
+    hexDigit("g") => -1

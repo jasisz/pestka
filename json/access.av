@@ -1,0 +1,108 @@
+module Access
+    intent =
+        "Reading fields out of a parsed JSON object, with an error that names"
+        "the missing or mistyped key. Objects in the export have at most a"
+        "dozen members, so a linear search is the right lookup."
+    exposes [field, need, int, text, bool, obj, ints, arr, has]
+    depends [Json.Line]
+    effects []
+
+fn field(fs: List<Tuple<String, J>>, key: String) -> Option<J>
+    ? "The value under key, if present."
+    match fs
+        [] -> Option.None
+        [(k, v), ..rest] -> match k == key
+            true -> Option.Some(v)
+            false -> field(rest, key)
+
+verify field
+    field([("a", J.JInt(1))], "a") => Option.Some(J.JInt(1))
+    field([("a", J.JInt(1))], "b") => Option.None
+
+fn has(fs: List<Tuple<String, J>>, key: String) -> Bool
+    ? "Whether the object has the key."
+    match field(fs, key)
+        Option.Some -> true
+        Option.None -> false
+
+verify has
+    has([("a", J.JNull)], "a") => true
+    has([], "a") => false
+
+fn need(fs: List<Tuple<String, J>>, key: String) -> Result<J, String>
+    ? "The value under key, or an error naming it."
+    match field(fs, key)
+        Option.Some(v) -> Result.Ok(v)
+        Option.None -> Result.Err("missing key '{key}'")
+
+verify need
+    need([], "x") => Result.Err("missing key 'x'")
+
+fn int(fs: List<Tuple<String, J>>, key: String) -> Result<Int, String>
+    ? "An integer member."
+    match need(fs, key)?
+        J.JInt(n) -> Result.Ok(n)
+        _ -> Result.Err("key '{key}' is not an integer")
+
+verify int
+    int([("n", J.JInt(4))], "n") => Result.Ok(4)
+    int([("n", J.JNull)], "n") => Result.Err("key 'n' is not an integer")
+
+fn text(fs: List<Tuple<String, J>>, key: String) -> Result<String, String>
+    ? "A string member."
+    match need(fs, key)?
+        J.JStr(s) -> Result.Ok(s)
+        _ -> Result.Err("key '{key}' is not a string")
+
+verify text
+    text([("s", J.JStr("x"))], "s") => Result.Ok("x")
+    text([("s", J.JInt(1))], "s") => Result.Err("key 's' is not a string")
+
+fn bool(fs: List<Tuple<String, J>>, key: String) -> Result<Bool, String>
+    ? "A boolean member."
+    match need(fs, key)?
+        J.JBool(b) -> Result.Ok(b)
+        _ -> Result.Err("key '{key}' is not a boolean")
+
+verify bool
+    bool([("b", J.JBool(true))], "b") => Result.Ok(true)
+    bool([("b", J.JInt(1))], "b") => Result.Err("key 'b' is not a boolean")
+
+fn obj(fs: List<Tuple<String, J>>, key: String) -> Result<List<Tuple<String, J>>, String>
+    ? "An object member."
+    match need(fs, key)?
+        J.JObj(inner) -> Result.Ok(inner)
+        _ -> Result.Err("key '{key}' is not an object")
+
+verify obj
+    obj([("o", J.JObj([]))], "o") => Result.Ok([])
+    obj([("o", J.JInt(1))], "o") => Result.Err("key 'o' is not an object")
+
+fn arr(fs: List<Tuple<String, J>>, key: String) -> Result<List<J>, String>
+    ? "An array member."
+    match need(fs, key)?
+        J.JArr(xs) -> Result.Ok(xs)
+        _ -> Result.Err("key '{key}' is not an array")
+
+verify arr
+    arr([("a", J.JArr([J.JNull]))], "a") => Result.Ok([J.JNull])
+    arr([("a", J.JNull)], "a") => Result.Err("key 'a' is not an array")
+
+fn ints(fs: List<Tuple<String, J>>, key: String) -> Result<List<Int>, String>
+    ? "An array of integers."
+    allInts(arr(fs, key)?, key, [])
+
+verify ints
+    ints([("a", J.JArr([J.JInt(1), J.JInt(2)]))], "a") => Result.Ok([1, 2])
+    ints([("a", J.JArr([J.JNull]))], "a") => Result.Err("key 'a' holds a non-integer")
+
+fn allInts(xs: List<J>, key: String, acc: List<Int>) -> Result<List<Int>, String>
+    ? "Checks every element is an integer, keeping order."
+    match xs
+        [] -> Result.Ok(List.reverse(acc))
+        [J.JInt(n), ..rest] -> allInts(rest, key, List.prepend(n, acc))
+        [_, .._] -> Result.Err("key '{key}' holds a non-integer")
+
+verify allInts
+    allInts([], "k", []) => Result.Ok([])
+    allInts([J.JInt(3)], "k", []) => Result.Ok([3])

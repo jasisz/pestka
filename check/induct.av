@@ -1,0 +1,557 @@
+module Induct
+    intent =
+        "The first half of adding an inductive block, as the reference kernel"
+        "does it: every occurrence of a type of the block is applied to the"
+        "block's parameters; the types are checked and share their parameters"
+        "and their universe, then declared with the flags the kernel computes;"
+        "the constructors are checked (parameters, universe of each field,"
+        "strict positivity, return type) and declared; finally the universe"
+        "the recursor may eliminate into and whether K-like reduction applies."
+    exposes [RIx, checkUniform, checkTypes, declareTypes, checkCtors, declareCtors, elimAndK, isRecArg]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Check.State, Check.Tc, Check.Telescope, Check.Blk]
+    effects []
+
+record WT
+    st: St
+    t: Expr
+    params: List<Expr>
+    i: Int
+    nidx: Int
+
+record TR
+    bs: BS
+    nidx: Int
+
+record RIx
+    o: Option<Int>
+    st: St
+
+fn reject(msg: String) -> Fail
+    ? "A kernel error for the block."
+    Fail.Reject(msg)
+
+verify reject
+    reject("x") => Fail.Reject("x")
+
+fn nm(n: Name) -> String
+    ? "A name for messages."
+    Core.Names.render(n)
+
+verify nm
+    nm(Core.Names.anon()) => "[anonymous]"
+
+fn checkUniform(blk: Blk) -> Result<Unit, Fail>
+    ? "In constructor types, the block's types occur only applied to its universe parameters and to its parameters, in order."
+    uniformTypes(blk, blk.types)
+
+verify checkUniform
+    checkUniform(Check.Blk.start([], 0, [], 0)) => Result.Ok(Unit)
+
+fn uniformTypes(blk: Blk, ts: List<TypeIn>) -> Result<Unit, Fail>
+    ? "Every constructor of every type."
+    match ts
+        [] -> Result.Ok(Unit)
+        [t, ..rest] -> uniformThen(uniformCtors(blk, t.ctors)?, blk, rest)
+
+verify uniformTypes
+    uniformTypes(Check.Blk.start([], 0, [], 0), []) => Result.Ok(Unit)
+
+fn uniformThen(u: Unit, blk: Blk, rest: List<TypeIn>) -> Result<Unit, Fail>
+    ? "Continues with the next type."
+    uniformTypes(blk, rest)
+
+verify uniformThen
+    uniformThen(Unit, Check.Blk.start([], 0, [], 0), []) => Result.Ok(Unit)
+
+fn uniformCtors(blk: Blk, cs: List<CtorIn>) -> Result<Unit, Fail>
+    ? "Each constructor type."
+    match cs
+        [] -> Result.Ok(Unit)
+        [c, ..rest] -> match uniformIn(blk, c.ty, 0)
+            true -> uniformCtors(blk, rest)
+            false -> Result.Err(reject("invalid occurrence of a datatype being declared in '{nm(c.name)}': it must be applied to the parameters and universe levels of the mutual declaration"))
+
+verify uniformCtors
+    uniformCtors(Check.Blk.start([], 0, [], 0), []) => Result.Ok(Unit)
+
+fn uniformIn(blk: Blk, e: Expr, offset: Int) -> Bool
+    ? "Visits e at binder depth offset; an occurrence with at most as many arguments as parameters is judged and not entered."
+    match Core.Apps.fnOf(e)
+        Expr.Const(n, ls) -> match List.contains(blk.names, n)
+            true -> match List.len(Core.Apps.argsOf(e)) > blk.nparams
+                true -> uniformChildren(blk, e, offset)
+                false -> uniformOcc(blk, ls, Core.Apps.argsOf(e), offset)
+            false -> uniformChildren(blk, e, offset)
+        _ -> uniformChildren(blk, e, offset)
+
+verify uniformIn
+    uniformIn(Check.Blk.start([], 0, [], 0), Core.Exprs.fvar(0), 0) => true
+
+fn uniformChildren(blk: Blk, e: Expr, offset: Int) -> Bool
+    ? "The children of a node."
+    match e
+        Expr.App(_, f, a) -> Bool.and(uniformIn(blk, f, offset), uniformIn(blk, a, offset))
+        Expr.Lam(_, _, t, b, _) -> Bool.and(uniformIn(blk, t, offset), uniformIn(blk, b, offset + 1))
+        Expr.Pi(_, _, t, b, _) -> Bool.and(uniformIn(blk, t, offset), uniformIn(blk, b, offset + 1))
+        Expr.Let(_, _, t, v, b) -> Bool.and(uniformIn(blk, t, offset), Bool.and(uniformIn(blk, v, offset), uniformIn(blk, b, offset + 1)))
+        Expr.Proj(_, _, _, x) -> uniformIn(blk, x, offset)
+        _ -> true
+
+verify uniformChildren
+    uniformChildren(Check.Blk.start([], 0, [], 0), Core.Exprs.bvar(0), 0) => true
+
+fn uniformOcc(blk: Blk, ls: List<Level>, args: List<Expr>, offset: Int) -> Bool
+    ? "Exactly the parameters, as the bound variables of the parameter binders, at the block's levels."
+    Bool.and(Bool.and(List.len(args) == blk.nparams, offset >= blk.nparams), Bool.and(ls == blk.levels, paramsAt(args, offset, 0)))
+
+verify uniformOcc
+    uniformOcc(Check.Blk.start([], 1, [], 0), [], [Core.Exprs.bvar(2)], 3) => true
+    uniformOcc(Check.Blk.start([], 1, [], 0), [], [Core.Exprs.bvar(0)], 3) => false
+
+fn paramsAt(args: List<Expr>, offset: Int, i: Int) -> Bool
+    ? "Argument i is the bound variable offset - 1 - i."
+    match args
+        [] -> true
+        [a, ..rest] -> Bool.and(a == Core.Exprs.bvar(offset - 1 - i), paramsAt(rest, offset, i + 1))
+
+verify paramsAt
+    paramsAt([Core.Exprs.bvar(1), Core.Exprs.bvar(0)], 2, 0) => true
+
+fn checkTypes(bs: BS) -> Result<BS, Fail>
+    ? "Every type is well formed, binds the same parameters, and ends in the same universe."
+    typesFrom(bs, bs.blk.types, true, [])
+
+verify checkTypes
+    checkTypes(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn typesFrom(bs: BS, ts: List<TypeIn>, first: Bool, nidxRev: List<Int>) -> Result<BS, Fail>
+    ? "One type after another; the first one fixes the parameters and the universe."
+    match ts
+        [] -> Result.Ok(BS(blk = Blk.update(bs.blk, nindices = List.reverse(nidxRev)), st = bs.st))
+        [t, ..rest] -> typeNext(oneType(bs, t, first)?, rest, nidxRev)
+
+verify typesFrom
+    typesFrom(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], true, [3]) => Result.Ok(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), nindices = [3]), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn typeNext(r: TR, rest: List<TypeIn>, nidxRev: List<Int>) -> Result<BS, Fail>
+    ? "Records the index count and goes on."
+    typesFrom(r.bs, rest, false, List.prepend(r.nidx, nidxRev))
+
+verify typeNext
+    typeNext(TR(bs = BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), nidx = 2), [], []) => Result.Ok(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), nindices = [2]), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn oneType(bs: BS, t: TypeIn, first: Bool) -> Result<TR, Fail>
+    ? "A new name and a new recursor name, then a well-formed type."
+    match Bool.or(Check.State.declared(bs.st, t.name), Check.State.declared(bs.st, Check.Blk.recName(t.name)))
+        true -> Result.Err(reject("'{nm(t.name)}' or its recursor has already been declared"))
+        false -> oneTypeChecked(bs, t, first, Check.Tc.check(bs.st, t.ty)?)
+
+verify oneType
+    oneType(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.natLit(1), ctors = []), true) => Result.Err(Fail.Reject("type expected"))
+
+fn oneTypeChecked(bs: BS, t: TypeIn, first: Bool, c: RE) -> Result<TR, Fail>
+    ? "Walks the binders: parameters, then indices; the rest must be a sort."
+    w = walkType(c.st, t.ty, bs.blk.nparams, bs.blk.params, first, 0, [], 0)?
+    match w.i >= bs.blk.nparams
+        false -> Result.Err(reject("number of parameters mismatch in inductive datatype declaration"))
+        true -> typeSort(bs.blk, w, first, Check.Tc.ensureSort(w.st, w.t)?)
+
+verify oneTypeChecked
+    oneTypeChecked(BS(blk = Check.Blk.start([], 1, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = []), true, RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("number of parameters mismatch in inductive datatype declaration"))
+
+fn typeSort(blk: Blk, w: WT, first: Bool, s: RE) -> Result<TR, Fail>
+    ? "The first type fixes the result universe; the others must agree with it."
+    l = Check.Tc.sortLevel(s.e)
+    match first
+        true -> Result.Ok(TR(bs = BS(blk = Blk.update(blk, params = List.reverse(w.params), result = l, notZero = Core.Univ.isNotZero(l)), st = s.st), nidx = w.nidx))
+        false -> match Core.Univ.isEquiv(l, blk.result)
+            true -> Result.Ok(TR(bs = BS(blk = blk, st = s.st), nidx = w.nidx))
+            false -> Result.Err(reject("mutually inductive types must live in the same universe"))
+
+verify typeSort
+    typeSort(Check.Blk.start([], 0, [], 0), WT(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.bvar(0), params = [], i = 0, nidx = 0), false, RE(e = Core.Exprs.sort(Level.Succ(Level.Zero)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("mutually inductive types must live in the same universe"))
+
+fn walkType(st: St, t: Expr, nparams: Int, params: List<Expr>, first: Bool, i: Int, newRev: List<Expr>, nidx: Int) -> Result<WT, Fail>
+    ? "Normalizes and opens one binder at a time."
+    w = Check.Tc.whnf(st, t)?
+    match w.e
+        Expr.Pi(_, _, d, b, _) -> walkBinder(w.st, w.e, d, b, nparams, params, first, i, newRev, nidx)
+        _ -> Result.Ok(WT(st = w.st, t = w.e, params = newRev, i = i, nidx = nidx))
+
+verify walkType
+    walkType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), 0, [], true, 0, [], 0) => Result.Ok(WT(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.sort(Level.Zero), params = [], i = 0, nidx = 0))
+
+fn walkBinder(st: St, pi: Expr, d: Expr, b: Expr, nparams: Int, params: List<Expr>, first: Bool, i: Int, newRev: List<Expr>, nidx: Int) -> Result<WT, Fail>
+    ? "A parameter binder declares (first type) or matches (later types) a parameter; the rest are indices."
+    match i < nparams
+        false -> walkIndex(Check.Telescope.localFor(st, pi), b, nparams, params, first, i, newRev, nidx)
+        true -> match first
+            true -> walkNewParam(Check.Telescope.localFor(st, pi), b, nparams, params, i, newRev, nidx)
+            false -> walkSameParam(st, d, b, nparams, params, i, newRev, nidx)
+
+verify walkBinder
+    walkBinder(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), 0, [], true, 0, [], 0) => Result.Ok(WT(st = Check.Telescope.localFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default)).st, t = Core.Exprs.sort(Level.Zero), params = [], i = 1, nidx = 1))
+
+fn walkIndex(loc: RE, b: Expr, nparams: Int, params: List<Expr>, first: Bool, i: Int, newRev: List<Expr>, nidx: Int) -> Result<WT, Fail>
+    ? "An index binder."
+    walkType(loc.st, Core.Subst.instantiate1(b, loc.e), nparams, params, first, i + 1, newRev, nidx + 1)
+
+verify walkIndex
+    walkIndex(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero), 0, [], true, 0, [], 0) => Result.Ok(WT(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.sort(Level.Zero), params = [], i = 1, nidx = 1))
+
+fn walkNewParam(loc: RE, b: Expr, nparams: Int, params: List<Expr>, i: Int, newRev: List<Expr>, nidx: Int) -> Result<WT, Fail>
+    ? "The first type declares the parameter."
+    walkType(loc.st, Core.Subst.instantiate1(b, loc.e), nparams, params, true, i + 1, List.prepend(loc.e, newRev), nidx)
+
+verify walkNewParam
+    walkNewParam(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero), 1, [], 0, [], 0) => Result.Ok(WT(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.sort(Level.Zero), params = [Core.Exprs.fvar(0)], i = 1, nidx = 0))
+
+fn walkSameParam(st: St, d: Expr, b: Expr, nparams: Int, params: List<Expr>, i: Int, newRev: List<Expr>, nidx: Int) -> Result<WT, Fail>
+    ? "A later type's parameter must have the first type's parameter type."
+    p = Check.Blk.nthExpr(params, i)
+    eq = Check.Tc.isDefEq(st, d, Check.Telescope.typeOfFVar(st, p))?
+    match eq.b
+        false -> Result.Err(reject("parameters of all inductive datatypes must match"))
+        true -> walkType(eq.st, Core.Subst.instantiate1(b, p), nparams, params, false, i + 1, newRev, nidx)
+
+verify walkSameParam
+    walkSameParam(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), 1, [Core.Exprs.fvar(5)], 0, [], 0) => Result.Err(Fail.Reject("parameters of all inductive datatypes must match"))
+
+fn declareTypes(bs: BS) -> BS
+    ? "Adds the types with the flags the kernel computes: recursive, reflexive, nested count."
+    BS(blk = bs.blk, st = St.update(bs.st, block = typeConsts(bs.st.block, bs.blk, bs.blk.types, 0, anyRec(bs.blk.types, bs.blk.names), anyReflexive(bs.blk.types, bs.blk.names))))
+
+verify declareTypes
+    Map.len(declareTypes(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).st.block) => 0
+
+fn typeConsts(env: Map<Name, Const>, blk: Blk, ts: List<TypeIn>, idx: Int, isRec: Bool, isRefl: Bool) -> Map<Name, Const>
+    ? "One constant per type."
+    match ts
+        [] -> env
+        [t, ..rest] -> typeConsts(Map.set(env, t.name, Const.CInduct(IndType(head = Head(name = t.name, params = blk.lparams, ty = t.ty), numParams = blk.nparams, numIndices = Check.Blk.nthInt(blk.nindices, idx), all = blk.names, ctors = ctorNames(t.ctors, []), numNested = blk.nnested, isRec = isRec, isUnsafe = false, isReflexive = isRefl))), blk, rest, idx + 1, isRec, isRefl)
+
+verify typeConsts
+    Map.len(typeConsts({}, Check.Blk.start([], 0, [], 0), [], 0, false, false)) => 0
+
+fn ctorNames(cs: List<CtorIn>, acc: List<Name>) -> List<Name>
+    ? "Constructor names in order."
+    match cs
+        [] -> List.reverse(acc)
+        [c, ..rest] -> ctorNames(rest, List.prepend(c.name, acc))
+
+verify ctorNames
+    ctorNames([], []) => []
+
+fn anyRec(ts: List<TypeIn>, names: List<Name>) -> Bool
+    ? "Some constructor has a field whose type mentions a type of the block."
+    match ts
+        [] -> false
+        [t, ..rest] -> Bool.or(ctorsRec(t.ctors, names), anyRec(rest, names))
+
+verify anyRec
+    anyRec([], []) => false
+
+fn ctorsRec(cs: List<CtorIn>, names: List<Name>) -> Bool
+    ? "Over the constructors of one type."
+    match cs
+        [] -> false
+        [c, ..rest] -> Bool.or(domainsMention(c.ty, names), ctorsRec(rest, names))
+
+verify ctorsRec
+    ctorsRec([], []) => false
+
+fn domainsMention(t: Expr, names: List<Name>) -> Bool
+    ? "Some binder domain of the telescope mentions the names."
+    match t
+        Expr.Pi(_, _, d, b, _) -> Bool.or(Check.Telescope.mentions(d, names), domainsMention(b, names))
+        _ -> false
+
+verify domainsMention
+    domainsMention(Core.Exprs.fvar(0), []) => false
+
+fn anyReflexive(ts: List<TypeIn>, names: List<Name>) -> Bool
+    ? "Some constructor takes a function returning a type of the block."
+    match ts
+        [] -> false
+        [t, ..rest] -> Bool.or(ctorsReflexive(t.ctors, names), anyReflexive(rest, names))
+
+verify anyReflexive
+    anyReflexive([], []) => false
+
+fn ctorsReflexive(cs: List<CtorIn>, names: List<Name>) -> Bool
+    ? "Over the constructors of one type."
+    match cs
+        [] -> false
+        [c, ..rest] -> Bool.or(piDomainMentions(c.ty, names), ctorsReflexive(rest, names))
+
+verify ctorsReflexive
+    ctorsReflexive([], []) => false
+
+fn piDomainMentions(t: Expr, names: List<Name>) -> Bool
+    ? "A binder domain that is itself a pi mentioning the names."
+    match t
+        Expr.Pi(_, _, d, b, _) -> Bool.or(Bool.and(isPi(d), Check.Telescope.mentions(d, names)), piDomainMentions(b, names))
+        _ -> false
+
+verify piDomainMentions
+    piDomainMentions(Core.Exprs.fvar(0), []) => false
+
+fn isPi(e: Expr) -> Bool
+    ? "A pi type."
+    match e
+        Expr.Pi -> true
+        _ -> false
+
+verify isPi
+    isPi(Core.Exprs.fvar(0)) => false
+
+fn checkCtors(bs: BS) -> Result<BS, Fail>
+    ? "Every constructor of every type."
+    ctorsOfTypes(bs, bs.blk.types, 0)
+
+verify checkCtors
+    checkCtors(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn ctorsOfTypes(bs: BS, ts: List<TypeIn>, idx: Int) -> Result<BS, Fail>
+    ? "The constructors of type idx, then the next type."
+    match ts
+        [] -> Result.Ok(bs)
+        [t, ..rest] -> ctorsOfTypes(ctorList(bs, t.ctors, idx, [])?, rest, idx + 1)
+
+verify ctorsOfTypes
+    ctorsOfTypes(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], 0) => Result.Ok(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn ctorList(bs: BS, cs: List<CtorIn>, idx: Int, seen: List<Name>) -> Result<BS, Fail>
+    ? "Distinct new names, then each constructor's type."
+    match cs
+        [] -> Result.Ok(bs)
+        [c, ..rest] -> match Bool.or(List.contains(seen, c.name), Check.State.declared(bs.st, c.name))
+            true -> Result.Err(reject("duplicate or already declared constructor '{nm(c.name)}'"))
+            false -> ctorList(oneCtor(bs, c, idx)?, rest, idx, List.prepend(c.name, seen))
+
+verify ctorList
+    ctorList(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0)), CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))], 0, [Core.Names.anon()]) => Result.Err(Fail.Reject("duplicate or already declared constructor '[anonymous]'"))
+
+fn oneCtor(bs: BS, c: CtorIn, idx: Int) -> Result<BS, Fail>
+    ? "A well-formed type, then its binders."
+    k = Check.Tc.check(bs.st, c.ty)?
+    Result.Ok(BS(blk = bs.blk, st = walkCtor(k.st, bs.blk, c.ty, c.name, idx, 0)?))
+
+verify oneCtor
+    oneCtor(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), CtorIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero)), 0) => Result.Err(Fail.Reject("invalid return type for '[anonymous]'"))
+
+fn walkCtor(st: St, blk: Blk, t: Expr, n: Name, idx: Int, i: Int) -> Result<St, Fail>
+    ? "Parameters must be the block's; each field is checked; the result must be the type applied to the parameters."
+    match t
+        Expr.Pi(_, _, d, b, _) -> match i < blk.nparams
+            true -> ctorParam(st, blk, d, b, n, idx, i)
+            false -> ctorField(st, blk, t, d, b, n, idx, i)
+        _ -> match Check.Blk.isValidIndApp(blk, t, idx)
+            true -> Result.Ok(st)
+            false -> Result.Err(reject("invalid return type for '{nm(n)}'"))
+
+verify walkCtor
+    walkCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), Core.Exprs.sort(Level.Zero), Core.Names.anon(), 0, 0) => Result.Err(Fail.Reject("invalid return type for '[anonymous]'"))
+
+fn ctorParam(st: St, blk: Blk, d: Expr, b: Expr, n: Name, idx: Int, i: Int) -> Result<St, Fail>
+    ? "A parameter binder's type equals the block's parameter type."
+    p = Check.Blk.nthExpr(blk.params, i)
+    eq = Check.Tc.isDefEq(st, d, Check.Telescope.typeOfFVar(st, p))?
+    match eq.b
+        false -> Result.Err(reject("arg #{i + 1} of '{nm(n)}' does not match inductive datatypes parameters"))
+        true -> walkCtor(eq.st, blk, Core.Subst.instantiate1(b, p), n, idx, i + 1)
+
+verify ctorParam
+    ctorParam(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 1, [], 0), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Core.Names.anon(), 0, 0) => Result.Err(Fail.Reject("arg #1 of '[anonymous]' does not match inductive datatypes parameters"))
+
+fn ctorField(st: St, blk: Blk, t: Expr, d: Expr, b: Expr, n: Name, idx: Int, i: Int) -> Result<St, Fail>
+    ? "A field's universe fits the type's (or the type is a predicate), and the field is strictly positive."
+    ty = Check.Tc.inferType(st, d)?
+    s = Check.Tc.ensureSort(ty.st, ty.e)?
+    match Bool.or(Core.Univ.isGeq(blk.result, Check.Tc.sortLevel(s.e)), Core.Univ.normalizesToZero(blk.result))
+        false -> Result.Err(reject("universe level of type_of(arg #{i + 1}) of '{nm(n)}' is too big for the corresponding inductive datatype"))
+        true -> ctorFieldNext(positivity(s.st, blk, d, n, i)?, blk, t, b, n, idx, i)
+
+verify ctorField
+    ctorField(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Blk.update(Check.Blk.start([], 0, [], 0), result = Level.Succ(Level.Zero), notZero = true), Core.Exprs.bvar(0), Core.Exprs.sort(Level.Succ(Level.Zero)), Core.Exprs.bvar(0), Core.Names.anon(), 0, 0) => Result.Err(Fail.Reject("universe level of type_of(arg #1) of '[anonymous]' is too big for the corresponding inductive datatype"))
+    ctorField(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), Core.Exprs.bvar(0), Core.Exprs.sort(Level.Succ(Level.Zero)), Core.Exprs.bvar(0), Core.Names.anon(), 0, 0) => Result.Err(Fail.Reject("invalid return type for '[anonymous]'"))
+
+fn ctorFieldNext(st: St, blk: Blk, t: Expr, b: Expr, n: Name, idx: Int, i: Int) -> Result<St, Fail>
+    ? "Declares the field and goes on."
+    loc = Check.Telescope.localFor(st, t)
+    walkCtor(loc.st, blk, Core.Subst.instantiate1(b, loc.e), n, idx, i + 1)
+
+verify ctorFieldNext
+    ctorFieldNext(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), Core.Exprs.bvar(0), Core.Exprs.sort(Level.Zero), Core.Names.anon(), 0, 0) => Result.Err(Fail.Reject("invalid return type for '[anonymous]'"))
+
+fn positivity(st: St, blk: Blk, t: Expr, n: Name, i: Int) -> Result<St, Fail>
+    ? "The block's types occur only to the right of arrows, as valid applications."
+    w = Check.Tc.whnf(st, t)?
+    match Check.Telescope.mentions(w.e, blk.names)
+        false -> Result.Ok(w.st)
+        true -> match w.e
+            Expr.Pi(_, _, d, b, _) -> match Check.Telescope.mentions(d, blk.names)
+                true -> Result.Err(reject("arg #{i + 1} of '{nm(n)}' has a non positive occurrence of the datatypes being declared"))
+                false -> posBody(Check.Telescope.localFor(w.st, w.e), blk, b, n, i)
+            _ -> match Check.Blk.validIndex(blk, w.e)
+                Option.Some -> Result.Ok(w.st)
+                Option.None -> Result.Err(reject("arg #{i + 1} of '{nm(n)}' contains a non valid occurrence of the datatypes being declared"))
+
+verify positivity
+    positivity(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), Core.Exprs.sort(Level.Zero), Core.Names.anon(), 0) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+
+fn posBody(loc: RE, blk: Blk, b: Expr, n: Name, i: Int) -> Result<St, Fail>
+    ? "Under the binder."
+    positivity(loc.st, blk, Core.Subst.instantiate1(b, loc.e), n, i)
+
+verify posBody
+    posBody(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.Blk.start([], 0, [], 0), Core.Exprs.sort(Level.Zero), Core.Names.anon(), 0) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+
+fn declareCtors(bs: BS) -> BS
+    ? "Adds the constructors with their position and field count."
+    BS(blk = bs.blk, st = St.update(bs.st, block = ctorConstsOfTypes(bs.st.block, bs.blk, bs.blk.types)))
+
+verify declareCtors
+    Map.len(declareCtors(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).st.block) => 0
+
+fn ctorConstsOfTypes(env: Map<Name, Const>, blk: Blk, ts: List<TypeIn>) -> Map<Name, Const>
+    ? "Per type."
+    match ts
+        [] -> env
+        [t, ..rest] -> ctorConstsOfTypes(ctorConsts(env, blk, t.name, t.ctors, 0), blk, rest)
+
+verify ctorConstsOfTypes
+    Map.len(ctorConstsOfTypes({}, Check.Blk.start([], 0, [], 0), [])) => 0
+
+fn ctorConsts(env: Map<Name, Const>, blk: Blk, induct: Name, cs: List<CtorIn>, cidx: Int) -> Map<Name, Const>
+    ? "One constant per constructor."
+    match cs
+        [] -> env
+        [c, ..rest] -> ctorConsts(Map.set(env, c.name, Const.CCtor(Ctor(head = Head(name = c.name, params = blk.lparams, ty = c.ty), induct = induct, cidx = cidx, numParams = blk.nparams, numFields = Check.Telescope.countPis(c.ty) - blk.nparams, isUnsafe = false))), blk, induct, rest, cidx + 1)
+
+verify ctorConsts
+    Map.len(ctorConsts({}, Check.Blk.start([], 0, [], 0), Core.Names.anon(), [CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))], 0)) => 1
+
+fn elimAndK(bs: BS) -> Result<BS, Fail>
+    ? "Where the recursor may eliminate, and whether the type is a K target."
+    z = elimOnlyZero(bs)?
+    match z.b
+        true -> Result.Ok(BS(blk = Blk.update(bs.blk, elim = Level.Zero, k = kTarget(bs.blk)), st = z.st))
+        false -> Result.Ok(BS(blk = Blk.update(bs.blk, elim = Level.Param(freshU(bs.blk.lparams, 0)), k = kTarget(bs.blk)), st = z.st))
+
+verify elimAndK
+    elimAndK(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), notZero = true), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), notZero = true, elim = Level.Param(Core.Names.str(Core.Names.anon(), "u"))), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn freshU(ps: List<Name>, i: Int) -> Name
+    ? "u, or u_1, u_2, ... when taken."
+    match List.contains(ps, uName(i))
+        false -> uName(i)
+        true -> freshU(ps, i + 1)
+
+verify freshU
+    Core.Names.render(freshU([], 0)) => "u"
+    Core.Names.render(freshU([Core.Names.str(Core.Names.anon(), "u")], 0)) => "u_1"
+
+fn uName(i: Int) -> Name
+    ? "The candidate name number i."
+    match i == 0
+        true -> Core.Names.str(Core.Names.anon(), "u")
+        false -> Core.Names.str(Core.Names.anon(), "u_{i}")
+
+verify uName
+    Core.Names.render(uName(2)) => "u_2"
+
+fn elimOnlyZero(bs: BS) -> Result<RB, Fail>
+    ? "Whether the recursor may only eliminate into Prop."
+    match bs.blk.notZero
+        true -> Result.Ok(RB(b = false, st = bs.st))
+        false -> match List.len(bs.blk.types) > 1
+            true -> Result.Ok(RB(b = true, st = bs.st))
+            false -> elimByCtors(bs, firstCtors(bs.blk.types))
+
+verify elimOnlyZero
+    elimOnlyZero(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn firstCtors(ts: List<TypeIn>) -> List<CtorIn>
+    ? "Constructors of the first type."
+    match ts
+        [] -> []
+        [t, .._] -> t.ctors
+
+verify firstCtors
+    firstCtors([]) => []
+
+fn elimByCtors(bs: BS, cs: List<CtorIn>) -> Result<RB, Fail>
+    ? "An empty predicate eliminates anywhere; more than one constructor only into Prop; one constructor depends on its fields."
+    match cs
+        [] -> Result.Ok(RB(b = false, st = bs.st))
+        [c] -> elimWalk(bs.st, bs.blk, c.ty, 0, [])
+        _ -> Result.Ok(RB(b = true, st = bs.st))
+
+verify elimByCtors
+    elimByCtors(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), []) => Result.Ok(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn elimWalk(st: St, blk: Blk, t: Expr, i: Int, toCheck: List<Expr>) -> Result<RB, Fail>
+    ? "Every field outside Prop must occur among the result's arguments."
+    match t
+        Expr.Pi(_, _, d, b, _) -> elimField(Check.Telescope.localFor(st, t), blk, d, b, i, toCheck)
+        _ -> Result.Ok(RB(b = Bool.not(allIn(toCheck, Core.Apps.argsOf(t))), st = st))
+
+verify elimWalk
+    elimWalk(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), Core.Exprs.fvar(0), 0, [Core.Exprs.fvar(1)]) => Result.Ok(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn elimField(loc: RE, blk: Blk, d: Expr, b: Expr, i: Int, toCheck: List<Expr>) -> Result<RB, Fail>
+    ? "A field (past the parameters) whose type is not a proposition must be checked."
+    match i >= blk.nparams
+        false -> elimWalk(loc.st, blk, Core.Subst.instantiate1(b, loc.e), i + 1, toCheck)
+        true -> elimFieldSort(loc, blk, b, i, toCheck, Check.Tc.inferType(loc.st, d)?)
+
+verify elimField
+    elimField(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.Blk.start([], 1, [], 0), Core.Exprs.bvar(0), Core.Exprs.bvar(0), 0, []) => Result.Ok(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn elimFieldSort(loc: RE, blk: Blk, b: Expr, i: Int, toCheck: List<Expr>, ty: RE) -> Result<RB, Fail>
+    ? "Proofs need no check."
+    s = Check.Tc.ensureSort(ty.st, ty.e)?
+    match Core.Univ.normalizesToZero(Check.Tc.sortLevel(s.e))
+        true -> elimWalk(s.st, blk, Core.Subst.instantiate1(b, loc.e), i + 1, toCheck)
+        false -> elimWalk(s.st, blk, Core.Subst.instantiate1(b, loc.e), i + 1, List.prepend(loc.e, toCheck))
+
+verify elimFieldSort
+    elimFieldSort(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.Blk.start([], 0, [], 0), Core.Exprs.fvar(0), 0, [], RE(e = Core.Exprs.sort(Level.Succ(Level.Zero)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn allIn(xs: List<Expr>, ys: List<Expr>) -> Bool
+    ? "Every x is among ys."
+    match xs
+        [] -> true
+        [x, ..rest] -> Bool.and(List.contains(ys, x), allIn(rest, ys))
+
+verify allIn
+    allIn([Core.Exprs.fvar(1)], [Core.Exprs.fvar(1)]) => true
+
+fn kTarget(blk: Blk) -> Bool
+    ? "One type, a predicate, one constructor with no fields."
+    match blk.types
+        [t] -> match t.ctors
+            [c] -> Bool.and(Core.Univ.normalizesToZero(blk.result), Check.Telescope.countPis(c.ty) <= blk.nparams)
+            _ -> false
+        _ -> false
+
+verify kTarget
+    kTarget(Check.Blk.start([], 0, [], 0)) => false
+
+fn isRecArg(st: St, blk: Blk, t: Expr) -> Result<RIx, Fail>
+    ? "A field whose type, under its own binders, is a valid application of a type of the block; which one."
+    w = Check.Tc.whnf(st, t)?
+    match w.e
+        Expr.Pi(_, _, _, b, _) -> recArgUnder(Check.Telescope.localFor(w.st, w.e), blk, b)
+        _ -> Result.Ok(RIx(o = Check.Blk.validIndex(blk, w.e), st = w.st))
+
+verify isRecArg
+    isRecArg(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), Core.Exprs.sort(Level.Zero)) => Result.Ok(RIx(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn recArgUnder(loc: RE, blk: Blk, b: Expr) -> Result<RIx, Fail>
+    ? "Under one binder."
+    isRecArg(loc.st, blk, Core.Subst.instantiate1(b, loc.e))
+
+verify recArgUnder
+    recArgUnder(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.Blk.start([], 0, [], 0), Core.Exprs.sort(Level.Zero)) => Result.Ok(RIx(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))

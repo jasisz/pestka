@@ -1,0 +1,74 @@
+module Main
+    intent =
+        "Pestka's command line: read one lean4export file and give a verdict."
+        "The verdict is the last line printed: accepted, rejected: <why> or"
+        "declined: <why>. A rejected file also makes main return an error,"
+        "so the status is 1; bin/pestka turns declined into status 2."
+    depends [Core.Names, Check.State, Check.Decl, Export.Stream, Export.Tables]
+    effects [Args.get, Console.print, Disk.readText]
+
+fn main() -> Result<Unit, String>
+    ! [Args.get, Console.print, Disk.readText]
+    match Args.get()
+        [path] -> report(Export.Stream.readFile(path, 8), 8)
+        [path, n] -> report(Export.Stream.readFile(path, workersOf(n)), workersOf(n))
+        _ -> declined("usage: pestka FILE.ndjson [WORKERS]")
+
+fn workersOf(n: String) -> Int
+    ? "The number of workers asked for, at least one; anything unreadable means eight."
+    match Int.fromString(n)
+        Result.Ok(k) -> Int.max(k, 1)
+        Result.Err -> 8
+
+verify workersOf
+    workersOf("3") => 3
+    workersOf("0") => 1
+    workersOf("x") => 8
+
+fn report(o: Outcome, workers: Int) -> Result<Unit, String>
+    ? "Prints the verdict."
+    ! [Console.print]
+    match o
+        Outcome.Rejected(why) -> rejected(why)
+        Outcome.Declined(why) -> declined(why)
+        Outcome.Read(t) -> summary(t, workers)
+
+fn summary(p: Parsed, workers: Int) -> Result<Unit, String>
+    ? "Counts of what the file defines, then the checking verdict."
+    ! [Console.print]
+    Console.print("constants {p.constants}, declarations {List.len(p.decls)}, names {p.names}, levels {p.levels}, expressions {p.exprs}")
+    verdict(Check.Decl.checkParallel(p.decls, workers))
+
+fn verdict(r: Result<Run, Fail>) -> Result<Unit, String>
+    ? "Accepted only when every declaration was checked; admitted inductive blocks make it a decline."
+    ! [Console.print]
+    match r
+        Result.Err(Fail.Reject(m)) -> rejected(m)
+        Result.Err(Fail.Decline(m)) -> declined(m)
+        Result.Ok(run) -> counted(run)
+
+fn counted(run: Run) -> Result<Unit, String>
+    ? "Prints what was checked, trusted and skipped."
+    ! [Console.print]
+    Console.print("checked {run.checked}, admitted unchecked {run.trusted}, skipped {run.skipped}")
+    match run.trusted == 0
+        true -> accepted()
+        false -> declined("{run.trusted} nested inductive blocks are not checked yet")
+
+fn accepted() -> Result<Unit, String>
+    ? "Every declaration was checked."
+    ! [Console.print]
+    Console.print("accepted")
+    Result.Ok(Unit)
+
+fn rejected(why: String) -> Result<Unit, String>
+    ? "Prints the rejection and fails, which gives status 1."
+    ! [Console.print]
+    Console.print("rejected: {why}")
+    Result.Err(why)
+
+fn declined(why: String) -> Result<Unit, String>
+    ? "Prints that the input is outside what Pestka handles."
+    ! [Console.print]
+    Console.print("declined: {why}")
+    Result.Ok(Unit)

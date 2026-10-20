@@ -1,0 +1,37 @@
+#!/usr/bin/env perl
+# Runs a command under hard caps, because macOS does not enforce ulimit -v:
+# the command is killed when the resident memory of its whole process group
+# exceeds MB megabytes or it runs longer than SECONDS. The command runs in a
+# process group of its own and the whole group is killed, so a wrapper
+# script's children die with it. Exit status: the command's own, 128 plus the
+# signal when a signal killed it, 137 when the memory cap killed it, or 142
+# when the time cap did.
+#
+#   bin/capped MB SECONDS command [args...]
+use strict;
+use warnings;
+use POSIX ":sys_wait_h";
+use Time::HiRes qw(time);
+
+my ($mb, $secs, @cmd) = @ARGV;
+die "usage: bin/capped MB SECONDS command [args...]\n" unless @cmd;
+my $pid = fork() // die "fork: $!\n";
+if ($pid == 0) { setpgrp(0, 0); exec @cmd or die "exec $cmd[0]: $!\n"; }
+my $start = time();
+while (1) {
+    my $done = waitpid($pid, WNOHANG);
+    if ($done == $pid) { exit($? & 127 ? 128 + ($? & 127) : $? >> 8); }
+    my $rss = 0;
+    $rss += $_ for map { (split)[1] } grep { (split)[0] == $pid } `ps -A -o pgid=,rss=`;
+    if ($rss / 1024 > $mb) {
+        kill 'KILL', -$pid; waitpid($pid, 0);
+        print STDERR "capped: killed at ${\ int($rss / 1024)} MB (cap $mb MB)\n";
+        exit 137;
+    }
+    if (time() - $start > $secs) {
+        kill 'KILL', -$pid; waitpid($pid, 0);
+        print STDERR "capped: killed after $secs s\n";
+        exit 142;
+    }
+    select(undef, undef, undef, 0.2);
+}

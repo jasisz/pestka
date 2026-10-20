@@ -1,0 +1,233 @@
+module Items
+    intent =
+        "Lines that define a name, a level or an expression. Each line names"
+        "its own index and refers only to indices defined before it, so the"
+        "value is built from values already in the tables and every shared"
+        "subterm stays shared. mdata is transparent to the kernel and"
+        "resolves to the expression it wraps."
+    exposes [nameLine, levelLine, exprLine, appAt, binderAt]
+    depends [Json.Line, Json.Access, Core.Names, Core.Levels, Core.Exprs, Export.Tables]
+    effects []
+
+fn otherKey(fs: List<Tuple<String, J>>, index: String) -> String
+    ? "The one key of a two-key line that is not its index key."
+    match fs
+        [] -> ""
+        [(k, _), ..rest] -> match k == index
+            true -> otherKey(rest, index)
+            false -> k
+
+verify otherKey
+    otherKey([("app", J.JNull), ("ie", J.JInt(1))], "ie") => "app"
+    otherKey([("ie", J.JInt(1)), ("lam", J.JNull)], "ie") => "lam"
+    otherKey([("ie", J.JInt(1))], "ie") => ""
+
+fn nameLine(t: Tables, fs: List<Tuple<String, J>>) -> Result<Tables, String>
+    ? "A Name.str or Name.num line."
+    i = Json.Access.int(fs, "in")?
+    match otherKey(fs, "in")
+        "str" -> nameStr(t, i, Json.Access.obj(fs, "str")?)
+        "num" -> nameNum(t, i, Json.Access.obj(fs, "num")?)
+        k -> Result.Err("unknown name kind '{k}'")
+
+verify nameLine
+    Result.withDefault(nameLine(Export.Tables.empty(), [("in", J.JInt(1)), ("str", J.JObj([("pre", J.JInt(0)), ("str", J.JStr("Nat"))]))]), Export.Tables.empty()).nextName => 2
+    nameLine(Export.Tables.empty(), [("in", J.JInt(1)), ("x", J.JNull)]) => Result.Err("unknown name kind 'x'")
+
+fn nameStr(t: Tables, i: Int, o: List<Tuple<String, J>>) -> Result<Tables, String>
+    ? "Name.str: a prefix and a string component."
+    pre = Export.Tables.name(t, Json.Access.int(o, "pre")?)?
+    Export.Tables.addName(t, i, Core.Names.str(pre, Json.Access.text(o, "str")?))
+
+verify nameStr
+    nameStr(Export.Tables.empty(), 1, [("pre", J.JInt(9)), ("str", J.JStr("x"))]) => Result.Err("unknown name index 9")
+
+fn nameNum(t: Tables, i: Int, o: List<Tuple<String, J>>) -> Result<Tables, String>
+    ? "Name.num: a prefix and a numeric component."
+    pre = Export.Tables.name(t, Json.Access.int(o, "pre")?)?
+    Export.Tables.addName(t, i, Core.Names.num(pre, Json.Access.int(o, "i")?))
+
+verify nameNum
+    Result.withDefault(nameNum(Export.Tables.empty(), 1, [("pre", J.JInt(0)), ("i", J.JInt(4294455747))]), Export.Tables.empty()).nextName => 2
+
+fn levelLine(t: Tables, fs: List<Tuple<String, J>>) -> Result<Tables, String>
+    ? "A Level.succ, max, imax or param line."
+    i = Json.Access.int(fs, "il")?
+    match otherKey(fs, "il")
+        "succ" -> Export.Tables.addLevel(t, i, Level.Succ(Export.Tables.level(t, Json.Access.int(fs, "succ")?)?))
+        "max" -> levelPair(t, i, Json.Access.ints(fs, "max")?, true)
+        "imax" -> levelPair(t, i, Json.Access.ints(fs, "imax")?, false)
+        "param" -> Export.Tables.addLevel(t, i, Level.Param(Export.Tables.name(t, Json.Access.int(fs, "param")?)?))
+        k -> Result.Err("unknown level kind '{k}'")
+
+verify levelLine
+    Result.withDefault(levelLine(Export.Tables.empty(), [("il", J.JInt(1)), ("succ", J.JInt(0))]), Export.Tables.empty()).nextLevel => 2
+    levelLine(Export.Tables.empty(), [("il", J.JInt(1)), ("succ", J.JInt(3))]) => Result.Err("unknown level index 3")
+
+fn levelPair(t: Tables, i: Int, ids: List<Int>, isMax: Bool) -> Result<Tables, String>
+    ? "max or imax of exactly two earlier levels."
+    match ids
+        [a, b] -> levelPairOf(t, i, Export.Tables.level(t, a)?, Export.Tables.level(t, b)?, isMax)
+        _ -> Result.Err("max and imax take exactly two levels")
+
+verify levelPair
+    levelPair(Export.Tables.empty(), 1, [0], true) => Result.Err("max and imax take exactly two levels")
+
+fn levelPairOf(t: Tables, i: Int, a: Level, b: Level, isMax: Bool) -> Result<Tables, String>
+    ? "Builds the max or imax node."
+    match isMax
+        true -> Export.Tables.addLevel(t, i, Level.Max(a, b))
+        false -> Export.Tables.addLevel(t, i, Level.IMax(a, b))
+
+verify levelPairOf
+    Result.withDefault(levelPairOf(Export.Tables.empty(), 1, Level.Zero, Level.Zero, false), Export.Tables.empty()).nextLevel => 2
+
+fn exprLine(t: Tables, fs: List<Tuple<String, J>>) -> Result<Tables, String>
+    ? "One expression line."
+    i = Json.Access.int(fs, "ie")?
+    Export.Tables.addExpr(t, i, exprOf(t, otherKey(fs, "ie"), fs)?)
+
+verify exprLine
+    Result.withDefault(exprLine(Export.Tables.empty(), [("bvar", J.JInt(0)), ("ie", J.JInt(0))]), Export.Tables.empty()).nextExpr => 1
+    exprLine(Export.Tables.empty(), [("ie", J.JInt(0)), ("app", J.JObj([("arg", J.JInt(0)), ("fn", J.JInt(0))]))]) => Result.Err("unknown expression index 0")
+
+fn exprOf(t: Tables, kind: String, fs: List<Tuple<String, J>>) -> Result<Expr, String>
+    ? "Builds the expression a line describes."
+    match kind
+        "bvar" -> Result.Ok(Core.Exprs.bvar(Json.Access.int(fs, "bvar")?))
+        "sort" -> Result.Ok(Core.Exprs.sort(Export.Tables.level(t, Json.Access.int(fs, "sort")?)?))
+        "const" -> constOf(t, Json.Access.obj(fs, "const")?)
+        "app" -> appOf(t, Json.Access.obj(fs, "app")?)
+        "lam" -> binderOf(t, Json.Access.obj(fs, "lam")?, true)
+        "forallE" -> binderOf(t, Json.Access.obj(fs, "forallE")?, false)
+        "letE" -> letOf(t, Json.Access.obj(fs, "letE")?)
+        "proj" -> projOf(t, Json.Access.obj(fs, "proj")?)
+        "natVal" -> natOf(Json.Access.text(fs, "natVal")?)
+        "strVal" -> Result.Ok(Core.Exprs.strLit(Json.Access.text(fs, "strVal")?))
+        "mdata" -> Export.Tables.expr(t, Json.Access.int(Json.Access.obj(fs, "mdata")?, "expr")?)
+        k -> Result.Err("unknown expression kind '{k}'")
+
+verify exprOf
+    exprOf(Export.Tables.empty(), "natVal", [("natVal", J.JStr("100000000000000023456789"))]) => Result.Ok(Core.Exprs.natLit(100000000000000023456789))
+    exprOf(Export.Tables.empty(), "sort", [("sort", J.JInt(0))]) => Result.Ok(Core.Exprs.sort(Level.Zero))
+    exprOf(Export.Tables.empty(), "fvar", []) => Result.Err("unknown expression kind 'fvar'")
+
+fn natOf(digits: String) -> Result<Expr, String>
+    ? "A Nat literal from its decimal digits; a sign or anything else is an error."
+    match String.startsWith(digits, "-")
+        true -> Result.Err("negative Nat literal")
+        false -> natParsed(Int.fromString(digits))
+
+verify natOf
+    natOf("7") => Result.Ok(Core.Exprs.natLit(7))
+    natOf("-1") => Result.Err("negative Nat literal")
+    natOf("x") => Result.Err("malformed Nat literal")
+
+fn natParsed(r: Result<Int, String>) -> Result<Expr, String>
+    ? "Wraps a parsed literal."
+    match r
+        Result.Ok(n) -> Result.Ok(Core.Exprs.natLit(n))
+        Result.Err -> Result.Err("malformed Nat literal")
+
+verify natParsed
+    natParsed(Result.Ok(3)) => Result.Ok(Core.Exprs.natLit(3))
+
+fn constOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
+    ? "A constant with its universe levels."
+    n = Export.Tables.name(t, Json.Access.int(o, "name")?)?
+    Result.Ok(Core.Exprs.cnst(n, Export.Tables.levels(t, Json.Access.ints(o, "us")?, [])?))
+
+verify constOf
+    constOf(Export.Tables.empty(), [("name", J.JInt(0)), ("us", J.JArr([]))]) => Result.Ok(Core.Exprs.cnst(Core.Names.anon(), []))
+
+fn appOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
+    ? "An application of two earlier expressions."
+    appOfIds(t, Json.Access.int(o, "fn")?, Json.Access.int(o, "arg")?)
+
+fn appOfIds(t: Tables, fnIdx: Int, argIdx: Int) -> Result<Expr, String>
+    ? "The application of expression fnIdx to expression argIdx; the function is looked up first."
+    f = Export.Tables.expr(t, fnIdx)?
+    Result.Ok(Core.Exprs.app(f, Export.Tables.expr(t, argIdx)?))
+
+verify appOfIds
+    appOfIds(Export.Tables.empty(), 4, 5) => Result.Err("unknown expression index 4")
+
+fn appAt(t: Tables, ie: Int, fnIdx: Int, argIdx: Int) -> Result<Tables, String>
+    ? "Defines expression ie as an application, as an app line does. The expression is built before the table is handed on, so that the table is not shared when it grows."
+    e = appOfIds(t, fnIdx, argIdx)?
+    Export.Tables.addExpr(t, ie, e)
+
+verify appAt
+    appAt(Export.Tables.empty(), 1, 0, 0) => Result.Err("unknown expression index 0")
+
+verify appOf
+    appOf(Export.Tables.empty(), [("arg", J.JInt(0)), ("fn", J.JInt(0))]) => Result.Err("unknown expression index 0")
+
+fn binderOf(t: Tables, o: List<Tuple<String, J>>, isLam: Bool) -> Result<Expr, String>
+    ? "A lambda or a pi type."
+    n = Export.Tables.name(t, Json.Access.int(o, "name")?)?
+    ty = Export.Tables.expr(t, Json.Access.int(o, "type")?)?
+    body = Export.Tables.expr(t, Json.Access.int(o, "body")?)?
+    bi = binderInfo(Json.Access.text(o, "binderInfo")?)?
+    Result.Ok(binderNode(n, ty, body, bi, isLam))
+
+fn binderNode(n: Name, ty: Expr, body: Expr, bi: Binder, isLam: Bool) -> Expr
+    ? "A lambda or a pi from its parts."
+    match isLam
+        true -> Core.Exprs.lam(n, ty, body, bi)
+        false -> Core.Exprs.pi(n, ty, body, bi)
+
+verify binderNode
+    binderNode(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default, false) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default)
+
+fn binderOfIds(t: Tables, nameIdx: Int, typeIdx: Int, bodyIdx: Int, bi: Binder, isLam: Bool) -> Result<Expr, String>
+    ? "A lambda or a pi from table indices, looked up in the order binderOf uses."
+    n = Export.Tables.name(t, nameIdx)?
+    ty = Export.Tables.expr(t, typeIdx)?
+    body = Export.Tables.expr(t, bodyIdx)?
+    Result.Ok(binderNode(n, ty, body, bi, isLam))
+
+verify binderOfIds
+    binderOfIds(Export.Tables.empty(), 0, 3, 4, Binder.Default, true) => Result.Err("unknown expression index 3")
+
+fn binderAt(t: Tables, ie: Int, nameIdx: Int, typeIdx: Int, bodyIdx: Int, bi: Binder, isLam: Bool) -> Result<Tables, String>
+    ? "Defines expression ie as a lambda or a pi, as a lam or forallE line does. The expression is built before the table is handed on, so that the table is not shared when it grows."
+    e = binderOfIds(t, nameIdx, typeIdx, bodyIdx, bi, isLam)?
+    Export.Tables.addExpr(t, ie, e)
+
+verify binderAt
+    binderAt(Export.Tables.empty(), 1, 0, 3, 4, Binder.Default, true) => Result.Err("unknown expression index 3")
+
+verify binderOf
+    binderOf(Export.Tables.empty(), [("binderInfo", J.JStr("default")), ("body", J.JInt(0)), ("name", J.JInt(0)), ("type", J.JInt(0))], true) => Result.Err("unknown expression index 0")
+
+fn binderInfo(s: String) -> Result<Binder, String>
+    ? "The four binder annotations."
+    match s
+        "default" -> Result.Ok(Binder.Default)
+        "implicit" -> Result.Ok(Binder.Implicit)
+        "strictImplicit" -> Result.Ok(Binder.StrictImplicit)
+        "instImplicit" -> Result.Ok(Binder.InstImplicit)
+        _ -> Result.Err("unknown binderInfo '{s}'")
+
+verify binderInfo
+    binderInfo("instImplicit") => Result.Ok(Binder.InstImplicit)
+    binderInfo("x") => Result.Err("unknown binderInfo 'x'")
+
+fn letOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
+    ? "A let; nondep only matters to elaboration and is not kept."
+    n = Export.Tables.name(t, Json.Access.int(o, "name")?)?
+    ty = Export.Tables.expr(t, Json.Access.int(o, "type")?)?
+    v = Export.Tables.expr(t, Json.Access.int(o, "value")?)?
+    Result.Ok(Core.Exprs.letE(n, ty, v, Export.Tables.expr(t, Json.Access.int(o, "body")?)?))
+
+verify letOf
+    letOf(Export.Tables.empty(), [("name", J.JInt(0)), ("type", J.JInt(0))]) => Result.Err("unknown expression index 0")
+
+fn projOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
+    ? "A projection out of a structure."
+    s = Export.Tables.name(t, Json.Access.int(o, "typeName")?)?
+    Result.Ok(Core.Exprs.proj(s, Json.Access.int(o, "idx")?, Export.Tables.expr(t, Json.Access.int(o, "struct")?)?))
+
+verify projOf
+    projOf(Export.Tables.empty(), [("idx", J.JInt(0)), ("struct", J.JInt(0)), ("typeName", J.JInt(0))]) => Result.Err("unknown expression index 0")

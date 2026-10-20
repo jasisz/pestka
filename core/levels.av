@@ -1,0 +1,57 @@
+module Levels
+    intent =
+        "Universe levels as Lean writes them: zero, successor, max, imax and"
+        "parameters. Normalization and comparison come with the type checker;"
+        "this module holds the shape, the hash and the parameter test."
+    exposes [Level, hashOf, hasParam, render]
+    depends [Core.Hash, Core.Names]
+    effects []
+
+type Level
+    Zero
+    Succ(Level)
+    Max(Level, Level)
+    IMax(Level, Level)
+    Param(Name)
+
+fn hashOf(l: Level) -> Int
+    ? "Structural hash; levels are small, so it is computed on demand."
+    match l
+        Level.Zero -> 2
+        Level.Succ(a) -> Core.Hash.mix(3, hashOf(a))
+        Level.Max(a, b) -> Core.Hash.mix(Core.Hash.mix(5, hashOf(a)), hashOf(b))
+        Level.IMax(a, b) -> Core.Hash.mix(Core.Hash.mix(7, hashOf(a)), hashOf(b))
+        Level.Param(n) -> Core.Hash.mix(11, Core.Names.hashOf(n))
+
+verify hashOf
+    hashOf(Level.Zero) => 2
+    hashOf(Level.Max(Level.Zero, Level.Succ(Level.Zero))) == hashOf(Level.Max(Level.Succ(Level.Zero), Level.Zero)) => false
+    hashOf(Level.Max(Level.Zero, Level.Zero)) == hashOf(Level.IMax(Level.Zero, Level.Zero)) => false
+
+fn hasParam(l: Level) -> Bool
+    ? "Whether a universe parameter occurs in the level."
+    match l
+        Level.Zero -> false
+        Level.Succ(a) -> hasParam(a)
+        Level.Max(a, b) -> Bool.or(hasParam(a), hasParam(b))
+        Level.IMax(a, b) -> Bool.or(hasParam(a), hasParam(b))
+        Level.Param -> true
+
+verify hasParam
+    hasParam(Level.Succ(Level.Zero)) => false
+    hasParam(Level.Max(Level.Zero, Level.Param(Core.Names.str(Core.Names.anon(), "u")))) => true
+    hasParam(Level.IMax(Level.Zero, Level.Zero)) => false
+
+fn render(l: Level) -> String
+    ? "Lean-like display for messages."
+    match l
+        Level.Zero -> "0"
+        Level.Succ(a) -> "{render(a)}+1"
+        Level.Max(a, b) -> "max ({render(a)}) ({render(b)})"
+        Level.IMax(a, b) -> "imax ({render(a)}) ({render(b)})"
+        Level.Param(n) -> Core.Names.render(n)
+
+verify render
+    render(Level.Succ(Level.Zero)) => "0+1"
+    render(Level.Max(Level.Zero, Level.Param(Core.Names.str(Core.Names.anon(), "u")))) => "max (0) (u)"
+    render(Level.IMax(Level.Zero, Level.Zero)) => "imax (0) (0)"

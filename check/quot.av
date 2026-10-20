@@ -1,0 +1,182 @@
+module Quot
+    intent =
+        "The quotient package. Lean's kernel adds Quot, Quot.mk, Quot.lift and"
+        "Quot.ind itself, with types it builds, once Eq is in the environment"
+        "with the shape it expects. Pestka does the same and then compares"
+        "every quotient constant the export states with the one it built."
+    exposes [addQuot, kindOf]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Core.Decls, Core.Alpha, Check.State, Check.Telescope, Check.Lits]
+    effects []
+
+record QB
+    st: St
+    consts: List<Const>
+
+fn reject(msg: String) -> Fail
+    ? "The quotient package cannot be added."
+    Fail.Reject(msg)
+
+verify reject
+    reject("x") => Fail.Reject("x")
+
+fn kindOf(n: Name) -> Option<QuotKind>
+    ? "Which quotient constant a name denotes."
+    match Core.Names.render(n)
+        "Quot" -> Option.Some(QuotKind.QType)
+        "Quot.mk" -> Option.Some(QuotKind.QCtor)
+        "Quot.lift" -> Option.Some(QuotKind.QLift)
+        "Quot.ind" -> Option.Some(QuotKind.QInd)
+        _ -> Option.None
+
+verify kindOf
+    kindOf(Check.Lits.name2("Quot", "lift")) => Option.Some(QuotKind.QLift)
+    kindOf(Check.Lits.name1("Eq")) => Option.None
+
+fn addQuot(env: Env) -> Result<Env, Fail>
+    ? "Checks Eq, then adds the four constants unless they are there already."
+    match Check.State.envGet(env, Check.Lits.name1("Quot"))
+        Option.Some(Const.CQuot) -> Result.Ok(env)
+        _ -> withEq(env, Check.State.envGet(env, Check.Lits.name1("Eq")))
+
+verify addQuot
+    addQuot(Check.State.envEmpty()) => Result.Err(Fail.Reject("failed to initialize quot module, environment does not have 'Eq' type"))
+
+fn withEq(env: Env, eq: Option<Const>) -> Result<Env, Fail>
+    ? "Eq must be an inductive type with one universe parameter and one constructor."
+    match eq
+        Option.Some(Const.CInduct(iv)) -> match iv.head.params
+            [u] -> match iv.ctors
+                [refl] -> eqShapes(env, iv, u, Check.State.envGet(env, refl))
+                _ -> Result.Err(reject("failed to initialize quot module, unexpected number of constructors for 'Eq' type"))
+            _ -> Result.Err(reject("failed to initialize quot module, unexpected number of universe params at 'Eq' type"))
+        _ -> Result.Err(reject("failed to initialize quot module, environment does not have 'Eq' type"))
+
+verify withEq
+    withEq(Check.State.envEmpty(), Option.None) => Result.Err(Fail.Reject("failed to initialize quot module, environment does not have 'Eq' type"))
+
+fn arrow(a: Expr, b: Expr) -> Expr
+    ? "A non-dependent function type; b mentions no bound variable."
+    Core.Exprs.pi(Core.Names.anon(), a, b, Binder.Default)
+
+verify arrow
+    arrow(Core.Exprs.fvar(0), Core.Exprs.fvar(1)) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.fvar(0), Core.Exprs.fvar(1), Binder.Default)
+
+fn prop() -> Expr
+    ? "Prop."
+    Core.Exprs.sort(Level.Zero)
+
+verify prop
+    prop() => Core.Exprs.sort(Level.Zero)
+
+fn local(st: St, n: String, ty: Expr, bi: Binder) -> RE
+    ? "A fresh named variable."
+    Check.State.names(st, Core.Names.str(Core.Names.anon(), n), ty, Option.None, bi)
+
+verify local
+    local(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), "a", prop(), Binder.Default).e => Core.Exprs.fvar(0)
+
+fn eqShapes(env: Env, iv: IndType, u: Name, refl: Option<Const>) -> Result<Env, Fail>
+    ? "Eq takes an implicit type and two of its values into Prop; its constructor relates a value to itself."
+    st0 = Check.State.fresh(env, [], Safety.Safe)
+    alpha = local(st0, "α", Core.Exprs.sort(Level.Param(u)), Binder.Implicit)
+    eqTy = Check.Telescope.piBinding(alpha.st, [alpha.e], arrow(alpha.e, arrow(alpha.e, prop())))
+    match Core.Alpha.alphaEq(eqTy, iv.head.ty)
+        false -> Result.Err(reject("failed to initialize quot module, 'Eq' has an unexpected type"))
+        true -> reflShape(env, refl)
+
+verify eqShapes
+    eqShapes(Check.State.envEmpty(), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false), Core.Names.anon(), Option.None) => Result.Err(Fail.Reject("failed to initialize quot module, 'Eq' has an unexpected type"))
+
+fn reflShape(env: Env, refl: Option<Const>) -> Result<Env, Fail>
+    ? "The constructor's type, at its own universe parameter."
+    match refl
+        Option.Some(c) -> match Check.State.headOf(c).params
+            [v] -> reflType(env, Check.State.headOf(c).ty, v)
+            _ -> Result.Err(reject("failed to initialize quot module, unexpected type for 'Eq' type constructor"))
+        Option.None -> Result.Err(reject("failed to initialize quot module, unexpected type for 'Eq' type constructor"))
+
+verify reflShape
+    reflShape(Check.State.envEmpty(), Option.None) => Result.Err(Fail.Reject("failed to initialize quot module, unexpected type for 'Eq' type constructor"))
+
+fn reflType(env: Env, ty: Expr, v: Name) -> Result<Env, Fail>
+    ? "Compares Eq.refl's type with the expected one."
+    st0 = Check.State.fresh(env, [], Safety.Safe)
+    alpha = local(st0, "α", Core.Exprs.sort(Level.Param(v)), Binder.Implicit)
+    a = local(alpha.st, "a", alpha.e, Binder.Default)
+    expected = Check.Telescope.piBinding(a.st, [alpha.e, a.e], Core.Apps.mkApps(Core.Exprs.cnst(Check.Lits.name1("Eq"), [Level.Param(v)]), [alpha.e, a.e, a.e]))
+    match Core.Alpha.alphaEq(expected, ty)
+        false -> Result.Err(reject("failed to initialize quot module, unexpected type for 'Eq' type constructor"))
+        true -> declareAll(env)
+
+verify reflType
+    reflType(Check.State.envEmpty(), Core.Exprs.bvar(0), Core.Names.anon()) => Result.Err(Fail.Reject("failed to initialize quot module, unexpected type for 'Eq' type constructor"))
+
+fn declareAll(env: Env) -> Result<Env, Fail>
+    ? "The four names must be free; then the constants are added."
+    match Bool.or(Bool.or(Check.State.envHas(env, Check.Lits.name1("Quot")), Check.State.envHas(env, Check.Lits.name2("Quot", "mk"))), Bool.or(Check.State.envHas(env, Check.Lits.name2("Quot", "lift")), Check.State.envHas(env, Check.Lits.name2("Quot", "ind"))))
+        true -> Result.Err(reject("failed to initialize quot module, a quotient constant is already declared"))
+        false -> Result.Ok(addAll(env, quotConsts(Check.State.fresh(env, [], Safety.Safe))))
+
+verify declareAll
+    Check.State.envHas(Result.withDefault(declareAll(Check.State.envEmpty()), Check.State.envEmpty()), Check.Lits.name2("Quot", "ind")) => true
+
+fn addAll(env: Env, cs: List<Const>) -> Env
+    ? "Adds each constant under its name."
+    match cs
+        [] -> env
+        [c, ..rest] -> addAll(Check.State.envSet(env, Check.State.headOf(c).name, c), rest)
+
+verify addAll
+    Check.State.envHas(addAll(Check.State.envEmpty(), []), Check.Lits.name1("Quot")) => false
+
+fn quotConsts(st: St) -> List<Const>
+    ? "The four constants with the types the reference kernel gives them."
+    u = Level.Param(Core.Names.str(Core.Names.anon(), "u"))
+    v = Level.Param(Core.Names.str(Core.Names.anon(), "v"))
+    alpha = local(st, "α", Core.Exprs.sort(u), Binder.Implicit)
+    r = local(alpha.st, "r", arrow(alpha.e, arrow(alpha.e, prop())), Binder.Default)
+    quotR = Core.Apps.mkApps(Core.Exprs.cnst(Check.Lits.name1("Quot"), [u]), [alpha.e, r.e])
+    a = local(r.st, "a", alpha.e, Binder.Default)
+    quotTy = Check.Telescope.piBinding(a.st, [alpha.e, r.e], Core.Exprs.sort(u))
+    mkTy = Check.Telescope.piBinding(a.st, [alpha.e, r.e, a.e], quotR)
+    rest = liftAndInd(a.st, u, v)
+    List.concat([Const.CQuot(Head(name = Check.Lits.name1("Quot"), params = [uName()], ty = quotTy), QuotKind.QType), Const.CQuot(Head(name = Check.Lits.name2("Quot", "mk"), params = [uName()], ty = mkTy), QuotKind.QCtor)], rest)
+
+verify quotConsts
+    List.len(quotConsts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => 4
+
+fn uName() -> Name
+    ? "The universe parameter u."
+    Core.Names.str(Core.Names.anon(), "u")
+
+verify uName
+    Core.Names.render(uName()) => "u"
+
+fn liftAndInd(st: St, u: Level, v: Level) -> List<Const>
+    ? "Quot.lift and Quot.ind, where r is implicit."
+    alpha = local(st, "α", Core.Exprs.sort(u), Binder.Implicit)
+    r = local(alpha.st, "r", arrow(alpha.e, arrow(alpha.e, prop())), Binder.Implicit)
+    quotR = Core.Apps.mkApps(Core.Exprs.cnst(Check.Lits.name1("Quot"), [u]), [alpha.e, r.e])
+    a = local(r.st, "a", alpha.e, Binder.Default)
+    beta = local(a.st, "β", Core.Exprs.sort(v), Binder.Implicit)
+    f = local(beta.st, "f", arrow(alpha.e, beta.e), Binder.Default)
+    b = local(f.st, "b", alpha.e, Binder.Default)
+    eqfab = Core.Apps.mkApps(Core.Exprs.cnst(Check.Lits.name1("Eq"), [v]), [beta.e, Core.Exprs.app(f.e, a.e), Core.Exprs.app(f.e, b.e)])
+    sanity = Check.Telescope.piBinding(b.st, [a.e, b.e], arrow(Core.Apps.mkApps(r.e, [a.e, b.e]), eqfab))
+    liftTy = Check.Telescope.piBinding(b.st, [alpha.e, r.e, beta.e, f.e], arrow(sanity, arrow(quotR, beta.e)))
+    [Const.CQuot(Head(name = Check.Lits.name2("Quot", "lift"), params = [uName(), Core.Names.str(Core.Names.anon(), "v")], ty = liftTy), QuotKind.QLift), indConst(b.st, u, alpha.e, r.e, a.e, quotR)]
+
+verify liftAndInd
+    List.len(liftAndInd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Level.Zero, Level.Zero)) => 2
+
+fn indConst(st: St, u: Level, alpha: Expr, r: Expr, a: Expr, quotR: Expr) -> Const
+    ? "Quot.ind : (∀ a, β (Quot.mk r a)) → ∀ q, β q."
+    beta = local(st, "β", arrow(quotR, prop()), Binder.Implicit)
+    mkA = Core.Apps.mkApps(Core.Exprs.cnst(Check.Lits.name2("Quot", "mk"), [u]), [alpha, r, a])
+    allQuot = Check.Telescope.piBinding(beta.st, [a], Core.Exprs.app(beta.e, mkA))
+    q = local(beta.st, "q", quotR, Binder.Default)
+    body = Core.Exprs.pi(Core.Names.str(Core.Names.anon(), "mk"), allQuot, Check.Telescope.piBinding(q.st, [q.e], Core.Exprs.app(beta.e, q.e)), Binder.Default)
+    Const.CQuot(Head(name = Check.Lits.name2("Quot", "ind"), params = [uName()], ty = Check.Telescope.piBinding(q.st, [alpha, r, beta.e], body)), QuotKind.QInd)
+
+verify indConst
+    Check.State.headOf(indConst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Level.Zero, Core.Exprs.fvar(0), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(3))).name => Check.Lits.name2("Quot", "ind")

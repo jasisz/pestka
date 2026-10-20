@@ -1,0 +1,88 @@
+module Stream
+    intent =
+        "Reads an export file whole and feeds its lines in order, the header"
+        "first. Reading in chunks with Disk.readBytesAt was tried and was"
+        "slower and larger (41 s and 5.9 GB on Init against 34 s and 5.4 GB):"
+        "the text is not what fills memory, the expression table is."
+    exposes [Outcome, readFile]
+    depends [Export.Reader, Export.Tables]
+    effects [Disk.readText]
+
+type Outcome
+    Read(Parsed)
+    Rejected(String)
+    Declined(String)
+
+type Fed
+    More(Tables, Int)
+    Stop(Outcome)
+
+fn readFile(path: String, workers: Int) -> Outcome
+    ? "Reads and parses the whole file, the parsing shared out among workers."
+    ! [Disk.readText]
+    match Disk.readText(path)
+        Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
+        Result.Ok(text) -> whole(String.split(text, "\n"), workers)
+
+fn whole(lines: List<String>, workers: Int) -> Outcome
+    ? "Feeds every line; the verdict is where feeding stopped."
+    match feed(Export.Tables.empty(), lines, 1, workers)
+        Fed.Stop(o) -> o
+        Fed.More(t, line) -> ended(line, t)
+
+verify whole
+    whole([""], 1) => Outcome.Rejected("line 1: unexpected end of line at column 0")
+    whole(["[]"], 1) => Outcome.Rejected("line 1: the header is not an object")
+    whole(["{{\"meta\":{{\"format\":{{\"version\":\"3.1.0\"}}}}}}", ""], 1) => Outcome.Read(Export.Tables.finish(Export.Tables.empty()))
+    whole(["{{\"meta\":{{\"format\":{{\"version\":\"3.1.0\"}}}}}}", "", "x"], 4) => Outcome.Rejected("line 3: unexpected character at column 0")
+
+fn ended(line: Int, t: Tables) -> Outcome
+    ? "A file with no lines at all has no header and is rejected."
+    match line == 1
+        true -> Outcome.Rejected("empty file")
+        false -> Outcome.Read(Export.Tables.finish(t))
+
+verify ended
+    ended(1, Export.Tables.empty()) => Outcome.Rejected("empty file")
+    ended(2, Export.Tables.empty()) => Outcome.Read(Export.Tables.finish(Export.Tables.empty()))
+
+fn feed(t: Tables, lines: List<String>, line: Int, workers: Int) -> Fed
+    ? "Feeds complete lines; line 1 is the header and is checked first."
+    match line == 1
+        true -> feedHeader(t, lines, workers)
+        false -> fedBody(Export.Reader.readParallel(t, lines, line, workers), line + List.len(lines))
+
+verify feed
+    feed(Export.Tables.empty(), [], 3, 1) => Fed.More(Export.Tables.empty(), 3)
+    feed(Export.Tables.empty(), ["{{\"meta\":{{\"format\":{{\"version\":\"9.0.0\"}}}}}}"], 1, 1) => Fed.Stop(Outcome.Declined("format version 9.0.0 is not supported"))
+
+fn feedHeader(t: Tables, lines: List<String>, workers: Int) -> Fed
+    ? "Checks the header line, then feeds the rest of the chunk."
+    match lines
+        [] -> Fed.More(t, 1)
+        [h, ..rest] -> afterHeader(t, Export.Reader.header(h), rest, workers)
+
+verify feedHeader
+    feedHeader(Export.Tables.empty(), [], 1) => Fed.More(Export.Tables.empty(), 1)
+
+fn afterHeader(t: Tables, version: Result<String, String>, rest: List<String>, workers: Int) -> Fed
+    ? "An unreadable header rejects; an unknown version declines."
+    match version
+        Result.Err(e) -> Fed.Stop(Outcome.Rejected("line 1: {e}"))
+        Result.Ok(v) -> match Export.Reader.supported(v)
+            true -> feed(t, rest, 2, workers)
+            false -> Fed.Stop(Outcome.Declined("format version {v} is not supported"))
+
+verify afterHeader
+    afterHeader(Export.Tables.empty(), Result.Err("bad"), [], 1) => Fed.Stop(Outcome.Rejected("line 1: bad"))
+    afterHeader(Export.Tables.empty(), Result.Ok("3.1.0"), [], 1) => Fed.More(Export.Tables.empty(), 2)
+
+fn fedBody(r: Result<Tables, String>, next: Int) -> Fed
+    ? "Continues after the lines of a chunk, or stops at a bad one."
+    match r
+        Result.Err(e) -> Fed.Stop(Outcome.Rejected(e))
+        Result.Ok(t) -> Fed.More(t, next)
+
+verify fedBody
+    fedBody(Result.Err("line 4: x"), 9) => Fed.Stop(Outcome.Rejected("line 4: x"))
+    fedBody(Result.Ok(Export.Tables.empty()), 9) => Fed.More(Export.Tables.empty(), 9)

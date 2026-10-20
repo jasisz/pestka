@@ -1,0 +1,144 @@
+module Blk
+    intent =
+        "One inductive block while it is being checked: the input types and"
+        "constructors, the parameters as free variables, and what checking"
+        "the types established (indices, result universe, elimination level,"
+        "K-likeness). The checker state travels next to it."
+    exposes [CtorIn, TypeIn, Blk, BS, start, nthExpr, nthInt, consts, isValidIndApp, validIndex, indicesOf, recName]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Check.State, Check.Telescope]
+    effects []
+
+record CtorIn
+    name: Name
+    ty: Expr
+
+record TypeIn
+    name: Name
+    ty: Expr
+    ctors: List<CtorIn>
+
+record Blk
+    lparams: List<Name>
+    levels: List<Level>
+    nparams: Int
+    types: List<TypeIn>
+    names: List<Name>
+    params: List<Expr>
+    nindices: List<Int>
+    result: Level
+    notZero: Bool
+    elim: Level
+    k: Bool
+    nnested: Int
+
+record BS
+    blk: Blk
+    st: St
+
+fn start(lparams: List<Name>, nparams: Int, types: List<TypeIn>, nnested: Int) -> Blk
+    ? "A block before any check."
+    Blk(lparams = lparams, levels = paramLevels(lparams, []), nparams = nparams, types = types, names = typeNames(types, []), params = [], nindices = [], result = Level.Zero, notZero = false, elim = Level.Zero, k = false, nnested = nnested)
+
+verify start
+    start([Core.Names.anon()], 0, [], 0).levels => [Level.Param(Core.Names.anon())]
+
+fn paramLevels(ps: List<Name>, acc: List<Level>) -> List<Level>
+    ? "Each universe parameter as a level."
+    match ps
+        [] -> List.reverse(acc)
+        [p, ..rest] -> paramLevels(rest, List.prepend(Level.Param(p), acc))
+
+verify paramLevels
+    paramLevels([], []) => []
+
+fn typeNames(ts: List<TypeIn>, acc: List<Name>) -> List<Name>
+    ? "The names of the block's types."
+    match ts
+        [] -> List.reverse(acc)
+        [t, ..rest] -> typeNames(rest, List.prepend(t.name, acc))
+
+verify typeNames
+    typeNames([], []) => []
+
+fn nthExpr(xs: List<Expr>, k: Int) -> Expr
+    ? "The k-th expression; callers keep k in range."
+    match List.drop(xs, k)
+        [x, .._] -> x
+        [] -> Core.Exprs.bvar(0)
+
+verify nthExpr
+    nthExpr([Core.Exprs.fvar(1)], 0) => Core.Exprs.fvar(1)
+
+fn nthInt(xs: List<Int>, k: Int) -> Int
+    ? "The k-th number; callers keep k in range."
+    match List.drop(xs, k)
+        [x, .._] -> x
+        [] -> 0
+
+verify nthInt
+    nthInt([4], 0) => 4
+
+fn consts(b: Blk) -> List<Expr>
+    ? "Each type of the block as a constant at the block's universe parameters."
+    constsOf(b.names, b.levels, [])
+
+verify consts
+    consts(start([], 0, [], 0)) => []
+
+fn constsOf(ns: List<Name>, ls: List<Level>, acc: List<Expr>) -> List<Expr>
+    ? "Builds the constants."
+    match ns
+        [] -> List.reverse(acc)
+        [n, ..rest] -> constsOf(rest, ls, List.prepend(Core.Exprs.cnst(n, ls), acc))
+
+verify constsOf
+    constsOf([Core.Names.anon()], [], []) => [Core.Exprs.cnst(Core.Names.anon(), [])]
+
+fn isValidIndApp(b: Blk, t: Expr, idx: Int) -> Bool
+    ? "t is the idx-th type applied to exactly the parameters and to indices that mention no type of the block."
+    args = Core.Apps.argsOf(t)
+    Bool.and(Bool.and(Core.Apps.fnOf(t) == nthExpr(consts(b), idx), List.len(args) == b.nparams + nthInt(b.nindices, idx)), Bool.and(List.take(args, b.nparams) == b.params, noneMention(List.drop(args, b.nparams), b.names)))
+
+verify isValidIndApp
+    isValidIndApp(start([], 0, [], 0), Core.Exprs.fvar(0), 0) => false
+
+fn noneMention(xs: List<Expr>, ns: List<Name>) -> Bool
+    ? "No expression mentions the block's types."
+    match xs
+        [] -> true
+        [x, ..rest] -> Bool.and(Bool.not(Check.Telescope.mentions(x, ns)), noneMention(rest, ns))
+
+verify noneMention
+    noneMention([], []) => true
+
+fn validIndex(b: Blk, t: Expr) -> Option<Int>
+    ? "Which type of the block t is a valid application of."
+    validFrom(b, t, 0)
+
+verify validIndex
+    validIndex(start([], 0, [], 0), Core.Exprs.fvar(0)) => Option.None
+
+fn validFrom(b: Blk, t: Expr, i: Int) -> Option<Int>
+    ? "Tries each type from i on."
+    match i >= List.len(b.names)
+        true -> Option.None
+        false -> match isValidIndApp(b, t, i)
+            true -> Option.Some(i)
+            false -> validFrom(b, t, i + 1)
+
+verify validFrom
+    validFrom(start([], 0, [], 0), Core.Exprs.fvar(0), 0) => Option.None
+
+fn indicesOf(b: Blk, t: Expr) -> List<Expr>
+    ? "The index arguments of a valid application."
+    List.drop(Core.Apps.argsOf(t), b.nparams)
+
+verify indicesOf
+    indicesOf(start([], 0, [], 0), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => [Core.Exprs.fvar(1)]
+
+fn recName(n: Name) -> Name
+    ? "The recursor of type n."
+    Core.Names.str(n, "rec")
+
+verify recName
+    Core.Names.render(recName(Core.Names.str(Core.Names.anon(), "Nat"))) => "Nat.rec"

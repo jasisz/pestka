@@ -1,0 +1,229 @@
+module Line
+    intent =
+        "One line of an NDJSON file, parsed into a small JSON tree."
+        "lean4export writes one object per line with sorted keys and no"
+        "floats, so the parser covers objects, arrays, strings, non-negative"
+        "integers, booleans and null. Every JSON string escape is decoded,"
+        "surrogate pairs included, because names may hold any character."
+    exposes [J, parse]
+    depends [Json.Escapes]
+    effects []
+
+type J
+    JInt(Int)
+    JStr(String)
+    JArr(List<J>)
+    JObj(List<Tuple<String, J>>)
+    JBool(Bool)
+    JNull
+
+type P
+    Ok(J, Int)
+    Err(String, Int)
+
+fn parse(s: String) -> Result<J, String>
+    ? "Parses a whole line; anything after the value is an error."
+    match value(s, skipWs(s, 0))
+        P.Err(msg, at) -> Result.Err("{msg} at column {at}")
+        P.Ok(v, at) -> atEnd(s, v, skipWs(s, at))
+
+verify parse
+    parse("{{\"in\":3,\"str\":{{\"pre\":0,\"str\":\"Nat\"}}}}") => Result.Ok(J.JObj([("in", J.JInt(3)), ("str", J.JObj([("pre", J.JInt(0)), ("str", J.JStr("Nat"))]))]))
+    parse("[1, true, null]") => Result.Ok(J.JArr([J.JInt(1), J.JBool(true), J.JNull]))
+    parse("\"a\\u00e9\\n\\\"\"") => Result.Ok(J.JStr("aé\n\""))
+    parse("\"\\uD83D\\uDE00\"") => Result.Ok(J.JStr("😀"))
+    parse("1 2") => Result.Err("trailing content at column 2")
+    parse("{{\"a\" 1}}") => Result.Err("expected ':' at column 5")
+
+fn atEnd(s: String, v: J, at: Int) -> Result<J, String>
+    ? "Accepts the value only when the line ends here."
+    match String.charAt(s, at)
+        Option.None -> Result.Ok(v)
+        Option.Some -> Result.Err("trailing content at column {at}")
+
+verify atEnd
+    atEnd("1", J.JInt(1), 1) => Result.Ok(J.JInt(1))
+    atEnd("1x", J.JInt(1), 1) => Result.Err("trailing content at column 1")
+
+fn skipWs(s: String, i: Int) -> Int
+    ? "Skips JSON whitespace."
+    match String.charAt(s, i)
+        Option.Some(" ") -> skipWs(s, i + 1)
+        Option.Some("\t") -> skipWs(s, i + 1)
+        Option.Some("\r") -> skipWs(s, i + 1)
+        Option.Some("\n") -> skipWs(s, i + 1)
+        _ -> i
+
+verify skipWs
+    skipWs("  x", 0) => 2
+    skipWs("x", 0) => 0
+
+fn value(s: String, i: Int) -> P
+    ? "Parses one JSON value starting at i."
+    match String.charAt(s, i)
+        Option.Some("{{") -> members(s, skipWs(s, i + 1), [])
+        Option.Some("[") -> elements(s, skipWs(s, i + 1), [])
+        Option.Some("\"") -> fromS(Json.Escapes.text(s, i + 1))
+        Option.Some("t") -> keyword(s, i, "true", J.JBool(true))
+        Option.Some("f") -> keyword(s, i, "false", J.JBool(false))
+        Option.Some("n") -> keyword(s, i, "null", J.JNull)
+        Option.Some(c) -> number(s, i, digit(c))
+        Option.None -> P.Err("unexpected end of line", i)
+
+verify value
+    value("12,", 0) => P.Ok(J.JInt(12), 2)
+    value("[]", 0) => P.Ok(J.JArr([]), 2)
+    value("x", 0) => P.Err("unexpected character", 0)
+    value("", 0) => P.Err("unexpected end of line", 0)
+
+fn keyword(s: String, i: Int, word: String, v: J) -> P
+    ? "Matches a literal word such as true."
+    n = String.len(word)
+    match String.slice(s, i, i + n) == word
+        true -> P.Ok(v, i + n)
+        false -> P.Err("unexpected character", i)
+
+verify keyword
+    keyword("true", 0, "true", J.JBool(true)) => P.Ok(J.JBool(true), 4)
+    keyword("tru", 0, "true", J.JBool(true)) => P.Err("unexpected character", 0)
+
+fn fromS(r: Scan) -> P
+    ? "A parsed string as a JSON value."
+    match r
+        Scan.Done(t, at) -> P.Ok(J.JStr(t), at)
+        Scan.Bad(msg, at) -> P.Err(msg, at)
+
+verify fromS
+    fromS(Scan.Done("a", 3)) => P.Ok(J.JStr("a"), 3)
+    fromS(Scan.Bad("x", 1)) => P.Err("x", 1)
+
+fn digit(c: String) -> Int
+    ? "Value of an ASCII decimal digit, or -1."
+    match c
+        "0" -> 0
+        "1" -> 1
+        "2" -> 2
+        "3" -> 3
+        "4" -> 4
+        "5" -> 5
+        "6" -> 6
+        "7" -> 7
+        "8" -> 8
+        "9" -> 9
+        _ -> -1
+
+verify digit
+    digit("0") => 0
+    digit("9") => 9
+    digit("a") => -1
+
+fn number(s: String, i: Int, first: Int) -> P
+    ? "A non-negative integer; the first character must be a digit."
+    match first < 0
+        true -> P.Err("unexpected character", i)
+        false -> digits(s, i + 1, first)
+
+verify number
+    number("42", 0, 4) => P.Ok(J.JInt(42), 2)
+    number("x", 0, -1) => P.Err("unexpected character", 0)
+
+fn digits(s: String, i: Int, acc: Int) -> P
+    ? "Reads the remaining digits of an integer."
+    match String.charAt(s, i)
+        Option.Some(c) -> moreDigits(s, i, acc, digit(c))
+        Option.None -> P.Ok(J.JInt(acc), i)
+
+verify digits
+    digits("23]", 0, 1) => P.Ok(J.JInt(123), 2)
+    digits("", 0, 7) => P.Ok(J.JInt(7), 0)
+
+fn moreDigits(s: String, i: Int, acc: Int, d: Int) -> P
+    ? "One step of digits."
+    match d < 0
+        true -> P.Ok(J.JInt(acc), i)
+        false -> digits(s, i + 1, acc * 10 + d)
+
+verify moreDigits
+    moreDigits("5", 0, 1, 5) => P.Ok(J.JInt(15), 1)
+    moreDigits(",", 0, 1, -1) => P.Ok(J.JInt(1), 0)
+
+fn elements(s: String, i: Int, acc: List<J>) -> P
+    ? "Array elements after the opening bracket."
+    match String.charAt(s, i)
+        Option.Some("]") -> P.Ok(J.JArr(List.reverse(acc)), i + 1)
+        _ -> afterElement(s, value(s, i), acc)
+
+verify elements
+    elements("]", 0, []) => P.Ok(J.JArr([]), 1)
+    elements("1, 2]", 0, []) => P.Ok(J.JArr([J.JInt(1), J.JInt(2)]), 5)
+
+fn afterElement(s: String, r: P, acc: List<J>) -> P
+    ? "After an element: a comma continues, a bracket closes."
+    match r
+        P.Err(msg, at) -> P.Err(msg, at)
+        P.Ok(v, at) -> nextElement(s, skipWs(s, at), List.prepend(v, acc))
+
+verify afterElement
+    afterElement("1]", P.Ok(J.JInt(1), 1), []) => P.Ok(J.JArr([J.JInt(1)]), 2)
+    afterElement("", P.Err("e", 0), []) => P.Err("e", 0)
+
+fn nextElement(s: String, i: Int, acc: List<J>) -> P
+    ? "Comma or closing bracket."
+    match String.charAt(s, i)
+        Option.Some(",") -> afterElement(s, value(s, skipWs(s, i + 1)), acc)
+        Option.Some("]") -> P.Ok(J.JArr(List.reverse(acc)), i + 1)
+        _ -> P.Err("expected ',' or ']'", i)
+
+verify nextElement
+    nextElement("]", 0, [J.JInt(1)]) => P.Ok(J.JArr([J.JInt(1)]), 1)
+    nextElement("x", 0, []) => P.Err("expected ',' or ']'", 0)
+
+fn members(s: String, i: Int, acc: List<Tuple<String, J>>) -> P
+    ? "Object members after the opening brace."
+    match String.charAt(s, i)
+        Option.Some("}}") -> P.Ok(J.JObj(List.reverse(acc)), i + 1)
+        Option.Some("\"") -> member(s, Json.Escapes.text(s, i + 1), acc)
+        _ -> P.Err("expected a key", i)
+
+verify members
+    members("}}", 0, []) => P.Ok(J.JObj([]), 1)
+    members("x", 0, []) => P.Err("expected a key", 0)
+
+fn member(s: String, key: Scan, acc: List<Tuple<String, J>>) -> P
+    ? "A key, a colon and the member's value."
+    match key
+        Scan.Bad(msg, at) -> P.Err(msg, at)
+        Scan.Done(k, at) -> memberValue(s, k, skipWs(s, at), acc)
+
+verify member
+    member("\"a\":1}}", Scan.Done("a", 3), []) => P.Ok(J.JObj([("a", J.JInt(1))]), 6)
+
+fn memberValue(s: String, key: String, i: Int, acc: List<Tuple<String, J>>) -> P
+    ? "Expects the colon, then parses the value."
+    match String.charAt(s, i)
+        Option.Some(":") -> afterMember(s, key, value(s, skipWs(s, i + 1)), acc)
+        _ -> P.Err("expected ':'", i)
+
+verify memberValue
+    memberValue(":1}}", "a", 0, []) => P.Ok(J.JObj([("a", J.JInt(1))]), 3)
+    memberValue("1", "a", 0, []) => P.Err("expected ':'", 0)
+
+fn afterMember(s: String, key: String, r: P, acc: List<Tuple<String, J>>) -> P
+    ? "After a member: a comma continues, a brace closes."
+    match r
+        P.Err(msg, at) -> P.Err(msg, at)
+        P.Ok(v, at) -> nextMember(s, skipWs(s, at), List.prepend((key, v), acc))
+
+verify afterMember
+    afterMember("}}", "a", P.Ok(J.JNull, 0), []) => P.Ok(J.JObj([("a", J.JNull)]), 1)
+
+fn nextMember(s: String, i: Int, acc: List<Tuple<String, J>>) -> P
+    ? "Comma or closing brace."
+    match String.charAt(s, i)
+        Option.Some(",") -> members(s, skipWs(s, i + 1), acc)
+        Option.Some("}}") -> P.Ok(J.JObj(List.reverse(acc)), i + 1)
+        _ -> P.Err("expected ',' or '}}'", i)
+
+verify nextMember
+    nextMember("}}", 0, []) => P.Ok(J.JObj([]), 1)
+    nextMember("x", 0, []) => P.Err("expected ',' or '}}'", 0)

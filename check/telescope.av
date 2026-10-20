@@ -1,0 +1,123 @@
+module Telescope
+    intent =
+        "Helpers for walking pi telescopes with fresh free variables, shared"
+        "by the inductive and quotient checks: type annotation gadgets are"
+        "stripped from binder types as the reference kernel does, and an"
+        "expression's occurrences of a set of constants can be searched."
+    exposes [consume, localFor, fvarId, typeOfFVar, mentions, countPis, piBinding, lamBinding, ids]
+    depends [Core.Names, Core.Exprs, Core.Apps, Core.Decls, Check.State, Check.Lits]
+    effects []
+
+fn consume(e: Expr) -> Expr
+    ? "Strips optParam, autoParam, outParam and semiOutParam around a type."
+    match Core.Apps.fnOf(e)
+        Expr.Const(Name.Str(Name.Anon, g, _), _) -> consumeGadget(e, g, Core.Apps.argsOf(e))
+        _ -> e
+
+verify consume
+    consume(Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("optParam"), []), Core.Exprs.fvar(1)), Core.Exprs.fvar(2))) => Core.Exprs.fvar(1)
+    consume(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("outParam"), []), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
+    consume(Core.Exprs.fvar(1)) => Core.Exprs.fvar(1)
+
+fn consumeGadget(e: Expr, g: String, args: List<Expr>) -> Expr
+    ? "Peels one gadget of the right arity."
+    match g
+        "optParam" -> twoArgs(e, args)
+        "autoParam" -> twoArgs(e, args)
+        "outParam" -> oneArg(e, args)
+        "semiOutParam" -> oneArg(e, args)
+        _ -> e
+
+verify consumeGadget
+    consumeGadget(Core.Exprs.fvar(0), "other", []) => Core.Exprs.fvar(0)
+
+fn twoArgs(e: Expr, args: List<Expr>) -> Expr
+    ? "optParam and autoParam keep their first argument."
+    match args
+        [a, _] -> consume(a)
+        _ -> e
+
+verify twoArgs
+    twoArgs(Core.Exprs.fvar(0), [Core.Exprs.fvar(1), Core.Exprs.fvar(2)]) => Core.Exprs.fvar(1)
+
+fn oneArg(e: Expr, args: List<Expr>) -> Expr
+    ? "outParam and semiOutParam keep their argument."
+    match args
+        [a] -> consume(a)
+        _ -> e
+
+verify oneArg
+    oneArg(Core.Exprs.fvar(0), [Core.Exprs.fvar(1)]) => Core.Exprs.fvar(1)
+
+fn localFor(st: St, t: Expr) -> RE
+    ? "A fresh variable for the binder of pi (or lambda) t, its type stripped of annotations."
+    match t
+        Expr.Pi(_, n, d, _, bi) -> Check.State.names(st, n, consume(d), Option.None, bi)
+        Expr.Lam(_, n, d, _, bi) -> Check.State.names(st, n, consume(d), Option.None, bi)
+        _ -> Check.State.names(st, Core.Names.anon(), t, Option.None, Binder.Default)
+
+verify localFor
+    localFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.fvar(5), Core.Exprs.bvar(0), Binder.Default)).e => Core.Exprs.fvar(0)
+
+fn fvarId(e: Expr) -> Int
+    ? "The number of a free variable, or -1."
+    match e
+        Expr.FVar(id) -> id
+        _ -> -1
+
+verify fvarId
+    fvarId(Core.Exprs.fvar(3)) => 3
+
+fn typeOfFVar(st: St, e: Expr) -> Expr
+    ? "The declared type of a free variable of the context."
+    Result.withDefault(Check.State.localType(st, fvarId(e)), Core.Exprs.bvar(0))
+
+verify typeOfFVar
+    typeOfFVar(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.fvar(9), Option.None, Binder.Default).st, Core.Exprs.fvar(0)) => Core.Exprs.fvar(9)
+
+fn mentions(e: Expr, ns: List<Name>) -> Bool
+    ? "Whether a constant named in ns occurs in e."
+    match e
+        Expr.Const(n, _) -> List.contains(ns, n)
+        Expr.App(_, f, a) -> Bool.or(mentions(f, ns), mentions(a, ns))
+        Expr.Lam(_, _, t, b, _) -> Bool.or(mentions(t, ns), mentions(b, ns))
+        Expr.Pi(_, _, t, b, _) -> Bool.or(mentions(t, ns), mentions(b, ns))
+        Expr.Let(_, _, t, v, b) -> Bool.or(mentions(t, ns), Bool.or(mentions(v, ns), mentions(b, ns)))
+        Expr.Proj(_, _, _, x) -> mentions(x, ns)
+        _ -> false
+
+verify mentions
+    mentions(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("I"), []), Core.Exprs.fvar(0)), [Check.Lits.name1("I")]) => true
+    mentions(Core.Exprs.fvar(0), [Check.Lits.name1("I")]) => false
+
+fn countPis(t: Expr) -> Int
+    ? "Number of leading pi binders, syntactically."
+    match t
+        Expr.Pi(_, _, _, b, _) -> countPis(b) + 1
+        _ -> 0
+
+verify countPis
+    countPis(Core.Exprs.pi(Core.Names.anon(), Core.Exprs.fvar(0), Core.Exprs.fvar(0), Binder.Default)) => 1
+
+fn piBinding(st: St, fvars: List<Expr>, body: Expr) -> Expr
+    ? "Closes body as a pi over the free variables, outermost first."
+    Check.State.mkBinding(st, ids(fvars, []), body, false, false)
+
+verify piBinding
+    piBinding(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], Core.Exprs.fvar(0)) => Core.Exprs.fvar(0)
+
+fn lamBinding(st: St, fvars: List<Expr>, body: Expr) -> Expr
+    ? "Closes body as a lambda over the free variables, outermost first."
+    Check.State.mkBinding(st, ids(fvars, []), body, true, false)
+
+verify lamBinding
+    lamBinding(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], Core.Exprs.fvar(0)) => Core.Exprs.fvar(0)
+
+fn ids(fvars: List<Expr>, acc: List<Int>) -> List<Int>
+    ? "The numbers of the free variables, in order."
+    match fvars
+        [] -> List.reverse(acc)
+        [f, ..rest] -> ids(rest, List.prepend(fvarId(f), acc))
+
+verify ids
+    ids([Core.Exprs.fvar(2), Core.Exprs.fvar(5)], []) => [2, 5]

@@ -1,0 +1,450 @@
+module Reader
+    intent =
+        "Reads a whole lean4export file: the header line first, then every"
+        "other line in order. A line is a declaration when its object has a"
+        "single key, and an item of the name, level or expression table"
+        "when it carries an in, il or ie index."
+    exposes [header, supported, readAll, readParallel, readLine]
+    depends [Json.Line, Json.Access, Core.Exprs, Export.Tables, Export.Items, Export.Declarations]
+    effects []
+
+fn header(line: String) -> Result<String, String>
+    ? "The format version the header line declares."
+    match Json.Line.parse(line)?
+        J.JObj(fs) -> Json.Access.text(Json.Access.obj(Json.Access.obj(fs, "meta")?, "format")?, "version")
+        _ -> Result.Err("the header is not an object")
+
+verify header
+    header("{{\"meta\":{{\"format\":{{\"version\":\"3.1.0\"}}}}}}") => Result.Ok("3.1.0")
+    header("[]") => Result.Err("the header is not an object")
+    header("{{\"in\":1}}") => Result.Err("missing key 'meta'")
+
+fn supported(version: String) -> Bool
+    ? "Format versions this reader understands: 3.1.x."
+    String.startsWith(version, "3.1.")
+
+verify supported
+    supported("3.1.0") => true
+    supported("3.2.0") => false
+    supported("2.0.0") => false
+
+fn readAll(t: Tables, lines: List<String>, n: Int) -> Result<Tables, String>
+    ? "Reads every remaining line; n is the line number of the first one."
+    match lines
+        [] -> Result.Ok(t)
+        [l, ..rest] -> continueAfter(applyLine(t, parseLine(l)), rest, n)
+
+verify readAll
+    readAll(Export.Tables.empty(), ["", ""], 2) => Result.Ok(Export.Tables.empty())
+    readAll(Export.Tables.empty(), ["{{\"app\":{{\"arg\":3,\"fn\":3}},\"ie\":1}}"], 2) => Result.Err("line 2: unknown expression index 3")
+
+fn continueAfter(r: Result<Tables, String>, rest: List<String>, n: Int) -> Result<Tables, String>
+    ? "Stops at the first bad line, naming it; otherwise reads on."
+    match r
+        Result.Err(e) -> Result.Err("line {n}: {e}")
+        Result.Ok(t) -> readAll(t, rest, n + 1)
+
+verify continueAfter
+    continueAfter(Result.Err("x"), [], 4) => Result.Err("line 4: x")
+
+fn readLine(t: Tables, line: String) -> Result<Tables, String>
+    ? "Reads one line into the tables."
+    applyLine(t, parseLine(line))
+
+verify readLine
+    readLine(Export.Tables.empty(), "{{\"app\":{{\"arg\":3,\"fn\":4}},\"ie\":12}}") => Result.Err("unknown expression index 4")
+
+type Line
+    App(Int, Int, Int)
+    Bind(BinderIds)
+    Obj(List<Tuple<String, J>>)
+    Blank
+    Bad(String)
+
+fn parseLine(line: String) -> Line
+    ? "One line parsed without the tables: an application or binder line in its canonical form by position, any other line through the JSON parser."
+    match line == ""
+        true -> Line.Blank
+        false -> match appLine(line)
+            Option.Some(ids) -> Line.App(ids.ie, ids.fnIdx, ids.argIdx)
+            Option.None -> match binderLine(line)
+                Option.Some(b) -> Line.Bind(b)
+                Option.None -> jsonParsed(Json.Line.parse(line))
+
+verify parseLine
+    parseLine("") => Line.Blank
+    parseLine("{{\"app\":{{\"arg\":3,\"fn\":4}},\"ie\":12}}") => Line.App(12, 4, 3)
+    parseLine("1") => Line.Bad("the line is not an object")
+
+fn jsonParsed(r: Result<J, String>) -> Line
+    ? "A parsed object, or why the line is not one."
+    match r
+        Result.Err(e) -> Line.Bad(e)
+        Result.Ok(J.JObj(fs)) -> Line.Obj(fs)
+        Result.Ok(_) -> Line.Bad("the line is not an object")
+
+verify jsonParsed
+    jsonParsed(Result.Err("x")) => Line.Bad("x")
+    jsonParsed(Result.Ok(J.JObj([]))) => Line.Obj([])
+
+fn applyLine(t: Tables, l: Line) -> Result<Tables, String>
+    ? "Adds a parsed line to the tables, or rejects it."
+    match l
+        Line.App(ie, f, a) -> Export.Items.appAt(t, ie, f, a)
+        Line.Bind(b) -> Export.Items.binderAt(t, b.ie, b.nameIdx, b.typeIdx, b.bodyIdx, b.bi, b.isLam)
+        Line.Obj(fs) -> dispatch(t, fs)
+        Line.Blank -> Result.Ok(t)
+        Line.Bad(e) -> Result.Err(e)
+
+verify applyLine
+    applyLine(Export.Tables.empty(), Line.Blank) => Result.Ok(Export.Tables.empty())
+    applyLine(Export.Tables.empty(), Line.Bad("x")) => Result.Err("x")
+
+fn readParallel(t: Tables, lines: List<String>, n: Int, workers: Int) -> Result<Tables, String>
+    ? "Reads every remaining line with the parsing shared out among workers, in rounds: each worker parses a run of the round's lines, the runs are parsed at once, and the parsed lines go into the tables in file order, so the first bad line is still the one reported. Rounds keep few parsed lines waiting for the tables at a time."
+    match workers <= 1
+        true -> readAll(t, lines, n)
+        false -> readRounds(t, lines, n, workers)
+
+verify readParallel
+    readParallel(Export.Tables.empty(), ["", "{{\"app\":{{\"arg\":3,\"fn\":3}},\"ie\":1}}", ""], 2, 2) => Result.Err("line 3: unknown expression index 3")
+    readParallel(Export.Tables.empty(), ["", ""], 2, 3) => Result.Ok(Export.Tables.empty())
+
+fn runLines() -> Int
+    ? "Lines one worker parses in a round."
+    20000
+
+verify runLines
+    runLines() > 0 => true
+
+fn readRounds(t: Tables, lines: List<String>, n: Int, workers: Int) -> Result<Tables, String>
+    ? "Parses the first round, then goes on round by round."
+    match lines
+        [] -> Result.Ok(t)
+        _ -> overlapped(t, parseRuns(starts(lines, workers, [])), List.drop(lines, workers * runLines()), n, workers)
+
+verify readRounds
+    readRounds(Export.Tables.empty(), [], 2, 2) => Result.Ok(Export.Tables.empty())
+
+fn overlapped(t: Tables, parsed: List<List<Line>>, rest: List<String>, n: Int, workers: Int) -> Result<Tables, String>
+    ? "Puts a parsed round into the tables while the next round is parsed."
+    match rest
+        [] -> lastRound(applyRuns(t, parsed, n)?)
+        _ -> match (applyRuns(t, parsed, n), parseRuns(starts(rest, workers, [])))!
+            (applied, next) -> roundDone(applied?, next, List.drop(rest, workers * runLines()), workers)
+
+verify overlapped
+    overlapped(Export.Tables.empty(), [[Line.Blank]], [], 2, 2) => Result.Ok(Export.Tables.empty())
+
+fn lastRound(at: At) -> Result<Tables, String>
+    ? "The tables after the last round."
+    Result.Ok(at.t)
+
+verify lastRound
+    lastRound(At(t = Export.Tables.empty(), n = 3)) => Result.Ok(Export.Tables.empty())
+
+fn roundDone(at: At, next: List<List<Line>>, rest: List<String>, workers: Int) -> Result<Tables, String>
+    ? "Goes on with the next round."
+    overlapped(at.t, next, rest, at.n, workers)
+
+verify roundDone
+    roundDone(At(t = Export.Tables.empty(), n = 3), [], [], 2) => Result.Ok(Export.Tables.empty())
+
+fn starts(lines: List<String>, k: Int, acc: List<List<String>>) -> List<List<String>>
+    ? "Where each of k runs begins, in order: the lines from there on, which share their cells with lines."
+    match k <= 0
+        true -> List.reverse(acc)
+        false -> match lines
+            [] -> List.reverse(acc)
+            _ -> starts(List.drop(lines, runLines()), k - 1, List.prepend(lines, acc))
+
+verify starts
+    starts(["a"], 3, []) => [["a"]]
+    starts([], 3, []) => []
+
+fn parseRuns(runs: List<List<String>>) -> List<List<Line>>
+    ? "Each run parsed on a worker of its own: the list is halved, and the halves run as an independent product."
+    match runs
+        [] -> []
+        [r] -> [parseAll(r, runLines(), [])]
+        _ -> parseHalves(List.take(runs, Int.div(List.len(runs), 2)), List.drop(runs, Int.div(List.len(runs), 2)))
+
+verify parseRuns
+    parseRuns([[""], ["", ""]]) => [[Line.Blank], [Line.Blank, Line.Blank]]
+
+fn parseHalves(left: List<List<String>>, right: List<List<String>>) -> List<List<Line>>
+    ? "The two halves at once."
+    match (parseRuns(left), parseRuns(right))!
+        (l, r) -> List.concat(l, r)
+
+verify parseHalves
+    parseHalves([[""]], [[""]]) => [[Line.Blank], [Line.Blank]]
+
+fn parseAll(lines: List<String>, count: Int, acc: List<Line>) -> List<Line>
+    ? "The first count lines parsed, in order."
+    match count <= 0
+        true -> List.reverse(acc)
+        false -> match lines
+            [] -> List.reverse(acc)
+            [l, ..rest] -> parseAll(rest, count - 1, List.prepend(parseLine(l), acc))
+
+verify parseAll
+    parseAll(["", ""], 5, []) => [Line.Blank, Line.Blank]
+    parseAll(["", ""], 1, []) => [Line.Blank]
+
+record At
+    t: Tables
+    n: Int
+
+fn applyRuns(t: Tables, runs: List<List<Line>>, n: Int) -> Result<At, String>
+    ? "The parsed runs into the tables, in order."
+    match runs
+        [] -> Result.Ok(At(t = t, n = n))
+        [r, ..rest] -> applyNext(applyAll(t, r, n)?, rest)
+
+verify applyRuns
+    applyRuns(Export.Tables.empty(), [[Line.Blank], [Line.Bad("x")]], 5) => Result.Err("line 6: x")
+
+fn applyNext(at: At, rest: List<List<Line>>) -> Result<At, String>
+    ? "Goes on with the next run."
+    applyRuns(at.t, rest, at.n)
+
+verify applyNext
+    applyNext(At(t = Export.Tables.empty(), n = 3), []) => Result.Ok(At(t = Export.Tables.empty(), n = 3))
+
+fn applyAll(t: Tables, ls: List<Line>, n: Int) -> Result<At, String>
+    ? "One run's lines into the tables; n is the line number of the first."
+    match ls
+        [] -> Result.Ok(At(t = t, n = n))
+        [l, ..rest] -> applyAfter(applyLine(t, l), rest, n)
+
+verify applyAll
+    applyAll(Export.Tables.empty(), [Line.Blank], 2) => Result.Ok(At(t = Export.Tables.empty(), n = 3))
+
+fn applyAfter(r: Result<Tables, String>, rest: List<Line>, n: Int) -> Result<At, String>
+    ? "Stops at the first bad line, naming it; otherwise goes on."
+    match r
+        Result.Err(e) -> Result.Err("line {n}: {e}")
+        Result.Ok(t) -> applyAll(t, rest, n + 1)
+
+verify applyAfter
+    applyAfter(Result.Err("x"), [], 7) => Result.Err("line 7: x")
+
+record AppIds
+    ie: Int
+    fnIdx: Int
+    argIdx: Int
+
+fn appLine(line: String) -> Option<AppIds>
+    ? "Four lines in five of an export are applications, written exactly as {{\"app\":{{\"arg\":A,\"fn\":F}},\"ie\":I}} with plain decimal indices. Such a line is read by position, digit by digit, instead of by a JSON parse, and accepted only if the numbers rebuild it exactly; anything else, however close, gives None and goes to the parser."
+    match String.startsWith(line, "{{\"app\":{{\"arg\":")
+        false -> Option.None
+        true -> appScan(line, numberAt(line, 14, 0))
+
+record NumAt
+    value: Int
+    end: Int
+
+fn digitAt(s: String, i: Int) -> Int
+    ? "The decimal digit at position i, or -1 for anything else or past the end."
+    match String.charAt(s, i)
+        Option.Some("0") -> 0
+        Option.Some("1") -> 1
+        Option.Some("2") -> 2
+        Option.Some("3") -> 3
+        Option.Some("4") -> 4
+        Option.Some("5") -> 5
+        Option.Some("6") -> 6
+        Option.Some("7") -> 7
+        Option.Some("8") -> 8
+        Option.Some("9") -> 9
+        _ -> -1
+
+verify digitAt
+    digitAt("a7", 1) => 7
+    digitAt("a7", 0) => -1
+    digitAt("a7", 2) => -1
+
+fn numberAt(s: String, i: Int, acc: Int) -> NumAt
+    ? "The digits from position i on as a number, and where they stop."
+    d = digitAt(s, i)
+    match d < 0
+        true -> NumAt(value = acc, end = i)
+        false -> numberAt(s, i + 1, acc * 10 + d)
+
+verify numberAt
+    numberAt("x12,", 1, 0) => NumAt(value = 12, end = 3)
+    numberAt("x,", 1, 0) => NumAt(value = 0, end = 1)
+
+fn appScan(line: String, a: NumAt) -> Option<AppIds>
+    ? "After the argument, six characters to the function; after it, seven to the index. The rebuilt line must be the line itself."
+    f = numberAt(line, a.end + 6, 0)
+    i = numberAt(line, f.end + 7, 0)
+    match "{{\"app\":{{\"arg\":{a.value},\"fn\":{f.value}}},\"ie\":{i.value}}}" == line
+        true -> Option.Some(AppIds(ie = i.value, fnIdx = f.value, argIdx = a.value))
+        false -> Option.None
+
+verify appScan
+    appScan("{{\"app\":{{\"arg\":3,\"fn\":4}},\"ie\":12}}", NumAt(value = 3, end = 15)) => Option.Some(AppIds(ie = 12, fnIdx = 4, argIdx = 3))
+
+verify appLine
+    appLine("{{\"app\":{{\"arg\":3,\"fn\":4}},\"ie\":12}}") => Option.Some(AppIds(ie = 12, fnIdx = 4, argIdx = 3))
+    appLine("{{\"app\":{{\"arg\":3,\"fn\":04}},\"ie\":12}}") => Option.None
+    appLine("{{\"app\":{{\"arg\":3,\"fn\":4}}}},\"ie\":12}}") => Option.None
+    appLine("{{\"app\":{{\"arg\":3, \"fn\":4}},\"ie\":12}}") => Option.None
+    appLine("{{\"ie\":1,\"bvar\":0}}") => Option.None
+
+
+fn beforeSep(s: String, sep: String) -> String
+    ? "The part of s before the first sep."
+    match String.split(s, sep)
+        [x, .._] -> x
+        [] -> s
+
+verify beforeSep
+    beforeSep("12,x", ",") => "12"
+
+fn natural(s: String) -> Option<Int>
+    ? "A natural number in its canonical decimal form: digits only, no sign, no leading zero."
+    match Int.fromString(s)
+        Result.Ok(n) -> match Bool.and(n >= 0, String.fromInt(n) == s)
+            true -> Option.Some(n)
+            false -> Option.None
+        Result.Err -> Option.None
+
+verify natural
+    natural("0") => Option.Some(0)
+    natural("07") => Option.None
+    natural("+7") => Option.None
+    natural("-7") => Option.None
+    natural("x") => Option.None
+
+
+record BinderIds
+    ie: Int
+    nameIdx: Int
+    typeIdx: Int
+    bodyIdx: Int
+    bi: Binder
+    isLam: Bool
+
+fn binderLine(line: String) -> Option<BinderIds>
+    ? "Lambdas and pi types, the next most common lines, in their canonical forms: the lambda's index comes first, the pi's last. Read with splits and accepted only if the numbers and the binder annotation rebuild the line exactly."
+    match String.startsWith(line, "{{\"ie\":")
+        true -> lamParts(String.split(line, ":"), line)
+        false -> match String.startsWith(line, "{{\"forallE\":{{\"binderInfo\":")
+            true -> piParts(String.split(line, ":"), line)
+            false -> Option.None
+
+verify binderLine
+    binderLine("{{\"ie\":7,\"lam\":{{\"binderInfo\":\"default\",\"body\":3,\"name\":2,\"type\":1}}}}") => Option.Some(BinderIds(ie = 7, nameIdx = 2, typeIdx = 1, bodyIdx = 3, bi = Binder.Default, isLam = true))
+    binderLine("{{\"forallE\":{{\"binderInfo\":\"instImplicit\",\"body\":3,\"name\":2,\"type\":1}},\"ie\":7}}") => Option.Some(BinderIds(ie = 7, nameIdx = 2, typeIdx = 1, bodyIdx = 3, bi = Binder.InstImplicit, isLam = false))
+    binderLine("{{\"forallE\":{{\"binderInfo\":\"other\",\"body\":3,\"name\":2,\"type\":1}},\"ie\":7}}") => Option.None
+    binderLine("{{\"ie\":7,\"bvar\":0}}") => Option.None
+
+fn lamParts(parts: List<String>, line: String) -> Option<BinderIds>
+    ? "Index, annotation, body, name and type of a lambda line, in the order the line gives them."
+    match parts
+        [_, i, _, b, d, n, ty] -> binderNumbers(natural(beforeSep(i, ",")), annotation(beforeSep(b, ",")), natural(beforeSep(d, ",")), natural(beforeSep(n, ",")), natural(beforeSep(ty, "}}")), true, line)
+        _ -> Option.None
+
+verify lamParts
+    lamParts(["x"], "x") => Option.None
+
+fn piParts(parts: List<String>, line: String) -> Option<BinderIds>
+    ? "Annotation, body, name, type and index of a pi line, in the order the line gives them."
+    match parts
+        [_, _, b, d, n, ty, i] -> binderNumbers(natural(beforeSep(i, "}}")), annotation(beforeSep(b, ",")), natural(beforeSep(d, ",")), natural(beforeSep(n, ",")), natural(beforeSep(ty, "}}")), false, line)
+        _ -> Option.None
+
+verify piParts
+    piParts(["x"], "x") => Option.None
+
+fn annotation(quoted: String) -> Option<Binder>
+    ? "One of the four binder annotations, still in its quotes."
+    match quoted
+        "\"default\"" -> Option.Some(Binder.Default)
+        "\"implicit\"" -> Option.Some(Binder.Implicit)
+        "\"strictImplicit\"" -> Option.Some(Binder.StrictImplicit)
+        "\"instImplicit\"" -> Option.Some(Binder.InstImplicit)
+        _ -> Option.None
+
+verify annotation
+    annotation("\"implicit\"") => Option.Some(Binder.Implicit)
+    annotation("implicit") => Option.None
+
+fn binderText(bi: Binder) -> String
+    ? "The annotation as the export writes it."
+    match bi
+        Binder.Default -> "default"
+        Binder.Implicit -> "implicit"
+        Binder.StrictImplicit -> "strictImplicit"
+        Binder.InstImplicit -> "instImplicit"
+
+verify binderText
+    binderText(Binder.StrictImplicit) => "strictImplicit"
+
+fn binderNumbers(i: Option<Int>, b: Option<Binder>, d: Option<Int>, n: Option<Int>, ty: Option<Int>, isLam: Bool, line: String) -> Option<BinderIds>
+    ? "All parts present, and the line is exactly the canonical one they make."
+    match i
+        Option.None -> Option.None
+        Option.Some(ie) -> match b
+            Option.None -> Option.None
+            Option.Some(bi) -> match d
+                Option.None -> Option.None
+                Option.Some(body) -> match n
+                    Option.None -> Option.None
+                    Option.Some(name) -> match ty
+                        Option.None -> Option.None
+                        Option.Some(typ) -> match binderCanonical(ie, bi, body, name, typ, isLam) == line
+                            true -> Option.Some(BinderIds(ie = ie, nameIdx = name, typeIdx = typ, bodyIdx = body, bi = bi, isLam = isLam))
+                            false -> Option.None
+
+verify binderNumbers
+    binderNumbers(Option.Some(1), Option.Some(Binder.Default), Option.Some(1), Option.Some(1), Option.Some(1), true, "x") => Option.None
+
+fn binderCanonical(ie: Int, bi: Binder, body: Int, name: Int, typ: Int, isLam: Bool) -> String
+    ? "The line lean4export writes for these parts."
+    inner = "{{\"binderInfo\":\"{binderText(bi)}\",\"body\":{body},\"name\":{name},\"type\":{typ}}}"
+    match isLam
+        true -> "{{\"ie\":{ie},\"lam\":{inner}}}"
+        false -> "{{\"forallE\":{inner},\"ie\":{ie}}}"
+
+verify binderCanonical
+    binderCanonical(7, Binder.Default, 3, 2, 1, true) => "{{\"ie\":7,\"lam\":{{\"binderInfo\":\"default\",\"body\":3,\"name\":2,\"type\":1}}}}"
+
+fn jsonLine(t: Tables, line: String) -> Result<Tables, String>
+    ? "Reads one line through the JSON parser."
+    applyLine(t, jsonParsed(Json.Line.parse(line)))
+
+verify readLine
+    readLine(Export.Tables.empty(), "{{\"app\":{{\"arg\":3,\"fn\":4}},\"ie\":12}}") => Result.Err("unknown expression index 4")
+
+verify jsonLine
+    Result.withDefault(jsonLine(Export.Tables.empty(), "{{\"in\":1,\"str\":{{\"pre\":0,\"str\":\"Nat\"}}}}"), Export.Tables.empty()).nextName => 2
+    jsonLine(Export.Tables.empty(), "1") => Result.Err("the line is not an object")
+
+fn dispatch(t: Tables, fs: List<Tuple<String, J>>) -> Result<Tables, String>
+    ? "A single key is a declaration; otherwise the index key says which table."
+    match fs
+        [(k, J.JObj(o))] -> Export.Declarations.declLine(t, k, o)
+        [(k, _)] -> Result.Err("declaration '{k}' is not an object")
+        _ -> indexed(t, fs)
+
+verify dispatch
+    dispatch(Export.Tables.empty(), [("axiom", J.JNull)]) => Result.Err("declaration 'axiom' is not an object")
+    dispatch(Export.Tables.empty(), [("a", J.JNull), ("b", J.JNull)]) => Result.Err("unrecognised line")
+
+fn indexed(t: Tables, fs: List<Tuple<String, J>>) -> Result<Tables, String>
+    ? "Expressions are by far the most common line, so they are tried first."
+    match Json.Access.has(fs, "ie")
+        true -> Export.Items.exprLine(t, fs)
+        false -> match Json.Access.has(fs, "in")
+            true -> Export.Items.nameLine(t, fs)
+            false -> match Json.Access.has(fs, "il")
+                true -> Export.Items.levelLine(t, fs)
+                false -> Result.Err("unrecognised line")
+
+verify indexed
+    Result.withDefault(indexed(Export.Tables.empty(), [("il", J.JInt(1)), ("succ", J.JInt(0))]), Export.Tables.empty()).nextLevel => 2
+    indexed(Export.Tables.empty(), [("x", J.JNull), ("y", J.JNull)]) => Result.Err("unrecognised line")

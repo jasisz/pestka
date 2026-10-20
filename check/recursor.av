@@ -1,0 +1,412 @@
+module Recursor
+    intent =
+        "The second half of adding an inductive block: the recursors. For"
+        "each type a motive over its indices and a major premise; for each"
+        "constructor a minor premise taking its fields and an induction"
+        "hypothesis per recursive field; the recursor's type; one computation"
+        "rule per constructor; and finally the reference kernel's defensive"
+        "check that every rule preserves types."
+    exposes [RInfo, recInfos, declareRecs, checkRecs, recLevels, recParams]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Check.State, Check.Tc, Check.Telescope, Check.Blk, Check.Induct]
+    effects []
+
+record RInfo
+    motive: Expr
+    indices: List<Expr>
+    major: Expr
+
+record RS
+    st: St
+    infos: List<RInfo>
+    minors: List<Expr>
+
+record XS
+    st: St
+    xs: List<Expr>
+
+record CF
+    st: St
+    t: Expr
+    fields: List<Expr>
+    recs: List<Expr>
+
+record UT
+    st: St
+    xs: List<Expr>
+    target: Expr
+
+fn reject(msg: String) -> Fail
+    ? "A kernel error for the block."
+    Fail.Reject(msg)
+
+verify reject
+    reject("x") => Fail.Reject("x")
+
+fn recLevels(blk: Blk) -> List<Level>
+    ? "The recursor's universe levels: the elimination level first when it is a parameter."
+    match blk.elim
+        Level.Param -> List.prepend(blk.elim, blk.levels)
+        _ -> blk.levels
+
+verify recLevels
+    recLevels(Check.Blk.start([], 0, [], 0)) => []
+
+fn recParams(blk: Blk) -> List<Name>
+    ? "The recursor's universe parameter names."
+    match blk.elim
+        Level.Param(u) -> List.prepend(u, blk.lparams)
+        _ -> blk.lparams
+
+verify recParams
+    recParams(Blk.update(Check.Blk.start([], 0, [], 0), elim = Level.Param(Core.Names.anon()))) => [Core.Names.anon()]
+
+fn recInfos(bs: BS) -> Result<RS, Fail>
+    ? "Motives and major premises for every type, then the minor premises."
+    m = motives(bs.st, bs.blk, bs.blk.types, 0, [])?
+    minorsOfTypes(m, bs.blk, bs.blk.types)
+
+verify recInfos
+    recInfos(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []))
+
+fn motives(st: St, blk: Blk, ts: List<TypeIn>, d: Int, acc: List<RInfo>) -> Result<RS, Fail>
+    ? "One motive per type: over the type's indices and a value of it, into the elimination universe."
+    match ts
+        [] -> Result.Ok(RS(st = st, infos = List.reverse(acc), minors = []))
+        [t, ..rest] -> motiveOf(indicesOfType(st, blk, t.ty, 0, [])?, blk, t, d, rest, acc)
+
+verify motives
+    motives(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), [], 0, []) => Result.Ok(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []))
+
+fn motiveOf(ix: XS, blk: Blk, t: TypeIn, d: Int, rest: List<TypeIn>, acc: List<RInfo>) -> Result<RS, Fail>
+    ? "Declares the major premise and the motive."
+    major = Check.State.names(ix.st, Core.Names.str(Core.Names.anon(), "t"), Core.Apps.mkApps(Check.Blk.nthExpr(Check.Blk.consts(blk), d), List.concat(blk.params, ix.xs)), Option.None, Binder.Default)
+    cty = Check.Telescope.piBinding(major.st, List.concat(ix.xs, [major.e]), Core.Exprs.sort(blk.elim))
+    mot = Check.State.names(major.st, motiveName(d, List.len(blk.types)), cty, Option.None, Binder.Default)
+    motives(mot.st, blk, rest, d + 1, List.prepend(RInfo(motive = mot.e, indices = ix.xs, major = major.e), acc))
+
+verify motiveOf
+    List.len(Result.withDefault(motiveOf(XS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = []), Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [])], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = []), 0, [], []), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = [])).infos) => 1
+
+fn motiveName(d: Int, n: Int) -> Name
+    ? "motive, or motive_1, motive_2, ... in a mutual block."
+    match n > 1
+        true -> Core.Names.str(Core.Names.anon(), "motive_{d + 1}")
+        false -> Core.Names.str(Core.Names.anon(), "motive")
+
+verify motiveName
+    Core.Names.render(motiveName(0, 2)) => "motive_1"
+
+fn indicesOfType(st: St, blk: Blk, t: Expr, i: Int, accRev: List<Expr>) -> Result<XS, Fail>
+    ? "Opens a type's binders: parameters become the block's, indices fresh variables."
+    w = Check.Tc.whnf(st, t)?
+    match w.e
+        Expr.Pi(_, _, _, b, _) -> match i < blk.nparams
+            true -> indicesOfType(w.st, blk, Core.Subst.instantiate1(b, Check.Blk.nthExpr(blk.params, i)), i + 1, accRev)
+            false -> indexHere(Check.Telescope.localFor(w.st, w.e), blk, b, i, accRev)
+        _ -> Result.Ok(XS(st = w.st, xs = List.reverse(accRev)))
+
+verify indicesOfType
+    indicesOfType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), Core.Exprs.sort(Level.Zero), 0, []) => Result.Ok(XS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = []))
+
+fn indexHere(loc: RE, blk: Blk, b: Expr, i: Int, accRev: List<Expr>) -> Result<XS, Fail>
+    ? "One index."
+    indicesOfType(loc.st, blk, Core.Subst.instantiate1(b, loc.e), i + 1, List.prepend(loc.e, accRev))
+
+verify indexHere
+    indexHere(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.Blk.start([], 0, [], 0), Core.Exprs.sort(Level.Zero), 0, []) => Result.Ok(XS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = [Core.Exprs.fvar(0)]))
+
+fn motivesOf(infos: List<RInfo>, acc: List<Expr>) -> List<Expr>
+    ? "The motives in order."
+    match infos
+        [] -> List.reverse(acc)
+        [i, ..rest] -> motivesOf(rest, List.prepend(i.motive, acc))
+
+verify motivesOf
+    motivesOf([], []) => []
+
+fn minorsOfTypes(rs: RS, blk: Blk, ts: List<TypeIn>) -> Result<RS, Fail>
+    ? "Minor premises of every constructor, type by type."
+    match ts
+        [] -> Result.Ok(RS(st = rs.st, infos = rs.infos, minors = List.reverse(rs.minors)))
+        [t, ..rest] -> minorsOfTypes(minorsOf(rs, blk, t, t.ctors)?, blk, rest)
+
+verify minorsOfTypes
+    minorsOfTypes(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), Check.Blk.start([], 0, [], 0), []) => Result.Ok(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []))
+
+fn minorsOf(rs: RS, blk: Blk, t: TypeIn, cs: List<CtorIn>) -> Result<RS, Fail>
+    ? "One minor premise per constructor, kept newest first until the end."
+    match cs
+        [] -> Result.Ok(rs)
+        [c, ..rest] -> minorsOf(minorOf(rs, blk, t, c, ctorShape(rs.st, blk, c.ty, 0, [], [])?)?, blk, t, rest)
+
+verify minorsOf
+    minorsOf(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = []), []) => Result.Ok(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []))
+
+fn ctorShape(st: St, blk: Blk, t: Expr, i: Int, fieldsRev: List<Expr>, recsRev: List<Expr>) -> Result<CF, Fail>
+    ? "Opens a constructor type: the block's parameters, then a fresh variable per field, noting the recursive ones."
+    match t
+        Expr.Pi(_, _, d, b, _) -> match i < blk.nparams
+            true -> ctorShape(st, blk, Core.Subst.instantiate1(b, Check.Blk.nthExpr(blk.params, i)), i + 1, fieldsRev, recsRev)
+            false -> shapeField(Check.Induct.isRecArg(st, blk, d)?, blk, t, b, i, fieldsRev, recsRev)
+        _ -> Result.Ok(CF(st = st, t = t, fields = List.reverse(fieldsRev), recs = List.reverse(recsRev)))
+
+verify ctorShape
+    ctorShape(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), Core.Exprs.sort(Level.Zero), 0, [], []) => Result.Ok(CF(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.sort(Level.Zero), fields = [], recs = []))
+
+fn shapeField(r: RIx, blk: Blk, t: Expr, b: Expr, i: Int, fieldsRev: List<Expr>, recsRev: List<Expr>) -> Result<CF, Fail>
+    ? "Declares the field; a recursive one is also noted."
+    loc = Check.Telescope.localFor(r.st, t)
+    match r.o
+        Option.Some -> ctorShape(loc.st, blk, Core.Subst.instantiate1(b, loc.e), i + 1, List.prepend(loc.e, fieldsRev), List.prepend(loc.e, recsRev))
+        Option.None -> ctorShape(loc.st, blk, Core.Subst.instantiate1(b, loc.e), i + 1, List.prepend(loc.e, fieldsRev), recsRev)
+
+verify shapeField
+    shapeField(RIx(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.Blk.start([], 0, [], 0), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default), Core.Exprs.sort(Level.Zero), 0, [], []) => Result.Ok(CF(st = Check.Telescope.localFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default)).st, t = Core.Exprs.sort(Level.Zero), fields = [Core.Exprs.fvar(0)], recs = []))
+
+fn motiveApp(blk: Blk, infos: List<RInfo>, target: Expr, value: Expr) -> Result<Expr, Fail>
+    ? "The motive of target's type applied to target's indices and the value."
+    match Check.Blk.validIndex(blk, target)
+        Option.None -> Result.Err(reject("internal: a recursive field is not a valid application of the block"))
+        Option.Some(k) -> Result.Ok(Core.Apps.mkApps(motiveAt(infos, k), List.concat(Check.Blk.indicesOf(blk, target), [value])))
+
+verify motiveApp
+    motiveApp(Check.Blk.start([], 0, [], 0), [], Core.Exprs.fvar(0), Core.Exprs.fvar(1)) => Result.Err(Fail.Reject("internal: a recursive field is not a valid application of the block"))
+
+fn motiveAt(infos: List<RInfo>, k: Int) -> Expr
+    ? "The motive of type k."
+    match List.drop(infos, k)
+        [i, .._] -> i.motive
+        [] -> Core.Exprs.bvar(0)
+
+verify motiveAt
+    motiveAt([], 0) => Core.Exprs.bvar(0)
+
+fn introApp(blk: Blk, c: CtorIn, fields: List<Expr>) -> Expr
+    ? "The constructor applied to the parameters and the fields."
+    Core.Apps.mkApps(Core.Exprs.cnst(c.name, blk.levels), List.concat(blk.params, fields))
+
+verify introApp
+    introApp(Check.Blk.start([], 0, [], 0), CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0)), []) => Core.Exprs.cnst(Core.Names.anon(), [])
+
+fn uTele(st: St, u: Expr) -> Result<UT, Fail>
+    ? "A recursive field's type opened under its own binders."
+    t = Check.Tc.inferType(st, u)?
+    uTeleFrom(t.st, t.e, [])
+
+verify uTele
+    Result.withDefault(uTele(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero)), UT(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = [], target = Core.Exprs.bvar(9))).target => Core.Exprs.sort(Level.Succ(Level.Zero))
+
+fn uTeleFrom(st: St, t: Expr, accRev: List<Expr>) -> Result<UT, Fail>
+    ? "Normalizes and opens binders until the target."
+    w = Check.Tc.whnf(st, t)?
+    match w.e
+        Expr.Pi(_, _, _, b, _) -> uTeleUnder(Check.Telescope.localFor(w.st, w.e), b, accRev)
+        _ -> Result.Ok(UT(st = w.st, xs = List.reverse(accRev), target = w.e))
+
+verify uTeleFrom
+    uTeleFrom(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), []) => Result.Ok(UT(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = [], target = Core.Exprs.sort(Level.Zero)))
+
+fn uTeleUnder(loc: RE, b: Expr, accRev: List<Expr>) -> Result<UT, Fail>
+    ? "One binder of the recursive field's type."
+    uTeleFrom(loc.st, Core.Subst.instantiate1(b, loc.e), List.prepend(loc.e, accRev))
+
+verify uTeleUnder
+    uTeleUnder(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero), []) => Result.Ok(UT(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = [Core.Exprs.fvar(0)], target = Core.Exprs.sort(Level.Zero)))
+
+fn minorOf(rs: RS, blk: Blk, t: TypeIn, c: CtorIn, cf: CF) -> Result<RS, Fail>
+    ? "The minor premise: fields, then hypotheses, into the motive at the constructor application."
+    capp = motiveApp(blk, rs.infos, cf.t, introApp(blk, c, cf.fields))?
+    hs = ihs(cf.st, blk, rs.infos, cf.recs, [])?
+    ty = Check.Telescope.piBinding(hs.st, List.concat(cf.fields, hs.xs), capp)
+    m = Check.State.names(hs.st, minorName(c.name, t.name), ty, Option.None, Binder.Default)
+    Result.Ok(RS(st = m.st, infos = rs.infos, minors = List.prepend(m.e, rs.minors)))
+
+verify minorOf
+    minorOf(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = []), CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0)), CF(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.fvar(0), fields = [], recs = [])) => Result.Err(Fail.Reject("internal: a recursive field is not a valid application of the block"))
+
+fn minorName(c: Name, t: Name) -> Name
+    ? "The constructor's name without the type's prefix."
+    match c
+        Name.Str(pre, s, _) -> match pre == t
+            true -> Core.Names.str(Core.Names.anon(), s)
+            false -> c
+        _ -> c
+
+verify minorName
+    Core.Names.render(minorName(Core.Names.str(Core.Names.str(Core.Names.anon(), "Nat"), "succ"), Core.Names.str(Core.Names.anon(), "Nat"))) => "succ"
+
+fn ihs(st: St, blk: Blk, infos: List<RInfo>, us: List<Expr>, accRev: List<Expr>) -> Result<XS, Fail>
+    ? "One induction hypothesis per recursive field."
+    match us
+        [] -> Result.Ok(XS(st = st, xs = List.reverse(accRev)))
+        [u, ..rest] -> ihOf(uTele(st, u)?, blk, infos, u, rest, accRev)
+
+verify ihs
+    ihs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), [], [], []) => Result.Ok(XS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = []))
+
+fn ihOf(ut: UT, blk: Blk, infos: List<RInfo>, u: Expr, rest: List<Expr>, accRev: List<Expr>) -> Result<XS, Fail>
+    ? "The motive at the field applied to its own binders, closed over them."
+    capp = motiveApp(blk, infos, ut.target, Core.Apps.mkApps(u, ut.xs))?
+    v = Check.State.names(ut.st, Core.Names.str(Core.Names.anon(), "ih"), Check.Telescope.piBinding(ut.st, ut.xs, capp), Option.None, Binder.Default)
+    ihs(v.st, blk, infos, rest, List.prepend(v.e, accRev))
+
+verify ihOf
+    ihOf(UT(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = [], target = Core.Exprs.fvar(0)), Check.Blk.start([], 0, [], 0), [], Core.Exprs.fvar(1), [], []) => Result.Err(Fail.Reject("internal: a recursive field is not a valid application of the block"))
+
+fn declareRecs(bs: BS, rs: RS) -> Result<BS, Fail>
+    ? "One recursor per type, with its rules, added to the environment."
+    recsFrom(bs, rs, bs.blk.types, 0, 0)
+
+verify declareRecs
+    declareRecs(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = [])) => Result.Ok(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn recsFrom(bs: BS, rs: RS, ts: List<TypeIn>, d: Int, minorIdx: Int) -> Result<BS, Fail>
+    ? "Type d's recursor; its rules use the minor premises from minorIdx on."
+    match ts
+        [] -> Result.Ok(bs)
+        [t, ..rest] -> recsFrom(oneRec(bs, rs, t, d, minorIdx)?, rs, rest, d + 1, minorIdx + List.len(t.ctors))
+
+verify recsFrom
+    recsFrom(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), [], 0, 0) => Result.Ok(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn infoAt(infos: List<RInfo>, d: Int) -> RInfo
+    ? "The motive information of type d."
+    match List.drop(infos, d)
+        [i, .._] -> i
+        [] -> RInfo(motive = Core.Exprs.bvar(0), indices = [], major = Core.Exprs.bvar(0))
+
+verify infoAt
+    infoAt([], 0).indices => []
+
+fn prefixArgs(blk: Blk, rs: RS) -> List<Expr>
+    ? "Parameters, motives and minor premises, in that order."
+    List.concat(blk.params, List.concat(motivesOf(rs.infos, []), rs.minors))
+
+verify prefixArgs
+    prefixArgs(Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = [])) => []
+
+fn oneRec(bs: BS, rs: RS, t: TypeIn, d: Int, minorIdx: Int) -> Result<BS, Fail>
+    ? "The recursor's type and rules."
+    info = infoAt(rs.infos, d)
+    ty = Check.Telescope.piBinding(bs.st, List.concat(prefixArgs(bs.blk, rs), List.concat(info.indices, [info.major])), Core.Apps.mkApps(info.motive, List.concat(info.indices, [info.major])))
+    rules = rulesOf(bs.st, bs.blk, rs, t.ctors, minorIdx, [])?
+    rv = Rec(head = Head(name = Check.Blk.recName(t.name), params = recParams(bs.blk), ty = ty), all = bs.blk.names, numParams = bs.blk.nparams, numIndices = Check.Blk.nthInt(bs.blk.nindices, d), numMotives = List.len(rs.infos), numMinors = List.len(rs.minors), rules = rules.rules, k = bs.blk.k, isUnsafe = false)
+    Result.Ok(BS(blk = bs.blk, st = St.update(rules.st, block = Map.set(rules.st.block, rv.head.name, Const.CRec(rv)))))
+
+verify oneRec
+    oneRec(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = []), 0, 0) == Result.Err(Fail.Reject("x")) => false
+
+record RR
+    st: St
+    rules: List<RecRule>
+
+fn rulesOf(st: St, blk: Blk, rs: RS, cs: List<CtorIn>, m: Int, acc: List<RecRule>) -> Result<RR, Fail>
+    ? "One computation rule per constructor of the type."
+    match cs
+        [] -> Result.Ok(RR(st = st, rules = List.reverse(acc)))
+        [c, ..rest] -> ruleNext(ruleOf(blk, rs, c, m, ctorShape(st, blk, c.ty, 0, [], [])?)?, blk, rs, rest, m, acc)
+
+verify rulesOf
+    rulesOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), [], 0, []) => Result.Ok(RR(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), rules = []))
+
+record R1
+    st: St
+    rule: RecRule
+
+fn ruleNext(r: R1, blk: Blk, rs: RS, rest: List<CtorIn>, m: Int, acc: List<RecRule>) -> Result<RR, Fail>
+    ? "Collects a rule and goes on."
+    rulesOf(r.st, blk, rs, rest, m + 1, List.prepend(r.rule, acc))
+
+verify ruleNext
+    ruleNext(R1(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), rule = RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), [], 0, []) => Result.Ok(RR(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), rules = [RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))]))
+
+fn ruleOf(blk: Blk, rs: RS, c: CtorIn, m: Int, cf: CF) -> Result<R1, Fail>
+    ? "rhs = fun params motives minors fields => minor_m fields (recursive calls)."
+    calls = recCalls(cf.st, blk, rs, cf.recs, [])?
+    rhs = Check.Telescope.lamBinding(calls.st, List.concat(prefixArgs(blk, rs), cf.fields), Core.Apps.mkApps(Check.Blk.nthExpr(rs.minors, m), List.concat(cf.fields, calls.xs)))
+    Result.Ok(R1(st = calls.st, rule = RecRule(ctor = c.name, nfields = List.len(cf.fields), rhs = rhs)))
+
+verify ruleOf
+    ruleOf(Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = [Core.Exprs.fvar(7)]), CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0)), 0, CF(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.bvar(0), fields = [], recs = [])) => Result.Ok(R1(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), rule = RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))))
+
+fn recCalls(st: St, blk: Blk, rs: RS, us: List<Expr>, accRev: List<Expr>) -> Result<XS, Fail>
+    ? "For each recursive field, the recursor of its type applied to it under its binders."
+    match us
+        [] -> Result.Ok(XS(st = st, xs = List.reverse(accRev)))
+        [u, ..rest] -> recCall(uTele(st, u)?, blk, rs, u, rest, accRev)
+
+verify recCalls
+    recCalls(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), [], []) => Result.Ok(XS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = []))
+
+fn recCall(ut: UT, blk: Blk, rs: RS, u: Expr, rest: List<Expr>, accRev: List<Expr>) -> Result<XS, Fail>
+    ? "fun xs => rec params motives minors indices (u xs)."
+    match Check.Blk.validIndex(blk, ut.target)
+        Option.None -> Result.Err(reject("internal: a recursive field is not a valid application of the block"))
+        Option.Some(k) -> recCalls(ut.st, blk, rs, rest, List.prepend(Check.Telescope.lamBinding(ut.st, ut.xs, Core.Apps.mkApps(Core.Exprs.cnst(Check.Blk.recName(nthName(blk.names, k)), recLevels(blk)), List.concat(prefixArgs(blk, rs), List.concat(Check.Blk.indicesOf(blk, ut.target), [Core.Apps.mkApps(u, ut.xs)])))), accRev))
+
+verify recCall
+    recCall(UT(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = [], target = Core.Exprs.fvar(0)), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), Core.Exprs.fvar(1), [], []) => Result.Err(Fail.Reject("internal: a recursive field is not a valid application of the block"))
+
+fn nthName(ns: List<Name>, k: Int) -> Name
+    ? "The k-th name."
+    match List.drop(ns, k)
+        [n, .._] -> n
+        [] -> Core.Names.anon()
+
+verify nthName
+    nthName([], 0) => Core.Names.anon()
+
+fn checkRecs(bs: BS, rs: RS) -> Result<BS, Fail>
+    ? "Each recursor's type is well formed and each of its rules preserves types."
+    checkRecsFrom(bs, rs, bs.blk.types)
+
+verify checkRecs
+    checkRecs(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = [])) => Result.Ok(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn checkRecsFrom(bs: BS, rs: RS, ts: List<TypeIn>) -> Result<BS, Fail>
+    ? "Type by type."
+    match ts
+        [] -> Result.Ok(bs)
+        [t, ..rest] -> checkRecsFrom(BS(blk = bs.blk, st = checkOneRec(bs.st, bs.blk, rs, t)?), rs, rest)
+
+verify checkRecsFrom
+    checkRecsFrom(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), []) => Result.Ok(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn checkOneRec(st: St, blk: Blk, rs: RS, t: TypeIn) -> Result<St, Fail>
+    ? "The type under the recursor's universe parameters, then every rule."
+    match Check.State.lookup(st, Check.Blk.recName(t.name))
+        Option.Some(Const.CRec(rv)) -> recTypeChecked(Check.Tc.check(St.update(st, params = recParams(blk)), rv.head.ty)?, st.params, blk, rs, t)
+        _ -> Result.Err(reject("internal: recursor of '{Core.Names.render(t.name)}' missing"))
+
+verify checkOneRec
+    checkOneRec(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [])) => Result.Err(Fail.Reject("internal: recursor of '[anonymous]' missing"))
+
+fn recTypeChecked(r: RE, params: List<Name>, blk: Blk, rs: RS, t: TypeIn) -> Result<St, Fail>
+    ? "Restores the declaration's universe parameters and checks the rules."
+    rulesPreserve(St.update(r.st, params = params), blk, rs, t, t.ctors)
+
+verify rulesPreserve
+    rulesPreserve(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = []), []) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+
+fn rulesPreserve(st: St, blk: Blk, rs: RS, t: TypeIn, cs: List<CtorIn>) -> Result<St, Fail>
+    ? "rec ... (c params fields) and its reduct have the same type."
+    match cs
+        [] -> Result.Ok(st)
+        [c, ..rest] -> rulesPreserve(rulePreserves(ctorShape(st, blk, c.ty, 0, [], [])?, blk, rs, t, c)?, blk, rs, t, rest)
+
+verify recTypeChecked
+    recTypeChecked(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [])) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+
+fn rulePreserves(cf: CF, blk: Blk, rs: RS, t: TypeIn, c: CtorIn) -> Result<St, Fail>
+    ? "Infers the type before and after one reduction step and compares them."
+    lhs = Core.Apps.mkApps(Core.Exprs.cnst(Check.Blk.recName(t.name), recLevels(blk)), List.concat(prefixArgs(blk, rs), List.concat(Check.Blk.indicesOf(blk, cf.t), [introApp(blk, c, cf.fields)])))
+    expected = Check.Tc.inferType(cf.st, lhs)?
+    reduct = Check.Tc.whnf(expected.st, lhs)?
+    actual = Check.Tc.inferType(reduct.st, reduct.e)?
+    eq = Check.Tc.isDefEq(actual.st, actual.e, expected.e)?
+    match eq.b
+        true -> Result.Ok(eq.st)
+        false -> Result.Err(reject("generated recursor computation rule for '{Core.Names.render(c.name)}' is not type-preserving"))
+
+verify rulePreserves
+    rulePreserves(CF(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.bvar(0), fields = [], recs = []), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = []), CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))) == Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => false

@@ -1,0 +1,218 @@
+module Ndjson
+    intent =
+        "Scouting prototype: parse an NDJSON file line by line into a table of"
+        "nodes keyed by Int, to measure parsing speed in the VM and compiled."
+    effects [Args.get, Console.print, Disk.readText]
+
+type J
+    JInt(Int)
+    JStr(String)
+    JArr(List<J>)
+    JObj(List<Tuple<String, J>>)
+    JBool(Bool)
+    JNull
+
+type P
+    Ok(J, Int)
+    Err(String, Int)
+
+record Stats
+    lines: Int
+    objects: Int
+    table: Map<Int, J>
+
+fn digitVal(c: String) -> Int
+    ? "Value of an ASCII digit, or -1."
+    match c
+        "0" -> 0
+        "1" -> 1
+        "2" -> 2
+        "3" -> 3
+        "4" -> 4
+        "5" -> 5
+        "6" -> 6
+        "7" -> 7
+        "8" -> 8
+        "9" -> 9
+        _ -> -1
+
+verify digitVal
+    digitVal("7") => 7
+    digitVal("x") => -1
+
+fn skipWs(s: String, i: Int) -> Int
+    ? "Skips spaces."
+    match String.charAt(s, i)
+        Option.Some(" ") -> skipWs(s, i + 1)
+        _ -> i
+
+verify skipWs
+    skipWs("  x", 0) => 2
+
+fn parseDigits(s: String, i: Int, acc: Int) -> P
+    ? "Reads decimal digits into an Int."
+    match String.charAt(s, i)
+        Option.Some(c) -> digitStep(s, i, acc, digitVal(c))
+        Option.None -> P.Ok(J.JInt(acc), i)
+
+verify parseDigits
+    parseDigits("42,", 0, 0) => P.Ok(J.JInt(42), 2)
+
+fn digitStep(s: String, i: Int, acc: Int, d: Int) -> P
+    ? "One step of parseDigits."
+    match d < 0
+        true -> P.Ok(J.JInt(acc), i)
+        false -> parseDigits(s, i + 1, acc * 10 + d)
+
+verify digitStep
+    digitStep("1", 0, 4, -1) => P.Ok(J.JInt(4), 0)
+
+fn strEnd(s: String, i: Int) -> Int
+    ? "Index of the closing quote; skips escaped characters."
+    match String.charAt(s, i)
+        Option.Some("\"") -> i
+        Option.Some("\\") -> strEnd(s, i + 2)
+        Option.Some -> strEnd(s, i + 1)
+        Option.None -> i
+
+verify strEnd
+    strEnd("ab\"c", 0) => 2
+
+fn parseValue(s: String, i: Int) -> P
+    ? "Parses one JSON value starting at i."
+    match String.charAt(s, i)
+        Option.Some("{{") -> parseObj(s, skipWs(s, i + 1), [])
+        Option.Some("[") -> parseArr(s, skipWs(s, i + 1), [])
+        Option.Some("\"") -> parseStr(s, i + 1)
+        Option.Some("t") -> P.Ok(J.JBool(true), i + 4)
+        Option.Some("f") -> P.Ok(J.JBool(false), i + 5)
+        Option.Some("n") -> P.Ok(J.JNull, i + 4)
+        Option.Some -> parseDigits(s, i, 0)
+        Option.None -> P.Err("unexpected end", i)
+
+fn parseStr(s: String, start: Int) -> P
+    ? "Parses a string body starting after the opening quote (escapes kept raw)."
+    end = strEnd(s, start)
+    P.Ok(J.JStr(String.slice(s, start, end)), end + 1)
+
+verify parseStr
+    parseStr("ab\"", 0) => P.Ok(J.JStr("ab"), 3)
+
+fn parseArr(s: String, i: Int, acc: List<J>) -> P
+    ? "Parses array elements after the opening bracket."
+    match String.charAt(s, i)
+        Option.Some("]") -> P.Ok(J.JArr(List.reverse(acc)), i + 1)
+        _ -> arrElem(s, parseValue(s, i), acc)
+
+verify parseArr
+    parseArr("]", 0, []) => P.Ok(J.JArr([]), 1)
+
+fn arrElem(s: String, r: P, acc: List<J>) -> P
+    ? "After one array element: comma or close."
+    match r
+        P.Err(m, p) -> P.Err(m, p)
+        P.Ok(v, p) -> arrNext(s, skipWs(s, p), List.prepend(v, acc))
+
+verify arrElem
+    arrElem("1]", P.Ok(J.JInt(1), 1), []) => P.Ok(J.JArr([J.JInt(1)]), 2)
+
+fn arrNext(s: String, i: Int, acc: List<J>) -> P
+    ? "Comma continues, bracket closes."
+    match String.charAt(s, i)
+        Option.Some(",") -> parseArr(s, skipWs(s, i + 1), acc)
+        Option.Some("]") -> P.Ok(J.JArr(List.reverse(acc)), i + 1)
+        _ -> P.Err("expected , or ]", i)
+
+verify arrNext
+    arrNext("]", 0, []) => P.Ok(J.JArr([]), 1)
+
+fn parseObj(s: String, i: Int, acc: List<Tuple<String, J>>) -> P
+    ? "Parses object members after the opening brace."
+    match String.charAt(s, i)
+        Option.Some("}}") -> P.Ok(J.JObj(List.reverse(acc)), i + 1)
+        Option.Some("\"") -> objKey(s, i + 1, strEnd(s, i + 1), acc)
+        _ -> P.Err("expected key", i)
+
+verify parseObj
+    parseObj("}}", 0, []) => P.Ok(J.JObj([]), 1)
+
+fn objKey(s: String, start: Int, end: Int, acc: List<Tuple<String, J>>) -> P
+    ? "Reads the key, the colon and the member value."
+    colon = skipWs(s, end + 1)
+    objMember(s, String.slice(s, start, end), parseValue(s, skipWs(s, colon + 1)), acc)
+
+verify objKey
+    objKey("a\":1}}", 0, 1, []) => P.Ok(J.JObj([("a", J.JInt(1))]), 5)
+
+fn objMember(s: String, key: String, r: P, acc: List<Tuple<String, J>>) -> P
+    ? "After one member: comma or close."
+    match r
+        P.Err(m, p) -> P.Err(m, p)
+        P.Ok(v, p) -> objNext(s, skipWs(s, p), List.prepend((key, v), acc))
+
+verify objMember
+    objMember("}}", "a", P.Ok(J.JInt(1), 0), []) => P.Ok(J.JObj([("a", J.JInt(1))]), 1)
+
+fn objNext(s: String, i: Int, acc: List<Tuple<String, J>>) -> P
+    ? "Comma continues, brace closes."
+    match String.charAt(s, i)
+        Option.Some(",") -> parseObj(s, skipWs(s, i + 1), acc)
+        Option.Some("}}") -> P.Ok(J.JObj(List.reverse(acc)), i + 1)
+        _ -> P.Err("expected , or }}", i)
+
+verify parseValue
+    parseValue("12", 0) => P.Ok(J.JInt(12), 2)
+    parseValue("[1, 2]", 0) => P.Ok(J.JArr([J.JInt(1), J.JInt(2)]), 6)
+    parseValue("{{\"a\":{{\"b\":3}}}}", 0) => P.Ok(J.JObj([("a", J.JObj([("b", J.JInt(3))]))]), 13)
+verify objNext
+    objNext("}}", 0, []) => P.Ok(J.JObj([]), 1)
+
+
+fn firstInt(fields: List<Tuple<String, J>>) -> Int
+    ? "The first Int-valued member of an object (the node's index), or -1."
+    match fields
+        [] -> -1
+        [(k, v), ..rest] -> match v
+            J.JInt(n) -> n
+            _ -> firstInt(rest)
+
+verify firstInt
+    firstInt([("a", J.JNull), ("ie", J.JInt(3))]) => 3
+    firstInt([]) => -1
+
+fn addLine(st: Stats, line: String) -> Stats
+    ? "Parses one line and files it in the table under its index."
+    match parseValue(line, 0)
+        P.Ok(J.JObj(fields), _) -> Stats.update(st, lines = st.lines + 1, objects = st.objects + 1, table = Map.set(st.table, firstInt(fields), J.JObj(fields)))
+        _ -> Stats.update(st, lines = st.lines + 1)
+
+verify addLine
+    addLine(Stats(lines = 0, objects = 0, table = {}), "{{\"ie\":1}}").objects => 1
+
+fn addLines(st: Stats, lines: List<String>) -> Stats
+    ? "Folds addLine over all lines."
+    match lines
+        [] -> st
+        [l, ..rest] -> addLines(addLine(st, l), rest)
+
+verify addLines
+    addLines(Stats(lines = 0, objects = 0, table = {}), ["1", "2"]).lines => 2
+
+fn firstArg(args: List<String>) -> String
+    ? "The first command-line argument, or a default path."
+    match args
+        [a, .._] -> a
+        [] -> "data.ndjson"
+
+verify firstArg
+    firstArg(["x"]) => "x"
+    firstArg([]) => "data.ndjson"
+
+fn main() -> Result<Unit, String>
+    ! [Args.get, Console.print, Disk.readText]
+    path = firstArg(Args.get())
+    text = Disk.readText(path)?
+    lines = String.split(text, "\n")
+    st = addLines(Stats(lines = 0, objects = 0, table = {}), lines)
+    Console.print("lines {st.lines} objects {st.objects} table {Map.len(st.table)}")
+    Result.Ok(Unit)

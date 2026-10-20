@@ -1,0 +1,125 @@
+module Tables
+    intent =
+        "What has been read of an export so far: the three numbered tables"
+        "of names, levels and expressions, and the declarations in file"
+        "order. Indices are arbitrary numbers, as in the reference parser:"
+        "they need not be consecutive or ordered, and a later line with the"
+        "same index replaces the earlier one. A reference to an index not"
+        "yet defined is an error, which is what keeps every term a finite"
+        "DAG. The next fields count the lines read (plus the implicit name"
+        "and level 0)."
+    exposes [Tables, Parsed, empty, name, level, expr, names, levels, addName, addLevel, addExpr, addDecl, finish]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls]
+    effects []
+
+record Tables
+    names: Map<Int, Name>
+    levels: Map<Int, Level>
+    exprs: Map<Int, Expr>
+    nextName: Int
+    nextLevel: Int
+    nextExpr: Int
+    decls: List<Decl>
+    constants: Int
+
+record Parsed
+    constants: Int
+    names: Int
+    levels: Int
+    exprs: Int
+    decls: List<Decl>
+
+fn finish(t: Tables) -> Parsed
+    ? "What checking needs: the declarations in file order and the counts; the index tables are left behind to be freed."
+    Parsed(constants = t.constants, names = t.nextName, levels = t.nextLevel, exprs = t.nextExpr, decls = List.reverse(t.decls))
+
+verify finish
+    finish(empty()).names => 1
+
+fn empty() -> Tables
+    ? "Name 0 is the anonymous name and level 0 is zero; neither has a line."
+    Tables(names = {0 => Core.Names.anon()}, levels = {0 => Level.Zero}, exprs = {}, nextName = 1, nextLevel = 1, nextExpr = 0, decls = [], constants = 0)
+
+verify empty
+    empty().nextName => 1
+    empty().nextExpr => 0
+
+fn name(t: Tables, i: Int) -> Result<Name, String>
+    ? "A defined name by index."
+    match Map.get(t.names, i)
+        Option.Some(n) -> Result.Ok(n)
+        Option.None -> Result.Err("unknown name index {i}")
+
+verify name
+    name(empty(), 0) => Result.Ok(Core.Names.anon())
+    name(empty(), 5) => Result.Err("unknown name index 5")
+
+fn level(t: Tables, i: Int) -> Result<Level, String>
+    ? "A defined level by index."
+    match Map.get(t.levels, i)
+        Option.Some(l) -> Result.Ok(l)
+        Option.None -> Result.Err("unknown level index {i}")
+
+verify level
+    level(empty(), 0) => Result.Ok(Level.Zero)
+    level(empty(), 1) => Result.Err("unknown level index 1")
+
+fn expr(t: Tables, i: Int) -> Result<Expr, String>
+    ? "A defined expression by index."
+    match Map.get(t.exprs, i)
+        Option.Some(e) -> Result.Ok(e)
+        Option.None -> Result.Err("unknown expression index {i}")
+
+verify expr
+    expr(empty(), 0) => Result.Err("unknown expression index 0")
+
+fn names(t: Tables, ids: List<Int>, acc: List<Name>) -> Result<List<Name>, String>
+    ? "Several names by index, in order."
+    match ids
+        [] -> Result.Ok(List.reverse(acc))
+        [i, ..rest] -> names(t, rest, List.prepend(name(t, i)?, acc))
+
+verify names
+    names(empty(), [0, 0], []) => Result.Ok([Core.Names.anon(), Core.Names.anon()])
+    names(empty(), [3], []) => Result.Err("unknown name index 3")
+
+fn levels(t: Tables, ids: List<Int>, acc: List<Level>) -> Result<List<Level>, String>
+    ? "Several levels by index, in order."
+    match ids
+        [] -> Result.Ok(List.reverse(acc))
+        [i, ..rest] -> levels(t, rest, List.prepend(level(t, i)?, acc))
+
+verify levels
+    levels(empty(), [0], []) => Result.Ok([Level.Zero])
+    levels(empty(), [2], []) => Result.Err("unknown level index 2")
+
+fn addName(t: Tables, i: Int, n: Name) -> Result<Tables, String>
+    ? "Defines name i."
+    Result.Ok(Tables.update(t, names = Map.set(t.names, i, n), nextName = t.nextName + 1))
+
+verify addName
+    Result.withDefault(addName(empty(), 1, Core.Names.anon()), empty()).nextName => 2
+    Map.has(Result.withDefault(addName(empty(), 7, Core.Names.anon()), empty()).names, 7) => true
+
+fn addLevel(t: Tables, i: Int, l: Level) -> Result<Tables, String>
+    ? "Defines level i."
+    Result.Ok(Tables.update(t, levels = Map.set(t.levels, i, l), nextLevel = t.nextLevel + 1))
+
+verify addLevel
+    Result.withDefault(addLevel(empty(), 1, Level.Zero), empty()).nextLevel => 2
+
+fn addExpr(t: Tables, i: Int, e: Expr) -> Result<Tables, String>
+    ? "Defines expression i."
+    Result.Ok(Tables.update(t, exprs = Map.set(t.exprs, i, e), nextExpr = t.nextExpr + 1))
+
+verify addExpr
+    Result.withDefault(addExpr(empty(), 0, Core.Exprs.bvar(0)), empty()).nextExpr => 1
+    Map.has(Result.withDefault(addExpr(empty(), 5, Core.Exprs.bvar(0)), empty()).exprs, 5) => true
+
+fn addDecl(t: Tables, d: Decl) -> Tables
+    ? "Appends a declaration, newest first, and counts its constants."
+    Tables.update(t, decls = List.prepend(d, t.decls), constants = t.constants + Core.Decls.constantCount(d))
+
+verify addDecl
+    addDecl(empty(), Decl.Induct([], [], [])).constants => 0
+    List.len(addDecl(empty(), Decl.Induct([], [], [])).decls) => 1

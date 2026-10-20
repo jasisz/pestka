@@ -1,0 +1,192 @@
+module Declarations
+    intent =
+        "Lines that declare constants: axioms, definitions, theorems, opaque"
+        "constants, the quotient package and inductive blocks. Every name,"
+        "level and expression they mention must already be in the tables."
+    exposes [declLine]
+    depends [Json.Line, Json.Access, Core.Names, Core.Exprs, Core.Decls, Export.Tables]
+    effects []
+
+fn declLine(t: Tables, kind: String, o: List<Tuple<String, J>>) -> Result<Tables, String>
+    ? "One declaration line, already split into its kind and its object."
+    Result.Ok(Export.Tables.addDecl(t, declOf(t, kind, o)?))
+
+verify declLine
+    declLine(Export.Tables.empty(), "lemma", []) => Result.Err("unknown declaration kind 'lemma'")
+
+fn declOf(t: Tables, kind: String, o: List<Tuple<String, J>>) -> Result<Decl, String>
+    ? "Builds the declaration of one kind."
+    match kind
+        "axiom" -> Result.Ok(Decl.Axiom(head(t, o)?, Json.Access.bool(o, "isUnsafe")?))
+        "def" -> defOf(t, o)
+        "thm" -> Result.Ok(Decl.Thm(head(t, o)?, value(t, o)?, all(t, o)?))
+        "opaque" -> Result.Ok(Decl.Opaq(head(t, o)?, value(t, o)?, Json.Access.bool(o, "isUnsafe")?, all(t, o)?))
+        "quot" -> Result.Ok(Decl.Quot(head(t, o)?, quotKind(Json.Access.text(o, "kind")?)?))
+        "inductive" -> inductiveOf(t, o)
+        k -> Result.Err("unknown declaration kind '{k}'")
+
+verify declOf
+    declOf(Export.Tables.empty(), "axiom", [("name", J.JInt(0))]) => Result.Err("missing key 'levelParams'")
+
+fn head(t: Tables, o: List<Tuple<String, J>>) -> Result<Head, String>
+    ? "Name, universe parameters and type, common to every constant."
+    n = Export.Tables.name(t, Json.Access.int(o, "name")?)?
+    ps = Export.Tables.names(t, Json.Access.ints(o, "levelParams")?, [])?
+    Result.Ok(Head(name = n, params = ps, ty = Export.Tables.expr(t, Json.Access.int(o, "type")?)?))
+
+verify head
+    head(Export.Tables.empty(), [("levelParams", J.JArr([])), ("name", J.JInt(0)), ("type", J.JInt(0))]) => Result.Err("unknown expression index 0")
+
+fn value(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
+    ? "The value of a definition, theorem or opaque constant."
+    Export.Tables.expr(t, Json.Access.int(o, "value")?)
+
+verify value
+    value(Export.Tables.empty(), [("value", J.JInt(3))]) => Result.Err("unknown expression index 3")
+
+fn all(t: Tables, o: List<Tuple<String, J>>) -> Result<List<Name>, String>
+    ? "The names of the mutual group the constant belongs to."
+    Export.Tables.names(t, Json.Access.ints(o, "all")?, [])
+
+verify all
+    all(Export.Tables.empty(), [("all", J.JArr([J.JInt(0)]))]) => Result.Ok([Core.Names.anon()])
+
+fn defOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Decl, String>
+    ? "A definition with its reducibility hints and safety."
+    h = head(t, o)?
+    v = value(t, o)?
+    hints = hintsOf(Json.Access.need(o, "hints")?)?
+    Result.Ok(Decl.Defn(h, v, hints, safetyOf(Json.Access.text(o, "safety")?)?, all(t, o)?))
+
+verify defOf
+    defOf(Export.Tables.empty(), []) => Result.Err("missing key 'name'")
+
+fn hintsOf(j: J) -> Result<Hints, String>
+    ? "The string opaque or abbrev, or an object holding the regular height."
+    match j
+        J.JStr("opaque") -> Result.Ok(Hints.Opaque)
+        J.JStr("abbrev") -> Result.Ok(Hints.Abbrev)
+        J.JObj(fs) -> Result.Ok(Hints.Regular(Json.Access.int(fs, "regular")?))
+        _ -> Result.Err("malformed hints")
+
+verify hintsOf
+    hintsOf(J.JStr("abbrev")) => Result.Ok(Hints.Abbrev)
+    hintsOf(J.JObj([("regular", J.JInt(3))])) => Result.Ok(Hints.Regular(3))
+    hintsOf(J.JStr("x")) => Result.Err("malformed hints")
+
+fn safetyOf(s: String) -> Result<Safety, String>
+    ? "safe, unsafe or partial."
+    match s
+        "safe" -> Result.Ok(Safety.Safe)
+        "unsafe" -> Result.Ok(Safety.Unsafe)
+        "partial" -> Result.Ok(Safety.Partial)
+        _ -> Result.Err("unknown safety '{s}'")
+
+verify safetyOf
+    safetyOf("partial") => Result.Ok(Safety.Partial)
+    safetyOf("x") => Result.Err("unknown safety 'x'")
+
+fn quotKind(s: String) -> Result<QuotKind, String>
+    ? "Which of the four quotient constants."
+    match s
+        "type" -> Result.Ok(QuotKind.QType)
+        "ctor" -> Result.Ok(QuotKind.QCtor)
+        "lift" -> Result.Ok(QuotKind.QLift)
+        "ind" -> Result.Ok(QuotKind.QInd)
+        _ -> Result.Err("unknown quot kind '{s}'")
+
+verify quotKind
+    quotKind("lift") => Result.Ok(QuotKind.QLift)
+    quotKind("x") => Result.Err("unknown quot kind 'x'")
+
+fn inductiveOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Decl, String>
+    ? "A block of inductive types with their constructors and recursors."
+    types = indTypes(t, Json.Access.arr(o, "types")?, [])?
+    ctors = ctorsOf(t, Json.Access.arr(o, "ctors")?, [])?
+    Result.Ok(Decl.Induct(types, ctors, recsOf(t, Json.Access.arr(o, "recs")?, [])?))
+
+verify inductiveOf
+    inductiveOf(Export.Tables.empty(), [("ctors", J.JArr([])), ("recs", J.JArr([])), ("types", J.JArr([]))]) => Result.Ok(Decl.Induct([], [], []))
+
+fn objectOf(j: J) -> Result<List<Tuple<String, J>>, String>
+    ? "An array element that must be an object."
+    match j
+        J.JObj(fs) -> Result.Ok(fs)
+        _ -> Result.Err("expected an object")
+
+verify objectOf
+    objectOf(J.JObj([])) => Result.Ok([])
+    objectOf(J.JNull) => Result.Err("expected an object")
+
+fn indTypes(t: Tables, xs: List<J>, acc: List<IndType>) -> Result<List<IndType>, String>
+    ? "The inductive types of a block, in order."
+    match xs
+        [] -> Result.Ok(List.reverse(acc))
+        [x, ..rest] -> indTypes(t, rest, List.prepend(indType(t, objectOf(x)?)?, acc))
+
+verify indTypes
+    indTypes(Export.Tables.empty(), [], []) => Result.Ok([])
+    indTypes(Export.Tables.empty(), [J.JNull], []) => Result.Err("expected an object")
+
+fn indType(t: Tables, o: List<Tuple<String, J>>) -> Result<IndType, String>
+    ? "One inductive type and the flags the export claims for it."
+    h = head(t, o)?
+    ctors = Export.Tables.names(t, Json.Access.ints(o, "ctors")?, [])?
+    Result.Ok(IndType(head = h, numParams = Json.Access.int(o, "numParams")?, numIndices = Json.Access.int(o, "numIndices")?, all = all(t, o)?, ctors = ctors, numNested = Json.Access.int(o, "numNested")?, isRec = Json.Access.bool(o, "isRec")?, isUnsafe = Json.Access.bool(o, "isUnsafe")?, isReflexive = Json.Access.bool(o, "isReflexive")?))
+
+verify indType
+    indType(Export.Tables.empty(), []) => Result.Err("missing key 'name'")
+
+fn ctorsOf(t: Tables, xs: List<J>, acc: List<Ctor>) -> Result<List<Ctor>, String>
+    ? "The constructors of a block, in order."
+    match xs
+        [] -> Result.Ok(List.reverse(acc))
+        [x, ..rest] -> ctorsOf(t, rest, List.prepend(ctorOf(t, objectOf(x)?)?, acc))
+
+verify ctorsOf
+    ctorsOf(Export.Tables.empty(), [], []) => Result.Ok([])
+
+fn ctorOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Ctor, String>
+    ? "One constructor."
+    h = head(t, o)?
+    induct = Export.Tables.name(t, Json.Access.int(o, "induct")?)?
+    Result.Ok(Ctor(head = h, induct = induct, cidx = Json.Access.int(o, "cidx")?, numParams = Json.Access.int(o, "numParams")?, numFields = Json.Access.int(o, "numFields")?, isUnsafe = Json.Access.bool(o, "isUnsafe")?))
+
+verify ctorOf
+    ctorOf(Export.Tables.empty(), []) => Result.Err("missing key 'name'")
+
+fn recsOf(t: Tables, xs: List<J>, acc: List<Rec>) -> Result<List<Rec>, String>
+    ? "The recursors of a block, in file order."
+    match xs
+        [] -> Result.Ok(List.reverse(acc))
+        [x, ..rest] -> recsOf(t, rest, List.prepend(recOf(t, objectOf(x)?)?, acc))
+
+verify recsOf
+    recsOf(Export.Tables.empty(), [], []) => Result.Ok([])
+
+fn recOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Rec, String>
+    ? "One recursor with its rules."
+    h = head(t, o)?
+    rules = rulesOf(t, Json.Access.arr(o, "rules")?, [])?
+    Result.Ok(Rec(head = h, all = all(t, o)?, numParams = Json.Access.int(o, "numParams")?, numIndices = Json.Access.int(o, "numIndices")?, numMotives = Json.Access.int(o, "numMotives")?, numMinors = Json.Access.int(o, "numMinors")?, rules = rules, k = Json.Access.bool(o, "k")?, isUnsafe = Json.Access.bool(o, "isUnsafe")?))
+
+verify recOf
+    recOf(Export.Tables.empty(), []) => Result.Err("missing key 'name'")
+
+fn rulesOf(t: Tables, xs: List<J>, acc: List<RecRule>) -> Result<List<RecRule>, String>
+    ? "Recursor rules, one per constructor."
+    match xs
+        [] -> Result.Ok(List.reverse(acc))
+        [x, ..rest] -> rulesOf(t, rest, List.prepend(ruleOf(t, objectOf(x)?)?, acc))
+
+verify rulesOf
+    rulesOf(Export.Tables.empty(), [], []) => Result.Ok([])
+
+fn ruleOf(t: Tables, o: List<Tuple<String, J>>) -> Result<RecRule, String>
+    ? "One rule: the constructor, its field count and the right-hand side."
+    c = Export.Tables.name(t, Json.Access.int(o, "ctor")?)?
+    rhs = Export.Tables.expr(t, Json.Access.int(o, "rhs")?)?
+    Result.Ok(RecRule(ctor = c, nfields = Json.Access.int(o, "nfields")?, rhs = rhs))
+
+verify ruleOf
+    ruleOf(Export.Tables.empty(), [("ctor", J.JInt(0)), ("nfields", J.JInt(0)), ("rhs", J.JInt(0))]) => Result.Err("unknown expression index 0")

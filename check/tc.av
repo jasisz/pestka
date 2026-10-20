@@ -1,0 +1,2862 @@
+module Tc
+    intent =
+        "The type checker: type inference, weak head normalization and"
+        "definitional equality, following Lean's reference kernel step by"
+        "step. The three call each other (whnf infers types for iota on"
+        "structures, equality normalizes, inference checks equality), so"
+        "they live in one module. Every function threads the checker state."
+    exposes [RI, LD, inferType, check, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.PMap, Core.Alpha, Check.State, Check.Lits, Core.Hash]
+    effects []
+
+record RI
+    i: Int
+    st: St
+
+record LD
+    status: Int
+    t: Expr
+    s: Expr
+    st: St
+
+fn bad(msg: String) -> Fail
+    ? "A kernel error: the declaration is rejected."
+    Fail.Reject(msg)
+
+verify bad
+    bad("x") => Fail.Reject("x")
+
+fn inferType(st: St, e: Expr) -> Result<RE, Fail>
+    ? "The type of e, trusting e (the reference infer_type)."
+    infer(st, e, true)
+
+verify inferType
+    resultExpr(inferType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero))) => Core.Exprs.sort(Level.Succ(Level.Zero))
+
+fn check(st: St, e: Expr) -> Result<RE, Fail>
+    ? "The type of e, checking e on the way."
+    infer(st, e, false)
+
+verify check
+    check(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0)) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
+
+fn infer(st: St, e: Expr, only: Bool) -> Result<RE, Fail>
+    ? "Cached inference; terms with loose bound variables are refused."
+    match Core.Exprs.looseRange(e) > 0
+        true -> Result.Err(bad("the type checker met a loose bound variable"))
+        false -> inferCached(st, e, only, cachedType(st, e, only))
+
+verify infer
+    resultExpr(infer(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(3), true)) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
+
+fn cachedType(st: St, e: Expr, only: Bool) -> Option<Expr>
+    ? "A known type of e: from the cache of closed terms checked in earlier declarations, else from this declaration's cache for the mode."
+    match shared(e)
+        true -> orCached(Check.State.cacheGet(st.closed, e), st, e, only)
+        false -> Check.State.cacheGet(cacheFor(st, only), e)
+
+verify cachedType
+    cachedType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), true) => Option.None
+
+fn orCached(hit: Option<Expr>, st: St, e: Expr, only: Bool) -> Option<Expr>
+    ? "The shared answer, or this declaration's."
+    match hit
+        Option.Some -> hit
+        Option.None -> Check.State.cacheGet(cacheFor(st, only), e)
+
+verify orCached
+    orCached(Option.Some(Core.Exprs.natLit(1)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2), true) => Option.Some(Core.Exprs.natLit(1))
+
+fn shared(e: Expr) -> Bool
+    ? "A term whose checked type is kept across declarations: closed, with no free variable, whose numbers mean something else in every declaration, and no universe parameter, whose names do too; and large enough that checking it again would cost."
+    Bool.and(Core.Exprs.treeSize(e) >= 32, Bool.and(Bool.not(Core.Exprs.hasFVar(e)), Bool.not(Core.Exprs.hasParam(e))))
+
+verify shared
+    shared(Core.Exprs.natLit(1)) => false
+
+fn cacheFor(st: St, only: Bool) -> PMap
+    ? "Inference and checking keep separate caches."
+    match only
+        true -> st.inferCache
+        false -> st.checkCache
+
+verify cacheFor
+    Core.PMap.size(cacheFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), true)) => 0
+
+fn inferCached(st: St, e: Expr, only: Bool, hit: Option<Expr>) -> Result<RE, Fail>
+    ? "Uses a cached type or infers and records one."
+    match hit
+        Option.Some(t) -> Result.Ok(RE(e = t, st = st))
+        Option.None -> Result.Ok(remember(inferCore(st, e, only)?, e, only))
+
+verify inferCached
+    resultExpr(inferCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), true, Option.Some(Core.Exprs.bvar(1)))) => Core.Exprs.bvar(1)
+
+fn remember(r: RE, e: Expr, only: Bool) -> RE
+    ? "Records the inferred type, when the term is worth an entry: a large one, or a constant at universe levels, whose type is instantiated at them each time."
+    match Bool.or(worthKeeping(e), levelled(e))
+        false -> r
+        true -> rememberAs(r, e, only)
+
+fn levelled(e: Expr) -> Bool
+    ? "A constant at some universe levels."
+    match e
+        Expr.Const(_, ls) -> List.len(ls) > 0
+        _ -> false
+
+verify levelled
+    levelled(Core.Exprs.cnst(Core.Names.anon(), [Level.Zero])) => true
+    levelled(Core.Exprs.cnst(Core.Names.anon(), [])) => false
+
+fn rememberAs(r: RE, e: Expr, only: Bool) -> RE
+    ? "Into the cache for the mode, or the shared one for closed terms."
+    match only
+        true -> RE(e = r.e, st = St.update(r.st, inferCache = Check.State.cachePut(r.st.inferCache, e, r.e)))
+        false -> match shared(e)
+            true -> RE(e = r.e, st = St.update(r.st, closed = Check.State.cachePut(r.st.closed, e, r.e)))
+            false -> RE(e = r.e, st = St.update(r.st, checkCache = Check.State.cachePut(r.st.checkCache, e, r.e)))
+
+
+verify rememberAs
+    Core.PMap.size(rememberAs(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 1
+verify remember
+    Core.PMap.size(remember(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 0
+
+fn inferCore(st: St, e: Expr, only: Bool) -> Result<RE, Fail>
+    ? "One inference step by the shape of e."
+    match e
+        Expr.BVar -> Result.Err(bad("the type checker met a loose bound variable"))
+        Expr.FVar(id) -> Result.Ok(RE(e = Check.State.localType(st, id)?, st = st))
+        Expr.Sort(l) -> inferSort(st, l, only)
+        Expr.Const(n, ls) -> inferConst(st, n, ls, only)
+        Expr.App(_, f, a) -> inferApp(st, e, f, a, only)
+        Expr.Lam -> lamLoop(st, e, [], [], only)
+        Expr.Pi -> piLoop(st, e, [], [], [], only)
+        Expr.Let -> letLoop(st, e, [], [], only)
+        Expr.NatLit -> Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.name1("Nat"), []), st = st))
+        Expr.StrLit -> Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.name1("String"), []), st = st))
+        Expr.Proj(_, s, i, x) -> inferProj(st, s, i, x, only)
+
+verify inferCore
+    inferCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.strLit("a"), true) => Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.name1("String"), []), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn checkLevel(st: St, l: Level) -> Result<Unit, Fail>
+    ? "Every universe parameter must be one of the declaration's."
+    match st.checkParams
+        false -> Result.Ok(Unit)
+        true -> match Core.Univ.undefParam(l, st.params)
+            Option.Some(n) -> Result.Err(bad("undefined universe level parameter '{Core.Names.render(n)}'"))
+            Option.None -> Result.Ok(Unit)
+
+verify checkLevel
+    checkLevel(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Level.Param(Core.Names.str(Core.Names.anon(), "u"))) => Result.Err(Fail.Reject("undefined universe level parameter 'u'"))
+
+fn checkLevels(st: St, ls: List<Level>) -> Result<Unit, Fail>
+    ? "checkLevel on each."
+    match ls
+        [] -> Result.Ok(Unit)
+        [l, ..rest] -> afterLevel(checkLevel(st, l)?, st, rest)
+
+verify checkLevels
+    checkLevels(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), []) => Result.Ok(Unit)
+
+fn afterLevel(u: Unit, st: St, rest: List<Level>) -> Result<Unit, Fail>
+    ? "Continues after one level passed."
+    checkLevels(st, rest)
+
+verify afterLevel
+    afterLevel(Unit, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), []) => Result.Ok(Unit)
+
+fn inferSort(st: St, l: Level, only: Bool) -> Result<RE, Fail>
+    ? "Sort u : Sort (u+1)."
+    match only
+        true -> Result.Ok(RE(e = Core.Exprs.sort(Level.Succ(l)), st = st))
+        false -> sortChecked(checkLevel(st, l)?, st, l)
+
+verify inferSort
+    inferSort(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Level.Zero, false) => Result.Ok(RE(e = Core.Exprs.sort(Level.Succ(Level.Zero)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn sortChecked(u: Unit, st: St, l: Level) -> Result<RE, Fail>
+    ? "The type of a checked sort."
+    Result.Ok(RE(e = Core.Exprs.sort(Level.Succ(l)), st = st))
+
+verify sortChecked
+    resultExpr(sortChecked(Unit, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Level.Zero)) => Core.Exprs.sort(Level.Succ(Level.Zero))
+
+fn inferConst(st: St, n: Name, ls: List<Level>, only: Bool) -> Result<RE, Fail>
+    ? "The constant's type at the given levels."
+    match Check.State.lookup(st, n)
+        Option.None -> Result.Err(bad("unknown constant '{Core.Names.render(n)}'"))
+        Option.Some(c) -> constType(st, c, Check.State.headOf(c), ls, only)
+
+verify inferConst
+    inferConst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.str(Core.Names.anon(), "x"), [], true) => Result.Err(Fail.Reject("unknown constant 'x'"))
+
+fn constType(st: St, c: Const, h: Head, ls: List<Level>, only: Bool) -> Result<RE, Fail>
+    ? "Checks the level count, and in checking mode safety and levels."
+    match List.len(h.params) == List.len(ls)
+        false -> Result.Err(bad("incorrect number of universe levels for '{Core.Names.render(h.name)}'"))
+        true -> match only
+            true -> Result.Ok(RE(e = Core.Subst.instLevelParams(h.ty, h.params, ls), st = st))
+            false -> constSafety(st, c, h, ls)
+
+verify constType
+    constType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [Level.Zero], true) => Result.Err(Fail.Reject("incorrect number of universe levels for '[anonymous]'"))
+
+fn constSafety(st: St, c: Const, h: Head, ls: List<Level>) -> Result<RE, Fail>
+    ? "A safe declaration may use neither unsafe nor partial constants."
+    match Bool.and(Check.State.isUnsafe(c), st.safety != Safety.Unsafe)
+        true -> Result.Err(bad("invalid declaration, it uses unsafe declaration '{Core.Names.render(h.name)}'"))
+        false -> match Bool.and(Check.State.isPartial(c), st.safety == Safety.Safe)
+            true -> Result.Err(bad("invalid declaration, safe declaration must not contain partial declaration '{Core.Names.render(h.name)}'"))
+            false -> constLevels(checkLevels(st, ls)?, st, h, ls)
+
+verify constSafety
+    constSafety(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), []) => Result.Err(Fail.Reject("invalid declaration, it uses unsafe declaration '[anonymous]'"))
+
+fn constLevels(u: Unit, st: St, h: Head, ls: List<Level>) -> Result<RE, Fail>
+    ? "The instantiated type once the levels passed."
+    Result.Ok(RE(e = Core.Subst.instLevelParams(h.ty, h.params, ls), st = st))
+
+verify constLevels
+    resultExpr(constLevels(Unit, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [])) => Core.Exprs.sort(Level.Zero)
+
+fn fvarId(e: Expr) -> Int
+    ? "The number of a free variable."
+    match e
+        Expr.FVar(id) -> id
+        _ -> -1
+
+verify fvarId
+    fvarId(Core.Exprs.fvar(4)) => 4
+
+fn domainOf(e: Expr) -> Expr
+    ? "Binder domain of a lambda or pi."
+    match e
+        Expr.Lam(_, _, d, _, _) -> d
+        Expr.Pi(_, _, d, _, _) -> d
+        _ -> e
+
+verify domainOf
+    domainOf(Core.Exprs.pi(Core.Names.anon(), Core.Exprs.bvar(9), Core.Exprs.bvar(0), Binder.Default)) => Core.Exprs.bvar(9)
+
+fn bodyOf(e: Expr) -> Expr
+    ? "Binder body of a lambda or pi."
+    match e
+        Expr.Lam(_, _, _, b, _) -> b
+        Expr.Pi(_, _, _, b, _) -> b
+        _ -> e
+
+verify bodyOf
+    bodyOf(Core.Exprs.pi(Core.Names.anon(), Core.Exprs.bvar(9), Core.Exprs.bvar(0), Binder.Default)) => Core.Exprs.bvar(0)
+
+fn sortLevel(e: Expr) -> Level
+    ? "The level of a sort."
+    match e
+        Expr.Sort(l) -> l
+        _ -> Level.Zero
+
+verify sortLevel
+    sortLevel(Core.Exprs.sort(Level.Succ(Level.Zero))) => Level.Succ(Level.Zero)
+
+fn lamLoop(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
+    ? "Opens nested lambdas with fresh variables, then infers the body and closes it as a pi."
+    match e
+        Expr.Lam(_, n, d, b, bi) -> lamStep(st, n, Core.Subst.instantiate(d, rev), b, bi, rev, ids, only)
+        _ -> lamEnd(st, e, rev, ids, only)
+
+verify lamLoop
+    resultExpr(lamLoop(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), [], [], false)) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default)
+
+fn lamStep(st: St, n: Name, d: Expr, b: Expr, bi: Binder, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
+    ? "Checks the domain is a type, then declares the variable."
+    st1 = domainChecked(st, d, only)?
+    loc = Check.State.names(st1, n, d, Option.None, bi)
+    lamLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), only)
+
+verify lamStep
+    lamStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default, [], [], false) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
+
+fn domainChecked(st: St, d: Expr, only: Bool) -> Result<St, Fail>
+    ? "In checking mode the domain must be a type."
+    match only
+        true -> Result.Ok(st)
+        false -> sortStateOf(check(st, d)?)
+
+verify domainChecked
+    domainChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), true) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+
+fn sortStateOf(t: RE) -> Result<St, Fail>
+    ? "Requires a sort and keeps only the state."
+    Result.Ok(ensureSort(t.st, t.e)?.st)
+
+verify sortStateOf
+    sortStateOf(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+
+fn lamEnd(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
+    ? "Infers the opened body and closes it over the variables."
+    r = infer(st, Core.Subst.instantiate(e, rev), only)?
+    Result.Ok(RE(e = Check.State.mkBinding(r.st, List.reverse(ids), cheapBeta(r.e), false, false), st = r.st))
+
+verify lamEnd
+    resultExpr(lamEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [], [], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
+
+fn piLoop(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, us: List<Level>, only: Bool) -> Result<RE, Fail>
+    ? "Opens nested pis collecting the domains' levels; the result is the imax of them all."
+    match e
+        Expr.Pi(_, n, d, b, bi) -> piStep(st, n, Core.Subst.instantiate(d, rev), b, bi, rev, ids, us, only)
+        _ -> piEnd(st, Core.Subst.instantiate(e, rev), us, only)
+
+verify piLoop
+    resultExpr(piLoop(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default), [], [], [], false)) => Core.Exprs.sort(Level.Succ(Level.Zero))
+
+fn piStep(st: St, n: Name, d: Expr, b: Expr, bi: Binder, rev: List<Expr>, ids: List<Int>, us: List<Level>, only: Bool) -> Result<RE, Fail>
+    ? "The domain's sort, then a fresh variable for it."
+    t = infer(st, d, only)?
+    s = ensureSort(t.st, t.e)?
+    loc = Check.State.names(s.st, n, d, Option.None, bi)
+    piLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), List.prepend(sortLevel(s.e), us), only)
+
+verify piStep
+    piStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default, [], [], [], true) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
+
+fn piEnd(st: St, e: Expr, us: List<Level>, only: Bool) -> Result<RE, Fail>
+    ? "imax of the domain levels and the codomain's."
+    t = infer(st, e, only)?
+    s = ensureSort(t.st, t.e)?
+    Result.Ok(RE(e = Core.Exprs.sort(imaxFold(us, sortLevel(s.e))), st = s.st))
+
+verify piEnd
+    resultExpr(piEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [Level.Zero], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
+
+fn imaxFold(us: List<Level>, r: Level) -> Level
+    ? "imax u_i r from the innermost domain out."
+    match us
+        [] -> r
+        [u, ..rest] -> imaxFold(rest, Core.Univ.mkImax(u, r))
+
+verify imaxFold
+    imaxFold([Level.Succ(Level.Zero)], Level.Zero) => Level.Zero
+
+fn inferApp(st: St, e: Expr, f: Expr, a: Expr, only: Bool) -> Result<RE, Fail>
+    ? "Checking mode checks one application; inference walks the whole spine."
+    match only
+        false -> appChecked(st, f, a)
+        true -> appSpine(st, e)
+
+verify inferApp
+    inferApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2), false) => Result.Err(Fail.Reject("function expected"))
+
+fn appChecked(st: St, f: Expr, a: Expr) -> Result<RE, Fail>
+    ? "The argument's type must equal the function's domain."
+    ft = check(st, f)?
+    p = ensurePi(ft.st, ft.e)?
+    at = check(p.st, a)?
+    ok = defEqMaybeEager(at.st, at.e, domainOf(p.e), isEagerReduce(a))?
+    match ok.b
+        true -> Result.Ok(RE(e = Core.Subst.instantiate1(bodyOf(p.e), a), st = ok.st))
+        false -> Result.Err(bad("application type mismatch"))
+
+verify appChecked
+    appChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero)) => Result.Err(Fail.Reject("function expected"))
+
+fn isEagerReduce(a: Expr) -> Bool
+    ? "An argument of the form eagerReduce _ _."
+    Bool.and(Core.Apps.isConst(Core.Apps.fnOf(a), Check.Lits.name1("eagerReduce")), Core.Apps.numArgs(a) == 2)
+
+verify isEagerReduce
+    isEagerReduce(Core.Exprs.bvar(0)) => false
+
+fn defEqMaybeEager(st: St, x: Expr, y: Expr, eager: Bool) -> Result<RB, Fail>
+    ? "Definitional equality, in eager mode when asked; the mode is restored after."
+    match eager
+        false -> isDefEq(st, x, y)
+        true -> restoreEager(isDefEq(St.update(st, eager = true), x, y)?, st.eager)
+
+verify defEqMaybeEager
+    resultBool(defEqMaybeEager(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(0), true)) => true
+
+fn restoreEager(r: RB, eager: Bool) -> Result<RB, Fail>
+    ? "Puts the eager flag back."
+    Result.Ok(RB(b = r.b, st = St.update(r.st, eager = eager)))
+
+verify restoreEager
+    resultBool(restoreEager(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), false)) => true
+
+fn appSpine(st: St, e: Expr) -> Result<RE, Fail>
+    ? "Infers f's type and peels one pi per argument, normalizing only when needed."
+    ft = infer(st, Core.Apps.fnOf(e), true)?
+    appWalk(ft.st, ft.e, Core.Apps.argsOf(e), [])
+
+verify appSpine
+    appSpine(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => Result.Err(Fail.Reject("function expected"))
+
+fn appWalk(st: St, ft: Expr, args: List<Expr>, pending: List<Expr>) -> Result<RE, Fail>
+    ? "pending holds the arguments not yet substituted, newest first."
+    match args
+        [] -> Result.Ok(RE(e = Core.Subst.instantiate(ft, pending), st = st))
+        [x, ..rest] -> match ft
+            Expr.Pi(_, _, _, b, _) -> appWalk(st, b, rest, List.prepend(x, pending))
+            _ -> appWalkWhnf(st, Core.Subst.instantiate(ft, pending), x, rest)
+
+verify appWalk
+    resultExpr(appWalk(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), [Core.Exprs.natLit(1)], [])) => Core.Exprs.natLit(1)
+
+fn appWalkWhnf(st: St, ft: Expr, x: Expr, rest: List<Expr>) -> Result<RE, Fail>
+    ? "The function type was not syntactically a pi: normalize it."
+    p = ensurePi(st, ft)?
+    appWalk(p.st, bodyOf(p.e), rest, [x])
+
+verify appWalkWhnf
+    appWalkWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), []) => Result.Err(Fail.Reject("function expected"))
+
+fn letLoop(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
+    ? "Opens nested lets as let variables, then infers the body."
+    match e
+        Expr.Let(_, n, t, v, b) -> letStep(st, n, Core.Subst.instantiate(t, rev), Core.Subst.instantiate(v, rev), b, rev, ids, only)
+        _ -> letEnd(st, e, rev, ids, only)
+
+verify letLoop
+    resultExpr(letLoop(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Succ(Level.Zero)), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0)), [], [], false)) => Core.Exprs.sort(Level.Succ(Level.Zero))
+
+fn letStep(st: St, n: Name, t: Expr, v: Expr, b: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
+    ? "Checks the let's type and value, then declares it."
+    st1 = letChecked(st, t, v, only)?
+    loc = Check.State.names(st1, n, t, Option.Some(v), Binder.Default)
+    letLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), only)
+
+verify letStep
+    letStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), [], [], false) => Result.Err(Fail.Reject("let value type mismatch"))
+
+fn letChecked(st: St, t: Expr, v: Expr, only: Bool) -> Result<St, Fail>
+    ? "The type is a type and the value has it."
+    match only
+        true -> Result.Ok(st)
+        false -> letValue(sortStateOf(check(st, t)?)?, t, v)
+
+verify letChecked
+    letChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(0), true) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+
+fn letValue(st: St, t: Expr, v: Expr) -> Result<St, Fail>
+    ? "The value's type must equal the declared type."
+    vt = check(st, v)?
+    eq = isDefEq(vt.st, vt.e, t)?
+    match eq.b
+        true -> Result.Ok(eq.st)
+        false -> Result.Err(bad("let value type mismatch"))
+
+verify letValue
+    letValue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero)) => Result.Err(Fail.Reject("let value type mismatch"))
+
+fn letEnd(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
+    ? "Infers the body and closes it with the lets it still uses."
+    r = infer(st, Core.Subst.instantiate(e, rev), only)?
+    Result.Ok(RE(e = Check.State.mkBinding(r.st, List.reverse(ids), cheapBeta(r.e), false, true), st = r.st))
+
+verify letEnd
+    resultExpr(letEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [], [], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
+
+fn cheapBeta(e: Expr) -> Expr
+    ? "Beta reduces a head lambda only when the result needs no substitution."
+    match Core.Apps.fnOf(e)
+        Expr.Lam -> cheapPeel(e, Core.Apps.fnOf(e), Core.Apps.argsOf(e), 0)
+        _ -> e
+
+verify cheapBeta
+    cheapBeta(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default), Core.Exprs.natLit(1))) => Core.Exprs.sort(Level.Zero)
+    cheapBeta(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.natLit(1))) => Core.Exprs.natLit(1)
+
+fn cheapPeel(e: Expr, f: Expr, args: List<Expr>, i: Int) -> Expr
+    ? "Skips as many lambdas as there are arguments."
+    match f
+        Expr.Lam(_, _, _, b, _) -> match i < List.len(args)
+            true -> cheapPeel(e, b, args, i + 1)
+            false -> cheapDone(e, f, args, i)
+        _ -> cheapDone(e, f, args, i)
+
+verify cheapPeel
+    cheapPeel(Core.Exprs.bvar(0), Core.Exprs.sort(Level.Zero), [], 0) => Core.Exprs.sort(Level.Zero)
+
+fn cheapDone(e: Expr, f: Expr, args: List<Expr>, i: Int) -> Expr
+    ? "A closed body, or a body that is one of the bound variables."
+    match Core.Exprs.looseRange(f) == 0
+        true -> Core.Apps.mkApps(f, List.drop(args, i))
+        false -> match f
+            Expr.BVar(j) -> Core.Apps.mkApps(nth(args, i - j - 1), List.drop(args, i))
+            _ -> e
+
+verify cheapDone
+    cheapDone(Core.Exprs.bvar(9), Core.Exprs.bvar(0), [Core.Exprs.natLit(5)], 1) => Core.Exprs.natLit(5)
+
+fn nth(xs: List<Expr>, k: Int) -> Expr
+    ? "The k-th element; callers keep k in range."
+    match List.drop(xs, k)
+        [x, .._] -> x
+        [] -> Core.Exprs.bvar(0)
+
+verify nth
+    nth([Core.Exprs.natLit(1)], 0) => Core.Exprs.natLit(1)
+
+fn ensureSort(st: St, e: Expr) -> Result<RE, Fail>
+    ? "e as a sort, normalizing if needed."
+    match e
+        Expr.Sort -> Result.Ok(RE(e = e, st = st))
+        _ -> sortAfterWhnf(whnf(st, e)?)
+
+verify ensureSort
+    ensureSort(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1)) => Result.Err(Fail.Reject("type expected"))
+
+fn sortAfterWhnf(w: RE) -> Result<RE, Fail>
+    ? "The normal form must be a sort."
+    match w.e
+        Expr.Sort -> Result.Ok(w)
+        _ -> Result.Err(bad("type expected"))
+
+verify sortAfterWhnf
+    sortAfterWhnf(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("type expected"))
+
+fn ensurePi(st: St, e: Expr) -> Result<RE, Fail>
+    ? "e as a pi, normalizing if needed."
+    match e
+        Expr.Pi -> Result.Ok(RE(e = e, st = st))
+        _ -> piAfterWhnf(whnf(st, e)?)
+
+verify ensurePi
+    ensurePi(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1)) => Result.Err(Fail.Reject("function expected"))
+
+fn piAfterWhnf(w: RE) -> Result<RE, Fail>
+    ? "The normal form must be a pi."
+    match w.e
+        Expr.Pi -> Result.Ok(w)
+        _ -> Result.Err(bad("function expected"))
+
+verify piAfterWhnf
+    piAfterWhnf(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("function expected"))
+
+fn isProp(st: St, e: Expr) -> Result<RB, Fail>
+    ? "Whether e is a proposition: its type is a sort whose level is zero up to normalization."
+    t = inferType(st, e)?
+    s = ensureSort(t.st, t.e)?
+    Result.Ok(RB(b = Core.Univ.normalizesToZero(sortLevel(s.e)), st = s.st))
+
+verify isProp
+    resultBool(isProp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero))) => false
+
+fn badProj() -> Fail
+    ? "The one error every malformed projection gives."
+    Fail.Reject("invalid projection")
+
+verify badProj
+    badProj() => Fail.Reject("invalid projection")
+
+fn inferProj(st: St, s: Name, idx: Int, x: Expr, only: Bool) -> Result<RE, Fail>
+    ? "x.idx where x's type is the structure s applied to its parameters."
+    t = infer(st, x, only)?
+    w = whnf(t.st, t.e)?
+    projFrom(w.st, s, idx, x, w.e, Core.Apps.fnOf(w.e), Core.Apps.argsOf(w.e))
+
+verify inferProj
+    inferProj(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), 0, Core.Exprs.natLit(1), true) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projFrom(st: St, s: Name, idx: Int, x: Expr, ty: Expr, head: Expr, args: List<Expr>) -> Result<RE, Fail>
+    ? "The type's head must be the projection's structure."
+    match head
+        Expr.Const(n, ls) -> match n == s
+            true -> projInduct(st, idx, x, ty, ls, args, Check.State.lookup(st, n))
+            false -> Result.Err(badProj())
+        _ -> Result.Err(badProj())
+
+verify projFrom
+    projFrom(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), 0, Core.Exprs.natLit(1), Core.Exprs.bvar(0), Core.Exprs.bvar(0), []) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projInduct(st: St, idx: Int, x: Expr, ty: Expr, ls: List<Level>, args: List<Expr>, c: Option<Const>) -> Result<RE, Fail>
+    ? "A structure: one constructor, fully applied to parameters and indices."
+    match c
+        Option.Some(Const.CInduct(iv)) -> match iv.ctors
+            [k] -> match List.len(args) == iv.numParams + iv.numIndices
+                true -> projCtor(st, idx, x, ty, ls, List.take(args, iv.numParams), iv.head.name, Check.State.lookup(st, k))
+                false -> Result.Err(badProj())
+            _ -> Result.Err(badProj())
+        _ -> Result.Err(badProj())
+
+verify projInduct
+    projInduct(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, Core.Exprs.natLit(1), Core.Exprs.bvar(0), [], [], Option.None) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projCtor(st: St, idx: Int, x: Expr, ty: Expr, ls: List<Level>, params: List<Expr>, sname: Name, c: Option<Const>) -> Result<RE, Fail>
+    ? "Walks the constructor type past the parameters and the earlier fields."
+    match c
+        Option.Some(Const.CCtor(k)) -> projWalk(st, idx, x, ty, sname, Core.Subst.instLevelParams(k.head.ty, k.head.params, ls), params)
+        _ -> Result.Err(badProj())
+
+verify projCtor
+    projCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, Core.Exprs.natLit(1), Core.Exprs.bvar(0), [], [], Core.Names.anon(), Option.None) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projWalk(st: St, idx: Int, x: Expr, ty: Expr, sname: Name, r: Expr, params: List<Expr>) -> Result<RE, Fail>
+    ? "Parameters, then fields, then the field's own type."
+    p = projParams(st, r, params)?
+    pp = isProp(p.st, ty)?
+    f = projFields(pp.st, p.e, sname, x, 0, idx, pp.b)?
+    w = whnf(f.st, f.e)?
+    match w.e
+        Expr.Pi(_, _, d, _, _) -> projResult(w.st, d, pp.b)
+        _ -> Result.Err(badProj())
+
+verify projWalk
+    projWalk(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, Core.Exprs.natLit(1), Core.Exprs.sort(Level.Zero), Core.Names.anon(), Core.Exprs.sort(Level.Zero), []) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projParams(st: St, r: Expr, params: List<Expr>) -> Result<RE, Fail>
+    ? "Instantiates the constructor's parameter binders."
+    match params
+        [] -> Result.Ok(RE(e = r, st = st))
+        [p, ..rest] -> projParam(whnf(st, r)?, p, rest)
+
+verify projParams
+    resultExpr(projParams(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [])) => Core.Exprs.bvar(0)
+
+fn projParam(w: RE, p: Expr, rest: List<Expr>) -> Result<RE, Fail>
+    ? "One parameter binder."
+    match w.e
+        Expr.Pi(_, _, _, b, _) -> projParams(w.st, Core.Subst.instantiate1(b, p), rest)
+        _ -> Result.Err(badProj())
+
+verify projParam
+    projParam(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(1), []) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projFields(st: St, r: Expr, sname: Name, x: Expr, i: Int, idx: Int, propType: Bool) -> Result<RE, Fail>
+    ? "Earlier fields are replaced by projections of x; out of a proof only proofs may be projected."
+    match i >= idx
+        true -> Result.Ok(RE(e = r, st = st))
+        false -> projField(whnf(st, r)?, sname, x, i, idx, propType)
+
+verify projFields
+    resultExpr(projFields(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Names.anon(), Core.Exprs.bvar(0), 0, 0, false)) => Core.Exprs.bvar(0)
+
+fn projField(w: RE, sname: Name, x: Expr, i: Int, idx: Int, propType: Bool) -> Result<RE, Fail>
+    ? "One earlier field."
+    match w.e
+        Expr.Pi(_, _, d, b, _) -> match Core.Exprs.looseRange(b) > 0
+            true -> projDependent(w.st, d, b, sname, x, i, idx, propType)
+            false -> projFields(w.st, b, sname, x, i + 1, idx, propType)
+        _ -> Result.Err(badProj())
+
+verify projField
+    projField(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Names.anon(), Core.Exprs.bvar(0), 0, 1, false) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projDependent(st: St, d: Expr, b: Expr, sname: Name, x: Expr, i: Int, idx: Int, propType: Bool) -> Result<RE, Fail>
+    ? "A field later fields depend on."
+    match propType
+        false -> projFields(st, Core.Subst.instantiate1(b, Core.Exprs.proj(sname, i, x)), sname, x, i + 1, idx, propType)
+        true -> projDependentProp(isProp(st, d)?, b, sname, x, i, idx)
+
+verify projDependent
+    resultExpr(projDependent(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Names.anon(), Core.Exprs.bvar(0), 0, 1, false)) => Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.bvar(0))
+
+fn projDependentProp(p: RB, b: Expr, sname: Name, x: Expr, i: Int, idx: Int) -> Result<RE, Fail>
+    ? "Out of a proof, a field later fields depend on must be a proof too."
+    match p.b
+        true -> projFields(p.st, Core.Subst.instantiate1(b, Core.Exprs.proj(sname, i, x)), sname, x, i + 1, idx, true)
+        false -> Result.Err(badProj())
+
+verify projDependentProp
+    projDependentProp(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Names.anon(), Core.Exprs.bvar(0), 0, 1) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projResult(st: St, d: Expr, propType: Bool) -> Result<RE, Fail>
+    ? "The field's type; out of a proof it must be a proposition."
+    match propType
+        false -> Result.Ok(RE(e = d, st = st))
+        true -> projResultProp(isProp(st, d)?, d)
+
+verify projResult
+    resultExpr(projResult(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), false)) => Core.Exprs.bvar(0)
+
+fn projResultProp(p: RB, d: Expr) -> Result<RE, Fail>
+    ? "Only a proposition may be projected out of a proof."
+    match p.b
+        true -> Result.Ok(RE(e = d, st = p.st))
+        false -> Result.Err(badProj())
+
+verify projResultProp
+    projResultProp(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0)) => Result.Err(Fail.Reject("invalid projection"))
+
+fn whnfCore(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "Beta, zeta, iota, quotient and projection reduction at the head, without unfolding definitions."
+    match e
+        Expr.FVar(id) -> letVar(st, e, Check.State.localValue(st, id), cheapRec, cheapProj)
+        Expr.App -> match rigidHead(st, Core.Apps.fnOf(e))
+            true -> Result.Ok(RE(e = e, st = st))
+            false -> coreCached(st, e, cheapRec, cheapProj)
+        Expr.Let -> coreCached(st, e, cheapRec, cheapProj)
+        Expr.Proj -> coreCached(st, e, cheapRec, cheapProj)
+        _ -> Result.Ok(RE(e = e, st = st))
+
+verify whnfCore
+    resultExpr(whnfCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.natLit(3)), false, false)) => Core.Exprs.natLit(3)
+    resultExpr(whnfCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), Core.Exprs.bvar(0)), false, false)) => Core.Exprs.natLit(1)
+
+fn rigidHead(st: St, f: Expr) -> Bool
+    ? "A head under which whnfCore can do nothing: a constant that is neither a recursor nor part of the quotient package, a free variable without a let value, a sort, a pi or a literal. An application with such a head is its own whnfCore, so it skips the cache."
+    match f
+        Expr.Const(n, _) -> match Check.State.lookup(st, n)
+            Option.Some(Const.CRec) -> false
+            Option.Some(Const.CQuot) -> false
+            _ -> true
+        Expr.FVar(id) -> Check.State.localValue(st, id) == Option.None
+        Expr.Sort -> true
+        Expr.Pi -> true
+        Expr.NatLit -> true
+        Expr.StrLit -> true
+        _ -> false
+
+verify rigidHead
+    rigidHead(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [])) => true
+    rigidHead(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)) => true
+    rigidHead(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)) => false
+    rigidHead(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(0))) => false
+
+fn letVar(st: St, e: Expr, v: Option<Expr>, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A let variable reduces to its value."
+    match v
+        Option.Some(x) -> whnfCore(st, x, cheapRec, cheapProj)
+        Option.None -> Result.Ok(RE(e = e, st = st))
+
+verify letVar
+    resultExpr(letVar(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Option.None, false, false)) => Core.Exprs.fvar(0)
+
+fn coreCached(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "Looks in the cache; only full (non-cheap) results are stored."
+    match Check.State.cacheGet(st.coreCache, e)
+        Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+        Option.None -> coreStore(coreWork(st, e, cheapRec, cheapProj)?, e, Bool.or(cheapRec, cheapProj))
+
+verify coreCached
+    resultExpr(coreCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.bvar(0)), false, true)) => Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.bvar(0))
+
+fn coreStore(r: RE, e: Expr, cheap: Bool) -> Result<RE, Fail>
+    ? "Caches a full whnfCore result."
+    match cheap
+        true -> Result.Ok(r)
+        false -> Result.Ok(RE(e = r.e, st = St.update(r.st, coreCache = Check.State.cachePut(r.st.coreCache, e, r.e))))
+
+verify coreStore
+    Core.PMap.size(coreStore(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(1), false)?.st.coreCache) => 1
+
+fn coreWork(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "One whnfCore step by shape."
+    match e
+        Expr.App -> coreApp(st, e, Core.Apps.fnOf(e), Core.Apps.argsOf(e), cheapRec, cheapProj)
+        Expr.Let(_, _, _, v, b) -> whnfCore(st, Core.Subst.instantiate1(b, v), cheapRec, cheapProj)
+        Expr.Proj(_, s, i, x) -> coreProj(st, e, s, i, x, cheapRec, cheapProj)
+        _ -> Result.Ok(RE(e = e, st = st))
+
+verify coreWork
+    resultExpr(coreWork(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), false, false)) => Core.Exprs.bvar(0)
+
+fn coreApp(st: St, e: Expr, f0: Expr, args: List<Expr>, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "Reduces the head; a lambda head is beta reduced, an unchanged head tries the recursor rules."
+    f = whnfCore(st, f0, cheapRec, cheapProj)?
+    match f.e
+        Expr.Lam -> whnfCore(f.st, beta(f.e, args, []), cheapRec, cheapProj)
+        _ -> match f.e == f0
+            true -> coreRec(f.st, e, cheapRec, cheapProj)
+            false -> whnfCore(f.st, Core.Apps.mkApps(f.e, args), cheapRec, cheapProj)
+
+verify coreApp
+    resultExpr(coreApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.fvar(0), [Core.Exprs.natLit(1)], false, false)) => Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1))
+
+fn beta(f: Expr, args: List<Expr>, consumed: List<Expr>) -> Expr
+    ? "Consumes one argument per lambda; consumed is newest first."
+    match f
+        Expr.Lam(_, _, _, b, _) -> match args
+            [a, ..rest] -> beta(b, rest, List.prepend(a, consumed))
+            [] -> Core.Subst.instantiate(f, consumed)
+        _ -> Core.Apps.mkApps(Core.Subst.instantiate(f, consumed), args)
+
+verify beta
+    beta(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(1), Binder.Default), Binder.Default), [Core.Exprs.natLit(1), Core.Exprs.natLit(2), Core.Exprs.natLit(3)], []) => Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(3))
+
+fn coreRec(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "Recursor and quotient rules; reduces on if one fires."
+    r = reduceRecursor(st, e, cheapRec, cheapProj)?
+    match r.o
+        Option.Some(x) -> whnfCore(r.st, x, cheapRec, cheapProj)
+        Option.None -> Result.Ok(RE(e = e, st = r.st))
+
+verify coreRec
+    resultExpr(coreRec(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), false, false)) => Core.Exprs.fvar(0)
+
+fn coreProj(st: St, e: Expr, s: Name, i: Int, x: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A projection of a constructor application reduces to the field."
+    r = reduceProj(st, s, i, x, cheapRec, cheapProj)?
+    match r.o
+        Option.Some(m) -> whnfCore(r.st, m, cheapRec, cheapProj)
+        Option.None -> Result.Ok(RE(e = e, st = r.st))
+
+verify coreProj
+    resultExpr(coreProj(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Names.anon(), 0, Core.Exprs.fvar(0), false, true)) => Core.Exprs.bvar(0)
+
+fn reduceProj(st: St, s: Name, i: Int, x: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RO, Fail>
+    ? "Normalizes the structure (cheaply when asked) and picks the field."
+    c = majorOfProj(st, x, cheapRec, cheapProj)?
+    Result.Ok(RO(o = projCore(c.st, c.e, s, i), st = c.st))
+
+verify reduceProj
+    resultOpt(reduceProj(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), 0, Core.Exprs.fvar(0), false, true)) => Option.None
+
+fn majorOfProj(st: St, x: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "whnfCore when cheap, whnf otherwise; a string literal becomes its constructor form."
+    c = whnfMaybe(st, x, cheapRec, cheapProj, cheapProj)?
+    match c.e
+        Expr.StrLit(s) -> whnf(c.st, Check.Lits.strToCtor(s))
+        _ -> Result.Ok(c)
+
+verify majorOfProj
+    resultExpr(majorOfProj(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), false, true)) => Core.Exprs.fvar(0)
+
+fn whnfMaybe(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool, cheap: Bool) -> Result<RE, Fail>
+    ? "whnfCore with the flags when cheap, else full whnf."
+    match cheap
+        true -> whnfCoreM(st, e, cheapRec, cheapProj)
+        false -> whnf(st, e)
+
+verify whnfMaybe
+    resultExpr(whnfMaybe(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), false, false, true)) => Core.Exprs.fvar(0)
+
+fn projCore(st: St, c: Expr, s: Name, i: Int) -> Option<Expr>
+    ? "Field i of a constructor application of structure s."
+    match Core.Apps.fnOf(c)
+        Expr.Const(n, _) -> projOfCtor(Check.State.lookup(st, n), Core.Apps.argsOf(c), s, i)
+        _ -> Option.None
+
+verify projCore
+    projCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Names.anon(), 0) => Option.None
+
+fn projOfCtor(c: Option<Const>, args: List<Expr>, s: Name, i: Int) -> Option<Expr>
+    ? "The argument after the parameters."
+    match c
+        Option.Some(Const.CCtor(k)) -> match Bool.and(k.induct == s, k.numParams + i < List.len(args))
+            true -> Option.Some(nth(args, k.numParams + i))
+            false -> Option.None
+        _ -> Option.None
+
+verify projOfCtor
+    projOfCtor(Option.None, [], Core.Names.anon(), 0) => Option.None
+
+fn reduceRecursor(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RO, Fail>
+    ? "Quotient rules once the quotient is declared, then inductive recursor rules."
+    q = quotReduce(st, e)?
+    match q.o
+        Option.Some -> Result.Ok(q)
+        Option.None -> inductiveReduce(q.st, e, cheapRec, cheapProj)
+
+verify reduceRecursor
+    resultOpt(reduceRecursor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), false, false)) => Option.None
+
+fn quotReady(st: St) -> Bool
+    ? "The quotient package has been added."
+    match Check.State.lookup(st, Check.Lits.name1("Quot"))
+        Option.Some(Const.CQuot) -> true
+        _ -> false
+
+verify quotReady
+    quotReady(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => false
+
+fn quotReduce(st: St, e: Expr) -> Result<RO, Fail>
+    ? "Quot.lift f h (Quot.mk r a) reduces to f a, and Quot.ind likewise."
+    match quotReady(st)
+        false -> Result.Ok(RO(o = Option.None, st = st))
+        true -> match Core.Apps.fnOf(e)
+            Expr.Const(Name.Str(Name.Str(Name.Anon, "Quot", _), "lift", _), _) -> quotApply(st, Core.Apps.argsOf(e), 5)
+            Expr.Const(Name.Str(Name.Str(Name.Anon, "Quot", _), "ind", _), _) -> quotApply(st, Core.Apps.argsOf(e), 4)
+            _ -> Result.Ok(RO(o = Option.None, st = st))
+
+verify quotReduce
+    resultOpt(quotReduce(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0))) => Option.None
+
+fn quotApply(st: St, args: List<Expr>, mkPos: Int) -> Result<RO, Fail>
+    ? "Needs the Quot.mk argument at mkPos; the function is argument 3."
+    match List.len(args) > mkPos
+        false -> Result.Ok(RO(o = Option.None, st = st))
+        true -> quotMk(whnf(st, nth(args, mkPos))?, args, mkPos)
+
+verify quotApply
+    resultOpt(quotApply(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], 5)) => Option.None
+
+fn quotMk(mk: RE, args: List<Expr>, mkPos: Int) -> Result<RO, Fail>
+    ? "Fires only on Quot.mk with its three arguments."
+    match Bool.and(Core.Apps.isConst(Core.Apps.fnOf(mk.e), Check.Lits.name2("Quot", "mk")), Core.Apps.numArgs(mk.e) == 3)
+        true -> Result.Ok(RO(o = Option.Some(Core.Apps.mkApps(Core.Exprs.app(nth(args, 3), lastArg(mk.e)), List.drop(args, mkPos + 1))), st = mk.st))
+        false -> Result.Ok(RO(o = Option.None, st = mk.st))
+
+verify quotMk
+    resultOpt(quotMk(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], 5)) => Option.None
+
+fn lastArg(e: Expr) -> Expr
+    ? "The argument of an application node."
+    match e
+        Expr.App(_, _, a) -> a
+        _ -> e
+
+verify lastArg
+    lastArg(Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
+
+fn inductiveReduce(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RO, Fail>
+    ? "Iota: a recursor applied to a constructor reduces by that constructor's rule."
+    match Core.Apps.fnOf(e)
+        Expr.Const(n, ls) -> recOf(st, e, ls, Check.State.lookup(st, n), cheapRec, cheapProj)
+        _ -> Result.Ok(RO(o = Option.None, st = st))
+
+verify inductiveReduce
+    resultOpt(inductiveReduce(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), false, false)) => Option.None
+
+fn recOf(st: St, e: Expr, ls: List<Level>, c: Option<Const>, cheapRec: Bool, cheapProj: Bool) -> Result<RO, Fail>
+    ? "Only recursors with their major premise present reduce."
+    match c
+        Option.Some(Const.CRec(rv)) -> recMajor(st, e, ls, rv, Core.Apps.argsOf(e), rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices, cheapRec, cheapProj)
+        _ -> Result.Ok(RO(o = Option.None, st = st))
+
+verify recOf
+    resultOpt(recOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), [], Option.None, false, false)) => Option.None
+
+fn recMajor(st: St, e: Expr, ls: List<Level>, rv: Rec, args: List<Expr>, majorIdx: Int, cheapRec: Bool, cheapProj: Bool) -> Result<RO, Fail>
+    ? "Brings the major premise to constructor form: K-like types, literals, structures."
+    match majorIdx >= List.len(args)
+        true -> Result.Ok(RO(o = Option.None, st = st))
+        false -> recFire(majorToCtor(st, rv, nth(args, majorIdx), cheapRec, cheapProj)?, ls, rv, args, majorIdx)
+
+verify recMajor
+    resultOpt(recMajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, false, false)) => Option.None
+
+fn majorToCtor(st: St, rv: Rec, major: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The reference order: K first, then whnf, then literal or structure expansion."
+    m1 = kMajor(st, rv, major)?
+    m2 = whnfMaybe(m1.st, m1.e, cheapRec, cheapProj, cheapRec)?
+    match m2.e
+        Expr.NatLit(n) -> Result.Ok(RE(e = Check.Lits.natLitToCtor(n), st = m2.st))
+        Expr.StrLit(s) -> whnf(m2.st, Check.Lits.strToCtor(s))
+        _ -> toCtorWhenStructure(m2.st, majorInduct(rv), m2.e)
+
+verify majorToCtor
+    resultExpr(majorToCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Exprs.natLit(0), false, false)) => Core.Exprs.cnst(Check.Lits.name2("Nat", "zero"), [])
+
+fn kMajor(st: St, rv: Rec, major: Expr) -> Result<RE, Fail>
+    ? "For a K-like recursor the major premise may be replaced by the nullary constructor."
+    match rv.k
+        false -> Result.Ok(RE(e = major, st = st))
+        true -> toCtorWhenK(st, rv, major)
+
+verify kMajor
+    resultExpr(kMajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Exprs.fvar(3))) => Core.Exprs.fvar(3)
+
+fn majorInduct(rv: Rec) -> Name
+    ? "The inductive type of the major premise, read off the recursor's type."
+    majorAfter(rv.head.ty, rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices)
+
+verify majorInduct
+    majorInduct(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("Nat"), []), Core.Exprs.bvar(0), Binder.Default)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false)) => Check.Lits.name1("Nat")
+
+fn majorAfter(t: Expr, n: Int) -> Name
+    ? "Skips n binders and names the head of the next domain."
+    match t
+        Expr.Pi(_, _, d, b, _) -> match n == 0
+            true -> Option.withDefault(Core.Apps.constName(Core.Apps.fnOf(d)), Core.Names.anon())
+            false -> majorAfter(b, n - 1)
+        _ -> Core.Names.anon()
+
+verify majorAfter
+    majorAfter(Core.Exprs.bvar(0), 0) => Core.Names.anon()
+
+fn toCtorWhenK(st: St, rv: Rec, e: Expr) -> Result<RE, Fail>
+    ? "e : I params indices with I K-like becomes I's constructor when the types agree."
+    t = inferType(st, e)?
+    w = whnf(t.st, t.e)?
+    match Core.Apps.isConst(Core.Apps.fnOf(w.e), majorInduct(rv))
+        false -> Result.Ok(RE(e = e, st = w.st))
+        true -> kCandidate(w.st, w.e, e, nullaryCtor(w.st, w.e, rv.numParams))
+
+verify toCtorWhenK
+    resultExpr(toCtorWhenK(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = true, isUnsafe = false), Core.Exprs.sort(Level.Zero))) => Core.Exprs.sort(Level.Zero)
+
+fn kCandidate(st: St, appType: Expr, e: Expr, cand: Option<Expr>) -> Result<RE, Fail>
+    ? "Uses the constructor only when its type equals e's."
+    match cand
+        Option.None -> Result.Ok(RE(e = e, st = st))
+        Option.Some(c) -> kCheck(st, appType, e, c, inferType(st, c)?)
+
+verify kCandidate
+    resultExpr(kCandidate(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.fvar(1), Option.None)) => Core.Exprs.fvar(1)
+
+fn kCheck(st: St, appType: Expr, e: Expr, c: Expr, ct: RE) -> Result<RE, Fail>
+    ? "The equality test of toCtorWhenK."
+    eq = isDefEq(ct.st, appType, ct.e)?
+    match eq.b
+        true -> Result.Ok(RE(e = c, st = eq.st))
+        false -> Result.Ok(RE(e = e, st = eq.st))
+
+verify kCheck
+    resultExpr(kCheck(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.fvar(1), Core.Exprs.fvar(2), RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))) => Core.Exprs.fvar(2)
+
+fn firstCtor(st: St, n: Name) -> Option<Name>
+    ? "The first constructor of an inductive type."
+    match Check.State.lookup(st, n)
+        Option.Some(Const.CInduct(iv)) -> match iv.ctors
+            [k, .._] -> Option.Some(k)
+            [] -> Option.None
+        _ -> Option.None
+
+verify firstCtor
+    firstCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon()) => Option.None
+
+fn nullaryCtor(st: St, ty: Expr, nparams: Int) -> Option<Expr>
+    ? "The type's first constructor applied to its parameters."
+    match Core.Apps.fnOf(ty)
+        Expr.Const(n, ls) -> nullaryOf(firstCtor(st, n), ls, List.take(Core.Apps.argsOf(ty), nparams))
+        _ -> Option.None
+
+verify nullaryCtor
+    nullaryCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), 0) => Option.None
+
+fn nullaryOf(k: Option<Name>, ls: List<Level>, params: List<Expr>) -> Option<Expr>
+    ? "Builds the application."
+    match k
+        Option.Some(c) -> Option.Some(Core.Apps.mkApps(Core.Exprs.cnst(c, ls), params))
+        Option.None -> Option.None
+
+verify nullaryOf
+    nullaryOf(Option.None, [], []) => Option.None
+
+fn isNonRecStructure(st: St, n: Name) -> Bool
+    ? "One constructor, no indices, not recursive."
+    match Check.State.lookup(st, n)
+        Option.Some(Const.CInduct(iv)) -> Bool.and(List.len(iv.ctors) == 1, Bool.and(iv.numIndices == 0, Bool.not(iv.isRec)))
+        _ -> false
+
+verify isNonRecStructure
+    isNonRecStructure(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon()) => false
+
+fn isCtorApp(st: St, e: Expr) -> Bool
+    ? "Headed by a constructor."
+    match Core.Apps.fnOf(e)
+        Expr.Const(n, _) -> match Check.State.lookup(st, n)
+            Option.Some(Const.CCtor) -> true
+            _ -> false
+        _ -> false
+
+verify isCtorApp
+    isCtorApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)) => false
+
+fn toCtorWhenStructure(st: St, induct: Name, e: Expr) -> Result<RE, Fail>
+    ? "A value of a non-recursive structure becomes mk e.1 ... e.n (not for proofs)."
+    match Bool.and(isNonRecStructure(st, induct), Bool.not(isCtorApp(st, e)))
+        false -> Result.Ok(RE(e = e, st = st))
+        true -> structTyped(whnfOf(inferType(st, e)?)?, induct, e)
+
+verify toCtorWhenStructure
+    resultExpr(toCtorWhenStructure(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+
+fn whnfOf(r: RE) -> Result<RE, Fail>
+    ? "whnf of an inferred type."
+    whnf(r.st, r.e)
+
+verify whnfOf
+    resultExpr(whnfOf(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))) => Core.Exprs.sort(Level.Zero)
+
+fn structTyped(w: RE, induct: Name, e: Expr) -> Result<RE, Fail>
+    ? "Only when the type really is the structure and not a proposition."
+    match Core.Apps.isConst(Core.Apps.fnOf(w.e), induct)
+        false -> Result.Ok(RE(e = e, st = w.st))
+        true -> structExpand(isProp(w.st, w.e)?, w.e, e)
+
+verify structTyped
+    resultExpr(structTyped(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Names.anon(), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+
+fn structExpand(p: RB, ty: Expr, e: Expr) -> Result<RE, Fail>
+    ? "Eta expands unless e is a proof."
+    match p.b
+        true -> Result.Ok(RE(e = e, st = p.st))
+        false -> Result.Ok(RE(e = expandEtaStruct(p.st, ty, e), st = p.st))
+
+verify structExpand
+    resultExpr(structExpand(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+
+fn expandEtaStruct(st: St, ty: Expr, e: Expr) -> Expr
+    ? "mk params e.0 ... e.(n-1)."
+    match Core.Apps.fnOf(ty)
+        Expr.Const(n, ls) -> etaWith(st, n, ls, Core.Apps.argsOf(ty), e, firstCtor(st, n))
+        _ -> e
+
+verify expandEtaStruct
+    expandEtaStruct(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(0)) => Core.Exprs.fvar(0)
+
+fn etaWith(st: St, n: Name, ls: List<Level>, args: List<Expr>, e: Expr, k: Option<Name>) -> Expr
+    ? "Needs the constructor's parameter and field counts."
+    match k
+        Option.Some(c) -> match Check.State.lookup(st, c)
+            Option.Some(Const.CCtor(kv)) -> projApps(Core.Apps.mkApps(Core.Exprs.cnst(c, ls), List.take(args, kv.numParams)), n, e, 0, kv.numFields)
+            _ -> e
+        Option.None -> e
+
+verify etaWith
+    etaWith(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), [], [], Core.Exprs.fvar(0), Option.None) => Core.Exprs.fvar(0)
+
+fn projApps(acc: Expr, n: Name, e: Expr, i: Int, count: Int) -> Expr
+    ? "Applies e.i for i below count."
+    match i >= count
+        true -> acc
+        false -> projApps(Core.Exprs.app(acc, Core.Exprs.proj(n, i, e)), n, e, i + 1, count)
+
+verify projApps
+    projApps(Core.Exprs.fvar(9), Core.Names.anon(), Core.Exprs.fvar(0), 0, 1) => Core.Exprs.app(Core.Exprs.fvar(9), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(0)))
+
+fn recFire(m: RE, ls: List<Level>, rv: Rec, args: List<Expr>, majorIdx: Int) -> Result<RO, Fail>
+    ? "Picks the rule of the major premise's constructor and builds its right-hand side."
+    match ruleFor(rv.rules, Core.Apps.fnOf(m.e))
+        Option.None -> Result.Ok(RO(o = Option.None, st = m.st))
+        Option.Some(rule) -> Result.Ok(ruleRhs(m.st, rule, ls, rv, args, majorIdx, Core.Apps.argsOf(m.e)))
+
+verify recFire
+    resultOpt(recFire(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0)) => Option.None
+
+fn ruleFor(rules: List<RecRule>, head: Expr) -> Option<RecRule>
+    ? "The rule for the constructor at the head."
+    match rules
+        [] -> Option.None
+        [r, ..rest] -> match Core.Apps.isConst(head, r.ctor)
+            true -> Option.Some(r)
+            false -> ruleFor(rest, head)
+
+verify ruleFor
+    ruleFor([], Core.Exprs.fvar(0)) => Option.None
+
+fn ruleRhs(st: St, rule: RecRule, ls: List<Level>, rv: Rec, args: List<Expr>, majorIdx: Int, majorArgs: List<Expr>) -> RO
+    ? "rhs params motives minors fields extra-arguments."
+    match Bool.or(rule.nfields > List.len(majorArgs), List.len(ls) != List.len(rv.head.params))
+        true -> RO(o = Option.None, st = st)
+        false -> ruleApplied(ruleAt(st, rule, rv, ls), rule, rv, args, majorIdx, majorArgs)
+
+verify ruleRhs
+    ruleRhs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, []).o => Option.None
+
+fn ruleApplied(r: RE, rule: RecRule, rv: Rec, args: List<Expr>, majorIdx: Int, majorArgs: List<Expr>) -> RO
+    ? "The instantiated right-hand side applied to the recursor's arguments and the constructor's fields."
+    RO(o = Option.Some(Core.Apps.mkApps(Core.Apps.mkApps(Core.Apps.mkApps(r.e, List.take(args, rv.numParams + rv.numMotives + rv.numMinors)), List.drop(majorArgs, List.len(majorArgs) - rule.nfields)), List.drop(args, majorIdx + 1))), st = r.st)
+
+verify ruleApplied
+    ruleApplied(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, [Core.Exprs.natLit(3)]).o => Option.Some(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(3)))
+
+fn ruleAt(st: St, rule: RecRule, rv: Rec, ls: List<Level>) -> RE
+    ? "The rule's right-hand side at the recursor's levels. Like an unfolded value, it is remembered for the rest of the declaration, since instantiating the levels walks all of it each time."
+    match ls
+        [] -> RE(e = rule.rhs, st = st)
+        _ -> ruleCached(st, rule, rv, ls, Core.Exprs.app(Core.Exprs.cnst(rv.head.name, ls), Core.Exprs.cnst(rule.ctor, [])))
+
+verify ruleAt
+    ruleAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), []).e => Core.Exprs.natLit(1)
+
+fn ruleCached(st: St, rule: RecRule, rv: Rec, ls: List<Level>, key: Expr) -> RE
+    ? "Shares the unfolding cache: its other keys are constants alone, and this key is the recursor at its levels applied to the rule's constructor."
+    match Check.State.cacheGet(st.unfoldCache, key)
+        Option.Some(v) -> RE(e = v, st = st)
+        Option.None -> ruleStore(st, key, Core.Subst.instLevelParams(rule.rhs, rv.head.params, ls))
+
+verify ruleCached
+    Core.PMap.size(ruleCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [Level.Zero], Core.Exprs.natLit(9)).st.unfoldCache) => 1
+
+fn ruleStore(st: St, key: Expr, v: Expr) -> RE
+    ? "Remembers an instantiated right-hand side."
+    RE(e = v, st = St.update(st, unfoldCache = Check.State.cachePut(st.unfoldCache, key, v)))
+
+verify ruleStore
+    ruleStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(9), Core.Exprs.natLit(1)).e => Core.Exprs.natLit(1)
+
+fn whnf(st: St, e: Expr) -> Result<RE, Fail>
+    ? "Weak head normal form: whnfCore, Nat literal arithmetic and definition unfolding, until none applies."
+    match e
+        Expr.BVar -> Result.Ok(RE(e = e, st = st))
+        Expr.Sort -> Result.Ok(RE(e = e, st = st))
+        Expr.Pi -> Result.Ok(RE(e = e, st = st))
+        Expr.NatLit -> Result.Ok(RE(e = e, st = st))
+        Expr.StrLit -> Result.Ok(RE(e = e, st = st))
+        Expr.FVar(id) -> match Check.State.localValue(st, id)
+            Option.None -> Result.Ok(RE(e = e, st = st))
+            Option.Some -> whnfCached(st, e)
+        _ -> whnfCached(st, e)
+
+verify whnf
+    resultExpr(whnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)))) => Core.Exprs.natLit(5)
+
+fn whnfCached(st: St, e: Expr) -> Result<RE, Fail>
+    ? "Uses or fills the whnf cache."
+    match Check.State.cacheGet(st.whnfCache, e)
+        Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+        Option.None -> whnfLoop(st, e, e)
+
+verify whnfCached
+    resultExpr(whnfCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+
+fn whnfLoop(st: St, orig: Expr, t: Expr) -> Result<RE, Fail>
+    ? "The reduction machine with definitions unfolded: whnfCore's steps, then Nat arithmetic on literals, then unfolding the head, in that order, until none applies; the result is stored for orig. An application whose head nothing can reduce is its own whnf."
+    match t
+        Expr.App -> match deltaRigid(st, Core.Apps.fnOf(t))
+            true -> Result.Ok(whnfStore(st, orig, t))
+            false -> whnfRun(st, orig, t)
+        _ -> whnfRun(st, orig, t)
+
+fn whnfRun(st: St, orig: Expr, t: Expr) -> Result<RE, Fail>
+    ? "Runs the machine with unfolding and stores its result."
+    r = lcore(st, t, [], [], MS(next = 0, forced = {}), true, false, false)?
+    Result.Ok(whnfStore(r.st, orig, r.e))
+
+verify whnfRun
+    resultExpr(whnfRun(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "mul"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)))) => Core.Exprs.natLit(6)
+
+fn deltaRigid(st: St, f: Expr) -> Bool
+    ? "A head under which whnf can do nothing: a constructor other than Nat.succ, an inductive type, an axiom, an opaque constant, a free variable without a let value, a sort, a pi or a literal."
+    match f
+        Expr.Const(n, _) -> match Core.Apps.isConst(f, Check.Lits.name2("Nat", "succ"))
+            true -> false
+            false -> match Check.State.lookup(st, n)
+                Option.Some(Const.CInduct) -> true
+                Option.Some(Const.CCtor) -> true
+                Option.Some(Const.CAxiom) -> true
+                Option.Some(Const.COpaque) -> true
+                _ -> false
+        Expr.FVar(id) -> Check.State.localValue(st, id) == Option.None
+        Expr.Sort -> true
+        Expr.Pi -> true
+        Expr.NatLit -> true
+        Expr.StrLit -> true
+        _ -> false
+
+verify deltaRigid
+    deltaRigid(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)) => true
+    deltaRigid(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), [])) => false
+
+verify whnfLoop
+    resultExpr(whnfLoop(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+
+fn mcore(st: St, t: Expr, env: List<Expr>, stack: List<Expr>, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "whnfCore as a machine: the head term, the values of its loose bound variables (index 0 first), and the arguments waiting for it (first argument first). The machine keeps them as closures, built only when needed; see lcore."
+    lcore(st, t, closedAll(env, []), closedAll(stack, []), MS(next = 0, forced = {}), false, cheapRec, cheapProj)
+
+type Clo
+    Clo(Int, Expr, List<Clo>)
+
+record MS
+    next: Int
+    forced: Map<Int, Expr>
+
+record MX
+    e: Expr
+    ms: MS
+
+record MXs
+    es: List<Expr>
+    ms: MS
+
+fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The machine on closures. An argument or a let value is a term with the environment it was met in, numbered so that it is built at most once; beta and let push such a closure, and a bound variable in head position goes on as its closure. At a constant: a recursor applied to a constructor takes its rule's right-hand side with the other arguments still closures; then, when delta is on, Nat arithmetic on literals and unfolding a definition, again with the arguments as they are. Terms are built only when the head is stuck, for the major premise of a recursor, and for the arguments of quotient rules and Nat arithmetic."
+    match t
+        Expr.App(_, f, a) -> lcore(st, f, env, List.prepend(closure(a, env, ms.next), stack), MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
+        Expr.Lam(_, _, _, body, _) -> match stack
+            [c, ..rest] -> lcore(st, body, List.prepend(c, env), rest, ms, delta, cheapRec, cheapProj)
+            [] -> Result.Ok(RE(e = matTerm(t, env, ms).e, st = st))
+        Expr.BVar(i) -> lclo(st, nthClo(env, i), stack, ms, delta, cheapRec, cheapProj)
+        Expr.Let(_, _, _, v, body) -> lcore(st, body, List.prepend(closure(v, env, ms.next), env), stack, MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
+        Expr.FVar(id) -> lvar(st, t, Check.State.localValue(st, id), stack, ms, delta, cheapRec, cheapProj)
+        Expr.Const(n, ls) -> lconst(st, t, ls, Check.State.lookup(st, n), stack, ms, delta, cheapRec, cheapProj)
+        Expr.Proj(_, s, i, x) -> lproject(st, s, i, matTerm(x, env, ms), stack, delta, cheapRec, cheapProj)
+        _ -> Result.Ok(RE(e = lstuck(matTerm(t, env, ms), stack), st = st))
+
+verify lcore
+    resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])], [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.natLit(1)
+    resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), [], [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.natLit(5)
+
+fn lclo(st: St, c: Clo, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A closure in head position: its term, in its own environment."
+    match c
+        Clo.Clo(_, e, cenv) -> lcore(st, e, cenv, stack, ms, delta, cheapRec, cheapProj)
+
+verify lclo
+    resultExpr(lclo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Clo.Clo(-1, Core.Exprs.natLit(2), []), [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.natLit(2)
+
+fn lvar(st: St, t: Expr, v: Option<Expr>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A let-bound free variable goes on as its value; any other is stuck."
+    match v
+        Option.Some(x) -> lcore(st, x, [], stack, ms, delta, cheapRec, cheapProj)
+        Option.None -> Result.Ok(RE(e = lstuck(MX(e = t, ms = ms), stack), st = st))
+
+verify lvar
+    resultExpr(lvar(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Option.None, [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.fvar(0)
+
+fn lconst(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A constant head: a recursor's rule, a quotient rule, or, with delta, Nat arithmetic and unfolding."
+    match c
+        Option.Some(Const.CRec(rv)) -> lrec(st, f, ls, rv, stack, ms, delta, cheapRec, cheapProj)
+        Option.Some(Const.CQuot) -> lquot(st, f, matStack(stack, ms, []), delta, cheapRec, cheapProj)
+        _ -> lnat(st, f, stack, ms, delta, cheapRec, cheapProj)
+
+verify lconst
+    resultExpr(lconst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+
+fn lrec(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A recursor reduces only with its major premise present; the major premise is built and brought to constructor form, the other arguments stay closures."
+    majorIdx = rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices
+    match majorIdx >= List.len(stack)
+        true -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
+        false -> lmajor(st, f, ls, rv, stack, majorIdx, matClo(nthClo(stack, majorIdx), ms), delta, cheapRec, cheapProj)
+
+verify lrec
+    resultExpr(lrec(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
+
+fn lmajor(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, major: MX, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The major premise in constructor form, as the reference reduces it."
+    m = majorToCtor(st, rv, major.e, cheapRec, cheapProj)?
+    lfire(m, f, ls, rv, stack, majorIdx, major.ms, delta, cheapRec, cheapProj)
+
+verify lmajor
+    resultExpr(lmajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [Clo.Clo(-1, Core.Exprs.fvar(0), [])], 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), false, false, false)) => Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("r"), []), Core.Exprs.fvar(0))
+
+fn lfire(m: RE, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The rule of the major premise's constructor; without one the recursor is stuck as it was met."
+    match ruleFor(rv.rules, Core.Apps.fnOf(m.e))
+        Option.None -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = m.st))
+        Option.Some(rule) -> lrule(m.st, rule, f, ls, rv, stack, majorIdx, Core.Apps.argsOf(m.e), ms, delta, cheapRec, cheapProj)
+
+verify lfire
+    resultExpr(lfire(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
+
+fn lrule(st: St, rule: RecRule, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, majorArgs: List<Expr>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "rhs params motives minors fields extra-arguments, as ruleRhs builds it, with the recursor's own arguments still closures."
+    match Bool.or(rule.nfields > List.len(majorArgs), List.len(ls) != List.len(rv.head.params))
+        true -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
+        false -> lruleApplied(ruleAt(st, rule, rv, ls), rule, rv, stack, majorIdx, majorArgs, ms, delta, cheapRec, cheapProj)
+
+verify lrule
+    resultExpr(lrule(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
+
+fn lruleApplied(r: RE, rule: RecRule, rv: Rec, stack: List<Clo>, majorIdx: Int, majorArgs: List<Expr>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The right-hand side takes the parameters, motives and minor premises, the constructor's fields and the arguments after the major premise."
+    lcore(r.st, r.e, [], List.concat(List.take(stack, rv.numParams + rv.numMotives + rv.numMinors), List.concat(closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), List.drop(stack, majorIdx + 1))), ms, delta, cheapRec, cheapProj)
+
+verify lruleApplied
+    resultExpr(lruleApplied(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.natLit(1)
+
+fn lquot(st: St, f: Expr, args: MXs, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A quotient rule on built arguments; nothing else reduces a quotient constant."
+    q = quotReduce(st, Core.Apps.mkApps(f, args.es))?
+    match q.o
+        Option.Some(x) -> lcore(q.st, x, [], [], args.ms, delta, cheapRec, cheapProj)
+        Option.None -> Result.Ok(RE(e = Core.Apps.mkApps(f, args.es), st = q.st))
+
+verify lquot
+    resultExpr(lquot(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("q"), []), MXs(es = [], ms = MS(next = 0, forced = {})), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("q"), [])
+
+fn lnat(st: St, f: Expr, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "With delta: Nat.succ of one argument or a Nat operation of two is tried on literals first, as whnf does; otherwise the head unfolds. Without delta the constant is stuck."
+    match delta
+        false -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
+        true -> match natArity(f, List.len(stack))
+            0 -> lunfold(st, f, stack, ms, cheapRec, cheapProj)
+            k -> lnatTry(st, f, stack, matStack(List.take(stack, k), ms, []), cheapRec, cheapProj)
+
+verify lnat
+    resultExpr(lnat(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+
+fn natArity(f: Expr, n: Int) -> Int
+    ? "How many arguments reduceNat takes for this head and this many arguments: 1 for Nat.succ, 2 for a binary Nat operation, 0 when it does not apply."
+    match f
+        Expr.Const(Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []) -> match Bool.and(op == "succ", n == 1)
+            true -> 1
+            false -> match Bool.and(Check.Lits.isNatOp(op), n == 2)
+                true -> 2
+                false -> 0
+        _ -> 0
+
+verify natArity
+    natArity(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), 2) => 2
+    natArity(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), 1) => 1
+    natArity(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), 3) => 0
+
+fn lnatTry(st: St, f: Expr, stack: List<Clo>, args: MXs, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "Nat arithmetic on the built arguments; a literal result is the answer, otherwise the head unfolds."
+    n = reduceNat(st, Core.Apps.mkApps(f, args.es))?
+    match n.o
+        Option.Some(v) -> Result.Ok(RE(e = v, st = n.st))
+        Option.None -> lunfold(n.st, f, stack, args.ms, cheapRec, cheapProj)
+
+verify lnatTry
+    resultExpr(lnatTry(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), [], MXs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], ms = MS(next = 0, forced = {})), false, false)) => Core.Exprs.natLit(3)
+
+fn lunfold(st: St, f: Expr, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A definition's value takes the waiting arguments as they are; anything else is stuck."
+    u = unfoldConst(st, f)
+    match u.o
+        Option.Some(v) -> lcore(u.st, v, [], stack, ms, true, cheapRec, cheapProj)
+        Option.None -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = u.st))
+
+verify lunfold
+    resultExpr(lunfold(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+
+fn lproject(st: St, s: Name, i: Int, x: MX, stack: List<Clo>, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A projection of a built structure; the field takes the waiting arguments as they are."
+    r = reduceProj(st, s, i, x.e, cheapRec, cheapProj)?
+    match r.o
+        Option.Some(m) -> lcore(r.st, m, [], stack, x.ms, delta, cheapRec, cheapProj)
+        Option.None -> Result.Ok(RE(e = lstuck(MX(e = Core.Exprs.proj(s, i, x.e), ms = x.ms), stack), st = r.st))
+
+verify lproject
+    resultExpr(lproject(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Lits.name1("P"), 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), [], false, false, false)) => Core.Exprs.proj(Check.Lits.name1("P"), 0, Core.Exprs.fvar(0))
+
+fn lstuck(h: MX, stack: List<Clo>) -> Expr
+    ? "A stuck head applied to the waiting arguments, all built."
+    Core.Apps.mkApps(h.e, matStack(stack, h.ms, []).es)
+
+verify lstuck
+    lstuck(MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), []) => Core.Exprs.fvar(0)
+
+fn closure(a: Expr, env: List<Clo>, id: Int) -> Clo
+    ? "a as a closure over env; a term with no loose bound variable needs no environment, and is its own value."
+    match Core.Exprs.looseRange(a) == 0
+        true -> Clo.Clo(-1, a, [])
+        false -> Clo.Clo(id, a, env)
+
+verify closure
+    closure(Core.Exprs.natLit(1), [Clo.Clo(-1, Core.Exprs.natLit(2), [])], 5) => Clo.Clo(-1, Core.Exprs.natLit(1), [])
+
+fn closedAll(xs: List<Expr>, acc: List<Clo>) -> List<Clo>
+    ? "Built terms as closures, in order."
+    match xs
+        [] -> List.reverse(acc)
+        [x, ..rest] -> closedAll(rest, List.prepend(Clo.Clo(-1, x, []), acc))
+
+verify closedAll
+    closedAll([Core.Exprs.natLit(1)], []) => [Clo.Clo(-1, Core.Exprs.natLit(1), [])]
+
+fn nthClo(env: List<Clo>, k: Int) -> Clo
+    ? "The k-th closure; callers keep k in range."
+    match List.drop(env, k)
+        [c, .._] -> c
+        [] -> Clo.Clo(-1, Core.Exprs.bvar(0), [])
+
+verify nthClo
+    nthClo([Clo.Clo(-1, Core.Exprs.natLit(1), [])], 0) => Clo.Clo(-1, Core.Exprs.natLit(1), [])
+
+fn matTerm(t: Expr, env: List<Clo>, ms: MS) -> MX
+    ? "t with its loose bound variables replaced by their closures, built; a closure is built when its variable is met, so those t never uses stay closures."
+    match Core.Exprs.looseRange(t) == 0
+        true -> MX(e = t, ms = ms)
+        false -> fromLS(lgo(t, 0, env, ms, {}))
+
+verify matTerm
+    matTerm(Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(3), [])], MS(next = 0, forced = {})).e => Core.Exprs.natLit(3)
+    matTerm(Core.Exprs.bvar(1), [Clo.Clo(5, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])]), Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {})).ms.forced => {}
+
+record LS
+    e: Expr
+    ms: MS
+    memo: Map<Int, Tuple<Expr, Expr>>
+
+fn fromLS(r: LS) -> MX
+    ? "The built term and the machine's memory."
+    MX(e = r.e, ms = r.ms)
+
+verify fromLS
+    fromLS(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = {})).e => Core.Exprs.natLit(1)
+
+fn lgo(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
+    ? "As Core.Subst.go for instantiation: what has no loose bound variable at or above off is left alone."
+    match Core.Exprs.looseRange(e) <= off
+        true -> LS(e = e, ms = ms, memo = memo)
+        false -> lvisit(e, off, env, ms, memo)
+
+verify lgo
+    lgo(Core.Exprs.natLit(1), 0, [], MS(next = 0, forced = {}), {}).e => Core.Exprs.natLit(1)
+
+fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
+    ? "A variable takes its closure's value; large compound nodes go through the memo, as in Core.Subst."
+    match e
+        Expr.BVar(i) -> lbvar(List.drop(env, i - off), i, env, ms, memo)
+        _ -> match Core.Exprs.treeSize(e) < 32
+            true -> lbuild(e, off, env, ms, memo)
+            false -> lmemoed(e, off, env, ms, memo, Core.Hash.mix(Core.Exprs.hashOf(e), off))
+
+verify lvisit
+    lvisit(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}).e => Core.Exprs.natLit(2)
+
+fn lbvar(from: List<Clo>, i: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
+    ? "The variable's closure, built on first use. A value has no loose bound variable, so it needs no lifting; a variable past the environment drops by its length."
+    match from
+        [c, .._] -> lvalue(matClo(c, ms), memo)
+        [] -> LS(e = Core.Exprs.bvar(i - List.len(env)), ms = ms, memo = memo)
+
+verify lbvar
+    lbvar([], 3, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}).e => Core.Exprs.bvar(2)
+
+fn lvalue(x: MX, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
+    ? "A built value with the walk's memo."
+    LS(e = x.e, ms = x.ms, memo = memo)
+
+verify lvalue
+    lvalue(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {})), {}).e => Core.Exprs.natLit(1)
+
+fn lmemoed(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>, key: Int) -> LS
+    ? "A node already rebuilt at this depth is reused."
+    match lhit(Map.get(memo, key), e)
+        Option.Some(r) -> LS(e = r, ms = ms, memo = memo)
+        Option.None -> lremember(lbuild(e, off, env, ms, memo), e, key)
+
+verify lmemoed
+    lmemoed(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}, 7).e => Core.Exprs.bvar(0)
+
+fn lremember(r: LS, e: Expr, key: Int) -> LS
+    ? "Records a rebuilt node."
+    LS(e = r.e, ms = r.ms, memo = Map.set(r.memo, key, (e, r.e)))
+
+verify lremember
+    Map.len(lremember(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = {}), Core.Exprs.natLit(2), 4).memo) => 1
+
+fn lhit(entry: Option<Tuple<Expr, Expr>>, e: Expr) -> Option<Expr>
+    ? "The remembered result when the entry is for this very node."
+    match entry
+        Option.Some((k, v)) -> match k == e
+            true -> Option.Some(v)
+            false -> Option.None
+        Option.None -> Option.None
+
+verify lhit
+    lhit(Option.None, Core.Exprs.natLit(1)) => Option.None
+
+fn lbuild(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
+    ? "Rebuilds one node, one binder deeper in binding positions."
+    match e
+        Expr.App(_, f, a) -> lapp2(lgo(f, off, env, ms, memo), a, off, env)
+        Expr.Lam(_, n, t, b, bi) -> lbinder(lgo(t, off, env, ms, memo), n, b, bi, off, env, true)
+        Expr.Pi(_, n, t, b, bi) -> lbinder(lgo(t, off, env, ms, memo), n, b, bi, off, env, false)
+        Expr.Let(_, n, t, v, b) -> llet(lgo(t, off, env, ms, memo), n, v, b, off, env)
+        Expr.Proj(_, s, i, x) -> lproj2(lgo(x, off, env, ms, memo), s, i)
+        _ -> LS(e = e, ms = ms, memo = memo)
+
+verify lbuild
+    lbuild(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}).e => Core.Exprs.app(Core.Exprs.natLit(2), Core.Exprs.natLit(2))
+
+fn lapp2(rf: LS, a: Expr, off: Int, env: List<Clo>) -> LS
+    ? "The argument after the function."
+    ra = lgo(a, off, env, rf.ms, rf.memo)
+    LS(e = Core.Exprs.app(rf.e, ra.e), ms = ra.ms, memo = ra.memo)
+
+verify lapp2
+    lapp2(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = {}), Core.Exprs.natLit(2), 0, []).e => Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))
+
+fn lbinder(rt: LS, n: Name, b: Expr, bi: Binder, off: Int, env: List<Clo>, isLam: Bool) -> LS
+    ? "The body one deeper, after the domain."
+    rb = lgo(b, off + 1, env, rt.ms, rt.memo)
+    match isLam
+        true -> LS(e = Core.Exprs.lam(n, rt.e, rb.e, bi), ms = rb.ms, memo = rb.memo)
+        false -> LS(e = Core.Exprs.pi(n, rt.e, rb.e, bi), ms = rb.ms, memo = rb.memo)
+
+verify lbinder
+    lbinder(LS(e = Core.Exprs.sort(Level.Zero), ms = MS(next = 0, forced = {}), memo = {}), Core.Names.anon(), Core.Exprs.bvar(0), Binder.Default, 0, [], true).e => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
+
+fn llet(rt: LS, n: Name, v: Expr, b: Expr, off: Int, env: List<Clo>) -> LS
+    ? "The value at this depth, then the body one deeper."
+    rv = lgo(v, off, env, rt.ms, rt.memo)
+    rb = lgo(b, off + 1, env, rv.ms, rv.memo)
+    LS(e = Core.Exprs.letE(n, rt.e, rv.e, rb.e), ms = rb.ms, memo = rb.memo)
+
+verify llet
+    llet(LS(e = Core.Exprs.sort(Level.Zero), ms = MS(next = 0, forced = {}), memo = {}), Core.Names.anon(), Core.Exprs.natLit(1), Core.Exprs.bvar(0), 0, []).e => Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), Core.Exprs.bvar(0))
+
+fn lproj2(r: LS, s: Name, i: Int) -> LS
+    ? "The projected structure rebuilt."
+    LS(e = Core.Exprs.proj(s, i, r.e), ms = r.ms, memo = r.memo)
+
+verify lproj2
+    lproj2(LS(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}), memo = {}), Check.Lits.name1("P"), 0).e => Core.Exprs.proj(Check.Lits.name1("P"), 0, Core.Exprs.fvar(0))
+
+fn matClo(c: Clo, ms: MS) -> MX
+    ? "A closure built, at most once: a numbered closure is remembered once built."
+    match c
+        Clo.Clo(id, e, cenv) -> match id < 0
+            true -> MX(e = e, ms = ms)
+            false -> match Map.get(ms.forced, id)
+                Option.Some(x) -> MX(e = x, ms = ms)
+                Option.None -> remembered1(matTerm(e, cenv, ms), id)
+
+verify matClo
+    matClo(Clo.Clo(-1, Core.Exprs.natLit(1), []), MS(next = 0, forced = {})).e => Core.Exprs.natLit(1)
+    matClo(Clo.Clo(3, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])]), MS(next = 0, forced = {})).ms.forced => {3 => Core.Exprs.natLit(7)}
+
+fn remembered1(x: MX, id: Int) -> MX
+    ? "Records a built closure."
+    MX(e = x.e, ms = MS.update(x.ms, forced = Map.set(x.ms.forced, id, x.e)))
+
+verify remembered1
+    remembered1(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {})), 2).ms.forced => {2 => Core.Exprs.natLit(1)}
+
+fn matStack(stack: List<Clo>, ms: MS, acc: List<Expr>) -> MXs
+    ? "Every waiting argument built, first argument first."
+    match stack
+        [] -> MXs(es = List.reverse(acc), ms = ms)
+        [c, ..rest] -> matStackNext(matClo(c, ms), rest, acc)
+
+verify matStack
+    matStack([Clo.Clo(-1, Core.Exprs.natLit(1), [])], MS(next = 0, forced = {}), []).es => [Core.Exprs.natLit(1)]
+
+fn matStackNext(x: MX, rest: List<Clo>, acc: List<Expr>) -> MXs
+    ? "One more built argument."
+    matStack(rest, x.ms, List.prepend(x.e, acc))
+
+verify matStackNext
+    matStackNext(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {})), [], []).es => [Core.Exprs.natLit(1)]
+
+verify mcore
+    resultExpr(mcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Binder.Default), Binder.Default), Core.Exprs.fvar(1)), Core.Exprs.fvar(2)), [], [], false, false)) => Core.Exprs.app(Core.Exprs.fvar(2), Core.Exprs.fvar(1))
+    resultExpr(mcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), Core.Exprs.bvar(0)), [], [], false, false)) => Core.Exprs.natLit(1)
+    resultExpr(mcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(1), Binder.Default), Binder.Default), Core.Exprs.fvar(3)), [], [], false, false)) => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.fvar(3), Binder.Default)
+    resultExpr(mcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), [], [], false, false)) => resultExpr(whnfCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), false, false))
+
+verify mcore law sameAsWhnfCore
+    given a: Int = [0, 1, 5]
+    given b: Int = [2, 7]
+    resultExpr(mcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(0)), Binder.Default)), Binder.Default), Core.Exprs.natLit(a)), Core.Exprs.fvar(b)), [], [], false, false)) => resultExpr(whnfCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(0)), Binder.Default)), Binder.Default), Core.Exprs.natLit(a)), Core.Exprs.fvar(b)), false, false))
+
+fn whnfCoreM(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "whnfCore through the machine. A term the machine cannot change comes back as it is, without taking its spine apart."
+    match e
+        Expr.App -> match rigidHead(st, Core.Apps.fnOf(e))
+            true -> Result.Ok(RE(e = e, st = st))
+            false -> mcached(st, e, cheapRec, cheapProj)
+        Expr.Let -> mcached(st, e, cheapRec, cheapProj)
+        Expr.Proj -> mcached(st, e, cheapRec, cheapProj)
+        Expr.FVar(id) -> lvar(st, e, Check.State.localValue(st, id), [], MS(next = 0, forced = {}), false, cheapRec, cheapProj)
+        _ -> Result.Ok(RE(e = e, st = st))
+
+verify whnfCoreM
+    resultExpr(whnfCoreM(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), false, false)) => Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1))
+    resultExpr(whnfCoreM(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), Core.Exprs.bvar(0)), false, true)) => Core.Exprs.natLit(1)
+
+fn mcached(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "Runs the machine. Its results are not cached: keeping every intermediate result is what the machine saves, and on reduction-heavy proofs the cache cost gigabytes."
+    mcore(st, e, [], [], cheapRec, cheapProj)
+
+verify mcached
+    resultExpr(mcached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(0)), false, true)) => Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(0))
+
+
+
+fn worthKeeping(e: Expr) -> Bool
+    ? "A term large enough that remembering a result about it costs less than finding the result again: a cache entry copies a path of the trie."
+    Core.Exprs.treeSize(e) >= 4
+
+verify worthKeeping
+    worthKeeping(Core.Exprs.bvar(0)) => false
+    worthKeeping(Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.fvar(2))) => true
+
+fn minst(t: Expr, env: List<Expr>) -> Expr
+    ? "t with the machine's values put in for its loose bound variables."
+    match env
+        [] -> t
+        _ -> Core.Subst.instantiate(t, env)
+
+verify minst
+    minst(Core.Exprs.bvar(0), [Core.Exprs.natLit(4)]) => Core.Exprs.natLit(4)
+    minst(Core.Exprs.bvar(0), []) => Core.Exprs.bvar(0)
+
+fn whnfStore(st: St, orig: Expr, r: Expr) -> RE
+    ? "Caches a whnf result, when the term is worth an entry."
+    match worthKeeping(orig)
+        true -> RE(e = r, st = St.update(st, whnfCache = Check.State.cachePut(st.whnfCache, orig, r)))
+        false -> RE(e = r, st = st)
+
+verify whnfStore
+    Core.PMap.size(whnfStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1)).st.whnfCache) => 0
+
+fn unfoldDefinition(st: St, e: Expr) -> RO
+    ? "Unfolds the head constant if it is a definition or theorem at the right number of levels."
+    u = unfoldConst(st, Core.Apps.fnOf(e))
+    match u.o
+        Option.Some(f) -> RO(o = Option.Some(Core.Apps.mkApps(f, Core.Apps.argsOf(e))), st = u.st)
+        Option.None -> u
+
+verify unfoldDefinition
+    unfoldDefinition(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)).o => Option.None
+
+fn unfoldConst(st: St, f: Expr) -> RO
+    ? "The instantiated value of a constant. A value at universe levels is remembered for the rest of the declaration, since instantiating the levels walks the whole value each time."
+    match f
+        Expr.Const(n, ls) -> match ls
+            [] -> RO(o = unfoldValue(Check.State.lookup(st, n), ls), st = st)
+            _ -> unfoldCached(st, f, n, ls, Check.State.cacheGet(st.unfoldCache, f))
+        _ -> RO(o = Option.None, st = st)
+
+verify unfoldConst
+    unfoldConst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [])).o => Option.None
+    unfoldConst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [Level.Zero])).o => Option.None
+
+fn unfoldCached(st: St, f: Expr, n: Name, ls: List<Level>, hit: Option<Expr>) -> RO
+    ? "A remembered value, or the value instantiated now and remembered."
+    match hit
+        Option.Some(v) -> RO(o = Option.Some(v), st = st)
+        Option.None -> unfoldStore(st, f, unfoldValue(Check.State.lookup(st, n), ls))
+
+verify unfoldCached
+    unfoldCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [Level.Zero]), Core.Names.anon(), [Level.Zero], Option.Some(Core.Exprs.natLit(1))).o => Option.Some(Core.Exprs.natLit(1))
+
+fn unfoldStore(st: St, f: Expr, v: Option<Expr>) -> RO
+    ? "Remembers an unfolded value under its constant."
+    match v
+        Option.Some(x) -> RO(o = v, st = St.update(st, unfoldCache = Check.State.cachePut(st.unfoldCache, f, x)))
+        Option.None -> RO(o = v, st = st)
+
+verify unfoldStore
+    Core.PMap.size(unfoldStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), []), Option.Some(Core.Exprs.natLit(1))).st.unfoldCache) => 1
+
+fn unfoldValue(c: Option<Const>, ls: List<Level>) -> Option<Expr>
+    ? "Value at the given levels, when the counts agree."
+    match c
+        Option.None -> Option.None
+        Option.Some(k) -> match Check.State.valueOf(k)
+            Option.Some(v) -> valueAt(Check.State.headOf(k), v, ls)
+            Option.None -> Option.None
+
+verify unfoldValue
+    unfoldValue(Option.None, []) => Option.None
+
+fn valueAt(h: Head, v: Expr, ls: List<Level>) -> Option<Expr>
+    ? "Instantiates the universe parameters."
+    match List.len(h.params) == List.len(ls)
+        true -> Option.Some(Core.Subst.instLevelParams(v, h.params, ls))
+        false -> Option.None
+
+verify valueAt
+    valueAt(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.natLit(1), []) => Option.Some(Core.Exprs.natLit(1))
+
+fn isDelta(st: St, e: Expr) -> Option<Const>
+    ? "The head's definition, when delta reduction can unfold it."
+    match Core.Apps.fnOf(e)
+        Expr.Const(n, ls) -> deltaConst(Check.State.lookup(st, n), ls)
+        _ -> Option.None
+
+verify isDelta
+    isDelta(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)) => Option.None
+
+fn deltaConst(c: Option<Const>, ls: List<Level>) -> Option<Const>
+    ? "Has a value and the right number of levels."
+    match c
+        Option.Some(k) -> match Check.State.valueOf(k)
+            Option.Some -> match List.len(Check.State.headOf(k).params) == List.len(ls)
+                true -> Option.Some(k)
+                false -> Option.None
+            Option.None -> Option.None
+        Option.None -> Option.None
+
+verify deltaConst
+    deltaConst(Option.None, []) => Option.None
+
+fn reduceNat(st: St, e: Expr) -> Result<RO, Fail>
+    ? "Nat.succ and the binary Nat functions on literal arguments."
+    match e
+        Expr.App(_, Expr.Const(Name.Str(Name.Str(Name.Anon, "Nat", _), "succ", _), []), a) -> natSucc(whnf(st, a)?)
+        Expr.App(_, Expr.App(_, Expr.Const(Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []), a), b) -> natBin(st, op, a, b)
+        _ -> Result.Ok(RO(o = Option.None, st = st))
+
+verify reduceNat
+    resultOpt(reduceNat(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
+
+fn natSucc(a: RE) -> Result<RO, Fail>
+    ? "succ of a literal."
+    match Check.Lits.natValue(a.e)
+        Option.Some(n) -> Result.Ok(RO(o = Option.Some(Core.Exprs.natLit(n + 1)), st = a.st))
+        Option.None -> Result.Ok(RO(o = Option.None, st = a.st))
+
+verify natSucc
+    resultOpt(natSucc(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))) => Option.None
+
+fn natBin(st: St, op: String, a: Expr, b: Expr) -> Result<RO, Fail>
+    ? "Both arguments are normalized and must be literals."
+    match Check.Lits.isNatOp(op)
+        false -> Result.Ok(RO(o = Option.None, st = st))
+        true -> natFirst(whnf(st, a)?, op, b)
+
+verify natBin
+    resultOpt(natBin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), "log2", Core.Exprs.natLit(1), Core.Exprs.natLit(1))) => Option.None
+
+fn natFirst(x: RE, op: String, b: Expr) -> Result<RO, Fail>
+    ? "The first argument as a literal."
+    match Check.Lits.natValue(x.e)
+        Option.None -> Result.Ok(RO(o = Option.None, st = x.st))
+        Option.Some(va) -> natSecond(whnf(x.st, b)?, op, va)
+
+verify natFirst
+    resultOpt(natFirst(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), "add", Core.Exprs.natLit(1))) => Option.None
+
+fn natSecond(y: RE, op: String, va: Int) -> Result<RO, Fail>
+    ? "The second argument as a literal, then the operation."
+    match Check.Lits.natValue(y.e)
+        Option.None -> Result.Ok(RO(o = Option.None, st = y.st))
+        Option.Some(vb) -> Result.Ok(RO(o = Option.Some(Check.Lits.natOp(op, va, vb)?), st = y.st))
+
+verify natSecond
+    resultOpt(natSecond(RE(e = Core.Exprs.natLit(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), "mul", 3)) => Option.Some(Core.Exprs.natLit(6))
+
+fn resultExpr(r: Result<RE, Fail>) -> Expr
+    ? "Test helper: the expression of a successful result."
+    match r
+        Result.Ok(x) -> x.e
+        Result.Err -> Core.Exprs.bvar(999999)
+
+verify resultExpr
+    resultExpr(Result.Err(Fail.Reject("x"))) => Core.Exprs.bvar(999999)
+
+fn resultBool(r: Result<RB, Fail>) -> Bool
+    ? "Test helper: the answer of a successful result; false on an error."
+    match r
+        Result.Ok(x) -> x.b
+        Result.Err -> false
+
+verify resultBool
+    resultBool(Result.Err(Fail.Reject("x"))) => false
+
+fn resultOpt(r: Result<RO, Fail>) -> Option<Expr>
+    ? "Test helper: the optional expression of a successful result."
+    match r
+        Result.Ok(x) -> x.o
+        Result.Err -> Option.Some(Core.Exprs.bvar(999999))
+
+verify resultOpt
+    resultOpt(Result.Err(Fail.Reject("x"))) => Option.Some(Core.Exprs.bvar(999999))
+
+fn yes(st: St) -> Result<RB, Fail>
+    ? "Equal."
+    Result.Ok(RB(b = true, st = st))
+
+verify yes
+    resultBool(yes(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => true
+
+fn no(st: St) -> Result<RB, Fail>
+    ? "Not equal."
+    Result.Ok(RB(b = false, st = st))
+
+verify no
+    resultBool(no(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => false
+
+fn decided(i: Int) -> Bool
+    ? "A three-way answer (0 unknown, 1 equal, 2 different) that is known."
+    i != 0
+
+verify decided
+    decided(0) => false
+
+fn tri(b: Bool) -> Int
+    ? "A boolean as a known three-way answer."
+    match b
+        true -> 1
+        false -> 2
+
+verify tri
+    tri(false) => 2
+
+fn isDefEq(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "Definitional equality; successes that took real work are cached, those the quick check finds are not."
+    q = quick(st, t, s)?
+    match decided(q.i)
+        true -> Result.Ok(RB(b = q.i == 1, st = q.st))
+        false -> remembered(eqBoolTrue(q.st, t, s)?, t, s)
+
+fn remembered(r: RB, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "Records a success, and keeps either answer for later declarations when both terms are closed."
+    match r.b
+        true -> yes(St.update(r.st, eqOk = Check.State.pairPut(r.st.eqOk, t, s), closed = keptPair(r.st.closed, t, s)))
+        false -> Result.Ok(RB(b = false, st = St.update(r.st, closed = keptFail(r.st.closed, t, s))))
+
+verify remembered
+    resultBool(remembered(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => false
+
+verify isDefEq
+    resultBool(isDefEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Max(Level.Zero, Level.Zero)), Core.Exprs.bvar(0), Binder.Implicit))) => true
+    resultBool(isDefEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(5), Core.Exprs.natLit(4))) => false
+    resultBool(isDefEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.natLit(1)), Core.Exprs.natLit(1))) => true
+
+fn keptPair(closed: PMap, t: Expr, s: Expr) -> PMap
+    ? "The cache kept across declarations, with the pair when it belongs there."
+    match sharedPair(t, s)
+        true -> Check.State.closedPairPut(closed, t, s)
+        false -> closed
+
+verify keptPair
+    Core.PMap.size(keptPair(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.fvar(0))) => 0
+    Core.PMap.size(keptPair(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
+
+fn keptFail(closed: PMap, t: Expr, s: Expr) -> PMap
+    ? "The cache kept across declarations, with the pair as different when it belongs there."
+    match sharedPair(t, s)
+        true -> Check.State.closedFailPut(closed, t, s)
+        false -> closed
+
+verify keptFail
+    Core.PMap.size(keptFail(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.fvar(0))) => 0
+    Core.PMap.size(keptFail(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
+
+fn sharedPair(t: Expr, s: Expr) -> Bool
+    ? "A pair whose equality holds in every later declaration of a worker: both terms with no free variable, whose numbers mean something else in every declaration. Universe parameters may occur: definitional equality never checks them against the declaration's own, and compares levels by their names alone. The worker meets declarations in file order and the environment only grows, so nothing the answer used changes."
+    match Core.Exprs.hasFVar(t)
+        true -> false
+        false -> Bool.not(Core.Exprs.hasFVar(s))
+
+verify sharedPair
+    sharedPair(Core.Exprs.natLit(1), Core.Exprs.fvar(0)) => false
+    sharedPair(Core.Exprs.sort(Level.Param(Core.Names.str(Core.Names.anon(), "u"))), Core.Exprs.natLit(1)) => true
+
+fn closedTerm(e: Expr) -> Bool
+    ? "No free variable and no universe parameter."
+    Bool.and(Bool.not(Core.Exprs.hasFVar(e)), Bool.not(Core.Exprs.hasParam(e)))
+
+verify closedTerm
+    closedTerm(Core.Exprs.natLit(1)) => true
+
+fn defEqCore(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "The reference is_def_eq_core, step by step."
+    q = quick(st, t, s)?
+    match decided(q.i)
+        true -> Result.Ok(RB(b = q.i == 1, st = q.st))
+        false -> eqBoolTrue(q.st, t, s)
+
+verify defEqCore
+    resultBool(defEqCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero))) => true
+
+fn eqBoolTrue(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "Proof by reflection: a closed term against Bool.true is evaluated."
+    match Bool.and(Bool.or(Bool.not(Core.Exprs.hasFVar(t)), st.eager), Core.Apps.isConst(s, Check.Lits.name2("Bool", "true")))
+        true -> eqBoolTrueWhnf(whnf(st, t)?, t, s)
+        false -> eqCoreWhnf(st, t, s)
+
+verify eqBoolTrue
+    resultBool(eqBoolTrue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "beq"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(2)), Check.Lits.boolExpr(true))) => true
+
+fn eqBoolTrueWhnf(w: RE, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "Equal if it evaluated to Bool.true; otherwise the general path."
+    match Core.Apps.isConst(w.e, Check.Lits.name2("Bool", "true"))
+        true -> yes(w.st)
+        false -> eqCoreWhnf(w.st, t, s)
+
+verify eqBoolTrueWhnf
+    resultBool(eqBoolTrueWhnf(RE(e = Check.Lits.boolExpr(true), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => true
+
+fn eqCoreWhnf(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "Cheap whnfCore on both sides (projections without whnf), and the easy cases again if anything changed."
+    tn = whnfCoreM(st, t, false, true)?
+    sn = whnfCoreM(tn.st, s, false, true)?
+    match Bool.or(tn.e != t, sn.e != s)
+        true -> eqAfterQuick(quick(sn.st, tn.e, sn.e)?, tn.e, sn.e)
+        false -> eqProofIrrel(sn.st, tn.e, sn.e)
+
+verify eqCoreWhnf
+    resultBool(eqCoreWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.sort(Level.Zero)), Core.Exprs.sort(Level.Zero))) => true
+
+fn eqAfterQuick(q: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Stops on a known answer."
+    match decided(q.i)
+        true -> Result.Ok(RB(b = q.i == 1, st = q.st))
+        false -> eqProofIrrel(q.st, tn, sn)
+
+verify eqAfterQuick
+    resultBool(eqAfterQuick(RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => true
+
+fn eqProofIrrel(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Two proofs of the same proposition are equal."
+    p = proofIrrel(st, tn, sn)?
+    match decided(p.i)
+        true -> Result.Ok(RB(b = p.i == 1, st = p.st))
+        false -> eqLazy(lazyDelta(p.st, tn, sn)?)
+
+verify eqProofIrrel
+    resultBool(eqProofIrrel(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Succ(Level.Zero)))) => false
+
+fn eqLazy(ld: LD) -> Result<RB, Fail>
+    ? "After lazy delta: a known answer, or the remaining structural cases."
+    match ld.status
+        1 -> yes(ld.st)
+        2 -> no(ld.st)
+        _ -> eqAfterDelta(ld.st, ld.t, ld.s)
+
+verify eqLazy
+    resultBool(eqLazy(LD(status = 2, t = Core.Exprs.bvar(0), s = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))) => false
+
+fn eqAfterDelta(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Same constant at equivalent levels, same free variable, or same projection."
+    match sameConst(tn, sn)
+        true -> yes(st)
+        false -> match sameFVar(tn, sn)
+            true -> yes(st)
+            false -> eqProj(st, tn, sn)
+
+verify eqAfterDelta
+    resultBool(eqAfterDelta(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
+
+fn sameConst(t: Expr, s: Expr) -> Bool
+    ? "The same constant at equivalent levels."
+    match t
+        Expr.Const(a, la) -> match s
+            Expr.Const(b, lb) -> Bool.and(a == b, Core.Univ.isEquivList(la, lb))
+            _ -> false
+        _ -> false
+
+verify sameConst
+    sameConst(Core.Exprs.cnst(Core.Names.anon(), [Level.Max(Level.Zero, Level.Succ(Level.Zero))]), Core.Exprs.cnst(Core.Names.anon(), [Level.Succ(Level.Zero)])) => true
+
+fn sameFVar(t: Expr, s: Expr) -> Bool
+    ? "The same free variable."
+    match t
+        Expr.FVar(a) -> match s
+            Expr.FVar(b) -> a == b
+            _ -> false
+        _ -> false
+
+verify sameFVar
+    sameFVar(Core.Exprs.fvar(1), Core.Exprs.fvar(2)) => false
+
+fn eqProj(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Projections of the same field compare their structures lazily first."
+    match tn
+        Expr.Proj(_, s1, i1, c1) -> match sn
+            Expr.Proj(_, s2, i2, c2) -> match Bool.and(s1 == s2, i1 == i2)
+                true -> eqProjAfter(lazyDeltaProj(st, c1, c2, s1, i1)?, tn, sn)
+                false -> eqRewhnf(st, tn, sn)
+            _ -> eqRewhnf(st, tn, sn)
+        _ -> eqRewhnf(st, tn, sn)
+
+verify eqProj
+    resultBool(eqProj(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)))) => true
+
+fn eqProjAfter(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Equal structures settle it; otherwise go on."
+    match r.b
+        true -> yes(r.st)
+        false -> eqRewhnf(r.st, tn, sn)
+
+verify eqProjAfter
+    resultBool(eqProjAfter(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => true
+
+fn eqRewhnf(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "whnfCore again, now normalizing projections fully; anything new starts over."
+    a = whnfCoreM(st, tn, false, false)?
+    b = whnfCoreM(a.st, sn, false, false)?
+    match Bool.or(a.e != tn, b.e != sn)
+        true -> defEqCore(b.st, a.e, b.e)
+        false -> eqFinal(b.st, tn, sn)
+
+verify eqRewhnf
+    resultBool(eqRewhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => false
+
+fn eqFinal(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Both sides are in weak head normal form: congruence, eta, structure eta, string literals, unit-like types."
+    a = defEqApp(st, tn, sn)?
+    match a.b
+        true -> yes(a.st)
+        false -> eqEta(etaExpansion(a.st, tn, sn)?, tn, sn)
+
+verify eqFinal
+    resultBool(eqFinal(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.natLit(2)), Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.natLit(2)))) => true
+
+fn eqEta(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "After eta expansion."
+    match r.b
+        true -> yes(r.st)
+        false -> eqEtaStruct(etaStruct(r.st, tn, sn)?, tn, sn)
+
+verify eqEta
+    resultBool(eqEta(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => true
+
+fn eqEtaStruct(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "After structure eta."
+    match r.b
+        true -> yes(r.st)
+        false -> eqString(stringLitExpansion(r.st, tn, sn)?, tn, sn)
+
+verify eqEtaStruct
+    resultBool(eqEtaStruct(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => true
+
+fn eqString(q: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "After string literal expansion; the last resort is a unit-like type."
+    match decided(q.i)
+        true -> Result.Ok(RB(b = q.i == 1, st = q.st))
+        false -> unitLike(q.st, tn, sn)
+
+verify eqString
+    resultBool(eqString(RI(i = 2, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => false
+
+fn quick(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
+    ? "Equal terms, a cached success, or a case decided by shape alone. Equal means equal up to binder names and annotations, as in the reference kernel's first check: two copies of a term that differ only in a bound name are the same term to Lean, and comparing them as different terms makes some proofs exponential."
+    match Bool.or(sameTerm(t, s), known(st, t, s))
+        true -> Result.Ok(RI(i = 1, st = st))
+        false -> match knownDifferent(st, t, s)
+            true -> Result.Ok(RI(i = 2, st = st))
+            false -> quickKinds(st, t, s)
+
+verify quick
+    quick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.strLit("1")) => Result.Ok(RI(i = 2, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn known(st: St, t: Expr, s: Expr) -> Bool
+    ? "A success recorded in this declaration, or one an earlier declaration kept for closed terms."
+    match Check.State.pairGet(st.eqOk, t, s)
+        true -> true
+        false -> match sharedPair(t, s)
+            true -> Check.State.closedPairGet(st.closed, t, s)
+            false -> false
+
+verify known
+    known(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
+
+fn knownDifferent(st: St, t: Expr, s: Expr) -> Bool
+    ? "Closed terms an earlier declaration found different."
+    match sharedPair(t, s)
+        true -> Check.State.closedFailGet(st.closed, t, s)
+        false -> false
+
+verify knownDifferent
+    knownDifferent(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
+
+fn sameTerm(t: Expr, s: Expr) -> Bool
+    ? "Identical, or equal hashes (which ignore binder names and annotations) and equal up to them."
+    match t == s
+        true -> true
+        false -> match Core.Exprs.hashOf(t) == Core.Exprs.hashOf(s)
+            true -> Core.Alpha.alphaEq(t, s)
+            false -> false
+
+verify sameTerm
+    sameTerm(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.str(Core.Names.anon(), "x"), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Implicit)) => true
+    sameTerm(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) => false
+
+fn quickKinds(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
+    ? "Binders, sorts and literals of the same kind."
+    match t
+        Expr.Lam -> match s
+            Expr.Lam -> bindingEq(st, t, s, true)
+            _ -> Result.Ok(RI(i = 0, st = st))
+        Expr.Pi -> match s
+            Expr.Pi -> bindingEq(st, t, s, false)
+            _ -> Result.Ok(RI(i = 0, st = st))
+        Expr.Sort(a) -> match s
+            Expr.Sort(b) -> Result.Ok(RI(i = tri(Core.Univ.isEquiv(a, b)), st = st))
+            _ -> Result.Ok(RI(i = 0, st = st))
+        Expr.NatLit(a) -> match s
+            Expr.NatLit(b) -> Result.Ok(RI(i = tri(a == b), st = st))
+            Expr.StrLit -> Result.Ok(RI(i = 2, st = st))
+            _ -> Result.Ok(RI(i = 0, st = st))
+        Expr.StrLit(a) -> match s
+            Expr.StrLit(b) -> Result.Ok(RI(i = tri(a == b), st = st))
+            Expr.NatLit -> Result.Ok(RI(i = 2, st = st))
+            _ -> Result.Ok(RI(i = 0, st = st))
+        _ -> Result.Ok(RI(i = 0, st = st))
+
+verify quickKinds
+    quickKinds(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Succ(Level.Zero))) => Result.Ok(RI(i = 2, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn bindingEq(st: St, t: Expr, s: Expr, isLam: Bool) -> Result<RI, Fail>
+    ? "Binders compare domain by domain, then bodies under shared fresh variables."
+    r = bindLoop(st, t, s, [], isLam)?
+    Result.Ok(RI(i = tri(r.b), st = r.st))
+
+verify bindingEq
+    resultInt(bindingEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.pi(Core.Names.str(Core.Names.anon(), "y"), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Implicit), false)) => 1
+
+fn sameBinder(e: Expr, isLam: Bool) -> Bool
+    ? "A lambda (or a pi) as asked."
+    match e
+        Expr.Lam -> isLam
+        Expr.Pi -> Bool.not(isLam)
+        _ -> false
+
+verify sameBinder
+    sameBinder(Core.Exprs.bvar(0), true) => false
+
+fn bindLoop(st: St, t: Expr, s: Expr, rev: List<Expr>, isLam: Bool) -> Result<RB, Fail>
+    ? "While both sides are binders of the kind."
+    match Bool.and(sameBinder(t, isLam), sameBinder(s, isLam))
+        false -> isDefEq(st, Core.Subst.instantiate(t, rev), Core.Subst.instantiate(s, rev))
+        true -> bindStep(st, t, s, rev, isLam)
+
+verify bindLoop
+    resultBool(bindLoop(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(1), [], true)) => true
+
+fn bindStep(st: St, t: Expr, s: Expr, rev: List<Expr>, isLam: Bool) -> Result<RB, Fail>
+    ? "Domains that are syntactically equal need no check."
+    match domainOf(t) == domainOf(s)
+        true -> bindVar(st, t, s, rev, isLam, Option.None)
+        false -> bindDomains(st, t, s, rev, isLam, Core.Subst.instantiate(domainOf(s), rev), Core.Subst.instantiate(domainOf(t), rev))
+
+verify bindStep
+    resultBool(bindStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), Binder.Default), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Succ(Level.Zero)), Core.Exprs.natLit(1), Binder.Default), [], true)) => false
+
+fn bindDomains(st: St, t: Expr, s: Expr, rev: List<Expr>, isLam: Bool, tyS: Expr, tyT: Expr) -> Result<RB, Fail>
+    ? "Different domains must be equal."
+    r = isDefEq(st, tyT, tyS)?
+    match r.b
+        false -> no(r.st)
+        true -> bindVar(r.st, t, s, rev, isLam, Option.Some(tyS))
+
+verify bindDomains
+    resultBool(bindDomains(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(0), [], true, Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => false
+
+fn bindVar(st: St, t: Expr, s: Expr, rev: List<Expr>, isLam: Bool, tyS: Option<Expr>) -> Result<RB, Fail>
+    ? "A fresh variable only when a body uses it; otherwise a placeholder."
+    match Bool.or(Core.Exprs.looseRange(bodyOf(t)) > 0, Core.Exprs.looseRange(bodyOf(s)) > 0)
+        true -> bindFresh(Check.State.names(st, binderName(s), Option.withDefault(tyS, Core.Subst.instantiate(domainOf(s), rev)), Option.None, binderInfo(s)), t, s, rev, isLam)
+        false -> bindLoop(st, bodyOf(t), bodyOf(s), List.prepend(Core.Exprs.cnst(Check.Lits.name1("dontcare"), []), rev), isLam)
+
+verify bindVar
+    resultBool(bindVar(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), [], true, Option.None)) => true
+
+fn bindFresh(loc: RE, t: Expr, s: Expr, rev: List<Expr>, isLam: Bool) -> Result<RB, Fail>
+    ? "Continues under the fresh variable."
+    bindLoop(loc.st, bodyOf(t), bodyOf(s), List.prepend(loc.e, rev), isLam)
+
+verify bindFresh
+    resultBool(bindFresh(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(1), Core.Exprs.natLit(1), [], true)) => true
+
+fn binderName(e: Expr) -> Name
+    ? "The binder's name."
+    match e
+        Expr.Lam(_, n, _, _, _) -> n
+        Expr.Pi(_, n, _, _, _) -> n
+        _ -> Core.Names.anon()
+
+verify binderName
+    binderName(Core.Exprs.bvar(0)) => Core.Names.anon()
+
+fn binderInfo(e: Expr) -> Binder
+    ? "The binder's annotation."
+    match e
+        Expr.Lam(_, _, _, _, bi) -> bi
+        Expr.Pi(_, _, _, _, bi) -> bi
+        _ -> Binder.Default
+
+verify binderInfo
+    binderInfo(Core.Exprs.bvar(0)) => Binder.Default
+
+fn proofIrrel(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
+    ? "If t proves a proposition, t and s are equal exactly when their types are."
+    tt = inferType(st, t)?
+    p = isProp(tt.st, tt.e)?
+    match p.b
+        false -> Result.Ok(RI(i = 0, st = p.st))
+        true -> proofTypes(p.st, tt.e, s)
+
+verify proofIrrel
+    resultInt(proofIrrel(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero))) => 0
+
+fn proofTypes(st: St, tType: Expr, s: Expr) -> Result<RI, Fail>
+    ? "Compares the two proofs' types."
+    ts = inferType(st, s)?
+    r = isDefEq(ts.st, tType, ts.e)?
+    Result.Ok(RI(i = tri(r.b), st = r.st))
+
+verify proofTypes
+    resultInt(proofTypes(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Succ(Level.Zero)), Core.Exprs.sort(Level.Zero))) => 1
+
+fn isNatZero(e: Expr) -> Bool
+    ? "Nat.zero or the literal 0."
+    Check.Lits.natValue(e) == Option.Some(0)
+
+verify isNatZero
+    isNatZero(Core.Exprs.natLit(0)) => true
+
+fn natPred(e: Expr) -> Option<Expr>
+    ? "n for a literal n+1 or Nat.succ n."
+    match e
+        Expr.NatLit(n) -> match n > 0
+            true -> Option.Some(Core.Exprs.natLit(n - 1))
+            false -> Option.None
+        Expr.App(_, f, a) -> match Core.Apps.isConst(f, Check.Lits.name2("Nat", "succ"))
+            true -> Option.Some(a)
+            false -> Option.None
+        _ -> Option.None
+
+verify natPred
+    natPred(Core.Exprs.natLit(3)) => Option.Some(Core.Exprs.natLit(2))
+    natPred(Core.Exprs.natLit(0)) => Option.None
+
+fn defEqOffset(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
+    ? "Zero against zero, and successor against successor."
+    match Bool.and(isNatZero(t), isNatZero(s))
+        true -> Result.Ok(RI(i = 1, st = st))
+        false -> offsetPreds(st, natPred(t), natPred(s))
+
+verify defEqOffset
+    resultInt(defEqOffset(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(0), Core.Exprs.cnst(Check.Lits.name2("Nat", "zero"), []))) => 1
+
+fn offsetPreds(st: St, pt: Option<Expr>, ps: Option<Expr>) -> Result<RI, Fail>
+    ? "Both successors: compare the predecessors."
+    match pt
+        Option.Some(a) -> match ps
+            Option.Some(b) -> triOf(defEqCore(st, a, b)?)
+            Option.None -> Result.Ok(RI(i = 0, st = st))
+        Option.None -> Result.Ok(RI(i = 0, st = st))
+
+verify offsetPreds
+    resultInt(offsetPreds(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.None, Option.None)) => 0
+
+fn triOf(r: RB) -> Result<RI, Fail>
+    ? "A boolean result as a known three-way one."
+    Result.Ok(RI(i = tri(r.b), st = r.st))
+
+verify triOf
+    resultInt(triOf(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))) => 1
+
+fn lazyDelta(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "Unfolds definitions one step at a time, the higher one first, until the sides meet or nothing is left to unfold."
+    o = defEqOffset(st, t, s)?
+    match decided(o.i)
+        true -> Result.Ok(LD(status = o.i, t = t, s = s, st = o.st))
+        false -> lazyNat(o.st, t, s)
+
+verify lazyDelta
+    resultStatus(lazyDelta(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 0
+
+fn lazyNat(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "Closed terms get Nat arithmetic first."
+    match Bool.or(Bool.and(Bool.not(Core.Exprs.hasFVar(t)), Bool.not(Core.Exprs.hasFVar(s))), st.eager)
+        true -> lazyNatLeft(reduceNat(st, t)?, t, s)
+        false -> lazyStep(st, t, s)
+
+verify lazyNat
+    resultStatus(lazyNat(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 0
+
+fn lazyNatLeft(r: RO, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "t reduced by arithmetic decides it."
+    match r.o
+        Option.Some(v) -> ldOf(defEqCore(r.st, v, s)?, t, s)
+        Option.None -> lazyNatRight(reduceNat(r.st, s)?, t, s)
+
+verify lazyNatLeft
+    resultStatus(lazyNatLeft(RO(o = Option.Some(Core.Exprs.natLit(1)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.natLit(1))) => 1
+
+fn lazyNatRight(r: RO, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "s reduced by arithmetic decides it."
+    match r.o
+        Option.Some(v) -> ldOf(defEqCore(r.st, t, v)?, t, s)
+        Option.None -> lazyStep(r.st, t, s)
+
+verify lazyNatRight
+    resultStatus(lazyNatRight(RO(o = Option.Some(Core.Exprs.natLit(1)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(2), Core.Exprs.bvar(0))) => 2
+
+fn ldOf(r: RB, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "A boolean answer as a finished lazy delta."
+    Result.Ok(LD(status = tri(r.b), t = t, s = s, st = r.st))
+
+verify ldOf
+    resultStatus(ldOf(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => 2
+
+fn lazyStep(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "One unfolding step; status 3 means go round again."
+    r = deltaStep(st, t, s)?
+    match r.status
+        3 -> lazyDelta(r.st, r.t, r.s)
+        _ -> Result.Ok(r)
+
+verify lazyStep
+    resultStatus(lazyStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 0
+
+fn deltaStep(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "Unfolds the side that can be unfolded, or the higher one when both can."
+    match isDelta(st, t)
+        Option.None -> match isDelta(st, s)
+            Option.None -> Result.Ok(LD(status = 0, t = t, s = s, st = st))
+            Option.Some -> unfoldRight(st, t, s)
+        Option.Some(ct) -> match isDelta(st, s)
+            Option.None -> unfoldLeft(st, t, s)
+            Option.Some(cs) -> unfoldBoth(st, t, s, ct, cs)
+
+verify deltaStep
+    resultStatus(deltaStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 0
+
+fn unfoldLeft(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "Only t unfolds; a projection application on the other side is reduced instead when it can be."
+    pa = tryUnfoldProjApp(st, s)?
+    match pa.o
+        Option.Some(s2) -> afterStep(pa.st, t, s2)
+        Option.None -> unfoldedLeft(unfoldWhnf(pa.st, t)?, s)
+
+verify unfoldLeft
+    resultStatus(unfoldLeft(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => 1
+
+fn unfoldedLeft(u: RE, s: Expr) -> Result<LD, Fail>
+    ? "After unfolding t."
+    afterStep(u.st, u.e, s)
+
+verify unfoldedLeft
+    resultStatus(unfoldedLeft(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1))) => 1
+
+fn unfoldRight(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "Only s unfolds; symmetric to unfoldLeft."
+    pa = tryUnfoldProjApp(st, t)?
+    match pa.o
+        Option.Some(t2) -> afterStep(pa.st, t2, s)
+        Option.None -> unfoldedRight(unfoldWhnf(pa.st, s)?, t)
+
+verify unfoldRight
+    resultStatus(unfoldRight(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => 1
+
+fn unfoldedRight(u: RE, t: Expr) -> Result<LD, Fail>
+    ? "After unfolding s."
+    afterStep(u.st, t, u.e)
+
+verify unfoldedRight
+    resultStatus(unfoldedRight(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(2))) => 3
+
+fn unfoldWhnf(st: St, e: Expr) -> Result<RE, Fail>
+    ? "Unfolds the head and takes the cheap whnfCore."
+    u = unfoldDefinition(st, e)
+    match u.o
+        Option.Some(x) -> whnfCoreM(u.st, x, false, true)
+        Option.None -> Result.Ok(RE(e = e, st = u.st))
+
+verify unfoldWhnf
+    resultExpr(unfoldWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
+
+fn hintOrder(a: Hints, b: Hints) -> Int
+    ? "Negative: unfold the left side; positive: the right; zero: both."
+    match a
+        Hints.Regular(ha) -> match b
+            Hints.Regular(hb) -> regularOrder(ha, hb)
+            Hints.Opaque -> -1
+            Hints.Abbrev -> 1
+        Hints.Opaque -> match b
+            Hints.Opaque -> 0
+            _ -> 1
+        Hints.Abbrev -> match b
+            Hints.Abbrev -> 0
+            Hints.Opaque -> -1
+            Hints.Regular -> -1
+
+verify hintOrder
+    hintOrder(Hints.Regular(3), Hints.Regular(1)) => -1
+    hintOrder(Hints.Opaque, Hints.Abbrev) => 1
+    hintOrder(Hints.Abbrev, Hints.Regular(2)) => -1
+
+fn regularOrder(ha: Int, hb: Int) -> Int
+    ? "The greater height unfolds first."
+    match ha == hb
+        true -> 0
+        false -> match ha > hb
+            true -> -1
+            false -> 1
+
+verify regularOrder
+    regularOrder(1, 1) => 0
+
+fn isRegular(h: Hints) -> Bool
+    ? "A regular definition."
+    match h
+        Hints.Regular -> true
+        _ -> false
+
+verify isRegular
+    isRegular(Hints.Opaque) => false
+
+fn unfoldBoth(st: St, t: Expr, s: Expr, ct: Const, cs: Const) -> Result<LD, Fail>
+    ? "Both unfold: by hints; the same regular definition first tries equal arguments."
+    c = hintOrder(Check.State.hintsOf(ct), Check.State.hintsOf(cs))
+    match c < 0
+        true -> unfoldedLeft(unfoldWhnf(st, t)?, s)
+        false -> match c > 0
+            true -> unfoldedRight(unfoldWhnf(st, s)?, t)
+            false -> sameHead(st, t, s, ct, cs)
+
+verify unfoldBoth
+    resultStatus(unfoldBoth(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0)), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0)))) => 1
+
+fn sameHead(st: St, t: Expr, s: Expr, ct: Const, cs: Const) -> Result<LD, Fail>
+    ? "f as =?= f bs for a regular f: equal arguments settle it, unless that failed before."
+    match Bool.and(Bool.and(Core.Apps.isApp(t), Core.Apps.isApp(s)), Bool.and(Check.State.headOf(ct).name == Check.State.headOf(cs).name, isRegular(Check.State.hintsOf(ct))))
+        false -> unfoldBothNow(st, t, s)
+        true -> match Check.State.pairGet(st.eqFail, t, s)
+            true -> unfoldBothNow(st, t, s)
+            false -> tryArgs(st, t, s, ct)
+
+verify sameHead
+    resultStatus(sameHead(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0)), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0)))) => 1
+
+fn headLevels(e: Expr) -> List<Level>
+    ? "Universe levels of the head constant."
+    match Core.Apps.fnOf(e)
+        Expr.Const(_, ls) -> ls
+        _ -> []
+
+verify headLevels
+    headLevels(Core.Exprs.fvar(0)) => []
+
+fn tryArgs(st: St, t: Expr, s: Expr, c: Const) -> Result<LD, Fail>
+    ? "Equal levels and arguments mean equal terms; otherwise remember the failure and unfold both. Arguments that c never uses are not compared."
+    match Core.Univ.isEquivList(headLevels(t), headLevels(s))
+        false -> unfoldBothNow(St.update(st, eqFail = Check.State.pairPut(st.eqFail, t, s)), t, s)
+        true -> argsTried(defEqArgs(st, t, s, unusedArgs(c, Core.Apps.numArgs(t)))?, t, s)
+
+verify tryArgs
+    resultStatus(tryArgs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), dropFirst())) => 1
+    resultStatus(tryArgs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), dropFirst())) => 1
+
+fn dropFirst() -> Const
+    ? "A sample regular definition that ignores its argument: fun x => 0."
+    Const.CDefn(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(0), Binder.Default), Hints.Regular(1), Safety.Safe)
+
+verify dropFirst
+    Check.State.hintsOf(dropFirst()) => Hints.Regular(1)
+
+fn unusedArgs(c: Const, k: Int) -> List<Bool>
+    ? "For k arguments of c, last first: whether c's value drops the argument. Only when the arguments cover every leading lambda of the value, so that unfolding both sides leaves the body alone, in which that variable does not occur. No flags means compare everything."
+    match Check.State.valueOf(c)
+        Option.Some(v) -> unusedFrom(lamBody(v), lamCount(v, 0), k)
+        Option.None -> []
+
+verify unusedArgs
+    unusedArgs(dropFirst(), 1) => [true]
+    unusedArgs(dropFirst(), 2) => [false, true]
+    unusedArgs(dropFirst(), 0) => []
+
+fn lamCount(e: Expr, acc: Int) -> Int
+    ? "How many lambdas e starts with, plus acc."
+    match e
+        Expr.Lam(_, _, _, b, _) -> lamCount(b, acc + 1)
+        _ -> acc
+
+verify lamCount
+    lamCount(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 0) => 1
+
+fn lamBody(e: Expr) -> Expr
+    ? "e without its leading lambdas."
+    match e
+        Expr.Lam(_, _, _, b, _) -> lamBody(b)
+        _ -> e
+
+verify lamBody
+    lamBody(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)) => Core.Exprs.bvar(0)
+
+fn unusedFrom(body: Expr, n: Int, k: Int) -> List<Bool>
+    ? "Flags for k arguments over a body under n lambdas; none when the k arguments do not reach the body."
+    match k < n
+        true -> []
+        false -> unusedLoop(body, n, 0, k, [])
+
+verify unusedFrom
+    unusedFrom(Core.Exprs.bvar(0), 2, 1) => []
+    unusedFrom(Core.Exprs.bvar(0), 2, 2) => [false, true]
+
+fn unusedLoop(body: Expr, n: Int, i: Int, k: Int, acc: List<Bool>) -> List<Bool>
+    ? "Prepends the flag of argument i, first argument first, so the last argument's flag ends up at the front. Argument i is the variable n - 1 - i of the body."
+    match i >= k
+        true -> acc
+        false -> unusedLoop(body, n, i + 1, k, List.prepend(Bool.and(i < n, Bool.not(mentions(body, n - 1 - i))), acc))
+
+verify unusedLoop
+    unusedLoop(Core.Exprs.bvar(1), 2, 0, 3, []) => [false, true, false]
+
+fn mentions(body: Expr, j: Int) -> Bool
+    ? "Whether variable j may occur in body: not when it is outside the loose range, looked up in a small body, assumed in a large one so that a shared term is never walked as a tree."
+    match Core.Exprs.looseRange(body) <= j
+        true -> false
+        false -> match Core.Exprs.treeSize(body) < 63
+            true -> Core.Subst.hasLooseBVar(body, j)
+            false -> true
+
+verify mentions
+    mentions(Core.Exprs.bvar(0), 1) => false
+    mentions(Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(0)), 1) => false
+    mentions(Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(0)), 2) => true
+
+fn argsTried(r: RB, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "Outcome of the argument comparison."
+    match r.b
+        true -> Result.Ok(LD(status = 1, t = t, s = s, st = r.st))
+        false -> unfoldBothNow(St.update(r.st, eqFail = Check.State.pairPut(r.st.eqFail, t, s)), t, s)
+
+verify argsTried
+    resultStatus(argsTried(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => 1
+
+fn unfoldBothNow(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "Unfolds both sides."
+    u = unfoldWhnf(st, t)?
+    v = unfoldWhnf(u.st, s)?
+    afterStep(v.st, u.e, v.e)
+
+verify unfoldBothNow
+    resultStatus(unfoldBothNow(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 3
+
+fn afterStep(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "The easy cases after a step; undecided means continue."
+    q = quick(st, t, s)?
+    match decided(q.i)
+        true -> Result.Ok(LD(status = q.i, t = t, s = s, st = q.st))
+        false -> Result.Ok(LD(status = 3, t = t, s = s, st = q.st))
+
+verify afterStep
+    resultStatus(afterStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => 1
+
+fn tryUnfoldProjApp(st: St, e: Expr) -> Result<RO, Fail>
+    ? "e headed by a projection, if whnfCore changes it."
+    match Core.Apps.fnOf(e)
+        Expr.Proj -> changed(whnfCoreM(st, e, false, false)?, e)
+        _ -> Result.Ok(RO(o = Option.None, st = st))
+
+verify tryUnfoldProjApp
+    resultOpt(tryUnfoldProjApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0))) => Option.None
+
+fn changed(w: RE, e: Expr) -> Result<RO, Fail>
+    ? "Some only when different."
+    match w.e == e
+        true -> Result.Ok(RO(o = Option.None, st = w.st))
+        false -> Result.Ok(RO(o = Option.Some(w.e), st = w.st))
+
+verify changed
+    resultOpt(changed(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0))) => Option.Some(Core.Exprs.fvar(1))
+
+fn lazyDeltaProj(st: St, t: Expr, s: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
+    ? "t.idx =?= s.idx: unfold t and s lazily, and compare the fields once neither unfolds."
+    r = deltaStep(st, t, s)?
+    match r.status
+        3 -> lazyDeltaProj(r.st, r.t, r.s, sname, idx)
+        1 -> yes(r.st)
+        _ -> projFallback(r.st, r.t, r.s, sname, idx)
+
+verify lazyDeltaProj
+    resultBool(lazyDeltaProj(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Names.anon(), 0)) => false
+
+fn projFallback(st: St, t: Expr, s: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
+    ? "Fields of constructor applications, else the structures themselves."
+    match projCore(st, t, sname, idx)
+        Option.Some(pt) -> match projCore(st, s, sname, idx)
+            Option.Some(ps) -> defEqCore(st, pt, ps)
+            Option.None -> defEqCore(st, t, s)
+        Option.None -> defEqCore(st, t, s)
+
+verify projFallback
+    resultBool(projFallback(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Names.anon(), 0)) => true
+
+fn defEqArgs(st: St, t: Expr, s: Expr, skip: List<Bool>) -> Result<RB, Fail>
+    ? "Pairwise equal arguments of two spines of the same length, last first, leaving out those flagged in skip."
+    match t
+        Expr.App(_, ft, at) -> match s
+            Expr.App(_, fs, as) -> match skip
+                [true, ..rest] -> defEqArgs(st, ft, fs, rest)
+                [false, ..rest] -> argThen(isDefEq(st, at, as)?, ft, fs, rest)
+                [] -> argThen(isDefEq(st, at, as)?, ft, fs, [])
+            _ -> no(st)
+        _ -> match s
+            Expr.App -> no(st)
+            _ -> yes(st)
+
+verify defEqArgs
+    resultBool(defEqArgs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(5), Core.Exprs.natLit(1)), [])) => true
+    resultBool(defEqArgs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), [true])) => true
+    resultBool(defEqArgs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), [false])) => false
+
+fn argThen(r: RB, ft: Expr, fs: Expr, skip: List<Bool>) -> Result<RB, Fail>
+    ? "Continues with the rest of the spine."
+    match r.b
+        true -> defEqArgs(r.st, ft, fs, skip)
+        false -> no(r.st)
+
+verify argThen
+    resultBool(argThen(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0), [])) => false
+
+fn defEqApp(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "Congruence: equal heads and equal arguments."
+    match Bool.and(Core.Apps.isApp(t), Core.Apps.isApp(s))
+        false -> no(st)
+        true -> appHeads(isDefEq(st, Core.Apps.fnOf(t), Core.Apps.fnOf(s))?, Core.Apps.argsOf(t), Core.Apps.argsOf(s))
+
+verify defEqApp
+    resultBool(defEqApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)))) => false
+
+fn appHeads(r: RB, as: List<Expr>, bs: List<Expr>) -> Result<RB, Fail>
+    ? "Then the arguments, if there are as many."
+    match Bool.and(r.b, List.len(as) == List.len(bs))
+        true -> argsAll(r.st, as, bs)
+        false -> no(r.st)
+
+verify appHeads
+    resultBool(appHeads(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [])) => true
+
+fn argsAll(st: St, as: List<Expr>, bs: List<Expr>) -> Result<RB, Fail>
+    ? "Pairwise equality."
+    match as
+        [] -> yes(st)
+        [a, ..arest] -> match bs
+            [b, ..brest] -> argsNext(isDefEq(st, a, b)?, arest, brest)
+            [] -> no(st)
+
+verify argsAll
+    resultBool(argsAll(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [Core.Exprs.natLit(1)], [Core.Exprs.natLit(1)])) => true
+
+fn argsNext(r: RB, as: List<Expr>, bs: List<Expr>) -> Result<RB, Fail>
+    ? "Stops at the first unequal pair."
+    match r.b
+        true -> argsAll(r.st, as, bs)
+        false -> no(r.st)
+
+verify argsNext
+    resultBool(argsNext(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [])) => false
+
+fn etaExpansion(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "fun x => f x against f, in either direction."
+    a = etaCore(st, t, s)?
+    match a.b
+        true -> yes(a.st)
+        false -> etaCore(a.st, s, t)
+
+verify etaExpansion
+    resultBool(etaExpansion(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => false
+
+fn etaCore(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "t a lambda, s not: compare t with s eta expanded along its pi type."
+    match t
+        Expr.Lam -> match s
+            Expr.Lam -> no(st)
+            _ -> etaWithType(whnfOf(inferType(st, s)?)?, t, s)
+        _ -> no(st)
+
+verify etaCore
+    resultBool(etaCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => false
+
+fn etaWithType(w: RE, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "Needs s's type to be a pi."
+    match w.e
+        Expr.Pi(_, n, d, _, bi) -> isDefEq(w.st, t, Core.Exprs.lam(n, d, Core.Exprs.app(s, Core.Exprs.bvar(0)), bi))
+        _ -> no(w.st)
+
+verify etaWithType
+    resultBool(etaWithType(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => false
+
+fn etaStruct(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "x against mk x.1 ... x.n, in either direction."
+    a = etaStructCore(st, t, s)?
+    match a.b
+        true -> yes(a.st)
+        false -> etaStructCore(a.st, s, t)
+
+verify etaStruct
+    resultBool(etaStruct(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => false
+
+fn etaStructCore(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "s must be a full constructor application of a non-recursive structure."
+    match Core.Apps.fnOf(s)
+        Expr.Const(n, _) -> match Check.State.lookup(st, n)
+            Option.Some(Const.CCtor(k)) -> match Bool.and(Core.Apps.numArgs(s) == k.numParams + k.numFields, isNonRecStructure(st, k.induct))
+                true -> etaStructTypes(st, t, s, k)
+                false -> no(st)
+            _ -> no(st)
+        _ -> no(st)
+
+verify etaStructCore
+    resultBool(etaStructCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => false
+
+fn etaStructTypes(st: St, t: Expr, s: Expr, k: Ctor) -> Result<RB, Fail>
+    ? "Equal types, then each field against the projection of t."
+    it = inferType(st, t)?
+    is = inferType(it.st, s)?
+    eq = isDefEq(is.st, it.e, is.e)?
+    match eq.b
+        false -> no(eq.st)
+        true -> fieldsEq(eq.st, t, List.drop(Core.Apps.argsOf(s), k.numParams), k.induct, 0)
+
+verify etaStructTypes
+    resultBool(etaStructTypes(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Succ(Level.Zero)), Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), induct = Core.Names.anon(), cidx = 0, numParams = 0, numFields = 0, isUnsafe = false))) => false
+
+fn fieldsEq(st: St, t: Expr, fields: List<Expr>, induct: Name, i: Int) -> Result<RB, Fail>
+    ? "Field i against t.i."
+    match fields
+        [] -> yes(st)
+        [x, ..rest] -> fieldNext(isDefEq(st, Core.Exprs.proj(induct, i, t), x)?, t, rest, induct, i)
+
+verify fieldsEq
+    resultBool(fieldsEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [], Core.Names.anon(), 0)) => true
+
+fn fieldNext(r: RB, t: Expr, rest: List<Expr>, induct: Name, i: Int) -> Result<RB, Fail>
+    ? "Stops at the first unequal field."
+    match r.b
+        true -> fieldsEq(r.st, t, rest, induct, i + 1)
+        false -> no(r.st)
+
+verify fieldNext
+    resultBool(fieldNext(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), [], Core.Names.anon(), 0)) => false
+
+fn stringLitExpansion(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
+    ? "A string literal against String.ofList of something: expand the literal."
+    a = stringCore(st, t, s)?
+    match decided(a.i)
+        true -> Result.Ok(a)
+        false -> stringCore(a.st, s, t)
+
+verify stringLitExpansion
+    resultInt(stringLitExpansion(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => 0
+
+fn stringCore(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
+    ? "One direction of the expansion."
+    match t
+        Expr.StrLit(x) -> match s
+            Expr.App(_, f, _) -> match f == Core.Exprs.cnst(Check.Lits.name2("String", "ofList"), [])
+                true -> stringExpanded(whnf(st, Check.Lits.strToCtor(x))?, s)
+                false -> Result.Ok(RI(i = 0, st = st))
+            _ -> Result.Ok(RI(i = 0, st = st))
+        _ -> Result.Ok(RI(i = 0, st = st))
+
+verify stringCore
+    resultInt(stringCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.strLit(""), Check.Lits.strToCtor(""))) => 1
+
+fn stringExpanded(w: RE, s: Expr) -> Result<RI, Fail>
+    ? "Compares the expansion with s."
+    triOf(defEqCore(w.st, w.e, s)?)
+
+verify stringExpanded
+    resultInt(stringExpanded(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1))) => 1
+
+fn unitLike(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "Values of a structure with one field-less constructor are all equal."
+    tt = inferType(st, t)?
+    w = whnf(tt.st, tt.e)?
+    match Core.Apps.fnOf(w.e)
+        Expr.Const(n, _) -> match Bool.and(isNonRecStructure(w.st, n), noFields(w.st, firstCtor(w.st, n)))
+            true -> unitTypes(w.st, w.e, s)
+            false -> no(w.st)
+        _ -> no(w.st)
+
+verify unitLike
+    resultBool(unitLike(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero))) => false
+
+fn noFields(st: St, k: Option<Name>) -> Bool
+    ? "The constructor has no fields."
+    match k
+        Option.Some(c) -> match Check.State.lookup(st, c)
+            Option.Some(Const.CCtor(kv)) -> kv.numFields == 0
+            _ -> false
+        Option.None -> false
+
+verify noFields
+    noFields(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.None) => false
+
+fn unitTypes(st: St, tType: Expr, s: Expr) -> Result<RB, Fail>
+    ? "Equal when s has the same type."
+    ts = inferType(st, s)?
+    defEqCore(ts.st, tType, ts.e)
+
+verify unitTypes
+    resultBool(unitTypes(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Succ(Level.Zero)), Core.Exprs.sort(Level.Zero))) => true
+
+fn resultInt(r: Result<RI, Fail>) -> Int
+    ? "Test helper: the three-way answer of a successful result; -1 on an error."
+    match r
+        Result.Ok(x) -> x.i
+        Result.Err -> -1
+
+verify resultInt
+    resultInt(Result.Err(Fail.Reject("x"))) => -1
+
+fn resultStatus(r: Result<LD, Fail>) -> Int
+    ? "Test helper: the status of a lazy delta result; -1 on an error."
+    match r
+        Result.Ok(x) -> x.status
+        Result.Err -> -1
+
+verify resultStatus
+    resultStatus(Result.Err(Fail.Reject("x"))) => -1

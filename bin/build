@@ -1,0 +1,9 @@
+#!/bin/sh
+# Compiles Pestka to Rust and builds the release binary into .build/.
+# Uses the aver on PATH unless AVER names another one; it should be the
+# commit in .aver-version. The allocator comes from aver.toml.
+set -e
+root=$(cd "$(dirname "$0")/.." && pwd)
+"${AVER:-aver}" compile "$root/main.av" --module-root "$root" -o "$root/.build" >/dev/null
+cd "$root/.build"
+cargo build --release

@@ -1,0 +1,493 @@
+module Decl
+    intent =
+        "Adds declarations to the environment in file order and checks each"
+        "as Lean's kernel does when it replays an export: the name is new,"
+        "the universe parameters are distinct, the type is a type, and a"
+        "value has the declared type. Unsafe and partial declarations are"
+        "skipped, as the reference replay skips them. Inductive blocks and"
+        "the quotient package are derived and compared with the export as"
+        "they are met. The types and values of the other declarations are"
+        "checked after the environment is built, each against the"
+        "environment at its own place in the file, so that they can be"
+        "checked apart; the verdict names the first failure in file order,"
+        "as checking strictly in order would."
+    exposes [Run, Job, Admitted, Chunk, Checked, checkAll, checkParallel, admit, due, chunks, checkChunk, combine, jobChecks]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.PMap, Check.State, Check.Tc, Check.IndAdd]
+    effects []
+
+record Run
+    env: Env
+    closed: PMap
+    checked: Int
+    trusted: Int
+    skipped: Int
+    jobs: List<Job>
+    pos: Int
+
+record Job
+    pos: Int
+    env: Env
+    head: Head
+    value: Option<Expr>
+    isThm: Bool
+
+record Admitted
+    run: Run
+    failure: Option<Fail>
+    at: Int
+
+record Chunk
+    jobs: List<Job>
+
+record Checked
+    failure: Option<Fail>
+    at: Int
+    count: Int
+
+fn checkAll(decls: List<Decl>) -> Result<Run, Fail>
+    ? "Builds the environment, then checks the deferred declarations before the first failure the building met, one after another."
+    a = admit(decls)
+    finish(a, checkJobs(List.reverse(a.run.jobs), a.run.closed, a.at))
+
+fn admit(decls: List<Decl>) -> Admitted
+    ? "Builds the environment from nothing; the deferred declarations wait in the result."
+    admitAll(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), decls)
+
+verify admit
+    admit([]).at => 0
+
+fn due(a: Admitted) -> List<Job>
+    ? "The deferred declarations in file order, those before the building's failure."
+    List.reverse(dropLate(a.run.jobs, a.at, []))
+
+verify due
+    due(admit([])) => []
+
+fn dropLate(jobs: List<Job>, limit: Int, acc: List<Job>) -> List<Job>
+    ? "Keeps the jobs before limit; jobs come newest first and go out oldest first."
+    match jobs
+        [] -> List.reverse(acc)
+        [j, ..rest] -> match j.pos < limit
+            true -> dropLate(rest, limit, List.prepend(j, acc))
+            false -> dropLate(rest, limit, acc)
+
+verify dropLate
+    dropLate([], 0, []) => []
+
+fn chunks(jobs: List<Job>, size: Int, cur: List<Job>, n: Int, acc: List<Chunk>) -> List<Chunk>
+    ? "Consecutive runs of size jobs, in file order; neighbours in a file share the most, which keeps the per-chunk caches useful."
+    match jobs
+        [] -> match cur
+            [] -> List.reverse(acc)
+            _ -> List.reverse(List.prepend(Chunk(jobs = List.reverse(cur)), acc))
+        [j, ..rest] -> match n + 1 >= size
+            true -> chunks(rest, size, [], 0, List.prepend(Chunk(jobs = List.reverse(List.prepend(j, cur))), acc))
+            false -> chunks(rest, size, List.prepend(j, cur), n + 1, acc)
+
+verify chunks
+    chunks([], 4, [], 0, []) => []
+
+fn checkParallel(decls: List<Decl>, workers: Int) -> Result<Run, Fail>
+    ? "Builds the environment, then checks the deferred declarations on workers at once: runs of 16 consecutive declarations are dealt to the workers in turn, which evens out their loads, and each worker checks its runs in file order."
+    a = admit(decls)
+    combine(a, runWorkers(deal(chunks(due(a), 16, [], 0, []), workers, 0, emptyGroups(workers, []))))
+
+verify checkParallel
+    checkParallel([], 4) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
+
+fn emptyGroups(n: Int, acc: List<List<Chunk>>) -> List<List<Chunk>>
+    ? "n empty groups."
+    none: List<Chunk> = []
+    match n <= 0
+        true -> acc
+        false -> emptyGroups(n - 1, List.prepend(none, acc))
+
+verify emptyGroups
+    List.len(emptyGroups(3, [])) => 3
+
+fn deal(cs: List<Chunk>, n: Int, i: Int, groups: List<List<Chunk>>) -> List<List<Chunk>>
+    ? "Deals the runs to n groups in turn, run i to group i mod n, keeping each group in file order."
+    match cs
+        [] -> reverseEach(groups, [])
+        [c, ..rest] -> deal(rest, n, i + 1, addAt(groups, Result.withDefault(Int.mod(i, Int.max(n, 1)), 0), c, []))
+
+verify deal
+    deal([], 2, 0, emptyGroups(2, [])) => [[], []]
+
+fn addAt(groups: List<List<Chunk>>, k: Int, c: Chunk, before: List<List<Chunk>>) -> List<List<Chunk>>
+    ? "Prepends c to group k."
+    match groups
+        [] -> List.reverse(before)
+        [g, ..rest] -> match k == 0
+            true -> List.concat(List.reverse(before), List.prepend(List.prepend(c, g), rest))
+            false -> addAt(rest, k - 1, c, List.prepend(g, before))
+
+verify addAt
+    addAt([[], []], 1, Chunk(jobs = []), []) => [[], [Chunk(jobs = [])]]
+
+fn reverseEach(groups: List<List<Chunk>>, acc: List<List<Chunk>>) -> List<List<Chunk>>
+    ? "Each group back in file order."
+    match groups
+        [] -> List.reverse(acc)
+        [g, ..rest] -> reverseEach(rest, List.prepend(List.reverse(g), acc))
+
+verify reverseEach
+    reverseEach([], []) => []
+
+fn runWorkers(groups: List<List<Chunk>>) -> List<Checked>
+    ? "Every group on a worker of its own: the list is halved, and the halves run as an independent product."
+    match groups
+        [] -> []
+        [g] -> [checkGroup(g)]
+        _ -> halves(List.take(groups, Int.div(List.len(groups), 2)), List.drop(groups, Int.div(List.len(groups), 2)))
+
+verify runWorkers
+    runWorkers([[], []]) => [Checked(failure = Option.None, at = 0, count = 0), Checked(failure = Option.None, at = 0, count = 0)]
+
+fn halves(left: List<List<Chunk>>, right: List<List<Chunk>>) -> List<Checked>
+    ? "The two halves at once."
+    match (runWorkers(left), runWorkers(right))!
+        (l, r) -> List.concat(l, r)
+
+verify halves
+    halves([], []) => []
+
+fn checkGroup(g: List<Chunk>) -> Checked
+    ? "One worker: its runs in file order with one cache of checked closed terms, stopping at the first failure."
+    groupLoop(g, Core.PMap.empty(), 0)
+
+verify checkGroup
+    checkGroup([]) => Checked(failure = Option.None, at = 0, count = 0)
+
+fn groupLoop(g: List<Chunk>, closed: PMap, count: Int) -> Checked
+    ? "Run after run."
+    match g
+        [] -> Checked(failure = Option.None, at = 0, count = count)
+        [c, ..rest] -> chunkLoop(c.jobs, rest, closed, count)
+
+verify groupLoop
+    groupLoop([], Core.PMap.empty(), 2).count => 2
+
+fn checkChunk(c: Chunk) -> Checked
+    ? "Checks one run of deferred declarations with a cache of its own; the first failure is reported with its place in the file."
+    chunkLoop(c.jobs, [], Core.PMap.empty(), 0)
+
+verify checkChunk
+    checkChunk(Chunk(jobs = [])) => Checked(failure = Option.None, at = 0, count = 0)
+
+fn chunkLoop(jobs: List<Job>, more: List<Chunk>, closed: PMap, count: Int) -> Checked
+    ? "One job after another, then the next run, until one fails."
+    match jobs
+        [] -> groupLoop(more, closed, count)
+        [j, ..rest] -> chunkNext(jobChecks(j, closed), j, rest, more, count)
+
+verify chunkLoop
+    chunkLoop([], [], Core.PMap.empty(), 3).count => 3
+
+fn chunkNext(r: Result<PMap, Fail>, j: Job, rest: List<Job>, more: List<Chunk>, count: Int) -> Checked
+    ? "Goes on, or stops with the named failure and its position."
+    match r
+        Result.Ok(closed) -> chunkLoop(rest, more, closed, count + 1)
+        Result.Err(e) -> Checked(failure = Option.Some(failNamed(e, j.head.name)), at = j.pos, count = count)
+
+verify chunkNext
+    chunkNext(Result.Err(Fail.Reject("bad")), Job(pos = 4, env = Check.State.envEmpty(), head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), [], [], 0) => Checked(failure = Option.Some(Fail.Reject("x: bad")), at = 4, count = 0)
+
+fn combine(a: Admitted, results: List<Checked>) -> Result<Run, Fail>
+    ? "The first failure in file order across the chunks and the building; otherwise the run with every deferred declaration counted."
+    firstOf(results, a.failure, a.at, 0, a)
+
+verify combine
+    combine(admit([]), [Checked(failure = Option.Some(Fail.Reject("b")), at = 9, count = 0), Checked(failure = Option.Some(Fail.Reject("a")), at = 2, count = 0)]) => Result.Err(Fail.Reject("a"))
+
+fn firstOf(rs: List<Checked>, best: Option<Fail>, bestAt: Int, count: Int, a: Admitted) -> Result<Run, Fail>
+    ? "Keeps the earliest failure seen so far."
+    match rs
+        [] -> match best
+            Option.Some(e) -> Result.Err(e)
+            Option.None -> Result.Ok(Run.update(a.run, checked = a.run.checked + count, jobs = []))
+        [r, ..rest] -> match r.failure
+            Option.None -> firstOf(rest, best, bestAt, count + r.count, a)
+            Option.Some(e) -> match Bool.or(best == Option.None, r.at < bestAt)
+                true -> firstOf(rest, r.failure, r.at, count + r.count, a)
+                false -> firstOf(rest, best, bestAt, count + r.count, a)
+
+verify firstOf
+    firstOf([], Option.None, 0, 5, admit([])) == Result.Err(Fail.Reject("x")) => false
+
+fn admitAll(run: Run, decls: List<Decl>) -> Admitted
+    ? "One declaration at a time; the first failure stops the building and is kept with its position."
+    match decls
+        [] -> Admitted(run = run, failure = Option.None, at = run.pos)
+        [d, ..rest] -> admitNext(run, named(addDecl(run, d), Core.Decls.nameOf(d)), rest)
+
+verify admitAll
+    admitAll(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), []).at => 0
+
+fn admitNext(run: Run, r: Result<Run, Fail>, rest: List<Decl>) -> Admitted
+    ? "Goes on with the next declaration, or stops at this one."
+    match r
+        Result.Ok(next) -> admitAll(next, rest)
+        Result.Err(e) -> Admitted(run = run, failure = Option.Some(e), at = run.pos)
+
+verify admitNext
+    admitNext(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Result.Err(Fail.Reject("x")), []).failure => Option.Some(Fail.Reject("x"))
+
+fn checkJobs(jobs: List<Job>, closed: PMap, limit: Int) -> Result<PMap, Fail>
+    ? "The deferred declarations in file order, up to the position where the building failed."
+    match jobs
+        [] -> Result.Ok(closed)
+        [j, ..rest] -> match j.pos < limit
+            false -> Result.Ok(closed)
+            true -> jobDone(jobChecks(j, closed), j, rest, limit)
+
+verify checkJobs
+    checkJobs([], Core.PMap.empty(), 0) => Result.Ok(Core.PMap.empty())
+
+fn jobDone(r: Result<PMap, Fail>, j: Job, rest: List<Job>, limit: Int) -> Result<PMap, Fail>
+    ? "Goes on, or names the declaration that failed."
+    match r
+        Result.Ok(closed) -> checkJobs(rest, closed, limit)
+        Result.Err(e) -> Result.Err(failNamed(e, j.head.name))
+
+verify jobDone
+    jobDone(Result.Err(Fail.Reject("bad")), Job(pos = 0, env = Check.State.envEmpty(), head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), [], 1) => Result.Err(Fail.Reject("x: bad"))
+
+fn finish(a: Admitted, b: Result<PMap, Fail>) -> Result<Run, Fail>
+    ? "A deferred failure comes first in the file; then the building's own; else everything passed."
+    match b
+        Result.Err(e) -> Result.Err(e)
+        Result.Ok(closed) -> match a.failure
+            Option.Some(e) -> Result.Err(e)
+            Option.None -> Result.Ok(Run.update(a.run, closed = closed, checked = a.run.checked + List.len(a.run.jobs), jobs = []))
+
+verify finish
+    finish(Admitted(run = Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), failure = Option.Some(Fail.Reject("late")), at = 3), Result.Err(Fail.Reject("early"))) => Result.Err(Fail.Reject("early"))
+
+fn jobChecks(j: Job, closed: PMap) -> Result<PMap, Fail>
+    ? "A deferred declaration against the environment before it: the type is a type, a theorem's type a proposition, and the value's type equal to the declared one. Returns the shared cache of checked closed terms."
+    st = typeIsSort(Check.Tc.check(St.update(Check.State.fresh(j.env, j.head.params, Safety.Safe), closed = closed), j.head.ty)?)?
+    match j.value
+        Option.None -> Result.Ok(st.closed)
+        Option.Some(v) -> valueChecks(st, j.head.ty, v, j.isThm)
+
+verify jobChecks
+    jobChecks(Job(pos = 0, env = Check.State.envEmpty(), head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Core.PMap.empty()) => Result.Err(Fail.Reject("declaration type mismatch"))
+
+verify checkAll
+    checkAll([]) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
+
+fn named(r: Result<Run, Fail>, n: Name) -> Result<Run, Fail>
+    ? "Puts the declaration's name in front of its failure."
+    match r
+        Result.Ok(x) -> Result.Ok(x)
+        Result.Err(Fail.Reject(m)) -> Result.Err(Fail.Reject("{Core.Names.render(n)}: {m}"))
+        Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline("{Core.Names.render(n)}: {m}"))
+
+fn failNamed(e: Fail, n: Name) -> Fail
+    ? "Puts the declaration's name in front of a failure."
+    match e
+        Fail.Reject(m) -> Fail.Reject("{Core.Names.render(n)}: {m}")
+        Fail.Decline(m) -> Fail.Decline("{Core.Names.render(n)}: {m}")
+
+verify failNamed
+    failNamed(Fail.Decline("d"), Core.Names.str(Core.Names.anon(), "y")) => Fail.Decline("y: d")
+
+verify named
+    named(Result.Err(Fail.Reject("bad")), Core.Names.str(Core.Names.anon(), "x")) => Result.Err(Fail.Reject("x: bad"))
+
+fn addDecl(run: Run, d: Decl) -> Result<Run, Fail>
+    ? "Dispatches on the kind of declaration."
+    match d
+        Decl.Axiom(h, unsafe) -> match unsafe
+            true -> skip(run)
+            false -> defer(run, h, Option.None, false, Const.CAxiom(h, false))
+        Decl.Defn(h, v, hints, safety, _) -> match safety
+            Safety.Safe -> defer(run, h, Option.Some(v), false, Const.CDefn(h, v, hints, safety))
+            _ -> skip(run)
+        Decl.Thm(h, v, _) -> defer(run, h, Option.Some(v), true, Const.CThm(h, v))
+        Decl.Opaq(h, v, unsafe, _) -> match unsafe
+            true -> skip(run)
+            false -> defer(run, h, Option.Some(v), false, Const.COpaque(h, v, unsafe))
+        Decl.Quot(h, kind) -> derived(run, Check.IndAdd.addQuotDecl(run.env, h, kind)?)
+        Decl.Induct(types, ctors, recs) -> match anyUnsafe(types)
+            true -> skip(run)
+            false -> inductive(run, Check.IndAdd.addInductive(run.env, types, ctors, recs), types, ctors, recs)
+
+fn defer(run: Run, h: Head, v: Option<Expr>, isThm: Bool, c: Const) -> Result<Run, Fail>
+    ? "A new name and distinct universe parameters now; the constant joins the environment, and its type and value are checked later against the environment before it."
+    ok = newHead(run.env, h)?
+    Result.Ok(Run.update(run, env = Check.State.envSet(run.env, h.name, c), jobs = List.prepend(Job(pos = run.pos, env = run.env, head = h, value = v, isThm = isThm), run.jobs), pos = run.pos + 1))
+
+verify defer
+    Result.withDefault(defer(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Option.None, false, Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)), Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).pos => 1
+
+fn newHead(env: Env, h: Head) -> Result<Unit, Fail>
+    ? "The name is not taken and the universe parameters are distinct."
+    match Check.State.envHas(env, h.name)
+        true -> Result.Err(Fail.Reject("already declared"))
+        false -> match hasDup(h.params)
+            true -> Result.Err(Fail.Reject("duplicate universe level parameter"))
+            false -> Result.Ok(Unit)
+
+verify newHead
+    newHead(Check.State.envEmpty(), Head(name = Core.Names.anon(), params = [Core.Names.anon(), Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero))) => Result.Err(Fail.Reject("duplicate universe level parameter"))
+
+verify addDecl
+    addDecl(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true)) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 1, jobs = [], pos = 1))
+
+fn derived(run: Run, env: Env) -> Result<Run, Fail>
+    ? "A block or quotient constant the checker derived and compared."
+    Result.Ok(Run.update(run, env = env, checked = run.checked + 1, pos = run.pos + 1))
+
+verify derived
+    Result.withDefault(derived(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Check.State.envEmpty()), Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).checked => 1
+
+fn inductive(run: Run, r: Result<Map<Name, Const>, Fail>, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> Result<Run, Fail>
+    ? "A derived block, or one Pestka cannot derive yet admitted as stated."
+    match r
+        Result.Ok(cs) -> blockAdded(run, cs)
+        Result.Err(Fail.Decline) -> trust(run, inductConsts(types, ctors, recs))
+        Result.Err(e) -> Result.Err(e)
+
+verify inductive
+    inductive(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Result.Err(Fail.Reject("x")), [], [], []) => Result.Err(Fail.Reject("x"))
+
+fn blockAdded(run: Run, cs: Map<Name, Const>) -> Result<Run, Fail>
+    ? "The constants a block derived join the environment, which no checker state holds any more."
+    Result.Ok(Run.update(run, env = mergeConsts(run.env, Map.entries(cs)), checked = run.checked + 1, pos = run.pos + 1))
+
+verify blockAdded
+    Result.withDefault(blockAdded(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), {}), Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).checked => 1
+
+fn mergeConsts(env: Env, cs: List<Tuple<Name, Const>>) -> Env
+    ? "Adds each named constant."
+    match cs
+        [] -> env
+        [(n, c), ..rest] -> mergeConsts(Check.State.envSet(env, n, c), rest)
+
+verify mergeConsts
+    Check.State.envHas(mergeConsts(Check.State.envEmpty(), [(Core.Names.anon(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false))]), Core.Names.anon()) => true
+
+fn skip(run: Run) -> Result<Run, Fail>
+    ? "An unsafe or partial declaration is left out."
+    Result.Ok(Run.update(run, skipped = run.skipped + 1, pos = run.pos + 1))
+
+verify skip
+    Result.withDefault(skip(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)), Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).skipped => 1
+
+fn anyUnsafe(types: List<IndType>) -> Bool
+    ? "An unsafe inductive block."
+    match types
+        [] -> false
+        [t, ..rest] -> Bool.or(t.isUnsafe, anyUnsafe(rest))
+
+verify anyUnsafe
+    anyUnsafe([]) => false
+
+fn typeIsSort(t: RE) -> Result<St, Fail>
+    ? "The declared type's type must be a sort."
+    Result.Ok(Check.Tc.ensureSort(t.st, t.e)?.st)
+
+verify typeIsSort
+    typeIsSort(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("type expected"))
+
+fn hasDup(ps: List<Name>) -> Bool
+    ? "A name occurring twice."
+    match ps
+        [] -> false
+        [p, ..rest] -> Bool.or(List.contains(rest, p), hasDup(rest))
+
+verify hasDup
+    hasDup([Core.Names.anon()]) => false
+
+fn valueChecks(st: St, ty: Expr, v: Expr, isThm: Bool) -> Result<PMap, Fail>
+    ? "A theorem's type a proposition, and the value's type equal to the declared one; returns the shared cache of checked closed terms."
+    st2 = thmProp(st, ty, isThm)?
+    vt = Check.Tc.check(st2, v)?
+    eq = Check.Tc.isDefEq(vt.st, vt.e, ty)?
+    match eq.b
+        true -> Result.Ok(eq.st.closed)
+        false -> Result.Err(Fail.Reject("declaration type mismatch"))
+
+verify valueChecks
+    valueChecks(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), false) => Result.Err(Fail.Reject("declaration type mismatch"))
+
+fn thmProp(st: St, ty: Expr, isThm: Bool) -> Result<St, Fail>
+    ? "A theorem must state a proposition."
+    match isThm
+        false -> Result.Ok(st)
+        true -> propOrFail(Check.Tc.isProp(st, ty)?)
+
+verify thmProp
+    thmProp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), true) => Result.Err(Fail.Reject("theorem type is not Prop"))
+
+fn propOrFail(p: RB) -> Result<St, Fail>
+    ? "Passes a proposition."
+    match p.b
+        true -> Result.Ok(p.st)
+        false -> Result.Err(Fail.Reject("theorem type is not Prop"))
+
+verify propOrFail
+    propOrFail(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("theorem type is not Prop"))
+
+fn trust(run: Run, cs: List<Const>) -> Result<Run, Fail>
+    ? "Records constants admitted without checking; their names must still be new."
+    match anyDeclared(run.env, cs)
+        true -> Result.Err(Fail.Reject("already declared"))
+        false -> Result.Ok(Run.update(run, env = addConsts(run.env, cs), trusted = run.trusted + 1, pos = run.pos + 1))
+
+verify trust
+    Result.withDefault(trust(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), []), Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).trusted => 1
+
+fn anyDeclared(env: Env, cs: List<Const>) -> Bool
+    ? "Some name is already in the environment."
+    match cs
+        [] -> false
+        [c, ..rest] -> Bool.or(Check.State.envHas(env, Check.State.headOf(c).name), anyDeclared(env, rest))
+
+verify anyDeclared
+    anyDeclared(Check.State.envEmpty(), []) => false
+
+fn addConsts(env: Env, cs: List<Const>) -> Env
+    ? "Adds each constant under its name."
+    match cs
+        [] -> env
+        [c, ..rest] -> addConsts(Check.State.envSet(env, Check.State.headOf(c).name, c), rest)
+
+verify addConsts
+    Check.State.envHas(addConsts(Check.State.envEmpty(), [Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)]), Core.Names.anon()) => true
+
+fn inductConsts(types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> List<Const>
+    ? "Every constant an inductive block declares."
+    List.concat(typeConsts(types, []), List.concat(ctorConsts(ctors, []), recConsts(recs, [])))
+
+verify inductConsts
+    inductConsts([], [], []) => []
+
+fn typeConsts(xs: List<IndType>, acc: List<Const>) -> List<Const>
+    ? "The types."
+    match xs
+        [] -> List.reverse(acc)
+        [x, ..rest] -> typeConsts(rest, List.prepend(Const.CInduct(x), acc))
+
+verify typeConsts
+    typeConsts([], []) => []
+
+fn ctorConsts(xs: List<Ctor>, acc: List<Const>) -> List<Const>
+    ? "The constructors."
+    match xs
+        [] -> List.reverse(acc)
+        [x, ..rest] -> ctorConsts(rest, List.prepend(Const.CCtor(x), acc))
+
+verify ctorConsts
+    ctorConsts([], []) => []
+
+fn recConsts(xs: List<Rec>, acc: List<Const>) -> List<Const>
+    ? "The recursors."
+    match xs
+        [] -> List.reverse(acc)
+        [x, ..rest] -> recConsts(rest, List.prepend(Const.CRec(x), acc))
+
+verify recConsts
+    recConsts([], []) => []

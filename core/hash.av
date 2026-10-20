@@ -1,0 +1,47 @@
+module Hash
+    intent =
+        "Structural hashes for names, levels and expressions."
+        "Every value stays below a prime just under 2^40, and the multiplier"
+        "is below 2^20, so one mixing step never leaves a machine word."
+        "A hash only narrows a comparison; equality is still decided"
+        "structurally."
+    exposes [mix, ofText, ofInts]
+    effects []
+
+fn mix(a: Int, b: Int) -> Int
+    ? "Combines a hash with one more ingredient below the modulus."
+    Int.mod(a * 1000003 + b, 1099511627689)
+
+verify mix
+    mix(0, 5) => 5
+    mix(1, 0) => 1000003
+    mix(1099511627688, 1099511627688) => Int.mod(1099511627688 * 1000004, 1099511627689)
+
+fn ofText(s: String) -> Int
+    ? "Hash of a string, over its code points."
+    ofChars(String.chars(s), 17)
+
+verify ofText
+    ofText("") => 17
+    ofText("a") => mix(17, 97)
+    ofText("ab") == ofText("ba") => false
+
+fn ofChars(cs: List<String>, acc: Int) -> Int
+    ? "Folds code points into the hash."
+    match cs
+        [] -> acc
+        [c, ..rest] -> ofChars(rest, mix(acc, Option.withDefault(String.firstCodePoint(c), 0)))
+
+verify ofChars
+    ofChars([], 3) => 3
+    ofChars(["a"], 0) => 97
+
+fn ofInts(xs: List<Int>, acc: Int) -> Int
+    ? "Folds already reduced hashes into one."
+    match xs
+        [] -> acc
+        [x, ..rest] -> ofInts(rest, mix(acc, x))
+
+verify ofInts
+    ofInts([], 9) => 9
+    ofInts([1, 2], 0) => mix(mix(0, 1), 2)

@@ -1,0 +1,570 @@
+module Univ
+    intent =
+        "Universe level arithmetic as Lean's reference kernel does it: the"
+        "simplifying max and imax, parameter instantiation, normalization,"
+        "equivalence and the greater-or-equal test. Equivalence and the"
+        "test are sound but deliberately as incomplete as the reference, so"
+        "Pestka accepts and rejects the same universe constraints it does."
+    exposes [Offset, toOffset, isExplicit, isZero, isNotZero, normalizesToZero, mkSucc, mkSuccN, mkMax, mkImax, instantiate, undefParam, normalize, isEquiv, isEquivList, isGeq]
+    depends [Core.Names, Core.Levels]
+    effects []
+
+record Offset
+    base: Level
+    k: Int
+
+fn toOffset(l: Level) -> Offset
+    ? "Splits succ^k(base) with base not a successor."
+    match l
+        Level.Succ(a) -> bump(toOffset(a))
+        _ -> Offset(base = l, k = 0)
+
+verify toOffset
+    toOffset(Level.Succ(Level.Succ(Level.Zero))) => Offset(base = Level.Zero, k = 2)
+    toOffset(Level.Max(Level.Zero, Level.Zero)) => Offset(base = Level.Max(Level.Zero, Level.Zero), k = 0)
+
+fn bump(o: Offset) -> Offset
+    ? "One more successor."
+    Offset(base = o.base, k = o.k + 1)
+
+verify bump
+    bump(Offset(base = Level.Zero, k = 0)).k => 1
+
+fn isExplicit(l: Level) -> Bool
+    ? "succ^k(zero)."
+    match l
+        Level.Zero -> true
+        Level.Succ(a) -> isExplicit(a)
+        _ -> false
+
+verify isExplicit
+    isExplicit(Level.Succ(Level.Zero)) => true
+    isExplicit(Level.Succ(Level.Param(Core.Names.anon()))) => false
+
+fn isZero(l: Level) -> Bool
+    ? "Syntactically zero."
+    match l
+        Level.Zero -> true
+        _ -> false
+
+verify isZero
+    isZero(Level.Zero) => true
+    isZero(Level.Succ(Level.Zero)) => false
+
+fn isNotZero(l: Level) -> Bool
+    ? "Never zero, whatever the parameters are."
+    match l
+        Level.Zero -> false
+        Level.Param -> false
+        Level.Succ -> true
+        Level.Max(a, b) -> Bool.or(isNotZero(a), isNotZero(b))
+        Level.IMax(_, b) -> isNotZero(b)
+
+verify isNotZero
+    isNotZero(Level.Max(Level.Zero, Level.Succ(Level.Zero))) => true
+    isNotZero(Level.IMax(Level.Succ(Level.Zero), Level.Param(Core.Names.anon()))) => false
+
+fn normalizesToZero(l: Level) -> Bool
+    ? "Zero for every assignment, by the reference kernel's syntactic test: imax with a zero right side is zero."
+    match l
+        Level.Zero -> true
+        Level.Param -> false
+        Level.Succ -> false
+        Level.Max(a, b) -> Bool.and(normalizesToZero(a), normalizesToZero(b))
+        Level.IMax(_, b) -> normalizesToZero(b)
+
+verify normalizesToZero
+    normalizesToZero(Level.IMax(Level.Succ(Level.Zero), Level.Zero)) => true
+    normalizesToZero(Level.Max(Level.Zero, Level.Param(Core.Names.anon()))) => false
+
+fn depth(l: Level) -> Int
+    ? "Height of the level tree."
+    match l
+        Level.Zero -> 0
+        Level.Param -> 0
+        Level.Succ(a) -> depth(a) + 1
+        Level.Max(a, b) -> Int.max(depth(a), depth(b)) + 1
+        Level.IMax(a, b) -> Int.max(depth(a), depth(b)) + 1
+
+verify depth
+    depth(Level.Succ(Level.Succ(Level.Zero))) => 2
+    depth(Level.Max(Level.Zero, Level.Zero)) => 1
+
+fn mkSucc(l: Level) -> Level
+    ? "Successor."
+    Level.Succ(l)
+
+verify mkSucc
+    mkSucc(Level.Zero) => Level.Succ(Level.Zero)
+
+fn mkSuccN(l: Level, k: Int) -> Level
+    ? "succ applied k times."
+    match k <= 0
+        true -> l
+        false -> mkSuccN(Level.Succ(l), k - 1)
+
+verify mkSuccN
+    mkSuccN(Level.Zero, 2) => Level.Succ(Level.Succ(Level.Zero))
+    mkSuccN(Level.Zero, 0) => Level.Zero
+
+fn mkMax(a: Level, b: Level) -> Level
+    ? "max with the reference kernel's local simplifications."
+    match Bool.and(isExplicit(a), isExplicit(b))
+        true -> biggerExplicit(a, b)
+        false -> maxNonExplicit(a, b)
+
+verify mkMax
+    mkMax(Level.Succ(Level.Zero), Level.Zero) => Level.Succ(Level.Zero)
+    mkMax(Level.Zero, Level.Param(Core.Names.anon())) => Level.Param(Core.Names.anon())
+    mkMax(Level.Param(Core.Names.anon()), Level.Succ(Level.Param(Core.Names.anon()))) => Level.Succ(Level.Param(Core.Names.anon()))
+
+fn biggerExplicit(a: Level, b: Level) -> Level
+    ? "The larger of two numerals; the first on a tie."
+    match depth(a) >= depth(b)
+        true -> a
+        false -> b
+
+verify biggerExplicit
+    biggerExplicit(Level.Zero, Level.Succ(Level.Zero)) => Level.Succ(Level.Zero)
+
+fn maxNonExplicit(a: Level, b: Level) -> Level
+    ? "Equal sides, a zero side, a side already inside the other max, or the same base."
+    match a == b
+        true -> a
+        false -> match isZero(a)
+            true -> b
+            false -> match isZero(b)
+                true -> a
+                false -> maxContained(a, b)
+
+verify maxNonExplicit
+    maxNonExplicit(Level.Param(Core.Names.anon()), Level.Param(Core.Names.anon())) => Level.Param(Core.Names.anon())
+
+fn maxContained(a: Level, b: Level) -> Level
+    ? "max a (max a c) is the right side, and symmetrically."
+    match isMaxWith(b, a)
+        true -> b
+        false -> match isMaxWith(a, b)
+            true -> a
+            false -> maxByOffset(a, b, toOffset(a), toOffset(b))
+
+verify maxContained
+    maxContained(Level.Param(Core.Names.anon()), Level.Max(Level.Param(Core.Names.anon()), Level.Zero)) => Level.Max(Level.Param(Core.Names.anon()), Level.Zero)
+
+fn isMaxWith(m: Level, l: Level) -> Bool
+    ? "m is max l _ or max _ l."
+    match m
+        Level.Max(x, y) -> Bool.or(x == l, y == l)
+        _ -> false
+
+verify isMaxWith
+    isMaxWith(Level.Max(Level.Zero, Level.Succ(Level.Zero)), Level.Zero) => true
+    isMaxWith(Level.Zero, Level.Zero) => false
+
+fn maxByOffset(a: Level, b: Level, oa: Offset, ob: Offset) -> Level
+    ? "Same base with different successors: the larger one; else a real max."
+    match oa.base == ob.base
+        true -> match oa.k > ob.k
+            true -> a
+            false -> b
+        false -> Level.Max(a, b)
+
+verify maxByOffset
+    maxByOffset(Level.Zero, Level.Param(Core.Names.anon()), toOffset(Level.Zero), toOffset(Level.Param(Core.Names.anon()))) => Level.Max(Level.Zero, Level.Param(Core.Names.anon()))
+
+fn mkImax(a: Level, b: Level) -> Level
+    ? "imax with the reference kernel's simplifications."
+    match isNotZero(b)
+        true -> mkMax(a, b)
+        false -> match isZero(b)
+            true -> b
+            false -> match Bool.or(isZero(a), a == Level.Succ(Level.Zero))
+                true -> b
+                false -> match a == b
+                    true -> a
+                    false -> Level.IMax(a, b)
+
+verify mkImax
+    mkImax(Level.Param(Core.Names.anon()), Level.Zero) => Level.Zero
+    mkImax(Level.Succ(Level.Zero), Level.Param(Core.Names.anon())) => Level.Param(Core.Names.anon())
+    mkImax(Level.Param(Core.Names.str(Core.Names.anon(), "u")), Level.Param(Core.Names.anon())) => Level.IMax(Level.Param(Core.Names.str(Core.Names.anon(), "u")), Level.Param(Core.Names.anon()))
+
+fn instantiate(l: Level, ps: List<Name>, us: List<Level>) -> Level
+    ? "Replaces parameters by levels; rebuilt nodes go through mkMax and mkImax."
+    match Core.Levels.hasParam(l)
+        false -> l
+        true -> match l
+            Level.Param(n) -> lookup(n, ps, us, l)
+            Level.Succ(a) -> Level.Succ(instantiate(a, ps, us))
+            Level.Max(a, b) -> rebuild(l, a, b, instantiate(a, ps, us), instantiate(b, ps, us), true)
+            Level.IMax(a, b) -> rebuild(l, a, b, instantiate(a, ps, us), instantiate(b, ps, us), false)
+            _ -> l
+
+verify instantiate
+    instantiate(Level.Succ(Level.Param(Core.Names.anon())), [Core.Names.anon()], [Level.Zero]) => Level.Succ(Level.Zero)
+    instantiate(Level.Max(Level.Param(Core.Names.anon()), Level.Zero), [Core.Names.anon()], [Level.Succ(Level.Zero)]) => Level.Succ(Level.Zero)
+    instantiate(Level.Param(Core.Names.anon()), [], []) => Level.Param(Core.Names.anon())
+
+fn rebuild(l: Level, a: Level, b: Level, a2: Level, b2: Level, isMax: Bool) -> Level
+    ? "Keeps the node when nothing below changed, as the reference does."
+    match Bool.and(a == a2, b == b2)
+        true -> l
+        false -> match isMax
+            true -> mkMax(a2, b2)
+            false -> mkImax(a2, b2)
+
+verify rebuild
+    rebuild(Level.Max(Level.Zero, Level.Zero), Level.Zero, Level.Zero, Level.Zero, Level.Zero, true) => Level.Max(Level.Zero, Level.Zero)
+
+fn lookup(n: Name, ps: List<Name>, us: List<Level>, dflt: Level) -> Level
+    ? "The level paired with parameter n, or the parameter itself."
+    match ps
+        [] -> dflt
+        [p, ..prest] -> match us
+            [] -> dflt
+            [u, ..urest] -> match p == n
+                true -> u
+                false -> lookup(n, prest, urest, dflt)
+
+verify lookup
+    lookup(Core.Names.anon(), [Core.Names.anon()], [Level.Zero], Level.Succ(Level.Zero)) => Level.Zero
+    lookup(Core.Names.anon(), [], [], Level.Succ(Level.Zero)) => Level.Succ(Level.Zero)
+
+fn undefParam(l: Level, ps: List<Name>) -> Option<Name>
+    ? "A parameter occurring in l that is not among ps."
+    match l
+        Level.Zero -> Option.None
+        Level.Param(n) -> match List.contains(ps, n)
+            true -> Option.None
+            false -> Option.Some(n)
+        Level.Succ(a) -> undefParam(a, ps)
+        Level.Max(a, b) -> firstSome(undefParam(a, ps), b, ps)
+        Level.IMax(a, b) -> firstSome(undefParam(a, ps), b, ps)
+
+verify undefParam
+    undefParam(Level.Param(Core.Names.anon()), []) => Option.Some(Core.Names.anon())
+    undefParam(Level.Max(Level.Zero, Level.Param(Core.Names.anon())), [Core.Names.anon()]) => Option.None
+
+fn firstSome(found: Option<Name>, b: Level, ps: List<Name>) -> Option<Name>
+    ? "The left side's answer, else the right side's."
+    match found
+        Option.Some(n) -> Option.Some(n)
+        Option.None -> undefParam(b, ps)
+
+verify firstSome
+    firstSome(Option.None, Level.Zero, []) => Option.None
+
+fn kindRank(l: Level) -> Int
+    ? "The reference kernel's order of level kinds."
+    match l
+        Level.Zero -> 0
+        Level.Succ -> 1
+        Level.Max -> 2
+        Level.IMax -> 3
+        Level.Param -> 4
+
+verify kindRank
+    kindRank(Level.Zero) => 0
+    kindRank(Level.Param(Core.Names.anon())) => 4
+
+fn normLt(a: Level, b: Level) -> Bool
+    ? "Total order used by normalization: by base, then by number of successors."
+    match a == b
+        true -> false
+        false -> normLtOff(toOffset(a), toOffset(b))
+
+verify normLt
+    normLt(Level.Zero, Level.Succ(Level.Zero)) => true
+    normLt(Level.Succ(Level.Zero), Level.Param(Core.Names.anon())) => true
+    normLt(Level.Param(Core.Names.str(Core.Names.anon(), "v")), Level.Param(Core.Names.str(Core.Names.anon(), "u"))) => false
+
+fn normLtOff(oa: Offset, ob: Offset) -> Bool
+    ? "Compares bases first; the same base orders by offset."
+    match oa.base == ob.base
+        true -> oa.k < ob.k
+        false -> baseLt(oa.base, ob.base)
+
+verify normLtOff
+    normLtOff(toOffset(Level.Zero), toOffset(Level.Succ(Level.Zero))) => true
+
+fn baseLt(x: Level, y: Level) -> Bool
+    ? "Different bases: by kind, then within a kind."
+    rx = kindRank(x)
+    ry = kindRank(y)
+    match rx == ry
+        false -> rx < ry
+        true -> sameKindLt(x, y)
+
+verify baseLt
+    baseLt(Level.Zero, Level.Param(Core.Names.anon())) => true
+
+fn sameKindLt(x: Level, y: Level) -> Bool
+    ? "Parameters by name; max and imax by left side, then right side."
+    match x
+        Level.Param(n) -> paramLt(n, y)
+        Level.Max(a, b) -> pairLt(a, b, y)
+        Level.IMax(a, b) -> pairLt(a, b, y)
+        _ -> false
+
+verify sameKindLt
+    sameKindLt(Level.Param(Core.Names.str(Core.Names.anon(), "a")), Level.Param(Core.Names.str(Core.Names.anon(), "b"))) => true
+
+fn paramLt(n: Name, y: Level) -> Bool
+    ? "Name order of two parameters."
+    match y
+        Level.Param(m) -> Core.Names.cmp(n, m) < 0
+        _ -> false
+
+verify paramLt
+    paramLt(Core.Names.anon(), Level.Zero) => false
+
+fn pairLt(a: Level, b: Level, y: Level) -> Bool
+    ? "Lexicographic on the two sides."
+    match y
+        Level.Max(c, d) -> sidesLt(a, b, c, d)
+        Level.IMax(c, d) -> sidesLt(a, b, c, d)
+        _ -> false
+
+verify pairLt
+    pairLt(Level.Zero, Level.Zero, Level.Max(Level.Zero, Level.Succ(Level.Zero))) => true
+
+fn sidesLt(a: Level, b: Level, c: Level, d: Level) -> Bool
+    ? "Left sides decide unless equal."
+    match a == c
+        false -> normLt(a, c)
+        true -> normLt(b, d)
+
+verify sidesLt
+    sidesLt(Level.Zero, Level.Zero, Level.Zero, Level.Zero) => false
+
+fn maxArgs(l: Level, acc: List<Level>) -> List<Level>
+    ? "Arguments of nested max, prepended in reverse order onto acc."
+    match l
+        Level.Max(a, b) -> maxArgs(b, maxArgs(a, acc))
+        _ -> List.prepend(l, acc)
+
+verify maxArgs
+    List.reverse(maxArgs(Level.Max(Level.Zero, Level.Max(Level.Succ(Level.Zero), Level.Zero)), [])) => [Level.Zero, Level.Succ(Level.Zero), Level.Zero]
+
+fn normalize(l: Level) -> Level
+    ? "The reference kernel's normal form."
+    o = toOffset(l)
+    match o.base
+        Level.IMax(a, b) -> mkSuccN(mkImax(normalize(a), normalize(b)), o.k)
+        Level.Max -> normMax(o)
+        _ -> l
+
+verify normalize
+    normalize(Level.Max(Level.Succ(Level.Zero), Level.Zero)) => Level.Succ(Level.Zero)
+    normalize(Level.Max(Level.Param(Core.Names.anon()), Level.Max(Level.Zero, Level.Param(Core.Names.anon())))) => Level.Param(Core.Names.anon())
+    normalize(Level.Succ(Level.Max(Level.Param(Core.Names.anon()), Level.Succ(Level.Param(Core.Names.anon()))))) => Level.Succ(Level.Succ(Level.Param(Core.Names.anon())))
+    normalize(Level.Max(Level.Succ(Level.Zero), Level.Succ(Level.Param(Core.Names.anon())))) => Level.Succ(Level.Param(Core.Names.anon()))
+
+fn normMax(o: Offset) -> Level
+    ? "Flattens, sorts, drops a dominated numeral and repeated bases, then rebuilds."
+    args = sortLevels(normalizeAll(List.reverse(maxArgs(o.base, [])), []), [])
+    mkMaxList(succAll(pruneExplicit(args), o.k, []))
+
+verify normMax
+    normMax(toOffset(Level.Max(Level.Zero, Level.Zero))) => Level.Zero
+
+fn normalizeAll(todo: List<Level>, acc: List<Level>) -> List<Level>
+    ? "Normalizes each argument and flattens the max arguments of the result."
+    match todo
+        [] -> List.reverse(acc)
+        [a, ..rest] -> normalizeAll(rest, maxArgs(normalize(a), acc))
+
+verify normalizeAll
+    normalizeAll([Level.Zero], []) => [Level.Zero]
+
+fn sortLevels(xs: List<Level>, acc: List<Level>) -> List<Level>
+    ? "Insertion sort by normLt; the lists are a handful long."
+    match xs
+        [] -> acc
+        [x, ..rest] -> sortLevels(rest, insertLevel(x, acc))
+
+verify sortLevels
+    sortLevels([Level.Succ(Level.Zero), Level.Zero], []) => [Level.Zero, Level.Succ(Level.Zero)]
+
+fn insertLevel(x: Level, sorted: List<Level>) -> List<Level>
+    ? "Inserts into a sorted list."
+    match sorted
+        [] -> [x]
+        [h, ..t] -> match normLt(h, x)
+            true -> List.prepend(h, insertLevel(x, t))
+            false -> List.prepend(x, sorted)
+
+verify insertLevel
+    insertLevel(Level.Succ(Level.Zero), [Level.Zero]) => [Level.Zero, Level.Succ(Level.Zero)]
+
+fn pruneExplicit(args: List<Level>) -> List<Level>
+    ? "Keeps only the largest numeral, and drops it too when some other argument has at least as many successors."
+    rest = dropExplicit(args)
+    match takeExplicit(args, [])
+        [] -> dedupe(rest)
+        [top, .._] -> match anyOffsetAtLeast(rest, toOffset(top).k)
+            true -> dedupe(rest)
+            false -> List.prepend(top, dedupe(rest))
+
+verify pruneExplicit
+    pruneExplicit([Level.Zero, Level.Succ(Level.Zero)]) => [Level.Succ(Level.Zero)]
+    pruneExplicit([Level.Succ(Level.Zero), Level.Succ(Level.Param(Core.Names.anon()))]) => [Level.Succ(Level.Param(Core.Names.anon()))]
+    pruneExplicit([Level.Succ(Level.Succ(Level.Zero)), Level.Param(Core.Names.anon())]) => [Level.Succ(Level.Succ(Level.Zero)), Level.Param(Core.Names.anon())]
+
+fn takeExplicit(xs: List<Level>, acc: List<Level>) -> List<Level>
+    ? "The leading numerals, reversed."
+    match xs
+        [x, ..rest] -> match isExplicit(x)
+            true -> takeExplicit(rest, List.prepend(x, acc))
+            false -> acc
+        [] -> acc
+
+verify takeExplicit
+    takeExplicit([Level.Zero, Level.Param(Core.Names.anon())], []) => [Level.Zero]
+
+fn dropExplicit(xs: List<Level>) -> List<Level>
+    ? "Everything after the leading numerals."
+    match xs
+        [x, ..rest] -> match isExplicit(x)
+            true -> dropExplicit(rest)
+            false -> xs
+        [] -> []
+
+verify dropExplicit
+    dropExplicit([Level.Zero, Level.Param(Core.Names.anon())]) => [Level.Param(Core.Names.anon())]
+
+fn anyOffsetAtLeast(xs: List<Level>, k: Int) -> Bool
+    ? "Some argument has at least k successors."
+    match xs
+        [] -> false
+        [x, ..rest] -> Bool.or(toOffset(x).k >= k, anyOffsetAtLeast(rest, k))
+
+verify anyOffsetAtLeast
+    anyOffsetAtLeast([Level.Succ(Level.Param(Core.Names.anon()))], 1) => true
+    anyOffsetAtLeast([], 0) => false
+
+fn dedupe(xs: List<Level>) -> List<Level>
+    ? "Of neighbours with the same base keeps the one with more successors."
+    match xs
+        [] -> []
+        [x, ..rest] -> dedupeFrom(x, rest, [])
+
+verify dedupe
+    dedupe([Level.Param(Core.Names.anon()), Level.Succ(Level.Param(Core.Names.anon()))]) => [Level.Succ(Level.Param(Core.Names.anon()))]
+
+fn dedupeFrom(prev: Level, xs: List<Level>, acc: List<Level>) -> List<Level>
+    ? "One step of dedupe."
+    match xs
+        [] -> List.reverse(List.prepend(prev, acc))
+        [x, ..rest] -> match toOffset(prev).base == toOffset(x).base
+            true -> dedupeFrom(laterIfBigger(prev, x), rest, acc)
+            false -> dedupeFrom(x, rest, List.prepend(prev, acc))
+
+verify dedupeFrom
+    dedupeFrom(Level.Zero, [], []) => [Level.Zero]
+
+fn laterIfBigger(prev: Level, x: Level) -> Level
+    ? "The one with more successors; the earlier on a tie."
+    match toOffset(prev).k < toOffset(x).k
+        true -> x
+        false -> prev
+
+verify laterIfBigger
+    laterIfBigger(Level.Zero, Level.Succ(Level.Zero)) => Level.Succ(Level.Zero)
+
+fn succAll(xs: List<Level>, k: Int, acc: List<Level>) -> List<Level>
+    ? "Adds k successors to each."
+    match xs
+        [] -> List.reverse(acc)
+        [x, ..rest] -> succAll(rest, k, List.prepend(mkSuccN(x, k), acc))
+
+verify succAll
+    succAll([Level.Zero], 1, []) => [Level.Succ(Level.Zero)]
+
+fn mkMaxList(xs: List<Level>) -> Level
+    ? "Right-nested max of the list."
+    match xs
+        [] -> Level.Zero
+        [x] -> x
+        [x, ..rest] -> mkMax(x, mkMaxList(rest))
+
+verify mkMaxList
+    mkMaxList([Level.Zero]) => Level.Zero
+    mkMaxList([Level.Param(Core.Names.anon()), Level.Param(Core.Names.str(Core.Names.anon(), "v"))]) => Level.Max(Level.Param(Core.Names.anon()), Level.Param(Core.Names.str(Core.Names.anon(), "v")))
+
+fn isEquiv(a: Level, b: Level) -> Bool
+    ? "Equal, or equal normal forms."
+    Bool.or(a == b, normalize(a) == normalize(b))
+
+verify isEquiv
+    isEquiv(Level.Max(Level.Param(Core.Names.anon()), Level.Zero), Level.Param(Core.Names.anon())) => true
+    isEquiv(Level.Succ(Level.Zero), Level.Zero) => false
+
+fn isEquivList(as: List<Level>, bs: List<Level>) -> Bool
+    ? "Pairwise equivalent lists of the same length."
+    match as
+        [] -> match bs
+            [] -> true
+            _ -> false
+        [a, ..arest] -> match bs
+            [] -> false
+            [b, ..brest] -> Bool.and(isEquiv(a, b), isEquivList(arest, brest))
+
+verify isEquivList
+    isEquivList([Level.Zero], [Level.Zero]) => true
+    isEquivList([Level.Zero], []) => false
+
+fn isGeq(a: Level, b: Level) -> Bool
+    ? "a >= b for every assignment of the parameters, as far as the reference test sees."
+    geqCore(normalize(a), normalize(b))
+
+verify isGeq
+    isGeq(Level.Succ(Level.Param(Core.Names.anon())), Level.Param(Core.Names.anon())) => true
+    isGeq(Level.Param(Core.Names.anon()), Level.Succ(Level.Zero)) => false
+    isGeq(Level.Max(Level.Param(Core.Names.anon()), Level.Succ(Level.Zero)), Level.Succ(Level.Zero)) => true
+    isGeq(Level.IMax(Level.Zero, Level.Param(Core.Names.anon())), Level.Param(Core.Names.anon())) => true
+
+fn geqCore(a: Level, b: Level) -> Bool
+    ? "Equal sides or a zero right side; then max on the right splits."
+    match Bool.or(a == b, isZero(b))
+        true -> true
+        false -> match b
+            Level.Max(c, d) -> Bool.and(isGeq(a, c), isGeq(a, d))
+            _ -> geqLeftMax(a, b)
+
+verify geqCore
+    geqCore(Level.Zero, Level.Zero) => true
+
+fn geqLeftMax(a: Level, b: Level) -> Bool
+    ? "A max on the left wins if either side does."
+    match a
+        Level.Max(c, d) -> match Bool.or(isGeq(c, b), isGeq(d, b))
+            true -> true
+            false -> geqImax(a, b)
+        _ -> geqImax(a, b)
+
+verify geqLeftMax
+    geqLeftMax(Level.Max(Level.Zero, Level.Succ(Level.Zero)), Level.Succ(Level.Zero)) => true
+
+fn geqImax(a: Level, b: Level) -> Bool
+    ? "imax on the right splits; imax on the left is judged by its right side."
+    match b
+        Level.IMax(c, d) -> Bool.and(isGeq(a, c), isGeq(a, d))
+        _ -> match a
+            Level.IMax(_, d) -> isGeq(d, b)
+            _ -> geqOffsets(toOffset(a), toOffset(b))
+
+verify geqImax
+    geqImax(Level.Succ(Level.Zero), Level.Zero) => true
+
+fn geqOffsets(oa: Offset, ob: Offset) -> Bool
+    ? "Same base or a numeral on the right: compare successors; equal positive successors: compare bases."
+    match Bool.or(oa.base == ob.base, isZero(ob.base))
+        true -> oa.k >= ob.k
+        false -> match Bool.and(oa.k == ob.k, oa.k > 0)
+            true -> isGeq(oa.base, ob.base)
+            false -> false
+
+verify geqOffsets
+    geqOffsets(toOffset(Level.Succ(Level.Zero)), toOffset(Level.Zero)) => true
+    geqOffsets(toOffset(Level.Param(Core.Names.anon())), toOffset(Level.Param(Core.Names.str(Core.Names.anon(), "v")))) => false

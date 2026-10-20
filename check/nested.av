@@ -1,0 +1,762 @@
+module Nested
+    intent =
+        "Nested inductive types, the way the reference kernel handles them."
+        "Every occurrence I Ds is of an earlier inductive type I whose"
+        "parameters Ds mention the block becomes an auxiliary type of the"
+        "block (with copies of the constructors of I's whole mutual group),"
+        "until no such occurrence is left. The enlarged block is checked like"
+        "any other; then the auxiliary types are turned back into the"
+        "occurrences they stand for, their recursors renamed rec_1, rec_2,"
+        "..., and everything rewritten is checked again."
+    exposes [NS, hasNested, eliminate, restoreAll]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps, Core.Decls, Check.State, Check.Tc, Check.Telescope, Check.Blk]
+    effects []
+
+record NS
+    st: St
+    env: Env
+    params: List<Expr>
+    nparams: Int
+    lvls: List<Level>
+    aux: List<Tuple<Expr, Name>>
+    types: List<TypeIn>
+    next: Int
+
+record NE
+    ns: NS
+    e: Expr
+
+record NO
+    ns: NS
+    o: Option<Expr>
+
+record PS
+    st: St
+    xs: List<Expr>
+    body: Expr
+
+fn reject(msg: String) -> Fail
+    ? "The nested declaration is rejected."
+    Fail.Reject(msg)
+
+verify reject
+    reject("x") => Fail.Reject("x")
+
+fn appendAfter(n: Name, i: Int) -> Name
+    ? "x becomes x_i."
+    match n
+        Name.Str(p, s, _) -> Core.Names.str(p, "{s}_{i}")
+        _ -> Core.Names.num(n, i)
+
+verify appendAfter
+    Core.Names.render(appendAfter(Core.Names.str(Core.Names.anon(), "rec"), 2)) => "rec_2"
+
+fn concatNames(a: Name, b: Name) -> Name
+    ? "The components of b under a."
+    match b
+        Name.Anon -> a
+        Name.Str(p, s, _) -> Core.Names.str(concatNames(a, p), s)
+        Name.Num(p, i, _) -> Core.Names.num(concatNames(a, p), i)
+
+verify concatNames
+    Core.Names.render(concatNames(Core.Names.str(Core.Names.anon(), "_nested"), Core.Names.str(Core.Names.str(Core.Names.anon(), "List"), "cons"))) => "_nested.List.cons"
+
+fn replacePrefix(n: Name, prefix: Name, by: Name) -> Name
+    ? "n with its prefix replaced, if it has that prefix."
+    match n == prefix
+        true -> by
+        false -> match n
+            Name.Str(p, s, _) -> Core.Names.str(replacePrefix(p, prefix, by), s)
+            Name.Num(p, i, _) -> Core.Names.num(replacePrefix(p, prefix, by), i)
+            Name.Anon -> n
+
+verify replacePrefix
+    Core.Names.render(replacePrefix(Core.Names.str(Core.Names.str(Core.Names.anon(), "List"), "cons"), Core.Names.str(Core.Names.anon(), "List"), Core.Names.str(Core.Names.anon(), "Aux"))) => "Aux.cons"
+
+fn nestedPrefix() -> Name
+    ? "The reserved root of auxiliary type names."
+    Core.Names.str(Core.Names.anon(), "_nested")
+
+verify nestedPrefix
+    Core.Names.render(nestedPrefix()) => "_nested"
+
+fn hasNested(env: Env, names: List<Name>, tins: List<TypeIn>) -> Bool
+    ? "Some constructor has a nested occurrence."
+    match tins
+        [] -> false
+        [t, ..rest] -> Bool.or(ctorsNested(env, names, t.ctors), hasNested(env, names, rest))
+
+verify hasNested
+    hasNested(Check.State.envEmpty(), [], []) => false
+
+fn ctorsNested(env: Env, names: List<Name>, cs: List<CtorIn>) -> Bool
+    ? "Over constructor types."
+    match cs
+        [] -> false
+        [c, ..rest] -> Bool.or(occursIn(env, names, c.ty), ctorsNested(env, names, rest))
+
+verify ctorsNested
+    ctorsNested(Check.State.envEmpty(), [], []) => false
+
+fn occursIn(env: Env, names: List<Name>, e: Expr) -> Bool
+    ? "A nested occurrence anywhere in e."
+    match nestedInd(env, names, e)
+        Option.Some -> true
+        Option.None -> match e
+            Expr.App(_, f, a) -> Bool.or(occursIn(env, names, f), occursIn(env, names, a))
+            Expr.Lam(_, _, t, b, _) -> Bool.or(occursIn(env, names, t), occursIn(env, names, b))
+            Expr.Pi(_, _, t, b, _) -> Bool.or(occursIn(env, names, t), occursIn(env, names, b))
+            Expr.Let(_, _, t, v, b) -> Bool.or(occursIn(env, names, t), Bool.or(occursIn(env, names, v), occursIn(env, names, b)))
+            Expr.Proj(_, _, _, x) -> occursIn(env, names, x)
+            _ -> false
+
+verify occursIn
+    occursIn(Check.State.envEmpty(), [], Core.Exprs.fvar(0)) => false
+
+fn nestedInd(env: Env, names: List<Name>, e: Expr) -> Option<IndType>
+    ? "e is I As is with I an earlier inductive type, fully given its parameters, one of which mentions the block."
+    match Core.Apps.isApp(e)
+        false -> Option.None
+        true -> match Core.Apps.fnOf(e)
+            Expr.Const(n, _) -> match Check.State.envGet(env, n)
+                Option.Some(Const.CInduct(iv)) -> match Bool.and(iv.numParams <= Core.Apps.numArgs(e), anyMentions(List.take(Core.Apps.argsOf(e), iv.numParams), names))
+                    true -> Option.Some(iv)
+                    false -> Option.None
+                _ -> Option.None
+            _ -> Option.None
+
+verify nestedInd
+    nestedInd(Check.State.envEmpty(), [], Core.Exprs.fvar(0)) => Option.None
+
+fn anyMentions(args: List<Expr>, names: List<Name>) -> Bool
+    ? "Some argument mentions the names."
+    match args
+        [] -> false
+        [a, ..rest] -> Bool.or(Check.Telescope.mentions(a, names), anyMentions(rest, names))
+
+verify anyMentions
+    anyMentions([], []) => false
+
+fn anyLoose(args: List<Expr>) -> Bool
+    ? "Some argument has a loose bound variable."
+    match args
+        [] -> false
+        [a, ..rest] -> Bool.or(Core.Exprs.looseRange(a) > 0, anyLoose(rest))
+
+verify anyLoose
+    anyLoose([Core.Exprs.bvar(0)]) => true
+
+fn typeNames(ts: List<TypeIn>, acc: List<Name>) -> List<Name>
+    ? "Names of the types so far, auxiliary ones included."
+    match ts
+        [] -> List.reverse(acc)
+        [t, ..rest] -> typeNames(rest, List.prepend(t.name, acc))
+
+verify typeNames
+    typeNames([], []) => []
+
+fn getParams(st: St, t: Expr, n: Int, accRev: List<Expr>) -> Result<PS, Fail>
+    ? "Opens the first n binders as fresh variables, keeping their names and annotations."
+    match n <= 0
+        true -> Result.Ok(PS(st = st, xs = List.reverse(accRev), body = t))
+        false -> match t
+            Expr.Pi(_, nm, d, b, bi) -> paramHere(Check.State.names(st, nm, d, Option.None, bi), b, n, accRev)
+            Expr.Lam(_, nm, d, b, bi) -> paramHere(Check.State.names(st, nm, d, Option.None, bi), b, n, accRev)
+            _ -> Result.Err(reject("invalid inductive datatype declaration, incorrect number of parameters"))
+
+verify getParams
+    getParams(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), 1, []) => Result.Err(Fail.Reject("invalid inductive datatype declaration, incorrect number of parameters"))
+
+fn paramHere(loc: RE, b: Expr, n: Int, accRev: List<Expr>) -> Result<PS, Fail>
+    ? "One parameter."
+    getParams(loc.st, Core.Subst.instantiate1(b, loc.e), n - 1, List.prepend(loc.e, accRev))
+
+verify paramHere
+    paramHere(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), 1, []) => Result.Ok(PS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = [Core.Exprs.fvar(0)], body = Core.Exprs.fvar(0)))
+
+fn replaceParams(e: Expr, from: List<Expr>, to: List<Expr>) -> Expr
+    ? "Puts the variables to in place of the variables from."
+    Core.Subst.instantiateRev(Core.Subst.abstractFVars(e, Check.Telescope.ids(from, [])), to)
+
+verify replaceParams
+    replaceParams(Core.Exprs.fvar(3), [Core.Exprs.fvar(3)], [Core.Exprs.fvar(7)]) => Core.Exprs.fvar(7)
+
+fn eliminate(env: Env, blk: Blk) -> Result<NS, Fail>
+    ? "Replaces nested occurrences until none is left; the result's types are the enlarged block."
+    p = getParams(Check.State.fresh(env, blk.lparams, Safety.Safe), firstType(blk.types), blk.nparams, [])?
+    queue(NS(st = p.st, env = env, params = p.xs, nparams = blk.nparams, lvls = blk.levels, aux = [], types = blk.types, next = 1), 0)
+
+verify eliminate
+    eliminate(Check.State.envEmpty(), Check.Blk.start([], 0, [], 0)) == Result.Err(Fail.Reject("x")) => false
+
+fn firstType(ts: List<TypeIn>) -> Expr
+    ? "The first type's type."
+    match ts
+        [t, .._] -> t.ty
+        [] -> Core.Exprs.sort(Level.Zero)
+
+verify firstType
+    firstType([]) => Core.Exprs.sort(Level.Zero)
+
+fn queue(ns: NS, q: Int) -> Result<NS, Fail>
+    ? "Processes type q; the list may have grown behind it."
+    match List.drop(ns.types, q)
+        [] -> Result.Ok(ns)
+        [t, .._] -> queue(retype(ctorsDone(ns, t.ctors, [])?, q, t), q + 1)
+
+verify queue
+    queue(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), 0) == Result.Err(Fail.Reject("x")) => false
+
+record NC
+    ns: NS
+    ctors: List<CtorIn>
+
+fn retype(r: NC, q: Int, t: TypeIn) -> NS
+    ? "Stores type q with its rewritten constructors."
+    NS.update(r.ns, types = List.concat(List.take(r.ns.types, q), List.prepend(TypeIn(name = t.name, ty = t.ty, ctors = r.ctors), List.drop(r.ns.types, q + 1))))
+
+verify retype
+    retype(NC(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), ctors = []), 0, TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [])).types => [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [])]
+
+fn ctorsDone(ns: NS, cs: List<CtorIn>, acc: List<CtorIn>) -> Result<NC, Fail>
+    ? "Rewrites each constructor type under its own parameter variables."
+    match cs
+        [] -> Result.Ok(NC(ns = ns, ctors = List.reverse(acc)))
+        [c, ..rest] -> ctorRewritten(getParams(ns.st, c.ty, ns.nparams, [])?, ns, c, rest, acc)
+
+verify ctorsDone
+    ctorsDone(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], []) == Result.Err(Fail.Reject("x")) => false
+
+fn ctorRewritten(p: PS, ns: NS, c: CtorIn, rest: List<CtorIn>, acc: List<CtorIn>) -> Result<NC, Fail>
+    ? "Replaces the nested occurrences in the constructor's fields and result."
+    r = replaceAll(NS.update(ns, st = p.st), p.xs, p.body)?
+    ctorsDone(r.ns, rest, List.prepend(CtorIn(name = c.name, ty = Check.Telescope.piBinding(r.ns.st, p.xs, r.e)), acc))
+
+verify ctorRewritten
+    ctorRewritten(PS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = [], body = Core.Exprs.fvar(0)), NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0)), [], []) == Result.Err(Fail.Reject("x")) => false
+
+fn replaceAll(ns: NS, as: List<Expr>, e: Expr) -> Result<NE, Fail>
+    ? "Top-down: a nested occurrence is replaced whole; otherwise the children are visited."
+    r = replaceIfNested(ns, as, e)?
+    match r.o
+        Option.Some(x) -> Result.Ok(NE(ns = r.ns, e = x))
+        Option.None -> replaceKids(r.ns, as, e)
+
+verify replaceAll
+    replaceAll(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], Core.Exprs.fvar(0)) == Result.Err(Fail.Reject("x")) => false
+
+fn replaceKids(ns: NS, as: List<Expr>, e: Expr) -> Result<NE, Fail>
+    ? "The children of a node."
+    match e
+        Expr.App(_, f, a) -> kids2(ns, as, f, a, 0, Core.Names.anon(), Binder.Default)
+        Expr.Lam(_, n, t, b, bi) -> kids2(ns, as, t, b, 1, n, bi)
+        Expr.Pi(_, n, t, b, bi) -> kids2(ns, as, t, b, 2, n, bi)
+        Expr.Let(_, n, t, v, b) -> kidsLet(ns, as, n, t, v, b)
+        Expr.Proj(_, s, i, x) -> kidsProj(replaceAll(ns, as, x)?, s, i)
+        _ -> Result.Ok(NE(ns = ns, e = e))
+
+verify replaceKids
+    replaceKids(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], Core.Exprs.fvar(0)) == Result.Err(Fail.Reject("x")) => false
+
+fn kids2(ns: NS, as: List<Expr>, x: Expr, y: Expr, kind: Int, n: Name, bi: Binder) -> Result<NE, Fail>
+    ? "Two children of an application (kind 0), lambda (1) or pi (2)."
+    rx = replaceAll(ns, as, x)?
+    ry = replaceAll(rx.ns, as, y)?
+    match kind
+        0 -> Result.Ok(NE(ns = ry.ns, e = Core.Exprs.app(rx.e, ry.e)))
+        1 -> Result.Ok(NE(ns = ry.ns, e = Core.Exprs.lam(n, rx.e, ry.e, bi)))
+        _ -> Result.Ok(NE(ns = ry.ns, e = Core.Exprs.pi(n, rx.e, ry.e, bi)))
+
+verify kids2
+    kids2(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], Core.Exprs.fvar(0), Core.Exprs.fvar(1), 0, Core.Names.anon(), Binder.Default) == Result.Err(Fail.Reject("x")) => false
+
+fn kidsLet(ns: NS, as: List<Expr>, n: Name, t: Expr, v: Expr, b: Expr) -> Result<NE, Fail>
+    ? "The three children of a let."
+    rt = replaceAll(ns, as, t)?
+    rv = replaceAll(rt.ns, as, v)?
+    rb = replaceAll(rv.ns, as, b)?
+    Result.Ok(NE(ns = rb.ns, e = Core.Exprs.letE(n, rt.e, rv.e, rb.e)))
+
+verify kidsLet
+    kidsLet(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], Core.Names.anon(), Core.Exprs.fvar(0), Core.Exprs.fvar(0), Core.Exprs.fvar(0)) == Result.Err(Fail.Reject("x")) => false
+
+fn kidsProj(r: NE, s: Name, i: Int) -> Result<NE, Fail>
+    ? "The projected structure."
+    Result.Ok(NE(ns = r.ns, e = Core.Exprs.proj(s, i, r.e)))
+
+verify kidsProj
+    kidsProj(NE(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), e = Core.Exprs.fvar(0)), Core.Names.anon(), 0) == Result.Err(Fail.Reject("x")) => false
+
+fn replaceIfNested(ns: NS, as: List<Expr>, e: Expr) -> Result<NO, Fail>
+    ? "A nested occurrence becomes its auxiliary type applied to the block's parameters and the indices."
+    match nestedInd(ns.env, typeNames(ns.types, []), e)
+        Option.None -> Result.Ok(NO(ns = ns, o = Option.None))
+        Option.Some(iv) -> match anyLoose(List.take(Core.Apps.argsOf(e), iv.numParams))
+            true -> Result.Err(reject("invalid nested inductive datatype '{Core.Names.render(iv.head.name)}', nested inductive datatypes parameters cannot contain local variables."))
+            false -> nestedFound(ns, as, e, iv)
+
+verify replaceIfNested
+    replaceIfNested(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], Core.Exprs.fvar(0)) == Result.Err(Fail.Reject("x")) => false
+
+fn nestedFound(ns: NS, as: List<Expr>, e: Expr, iv: IndType) -> Result<NO, Fail>
+    ? "Reuses the auxiliary type of an equal occurrence, or creates the whole group's."
+    args = Core.Apps.argsOf(e)
+    ias = Core.Apps.mkApps(Core.Apps.fnOf(e), List.take(args, iv.numParams))
+    match lookupAux(ns.aux, replaceParams(ias, as, ns.params))
+        Option.Some(aux) -> Result.Ok(NO(ns = ns, o = Option.Some(auxApp(ns, aux, as, List.drop(args, iv.numParams)))))
+        Option.None -> createGroup(ns, as, iv, Core.Apps.fnOf(e), args)
+
+verify nestedFound
+    nestedFound(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [(Core.Exprs.fvar(0), Core.Names.anon())], types = [], next = 1), [], Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false)) == Result.Err(Fail.Reject("x")) => false
+
+fn auxApp(ns: NS, aux: Name, as: List<Expr>, rest: List<Expr>) -> Expr
+    ? "auxI As is."
+    Core.Apps.mkApps(Core.Apps.mkApps(Core.Exprs.cnst(aux, ns.lvls), as), rest)
+
+verify auxApp
+    auxApp(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), Core.Names.anon(), [], []) => Core.Exprs.cnst(Core.Names.anon(), [])
+
+fn lookupAux(aux: List<Tuple<Expr, Name>>, e: Expr) -> Option<Name>
+    ? "The auxiliary type standing for an equal occurrence."
+    match aux
+        [] -> Option.None
+        [(x, n), ..rest] -> match x == e
+            true -> Option.Some(n)
+            false -> lookupAux(rest, e)
+
+verify lookupAux
+    lookupAux([(Core.Exprs.fvar(0), Core.Names.anon())], Core.Exprs.fvar(0)) => Option.Some(Core.Names.anon())
+
+record GR
+    ns: NS
+    result: Option<Expr>
+
+fn createGroup(ns: NS, as: List<Expr>, iv: IndType, fn0: Expr, args: List<Expr>) -> Result<NO, Fail>
+    ? "One auxiliary type per member of I's mutual group, in the group's order."
+    r = groupMembers(GR(ns = ns, result = Option.None), as, iv, Core.Apps.constName(fn0), fn0, args, iv.all)?
+    Result.Ok(NO(ns = r.ns, o = r.result))
+
+verify createGroup
+    createGroup(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false), Core.Exprs.fvar(0), []) => Result.Ok(NO(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), o = Option.None))
+
+fn groupMembers(gr: GR, as: List<Expr>, iv: IndType, iName: Option<Name>, fn0: Expr, args: List<Expr>, js: List<Name>) -> Result<GR, Fail>
+    ? "Creates each member's auxiliary type and constructors."
+    match js
+        [] -> Result.Ok(gr)
+        [j, ..rest] -> groupMembers(oneMember(gr, as, iv, iName, fn0, args, j, uniqueName(gr.ns, concatNames(nestedPrefix(), j), gr.ns.next))?, as, iv, iName, fn0, args, rest)
+
+verify groupMembers
+    groupMembers(GR(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), result = Option.None), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false), Option.None, Core.Exprs.fvar(0), [], []) == Result.Err(Fail.Reject("x")) => false
+
+record UN
+    name: Name
+    next: Int
+
+fn uniqueName(ns: NS, n: Name, i: Int) -> UN
+    ? "n_i for the first i not taken in the environment; the counter is shared by all names."
+    match Check.State.envHas(ns.env, appendAfter(n, i))
+        true -> uniqueName(ns, n, i + 1)
+        false -> UN(name = appendAfter(n, i), next = i + 1)
+
+verify uniqueName
+    Core.Names.render(uniqueName(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), Core.Names.str(Core.Names.anon(), "x"), 3).name) => "x_3"
+
+fn levelsOf(fn0: Expr) -> List<Level>
+    ? "Universe levels of the nested type's head."
+    match fn0
+        Expr.Const(_, ls) -> ls
+        _ -> []
+
+verify levelsOf
+    levelsOf(Core.Exprs.fvar(0)) => []
+
+fn oneMember(gr: GR, as: List<Expr>, iv: IndType, iName: Option<Name>, fn0: Expr, args: List<Expr>, j: Name, un: UN) -> Result<GR, Fail>
+    ? "auxJ : the member's type at I's levels and I's parameters, closed over the block's parameters."
+    ns = NS.update(gr.ns, next = un.next)
+    ps = List.take(args, iv.numParams)
+    ilvls = levelsOf(fn0)
+    jv = memberInd(ns.env, j)?
+    jty = Check.Telescope.piBinding(ns.st, as, instPiParams(Core.Subst.instLevelParams(jv.head.ty, jv.head.params, ilvls), iv.numParams, ps)?)
+    ctors = auxCtors(ns, as, jv.ctors, j, un.name, ilvls, iv.numParams, ps, [])?
+    ns2 = NS.update(ns, aux = List.concat(ns.aux, [(replaceParams(Core.Apps.mkApps(Core.Exprs.cnst(j, ilvls), ps), as, ns.params), un.name)]), types = List.concat(ns.types, [TypeIn(name = un.name, ty = jty, ctors = ctors)]))
+    match iName == Option.Some(j)
+        true -> Result.Ok(GR(ns = ns2, result = Option.Some(auxApp(ns2, un.name, as, List.drop(args, iv.numParams)))))
+        false -> Result.Ok(GR(ns = ns2, result = gr.result))
+
+verify oneMember
+    oneMember(GR(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), result = Option.None), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false), Option.None, Core.Exprs.fvar(0), [], Core.Names.anon(), UN(name = Core.Names.anon(), next = 2)) => Result.Err(Fail.Reject("invalid nested inductive datatype, ill-formed declaration"))
+
+fn memberInd(env: Env, j: Name) -> Result<IndType, Fail>
+    ? "A member of the nested type's group."
+    match Check.State.envGet(env, j)
+        Option.Some(Const.CInduct(jv)) -> Result.Ok(jv)
+        _ -> Result.Err(reject("invalid nested inductive datatype, ill-formed declaration"))
+
+verify memberInd
+    memberInd(Check.State.envEmpty(), Core.Names.anon()) => Result.Err(Fail.Reject("invalid nested inductive datatype, ill-formed declaration"))
+
+fn instPiParams(e: Expr, n: Int, ps: List<Expr>) -> Result<Expr, Fail>
+    ? "Drops n pi binders and puts ps in their place."
+    stripPis(e, n, ps, n)
+
+verify instPiParams
+    instPiParams(Core.Exprs.pi(Core.Names.anon(), Core.Exprs.fvar(0), Core.Exprs.bvar(0), Binder.Default), 1, [Core.Exprs.fvar(5)]) => Result.Ok(Core.Exprs.fvar(5))
+
+fn stripPis(e: Expr, k: Int, ps: List<Expr>, n: Int) -> Result<Expr, Fail>
+    ? "Peels k more binders."
+    match k <= 0
+        true -> Result.Ok(Core.Subst.instantiateRev(e, List.take(ps, n)))
+        false -> match e
+            Expr.Pi(_, _, _, b, _) -> stripPis(b, k - 1, ps, n)
+            _ -> Result.Err(reject("invalid nested inductive datatype, ill-formed declaration"))
+
+verify stripPis
+    stripPis(Core.Exprs.fvar(0), 1, [], 1) => Result.Err(Fail.Reject("invalid nested inductive datatype, ill-formed declaration"))
+
+fn auxCtors(ns: NS, as: List<Expr>, cs: List<Name>, j: Name, aux: Name, ilvls: List<Level>, np: Int, ps: List<Expr>, acc: List<CtorIn>) -> Result<List<CtorIn>, Fail>
+    ? "Copies of the member's constructors, renamed under the auxiliary type."
+    match cs
+        [] -> Result.Ok(List.reverse(acc))
+        [c, ..rest] -> auxCtors(ns, as, rest, j, aux, ilvls, np, ps, List.prepend(CtorIn(name = replacePrefix(c, j, aux), ty = Check.Telescope.piBinding(ns.st, as, instPiParams(Core.Subst.instLevelParams(ctorType(ns.env, c), ctorParams(ns.env, c), ilvls), np, ps)?)), acc))
+
+verify auxCtors
+    auxCtors(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], [], Core.Names.anon(), Core.Names.anon(), [], 0, [], []) => Result.Ok([])
+
+fn ctorType(env: Env, c: Name) -> Expr
+    ? "A constructor's type from the environment."
+    match Check.State.envGet(env, c)
+        Option.Some(k) -> Check.State.headOf(k).ty
+        Option.None -> Core.Exprs.sort(Level.Zero)
+
+verify ctorType
+    ctorType(Check.State.envEmpty(), Core.Names.anon()) => Core.Exprs.sort(Level.Zero)
+
+fn ctorParams(env: Env, c: Name) -> List<Name>
+    ? "A constructor's universe parameters."
+    match Check.State.envGet(env, c)
+        Option.Some(k) -> Check.State.headOf(k).params
+        Option.None -> []
+
+verify ctorParams
+    ctorParams(Check.State.envEmpty(), Core.Names.anon()) => []
+
+record RC
+    st: St
+    env: Map<Name, Const>
+    names: List<Name>
+
+fn restoreAll(origEnv: Env, auxEnv: Map<Name, Const>, blk: Blk, ns: NS) -> Result<Map<Name, Const>, Fail>
+    ? "Builds the real block's constants from the enlarged one, then checks what was rewritten."
+    recMap = auxRecNames(ns.types, List.len(blk.names), firstName(blk.names), 0, [])
+    rc = restoreTypes(RC(st = ns.st, env = {}, names = []), auxEnv, ns, recMap, blk.names, blk.names)?
+    rc2 = restoreRecs(rc, auxEnv, ns, recMap, blk.names, List.concat(recNamesOf(blk.names, []), oldNames(recMap, [])))?
+    recheck(rc2, ns, blk)
+
+verify restoreAll
+    restoreAll(Check.State.envEmpty(), {}, Check.Blk.start([], 0, [], 0), NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1)) == Result.Err(Fail.Reject("x")) => false
+
+fn firstName(ns: List<Name>) -> Name
+    ? "The block's first type name."
+    match ns
+        [n, .._] -> n
+        [] -> Core.Names.anon()
+
+verify firstName
+    firstName([]) => Core.Names.anon()
+
+fn auxRecNames(types: List<TypeIn>, ntypes: Int, main: Name, i: Int, acc: List<Tuple<Name, Name>>) -> List<Tuple<Name, Name>>
+    ? "Each auxiliary type's recursor and its new name main.rec_k."
+    match types
+        [] -> List.reverse(acc)
+        [t, ..rest] -> match i >= ntypes
+            true -> auxRecNames(rest, ntypes, main, i + 1, List.prepend((Check.Blk.recName(t.name), appendAfter(Check.Blk.recName(main), i - ntypes + 1)), acc))
+            false -> auxRecNames(rest, ntypes, main, i + 1, acc)
+
+verify auxRecNames
+    auxRecNames([], 0, Core.Names.anon(), 0, []) => []
+
+fn recNamesOf(ns: List<Name>, acc: List<Name>) -> List<Name>
+    ? "The recursor of each type."
+    match ns
+        [] -> List.reverse(acc)
+        [n, ..rest] -> recNamesOf(rest, List.prepend(Check.Blk.recName(n), acc))
+
+verify recNamesOf
+    recNamesOf([], []) => []
+
+fn oldNames(m: List<Tuple<Name, Name>>, acc: List<Name>) -> List<Name>
+    ? "The auxiliary recursors' names before renaming."
+    match m
+        [] -> List.reverse(acc)
+        [(o, _), ..rest] -> oldNames(rest, List.prepend(o, acc))
+
+verify oldNames
+    oldNames([], []) => []
+
+fn lookupName(m: List<Tuple<Name, Name>>, n: Name) -> Option<Name>
+    ? "The new name of a renamed constant."
+    match m
+        [] -> Option.None
+        [(o, x), ..rest] -> match o == n
+            true -> Option.Some(x)
+            false -> lookupName(rest, n)
+
+verify lookupName
+    lookupName([], Core.Names.anon()) => Option.None
+
+fn lookupNested(aux: List<Tuple<Expr, Name>>, n: Name) -> Option<Expr>
+    ? "The occurrence an auxiliary type stands for."
+    match aux
+        [] -> Option.None
+        [(e, a), ..rest] -> match a == n
+            true -> Option.Some(e)
+            false -> lookupNested(rest, n)
+
+verify lookupNested
+    lookupNested([], Core.Names.anon()) => Option.None
+
+fn restoreTypes(rc: RC, auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, users: List<Name>, ts: List<Name>) -> Result<RC, Fail>
+    ? "The real types, with all listing only the real ones, and their constructors restored."
+    match ts
+        [] -> Result.Ok(rc)
+        [t, ..rest] -> restoreTypes(restoreType(rc, auxEnv, ns, users, Map.get(auxEnv, t))?, auxEnv, ns, recMap, users, rest)
+
+verify restoreTypes
+    restoreTypes(RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], [], []) == Result.Err(Fail.Reject("x")) => false
+
+fn restoreType(rc: RC, auxEnv: Map<Name, Const>, ns: NS, users: List<Name>, c: Option<Const>) -> Result<RC, Fail>
+    ? "One real type."
+    match c
+        Option.Some(Const.CInduct(iv)) -> restoreCtors(declared(rc, iv.head.name, Const.CInduct(IndType.update(iv, all = users)))?, auxEnv, ns, iv.ctors)
+        _ -> Result.Err(reject("internal: a type of the nested block is missing"))
+
+verify restoreType
+    restoreType(RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], Option.None) => Result.Err(Fail.Reject("internal: a type of the nested block is missing"))
+
+fn declared(rc: RC, n: Name, c: Const) -> Result<RC, Fail>
+    ? "Adds a constant whose name must be new."
+    match Bool.or(Map.has(rc.env, n), Check.State.declared(rc.st, n))
+        true -> Result.Err(reject("'{Core.Names.render(n)}' has already been declared"))
+        false -> Result.Ok(RC.update(rc, env = Map.set(rc.env, n, c), names = List.prepend(n, rc.names)))
+
+verify declared
+    Map.len(Result.withDefault(declared(RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), Core.Names.anon(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = [])).env) => 1
+
+fn restoreCtors(rc: RC, auxEnv: Map<Name, Const>, ns: NS, cs: List<Name>) -> Result<RC, Fail>
+    ? "Each constructor's type with nested occurrences restored."
+    match cs
+        [] -> Result.Ok(rc)
+        [c, ..rest] -> restoreCtors(restoreCtor(rc, auxEnv, ns, Map.get(auxEnv, c))?, auxEnv, ns, rest)
+
+verify restoreCtors
+    restoreCtors(RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), []) == Result.Err(Fail.Reject("x")) => false
+
+fn restoreCtor(rc: RC, auxEnv: Map<Name, Const>, ns: NS, c: Option<Const>) -> Result<RC, Fail>
+    ? "One constructor."
+    match c
+        Option.Some(Const.CCtor(k)) -> ctorRestored(restoreExpr(rc.st, auxEnv, ns, [], k.head.ty)?, rc, k)
+        _ -> Result.Err(reject("internal: a constructor of the nested block is missing"))
+
+verify restoreCtor
+    restoreCtor(RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), Option.None) => Result.Err(Fail.Reject("internal: a constructor of the nested block is missing"))
+
+fn ctorRestored(r: RE, rc: RC, k: Ctor) -> Result<RC, Fail>
+    ? "Adds the restored constructor."
+    declared(RC.update(rc, st = r.st), k.head.name, Const.CCtor(Ctor.update(k, head = Head.update(k.head, ty = r.e))))
+
+verify ctorRestored
+    Map.len(Result.withDefault(ctorRestored(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), induct = Core.Names.anon(), cidx = 0, numParams = 0, numFields = 0, isUnsafe = false)), RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = [])).env) => 1
+
+fn restoreRecs(rc: RC, auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, users: List<Name>, recs: List<Name>) -> Result<RC, Fail>
+    ? "Every recursor of the enlarged block, the auxiliary ones renamed."
+    match recs
+        [] -> Result.Ok(rc)
+        [r, ..rest] -> restoreRecs(restoreRec(rc, auxEnv, ns, recMap, users, r, Map.get(auxEnv, r))?, auxEnv, ns, recMap, users, rest)
+
+verify restoreRecs
+    restoreRecs(RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], [], []) == Result.Err(Fail.Reject("x")) => false
+
+fn restoreRec(rc: RC, auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, users: List<Name>, old: Name, c: Option<Const>) -> Result<RC, Fail>
+    ? "The recursor's type and rules restored; a renamed recursor's rules name the real constructors."
+    match c
+        Option.Some(Const.CRec(rv)) -> recTyped(restoreExpr(rc.st, auxEnv, ns, recMap, rv.head.ty)?, rc, auxEnv, ns, recMap, users, rv, Option.withDefault(lookupName(recMap, old), old), old)
+        _ -> Result.Err(reject("internal: a recursor of the nested block is missing"))
+
+verify restoreRec
+    restoreRec(RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], [], Core.Names.anon(), Option.None) => Result.Err(Fail.Reject("internal: a recursor of the nested block is missing"))
+
+record RL
+    st: St
+    rules: List<RecRule>
+
+fn recTyped(ty: RE, rc: RC, auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, users: List<Name>, rv: Rec, newName: Name, old: Name) -> Result<RC, Fail>
+    ? "Then the rules."
+    rl = restoreRules(ty.st, auxEnv, ns, recMap, rv.rules, newName != old, [])?
+    declared(RC.update(rc, st = rl.st), newName, Const.CRec(Rec.update(rv, head = Head(name = newName, params = rv.head.params, ty = ty.e), all = users, rules = rl.rules)))
+
+verify recTyped
+    Map.len(Result.withDefault(recTyped(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon(), Core.Names.anon()), RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = [])).env) => 1
+
+fn restoreRules(st: St, auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, rules: List<RecRule>, renamed: Bool, acc: List<RecRule>) -> Result<RL, Fail>
+    ? "Each rule's right-hand side, and its constructor when the recursor was renamed."
+    match rules
+        [] -> Result.Ok(RL(st = st, rules = List.reverse(acc)))
+        [r, ..rest] -> ruleRestored(restoreExpr(st, auxEnv, ns, recMap, r.rhs)?, auxEnv, ns, recMap, r, rest, renamed, acc)
+
+verify restoreRules
+    restoreRules(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], [], false, []) == Result.Err(Fail.Reject("x")) => false
+
+fn ruleRestored(rhs: RE, auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, r: RecRule, rest: List<RecRule>, renamed: Bool, acc: List<RecRule>) -> Result<RL, Fail>
+    ? "Collects one restored rule."
+    ctor = ruleCtor(auxEnv, ns, r.ctor, renamed)?
+    restoreRules(rhs.st, auxEnv, ns, recMap, rest, renamed, List.prepend(RecRule(ctor = ctor, nfields = r.nfields, rhs = rhs.e), acc))
+
+verify ruleRestored
+    ruleRestored(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0)), [], false, []) == Result.Err(Fail.Reject("x")) => false
+
+fn ruleCtor(auxEnv: Map<Name, Const>, ns: NS, c: Name, renamed: Bool) -> Result<Name, Fail>
+    ? "An auxiliary constructor becomes the constructor of the type it stands for."
+    match renamed
+        false -> Result.Ok(c)
+        true -> match auxCtorOf(auxEnv, ns, c)
+            Option.Some((nested, auxI)) -> match Core.Apps.fnOf(nested)
+                Expr.Const(i, _) -> Result.Ok(replacePrefix(c, auxI, i))
+                _ -> Result.Err(reject("failed to restore nested inductive types, nested occurrence is not an inductive type application"))
+            Option.None -> Result.Err(reject("failed to restore nested inductive types, '{Core.Names.render(c)}' is not a constructor of an auxiliary type"))
+
+verify ruleCtor
+    ruleCtor({}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), Core.Names.anon(), false) => Result.Ok(Core.Names.anon())
+
+fn auxCtorOf(auxEnv: Map<Name, Const>, ns: NS, c: Name) -> Option<Tuple<Expr, Name>>
+    ? "For a constructor of an auxiliary type: the occurrence that type stands for, and the type."
+    match Map.get(auxEnv, c)
+        Option.Some(Const.CCtor(k)) -> match lookupNested(ns.aux, k.induct)
+            Option.Some(nested) -> Option.Some((nested, k.induct))
+            Option.None -> Option.None
+        _ -> Option.None
+
+verify auxCtorOf
+    auxCtorOf({}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), Core.Names.anon()) => Option.None
+
+fn restoreExpr(st: St, auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, e: Expr) -> Result<RE, Fail>
+    ? "Opens the parameter binders, restores the body, and closes it again the same way."
+    ps = getParams(st, e, ns.nparams, [])?
+    body = restoreBody(auxEnv, ns, recMap, ps.xs, ps.body)?
+    match e
+        Expr.Pi -> Result.Ok(RE(e = Check.Telescope.piBinding(ps.st, ps.xs, body), st = ps.st))
+        _ -> Result.Ok(RE(e = Check.Telescope.lamBinding(ps.st, ps.xs, body), st = ps.st))
+
+verify restoreExpr
+    restoreExpr(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], Core.Exprs.fvar(3)) == Result.Err(Fail.Reject("x")) => false
+
+fn restoreBody(auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, as: List<Expr>, t: Expr) -> Result<Expr, Fail>
+    ? "Renamed recursors, auxiliary types and auxiliary constructors become what they stand for; elsewhere the children."
+    match t
+        Expr.Const(n, ls) -> match lookupName(recMap, n)
+            Option.Some(n2) -> Result.Ok(Core.Exprs.cnst(n2, ls))
+            Option.None -> restoreHead(auxEnv, ns, recMap, as, t)
+        _ -> restoreHead(auxEnv, ns, recMap, as, t)
+
+verify restoreBody
+    restoreBody({}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [(Core.Names.anon(), Core.Names.str(Core.Names.anon(), "r"))], [], Core.Exprs.cnst(Core.Names.anon(), [])) => Result.Ok(Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "r"), []))
+
+fn restoreHead(auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, as: List<Expr>, t: Expr) -> Result<Expr, Fail>
+    ? "An application headed by an auxiliary type or constructor."
+    match Core.Apps.fnOf(t)
+        Expr.Const(f, _) -> match lookupNested(ns.aux, f)
+            Option.Some(nested) -> auxTypeApp(ns, as, nested, Core.Apps.argsOf(t))
+            Option.None -> match auxCtorOf(auxEnv, ns, f)
+                Option.Some((nested, auxI)) -> auxCtorApp(ns, as, nested, auxI, f, Core.Apps.argsOf(t))
+                Option.None -> restoreKids(auxEnv, ns, recMap, as, t)
+        _ -> restoreKids(auxEnv, ns, recMap, as, t)
+
+verify restoreHead
+    restoreHead({}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], [], Core.Exprs.fvar(1)) => Result.Ok(Core.Exprs.fvar(1))
+
+fn inAs(ns: NS, as: List<Expr>, nested: Expr) -> Expr
+    ? "The occurrence with the parameters in hand put for the block's parameters."
+    replaceParams(nested, ns.params, as)
+
+verify inAs
+    inAs(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [Core.Exprs.fvar(1)], nparams = 1, lvls = [], aux = [], types = [], next = 1), [Core.Exprs.fvar(9)], Core.Exprs.fvar(1)) => Core.Exprs.fvar(9)
+
+fn auxTypeApp(ns: NS, as: List<Expr>, nested: Expr, args: List<Expr>) -> Result<Expr, Fail>
+    ? "auxI As is becomes I Ds is."
+    match List.len(args) < ns.nparams
+        true -> Result.Err(reject("failed to restore nested inductive types, auxiliary type is not applied to all parameters"))
+        false -> Result.Ok(Core.Apps.mkApps(inAs(ns, as, nested), List.drop(args, ns.nparams)))
+
+verify auxTypeApp
+    auxTypeApp(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 1, lvls = [], aux = [], types = [], next = 1), [], Core.Exprs.fvar(0), []) => Result.Err(Fail.Reject("failed to restore nested inductive types, auxiliary type is not applied to all parameters"))
+
+fn auxCtorApp(ns: NS, as: List<Expr>, nested: Expr, auxI: Name, f: Name, args: List<Expr>) -> Result<Expr, Fail>
+    ? "auxI.c As fields becomes I.c Ds fields."
+    match List.len(args) < ns.nparams
+        true -> Result.Err(reject("failed to restore nested inductive types, auxiliary constructor is not applied to all parameters"))
+        false -> match Core.Apps.fnOf(inAs(ns, as, nested))
+            Expr.Const(i, ils) -> Result.Ok(Core.Apps.mkApps(Core.Apps.mkApps(Core.Exprs.cnst(replacePrefix(f, auxI, i), ils), Core.Apps.argsOf(inAs(ns, as, nested))), List.drop(args, ns.nparams)))
+            _ -> Result.Err(reject("failed to restore nested inductive types, nested occurrence is not an inductive type application"))
+
+verify auxCtorApp
+    auxCtorApp(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 1, lvls = [], aux = [], types = [], next = 1), [], Core.Exprs.fvar(0), Core.Names.anon(), Core.Names.anon(), []) => Result.Err(Fail.Reject("failed to restore nested inductive types, auxiliary constructor is not applied to all parameters"))
+
+fn restoreKids(auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, as: List<Expr>, t: Expr) -> Result<Expr, Fail>
+    ? "The children of a node."
+    match t
+        Expr.App(_, f, a) -> Result.Ok(Core.Exprs.app(restoreBody(auxEnv, ns, recMap, as, f)?, restoreBody(auxEnv, ns, recMap, as, a)?))
+        Expr.Lam(_, n, d, b, bi) -> Result.Ok(Core.Exprs.lam(n, restoreBody(auxEnv, ns, recMap, as, d)?, restoreBody(auxEnv, ns, recMap, as, b)?, bi))
+        Expr.Pi(_, n, d, b, bi) -> Result.Ok(Core.Exprs.pi(n, restoreBody(auxEnv, ns, recMap, as, d)?, restoreBody(auxEnv, ns, recMap, as, b)?, bi))
+        Expr.Let(_, n, d, v, b) -> Result.Ok(Core.Exprs.letE(n, restoreBody(auxEnv, ns, recMap, as, d)?, restoreBody(auxEnv, ns, recMap, as, v)?, restoreBody(auxEnv, ns, recMap, as, b)?))
+        Expr.Proj(_, s, i, x) -> Result.Ok(Core.Exprs.proj(s, i, restoreBody(auxEnv, ns, recMap, as, x)?))
+        _ -> Result.Ok(t)
+
+verify restoreKids
+    restoreKids({}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], [], Core.Exprs.fvar(1)) => Result.Ok(Core.Exprs.fvar(1))
+
+fn recheck(rc: RC, ns: NS, blk: Blk) -> Result<Map<Name, Const>, Fail>
+    ? "The occurrences replaced by auxiliary types, then every restored constant, are type checked in the new environment."
+    st = St.update(rc.st, block = rc.env, params = blk.lparams)
+    st2 = checkNested(st, ns.aux)?
+    match checkRestored(st2, rc.env, rc.names, blk.lparams)
+        Result.Ok -> Result.Ok(rc.env)
+        Result.Err(e) -> Result.Err(e)
+
+verify recheck
+    recheck(RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), Check.Blk.start([], 0, [], 0)) => Result.Ok({})
+
+fn checkNested(st: St, aux: List<Tuple<Expr, Name>>) -> Result<St, Fail>
+    ? "The parametric arguments Ds never appear in the auxiliary block, so they are checked here."
+    match aux
+        [] -> Result.Ok(st)
+        [(e, _), ..rest] -> checkNested(Check.Tc.check(st, e)?.st, rest)
+
+verify checkNested
+    checkNested(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), []) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+
+fn checkRestored(st: St, env: Map<Name, Const>, names: List<Name>, lparams: List<Name>) -> Result<St, Fail>
+    ? "Constructor types, recursor types and rule right-hand sides, at their own universe parameters."
+    match names
+        [] -> Result.Ok(st)
+        [n, ..rest] -> checkRestored(checkConst(st, Map.get(env, n), lparams)?, env, rest, lparams)
+
+verify checkRestored
+    checkRestored(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), {}, [], []) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+
+fn checkConst(st: St, c: Option<Const>, lparams: List<Name>) -> Result<St, Fail>
+    ? "One restored constant."
+    match c
+        Option.Some(Const.CCtor(k)) -> Result.Ok(St.update(Check.Tc.check(St.update(st, params = lparams), k.head.ty)?.st, params = lparams))
+        Option.Some(Const.CRec(rv)) -> checkRules(St.update(Check.Tc.check(St.update(st, params = rv.head.params), rv.head.ty)?.st, params = rv.head.params), rv.rules, lparams)
+        _ -> Result.Ok(st)
+
+verify checkConst
+    checkConst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.None, []) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+
+fn checkRules(st: St, rules: List<RecRule>, lparams: List<Name>) -> Result<St, Fail>
+    ? "Each rule's right-hand side, then back to the block's parameters."
+    match rules
+        [] -> Result.Ok(St.update(st, params = lparams))
+        [r, ..rest] -> checkRules(Check.Tc.check(st, r.rhs)?.st, rest, lparams)
+
+verify checkRules
+    checkRules(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], []) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))

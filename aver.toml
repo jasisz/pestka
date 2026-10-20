@@ -1,0 +1,5 @@
+[rust]
+# Pestka spends much of its time allocating and freeing terms; on macOS the
+# system allocator cost it about 9% of its time on one thread and half of
+# its memory on eight.
+allocator = "mimalloc"

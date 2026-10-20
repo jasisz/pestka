@@ -1,0 +1,425 @@
+module State
+    intent =
+        "What the type checker carries while it checks one declaration: the"
+        "environment, the local context of free variables with their fresh"
+        "counter, the universe parameters in scope, and the caches. Aver has"
+        "no mutable state, so every checking function takes a St and returns"
+        "the St it leaves behind inside its result."
+    exposes [Fail, Const, Env, Local, St, RE, RB, RO, envEmpty, envGet, envHas, envSet, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names]
+    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.PMap, Core.Alpha]
+    effects []
+
+type Fail
+    Reject(String)
+    Decline(String)
+
+type Const
+    CAxiom(Head, Bool)
+    CDefn(Head, Expr, Hints, Safety)
+    CThm(Head, Expr)
+    COpaque(Head, Expr, Bool)
+    CQuot(Head, QuotKind)
+    CInduct(IndType)
+    CCtor(Ctor)
+    CRec(Rec)
+
+type Env
+    Empty
+    Leaf(Int, List<Tuple<Name, Const>>)
+    Branch(Vector<Env>, Int)
+
+decision PersistentEnvironment
+    date = "2026-10-19"
+    reason =
+        "The environment only grows, one declaration at a time, and a"
+        "checker of declaration i must see exactly the constants before i."
+        "A persistent hash trie keyed by the hash each name carries gives"
+        "every point of the file its own environment for the price of one"
+        "root, so declarations can be checked apart, and in parallel, against"
+        "the environment they would see in order. It also never copies the"
+        "whole environment when a copy of it is alive, as a Map does."
+    chosen = "PersistentEnvironment"
+    rejected = ["MapWithPositions", "Map"]
+    impacts = [Env, envSet, envGet]
+
+fn envEmpty() -> Env
+    ? "The empty environment."
+    Env.Empty
+
+verify envEmpty
+    envHas(envEmpty(), Core.Names.anon()) => false
+
+fn envGet(env: Env, n: Name) -> Option<Const>
+    ? "The constant named n."
+    envFind(envBucket(env, Core.Names.hashOf(n), 0), n)
+
+verify envGet
+    envGet(envSet(envEmpty(), Core.Names.anon(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.anon()) => Option.Some(Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false))
+    envGet(envEmpty(), Core.Names.anon()) => Option.None
+
+fn envHas(env: Env, n: Name) -> Bool
+    ? "Whether a constant is named n."
+    envGet(env, n) != Option.None
+
+verify envHas
+    envHas(envSet(envEmpty(), Core.Names.anon(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.anon()) => true
+
+fn envBucket(env: Env, key: Int, shift: Int) -> List<Tuple<Name, Const>>
+    ? "The bucket of a hash, descending four bits at a time."
+    match env
+        Env.Empty -> []
+        Env.Leaf(k, b) -> match k == key
+            true -> b
+            false -> []
+        Env.Branch(v, _) -> envBucket(Option.withDefault(Vector.get(v, envNibble(key, shift)), Env.Empty), key, shift + 4)
+
+verify envBucket
+    envBucket(Env.Leaf(5, []), 6, 0) => []
+
+fn envFind(bucket: List<Tuple<Name, Const>>, n: Name) -> Option<Const>
+    ? "The newest constant of the bucket named n."
+    match bucket
+        [] -> Option.None
+        [(k, c), ..rest] -> match k == n
+            true -> Option.Some(c)
+            false -> envFind(rest, n)
+
+verify envFind
+    envFind([], Core.Names.anon()) => Option.None
+
+fn envSet(env: Env, n: Name, c: Const) -> Env
+    ? "Adds a constant; it shadows any older one of the same name, which the checker never lets in."
+    envAdd(env, Core.Names.hashOf(n), (n, c), 0)
+
+verify envSet
+    envHas(envSet(envSet(envEmpty(), Core.Names.str(Core.Names.anon(), "a"), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.str(Core.Names.anon(), "b"), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.str(Core.Names.anon(), "a")) => true
+
+fn envAdd(env: Env, key: Int, entry: Tuple<Name, Const>, shift: Int) -> Env
+    ? "Inserts below this node, copying one path; a leaf with another hash becomes a branch."
+    match env
+        Env.Empty -> Env.Leaf(key, [entry])
+        Env.Leaf(k, b) -> match k == key
+            true -> Env.Leaf(k, List.prepend(entry, b))
+            false -> envAdd(Env.Branch(envChild(Vector.new(16, Env.Empty), envNibble(k, shift), Env.Leaf(k, b)), List.len(b)), key, entry, shift)
+        Env.Branch(v, count) -> Env.Branch(envChild(v, envNibble(key, shift), envAdd(Option.withDefault(Vector.get(v, envNibble(key, shift)), Env.Empty), key, entry, shift + 4)), count + 1)
+
+verify envAdd
+    envBucket(envAdd(Env.Leaf(1, []), 17, (Core.Names.anon(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), 0), 17, 0) == [] => false
+
+fn envChild(v: Vector<Env>, i: Int, child: Env) -> Vector<Env>
+    ? "Replaces one child; the index is always in range."
+    Option.withDefault(Vector.set(v, i, child), v)
+
+verify envChild
+    Vector.len(envChild(Vector.new(16, Env.Empty), 3, Env.Empty)) => 16
+
+fn envNibble(key: Int, shift: Int) -> Int
+    ? "Four bits of the hash starting at bit shift."
+    Bits.and(Result.withDefault(Bits.shiftRight(key, shift), 0), 15)
+
+verify envNibble
+    envNibble(255, 4) => 15
+
+record Local
+    name: Name
+    ty: Expr
+    value: Option<Expr>
+    binder: Binder
+
+record St
+    env: Env
+    block: Map<Name, Const>
+    lctx: Map<Int, Local>
+    next: Int
+    params: List<Name>
+    checkParams: Bool
+    safety: Safety
+    eager: Bool
+    inferCache: PMap
+    checkCache: PMap
+    whnfCache: PMap
+    coreCache: PMap
+    eqOk: PMap
+    eqFail: PMap
+    unfoldCache: PMap
+    closed: PMap
+
+record RE
+    e: Expr
+    st: St
+
+record RB
+    b: Bool
+    st: St
+
+record RO
+    o: Option<Expr>
+    st: St
+
+fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
+    ? "A checker for one declaration: empty context and caches."
+    St(env = env, block = {}, lctx = {}, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.PMap.empty(), checkCache = Core.PMap.empty(), whnfCache = Core.PMap.empty(), coreCache = Core.PMap.empty(), eqOk = Core.PMap.empty(), eqFail = Core.PMap.empty(), unfoldCache = Core.PMap.empty(), closed = Core.PMap.empty())
+
+verify fresh
+    fresh(envEmpty(), [], Safety.Safe).next => 0
+
+fn headOf(c: Const) -> Head
+    ? "Name, parameters and type of any constant."
+    match c
+        Const.CAxiom(h, _) -> h
+        Const.CDefn(h, _, _, _) -> h
+        Const.CThm(h, _) -> h
+        Const.COpaque(h, _, _) -> h
+        Const.CQuot(h, _) -> h
+        Const.CInduct(i) -> i.head
+        Const.CCtor(k) -> k.head
+        Const.CRec(r) -> r.head
+
+verify headOf
+    headOf(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0))).name => Core.Names.anon()
+
+fn isUnsafe(c: Const) -> Bool
+    ? "Whether the constant is unsafe."
+    match c
+        Const.CAxiom(_, u) -> u
+        Const.CDefn(_, _, _, s) -> s == Safety.Unsafe
+        Const.COpaque(_, _, u) -> u
+        Const.CInduct(i) -> i.isUnsafe
+        Const.CCtor(k) -> k.isUnsafe
+        Const.CRec(r) -> r.isUnsafe
+        _ -> false
+
+verify isUnsafe
+    isUnsafe(Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), true)) => true
+
+fn isPartial(c: Const) -> Bool
+    ? "Whether the constant is a partial definition."
+    match c
+        Const.CDefn(_, _, _, s) -> s == Safety.Partial
+        _ -> false
+
+verify isPartial
+    isPartial(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0))) => false
+
+fn valueOf(c: Const) -> Option<Expr>
+    ? "The value delta reduction may unfold: definitions and theorems, never opaque constants."
+    match c
+        Const.CDefn(_, v, _, _) -> Option.Some(v)
+        Const.CThm(_, v) -> Option.Some(v)
+        _ -> Option.None
+
+verify valueOf
+    valueOf(Const.COpaque(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0), false)) => Option.None
+
+fn hintsOf(c: Const) -> Hints
+    ? "Reducibility hints; everything but a definition counts as opaque."
+    match c
+        Const.CDefn(_, _, h, _) -> h
+        _ -> Hints.Opaque
+
+verify hintsOf
+    hintsOf(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0))) => Hints.Opaque
+
+fn lookup(st: St, n: Name) -> Option<Const>
+    ? "A constant of the inductive block being added, or of the environment. The block's constants are kept apart until the block is accepted, so the environment is only read while a block is checked and is never copied for it."
+    match Map.len(st.block) == 0
+        true -> envGet(st.env, n)
+        false -> blockFirst(Map.get(st.block, n), st.env, n)
+
+verify lookup
+    lookup(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon()) => Option.None
+
+fn blockFirst(b: Option<Const>, env: Env, n: Name) -> Option<Const>
+    ? "The block's constant, else the environment's."
+    match b
+        Option.Some -> b
+        Option.None -> envGet(env, n)
+
+verify blockFirst
+    blockFirst(Option.None, envEmpty(), Core.Names.anon()) => Option.None
+
+fn declared(st: St, n: Name) -> Bool
+    ? "Whether the name is taken, in the block being added or in the environment."
+    Bool.or(Map.has(st.block, n), envHas(st.env, n))
+
+verify declared
+    declared(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon()) => false
+
+fn localType(st: St, id: Int) -> Result<Expr, Fail>
+    ? "The type of a free variable."
+    match Map.get(st.lctx, id)
+        Option.Some(l) -> Result.Ok(l.ty)
+        Option.None -> Result.Err(Fail.Reject("unknown free variable"))
+
+verify localType
+    localType(fresh(envEmpty(), [], Safety.Safe), 3) => Result.Err(Fail.Reject("unknown free variable"))
+
+fn localValue(st: St, id: Int) -> Option<Expr>
+    ? "The value of a let-bound free variable."
+    match Map.get(st.lctx, id)
+        Option.Some(l) -> l.value
+        Option.None -> Option.None
+
+verify localValue
+    localValue(fresh(envEmpty(), [], Safety.Safe), 3) => Option.None
+
+fn names(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder) -> RE
+    ? "Declares a fresh free variable and returns it."
+    id = st.next
+    RE(e = Core.Exprs.fvar(id), st = St.update(st, lctx = Map.set(st.lctx, id, Local(name = n, ty = ty, value = value, binder = bi)), next = id + 1))
+
+verify names
+    names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).e => Core.Exprs.fvar(0)
+    names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).st.next => 1
+
+fn mkBinding(st: St, ids: List<Int>, body: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
+    ? "Abstracts the free variables ids (outermost first) out of body, binding each with its type, or with let for a let variable."
+    wrap(st, List.reverse(ids), ids, Core.Subst.abstractFVars(body, ids), isLam, dropDeadLet)
+
+verify mkBinding
+    mkBinding(names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, [0], Core.Exprs.fvar(0), false, false) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
+
+fn wrap(st: St, revIds: List<Int>, ids: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
+    ? "Adds the binders from the innermost out; the type of variable i is abstracted over the variables before it."
+    match revIds
+        [] -> r
+        [id, ..rest] -> wrap(st, rest, ids, wrapOne(st, id, List.take(ids, List.len(rest)), r, isLam, dropDeadLet), isLam, dropDeadLet)
+
+verify wrap
+    wrap(fresh(envEmpty(), [], Safety.Safe), [], [], Core.Exprs.bvar(0), true, false) => Core.Exprs.bvar(0)
+
+fn wrapOne(st: St, id: Int, before: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
+    ? "One binder around r."
+    match Map.get(st.lctx, id)
+        Option.None -> r
+        Option.Some(l) -> wrapLocal(l, Core.Subst.abstractFVars(l.ty, before), before, r, isLam, dropDeadLet)
+
+verify wrapOne
+    wrapOne(fresh(envEmpty(), [], Safety.Safe), 0, [], Core.Exprs.bvar(0), true, false) => Core.Exprs.bvar(0)
+
+fn wrapLocal(l: Local, ty: Expr, before: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
+    ? "let for a let variable (dropped when dead and asked to), else lambda or pi."
+    match l.value
+        Option.Some(v) -> match Bool.and(dropDeadLet, Bool.not(Core.Subst.hasLooseBVar(r, 0)))
+            true -> Core.Subst.lower(r, 1, 1)
+            false -> Core.Exprs.letE(l.name, ty, Core.Subst.abstractFVars(v, before), r)
+        Option.None -> match isLam
+            true -> Core.Exprs.lam(l.name, ty, r, l.binder)
+            false -> Core.Exprs.pi(l.name, ty, r, l.binder)
+
+verify wrapLocal
+    wrapLocal(Local(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), value = Option.Some(Core.Exprs.sort(Level.Zero)), binder = Binder.Default), Core.Exprs.sort(Level.Zero), [], Core.Exprs.sort(Level.Zero), false, true) => Core.Exprs.sort(Level.Zero)
+
+fn cacheGet(cache: PMap, key: Expr) -> Option<Expr>
+    ? "A cached result for key, found by hash and confirmed by equality."
+    findIn(Core.PMap.get(cache, Core.Exprs.hashOf(key)), key)
+
+verify cacheGet
+    cacheGet(Core.PMap.empty(), Core.Exprs.bvar(0)) => Option.None
+    cacheGet(cachePut(Core.PMap.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
+
+fn findIn(bucket: List<Tuple<Expr, Expr>>, key: Expr) -> Option<Expr>
+    ? "The value stored under an equal key."
+    match bucket
+        [] -> Option.None
+        [(k, v), ..rest] -> match k == key
+            true -> Option.Some(v)
+            false -> findIn(rest, key)
+
+verify findIn
+    findIn([], Core.Exprs.bvar(0)) => Option.None
+
+fn cachePut(cache: PMap, key: Expr, v: Expr) -> PMap
+    ? "Stores a result under the key's hash."
+    Core.PMap.add(cache, Core.Exprs.hashOf(key), (key, v))
+
+verify cachePut
+    Core.PMap.size(cachePut(Core.PMap.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => 1
+
+fn pairKey(a: Expr, b: Expr) -> Int
+    ? "One key for an unordered pair."
+    ha = Core.Exprs.hashOf(a)
+    hb = Core.Exprs.hashOf(b)
+    Core.Hash.mix(Int.min(ha, hb), Int.max(ha, hb))
+
+verify pairKey
+    pairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) == pairKey(Core.Exprs.bvar(1), Core.Exprs.bvar(0)) => true
+
+fn pairGet(cache: PMap, a: Expr, b: Expr) -> Bool
+    ? "Whether the pair, in either order, is recorded."
+    hasPair(Core.PMap.get(cache, pairKey(a, b)), a, b)
+
+verify pairGet
+    pairGet(pairPut(Core.PMap.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(1), Core.Exprs.bvar(0)) => true
+    pairGet(Core.PMap.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)) => false
+
+fn hasPair(bucket: List<Tuple<Expr, Expr>>, a: Expr, b: Expr) -> Bool
+    ? "Membership in either order."
+    match bucket
+        [] -> false
+        [(x, y), ..rest] -> match Bool.or(Bool.and(alike(x, a), alike(y, b)), Bool.and(alike(x, b), alike(y, a)))
+            true -> true
+            false -> hasPair(rest, a, b)
+
+verify hasPair
+    hasPair([], Core.Exprs.bvar(0), Core.Exprs.bvar(0)) => false
+
+fn alike(x: Expr, a: Expr) -> Bool
+    ? "The same term up to binder names and annotations, the identical case first."
+    match x == a
+        true -> true
+        false -> Core.Alpha.alphaEq(x, a)
+
+verify alike
+    alike(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.str(Core.Names.anon(), "x"), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)) => true
+
+fn pairPut(cache: PMap, a: Expr, b: Expr) -> PMap
+    ? "Records the pair."
+    Core.PMap.add(cache, pairKey(a, b), (a, b))
+
+verify pairPut
+    Core.PMap.size(pairPut(Core.PMap.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => 1
+
+fn closedPairKey(a: Expr, b: Expr) -> Int
+    ? "The key of a pair in the cache kept across declarations: above every term hash, so that it never meets an entry for a type there."
+    pairKey(a, b) + 1099511627776
+
+verify closedPairKey
+    closedPairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) > 1099511627775 => true
+
+fn closedPairGet(cache: PMap, a: Expr, b: Expr) -> Bool
+    ? "Whether the pair, in either order, is recorded in the cache kept across declarations."
+    hasPair(Core.PMap.get(cache, closedPairKey(a, b)), a, b)
+
+verify closedPairGet
+    closedPairGet(closedPairPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
+    closedPairGet(pairPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
+
+fn closedPairPut(cache: PMap, a: Expr, b: Expr) -> PMap
+    ? "Records the pair in the cache kept across declarations."
+    Core.PMap.add(cache, closedPairKey(a, b), (a, b))
+
+verify closedPairPut
+    Core.PMap.size(closedPairPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
+
+fn closedFailKey(a: Expr, b: Expr) -> Int
+    ? "The key of a pair known to differ, in the cache kept across declarations: above the keys of equal pairs."
+    pairKey(a, b) + 2199023255552
+
+verify closedFailKey
+    closedFailKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) > 2199023255551 => true
+
+fn closedFailGet(cache: PMap, a: Expr, b: Expr) -> Bool
+    ? "Whether the pair, in either order, is recorded as different in the cache kept across declarations."
+    hasPair(Core.PMap.get(cache, closedFailKey(a, b)), a, b)
+
+verify closedFailGet
+    closedFailGet(closedFailPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
+    closedFailGet(closedPairPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
+
+fn closedFailPut(cache: PMap, a: Expr, b: Expr) -> PMap
+    ? "Records the pair as different in the cache kept across declarations."
+    Core.PMap.add(cache, closedFailKey(a, b), (a, b))
+
+verify closedFailPut
+    Core.PMap.size(closedFailPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1

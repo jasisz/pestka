@@ -1,0 +1,116 @@
+module Stress
+    intent =
+        "Scouting prototype: how deep non-tail recursion can go, and how fast"
+        "big Int arithmetic is, in the VM and compiled."
+    effects [Args.get, Console.print]
+
+type T
+    Leaf
+    Node(Int, T)
+
+fn build(n: Int) -> T
+    ? "A right-nested chain of depth n, built by non-tail recursion."
+    match n <= 0
+        true -> T.Leaf
+        false -> T.Node(n, build(n - 1))
+
+verify build
+    build(0) => T.Leaf
+    build(1) => T.Node(1, T.Leaf)
+
+fn sumT(t: T) -> Int
+    ? "Sums the chain by non-tail recursion."
+    match t
+        T.Leaf -> 0
+        T.Node(v, rest) -> v + sumT(rest)
+
+verify sumT
+    sumT(build(3)) => 6
+
+fn bump(t: T) -> T
+    ? "Rebuilds the chain with every value plus one (like instantiate over a spine)."
+    match t
+        T.Leaf -> T.Leaf
+        T.Node(v, rest) -> T.Node(v + 1, bump(rest))
+
+verify bump
+    bump(build(1)) => T.Node(2, T.Leaf)
+
+fn powMod(b: Int, e: Int, acc: Int) -> Int
+    ? "b^e by square-and-multiply, tail recursive."
+    match e == 0
+        true -> acc
+        false -> powStep(b, e, acc, Int.mod(e, 2) == 1)
+
+verify powMod
+    powMod(3, 4, 1) => 81
+
+fn powStep(b: Int, e: Int, acc: Int, odd: Bool) -> Int
+    ? "One step of powMod."
+    match odd
+        true -> powMod(b * b, Int.div(e, 2), acc * b)
+        false -> powMod(b * b, Int.div(e, 2), acc)
+
+verify powStep
+    powStep(3, 1, 1, true) => 3
+
+fn gcd(a: Int, b: Int) -> Int
+    ? "Euclid."
+    match b == 0
+        true -> a
+        false -> gcd(b, Result.withDefault(Int.mod(a, b), 0))
+
+verify gcd
+    gcd(12, 18) => 6
+
+fn log2(n: Int, acc: Int) -> Int
+    ? "Floor log2 by shifting right."
+    match n <= 1
+        true -> acc
+        false -> log2(Bits.shiftRight(n, 1), acc + 1)
+
+verify log2
+    log2(8, 0) => 3
+
+fn argInt(args: List<String>, i: Int, dflt: Int) -> Int
+    ? "The i-th argument as Int, or the default."
+    match List.drop(args, i)
+        [a, .._] -> Result.withDefault(Int.fromString(a), dflt)
+        [] -> dflt
+
+verify argInt
+    argInt(["x", "5"], 1, 0) => 5
+    argInt([], 1, 7) => 7
+
+fn argStr(args: List<String>) -> String
+    ? "The mode argument."
+    match args
+        [a, .._] -> a
+        [] -> "depth"
+
+verify argStr
+    argStr(["big"]) => "big"
+    argStr([]) => "depth"
+
+fn runDepth(n: Int) -> Unit
+    ? "Builds, rebuilds and sums a chain of depth n."
+    ! [Console.print]
+    t = bump(build(n))
+    Console.print("depth {n} sum {sumT(t)}")
+
+fn runBig(n: Int) -> Unit
+    ? "3^n, its square, gcd with 2^n-1, and log2."
+    ! [Console.print]
+    a = powMod(3, n, 1)
+    b = a * a
+    c = powMod(2, n, 1) - 1
+    g = gcd(b, c)
+    Console.print("bits {log2(b, 0)} gcd-bits {log2(g, 0)}")
+
+fn main() -> Unit
+    ! [Args.get, Console.print]
+    args = Args.get()
+    n = argInt(args, 1, 10000)
+    match argStr(args)
+        "big" -> runBig(n)
+        _ -> runDepth(n)

@@ -1,0 +1,106 @@
+module Decls
+    intent =
+        "Declarations as the export states them. An inductive block keeps"
+        "its constructors and recursors together, the way the kernel receives"
+        "it; recursors and the computed flags are claims the checker"
+        "re-derives and compares, never inputs it trusts."
+    exposes [Head, Hints, Safety, QuotKind, IndType, Ctor, RecRule, Rec, Decl, nameOf, constantCount]
+    depends [Core.Names, Core.Levels, Core.Exprs]
+    effects []
+
+record Head
+    name: Name
+    params: List<Name>
+    ty: Expr
+
+type Hints
+    Opaque
+    Abbrev
+    Regular(Int)
+
+type Safety
+    Safe
+    Unsafe
+    Partial
+
+type QuotKind
+    QType
+    QCtor
+    QLift
+    QInd
+
+record IndType
+    head: Head
+    numParams: Int
+    numIndices: Int
+    all: List<Name>
+    ctors: List<Name>
+    numNested: Int
+    isRec: Bool
+    isUnsafe: Bool
+    isReflexive: Bool
+
+record Ctor
+    head: Head
+    induct: Name
+    cidx: Int
+    numParams: Int
+    numFields: Int
+    isUnsafe: Bool
+
+record RecRule
+    ctor: Name
+    nfields: Int
+    rhs: Expr
+
+record Rec
+    head: Head
+    all: List<Name>
+    numParams: Int
+    numIndices: Int
+    numMotives: Int
+    numMinors: Int
+    rules: List<RecRule>
+    k: Bool
+    isUnsafe: Bool
+
+type Decl
+    Axiom(Head, Bool)
+    Defn(Head, Expr, Hints, Safety, List<Name>)
+    Thm(Head, Expr, List<Name>)
+    Opaq(Head, Expr, Bool, List<Name>)
+    Quot(Head, QuotKind)
+    Induct(List<IndType>, List<Ctor>, List<Rec>)
+
+fn nameOf(d: Decl) -> Name
+    ? "The declared name; an inductive block answers with its first type."
+    match d
+        Decl.Axiom(h, _) -> h.name
+        Decl.Defn(h, _, _, _, _) -> h.name
+        Decl.Thm(h, _, _) -> h.name
+        Decl.Opaq(h, _, _, _) -> h.name
+        Decl.Quot(h, _) -> h.name
+        Decl.Induct(types, _, _) -> firstName(types)
+
+verify nameOf
+    nameOf(Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "ax"), params = [], ty = Core.Exprs.sort(Level.Zero)), false)) => Core.Names.str(Core.Names.anon(), "ax")
+    nameOf(Decl.Induct([], [], [])) => Core.Names.anon()
+
+fn firstName(types: List<IndType>) -> Name
+    ? "Name of the first type of a block, or the empty name."
+    match types
+        [] -> Core.Names.anon()
+        [t, .._] -> t.head.name
+
+verify firstName
+    firstName([]) => Core.Names.anon()
+
+fn constantCount(d: Decl) -> Int
+    ? "How many constants the declaration adds to the environment."
+    match d
+        Decl.Induct(types, ctors, recs) -> List.len(types) + List.len(ctors) + List.len(recs)
+        _ -> 1
+
+verify constantCount
+    constantCount(Decl.Induct([], [], [])) => 0
+    constantCount(Decl.Quot(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), QuotKind.QType)) => 1

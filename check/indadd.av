@@ -1,0 +1,348 @@
+module IndAdd
+    intent =
+        "Adds an inductive block or a quotient constant the way Lean's replay"
+        "does: the kernel receives only the types and the constructor types,"
+        "derives everything else, and the constructors and recursors the"
+        "export states must equal the derived ones up to binder names. Only"
+        "the derived constants enter the environment. A block with nested"
+        "occurrences goes through Check.Nested first."
+    exposes [addInductive, addQuotDecl]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Core.Decls, Core.Alpha, Check.State, Check.Telescope, Check.Blk, Check.Induct, Check.Recursor, Check.Quot, Check.Nested]
+    effects []
+
+fn reject(msg: String) -> Fail
+    ? "The block is rejected."
+    Fail.Reject(msg)
+
+verify reject
+    reject("x") => Fail.Reject("x")
+
+fn nm(n: Name) -> String
+    ? "A name for messages."
+    Core.Names.render(n)
+
+verify nm
+    nm(Core.Names.anon()) => "[anonymous]"
+
+fn addInductive(env: Env, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> Result<Map<Name, Const>, Fail>
+    ? "Checks the block against env and returns the constants it derives, which are not in env yet."
+    match types
+        [] -> Result.Err(reject("invalid empty (mutual) inductive datatype declaration"))
+        [first, .._] -> fromFirst(env, first, types, ctors, recs, typeIns(types, ctors, [])?)
+
+verify addInductive
+    addInductive(Check.State.envEmpty(), [], [], []) => Result.Err(Fail.Reject("invalid empty (mutual) inductive datatype declaration"))
+
+fn typeIns(types: List<IndType>, ctors: List<Ctor>, acc: List<TypeIn>) -> Result<List<TypeIn>, Fail>
+    ? "Each type with the types of the constructors it lists."
+    match types
+        [] -> Result.Ok(List.reverse(acc))
+        [t, ..rest] -> typeIns(rest, ctors, List.prepend(TypeIn(name = t.head.name, ty = t.head.ty, ctors = ctorIns(t.ctors, ctors, [])?), acc))
+
+verify typeIns
+    typeIns([], [], []) => Result.Ok([])
+
+fn ctorIns(names: List<Name>, ctors: List<Ctor>, acc: List<CtorIn>) -> Result<List<CtorIn>, Fail>
+    ? "Finds each listed constructor in the block."
+    match names
+        [] -> Result.Ok(List.reverse(acc))
+        [n, ..rest] -> match findCtor(ctors, n)
+            Option.Some(c) -> ctorIns(rest, ctors, List.prepend(CtorIn(name = n, ty = c.head.ty), acc))
+            Option.None -> Result.Err(reject("constructor '{nm(n)}' is not in the block"))
+
+verify ctorIns
+    ctorIns([Core.Names.anon()], [], []) => Result.Err(Fail.Reject("constructor '[anonymous]' is not in the block"))
+
+fn findCtor(cs: List<Ctor>, n: Name) -> Option<Ctor>
+    ? "The constructor named n."
+    match cs
+        [] -> Option.None
+        [c, ..rest] -> match c.head.name == n
+            true -> Option.Some(c)
+            false -> findCtor(rest, n)
+
+verify findCtor
+    findCtor([], Core.Names.anon()) => Option.None
+
+fn fromFirst(env: Env, first: IndType, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>, tins: List<TypeIn>) -> Result<Map<Name, Const>, Fail>
+    ? "The first type gives the universe parameters and the parameter count."
+    blk = Check.Blk.start(first.head.params, first.numParams, tins, 0)
+    match anyReserved(tins)
+        true -> Result.Err(reject("invalid declaration, it uses the reserved prefix '_nested'"))
+        false -> match nestedTypes(env, blk.names, tins)
+            true -> nestedPath(Check.Induct.checkUniform(blk)?, env, blk, types, ctors, recs)
+            false -> afterUniform(Check.Induct.checkUniform(blk)?, env, blk, types, ctors, recs)
+
+verify fromFirst
+    fromFirst(Check.State.envEmpty(), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false), [], [], [], []) => Result.Ok({})
+
+fn afterUniform(u: Unit, env: Env, blk: Blk, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> Result<Map<Name, Const>, Fail>
+    ? "Runs the kernel's steps, then compares with the export."
+    newEnv = steps(env, blk)?
+    compared(compareAll(newEnv, types, ctors, recs)?, newEnv)
+
+verify afterUniform
+    afterUniform(Unit, Check.State.envEmpty(), Check.Blk.start([], 0, [], 0), [], [], []) => Result.Ok({})
+
+fn nestedPath(u: Unit, env: Env, blk: Blk, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> Result<Map<Name, Const>, Fail>
+    ? "Auxiliary types for the nested occurrences, the enlarged block checked, then restored and compared."
+    ns = Check.Nested.eliminate(env, blk)?
+    auxEnv = steps(env, Check.Blk.start(blk.lparams, blk.nparams, ns.types, List.len(ns.aux)))?
+    newEnv = Check.Nested.restoreAll(env, auxEnv, blk, ns)?
+    compared(compareAll(newEnv, types, ctors, recs)?, newEnv)
+
+verify nestedPath
+    nestedPath(Unit, Check.State.envEmpty(), Check.Blk.start([], 0, [], 0), [], [], []) == Result.Err(Fail.Reject("x")) => false
+
+fn compared(u: Unit, env: Map<Name, Const>) -> Result<Map<Name, Const>, Fail>
+    ? "The environment once everything matched."
+    Result.Ok(env)
+
+verify compared
+    compared(Unit, {}) => Result.Ok({})
+
+fn steps(env: Env, blk: Blk) -> Result<Map<Name, Const>, Fail>
+    ? "Types, constructors, elimination level, recursors, and the rule check."
+    match hasDup(blk.lparams)
+        true -> Result.Err(reject("duplicate universe level parameter"))
+        false -> stepsFrom(Check.Induct.checkTypes(BS(blk = blk, st = Check.State.fresh(env, blk.lparams, Safety.Safe)))?)
+
+verify steps
+    steps(Check.State.envEmpty(), Check.Blk.start([Core.Names.anon(), Core.Names.anon()], 0, [], 0)) => Result.Err(Fail.Reject("duplicate universe level parameter"))
+
+fn stepsFrom(a: BS) -> Result<Map<Name, Const>, Fail>
+    ? "Everything after the types are known."
+    c = Check.Induct.checkCtors(Check.Induct.declareTypes(a))?
+    e = Check.Induct.elimAndK(Check.Induct.declareCtors(c))?
+    rs = Check.Recursor.recInfos(e)?
+    f = Check.Recursor.declareRecs(BS(blk = e.blk, st = rs.st), rs)?
+    g = Check.Recursor.checkRecs(f, rs)?
+    Result.Ok(g.st.block)
+
+verify stepsFrom
+    stepsFrom(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok({})
+
+fn hasDup(ps: List<Name>) -> Bool
+    ? "A name occurring twice."
+    match ps
+        [] -> false
+        [p, ..rest] -> Bool.or(List.contains(rest, p), hasDup(rest))
+
+verify hasDup
+    hasDup([Core.Names.anon()]) => false
+
+fn anyReserved(tins: List<TypeIn>) -> Bool
+    ? "A type or constructor type mentions a constant under _nested."
+    match tins
+        [] -> false
+        [t, ..rest] -> Bool.or(Bool.or(reservedIn(t.ty), ctorsReserved(t.ctors)), anyReserved(rest))
+
+verify anyReserved
+    anyReserved([]) => false
+
+fn ctorsReserved(cs: List<CtorIn>) -> Bool
+    ? "Over constructor types."
+    match cs
+        [] -> false
+        [c, ..rest] -> Bool.or(reservedIn(c.ty), ctorsReserved(rest))
+
+verify ctorsReserved
+    ctorsReserved([]) => false
+
+fn reservedIn(e: Expr) -> Bool
+    ? "A constant or projection whose name starts with _nested."
+    match e
+        Expr.Const(n, _) -> rootIs(n, "_nested")
+        Expr.Proj(_, s, _, x) -> Bool.or(rootIs(s, "_nested"), reservedIn(x))
+        Expr.App(_, f, a) -> Bool.or(reservedIn(f), reservedIn(a))
+        Expr.Lam(_, _, t, b, _) -> Bool.or(reservedIn(t), reservedIn(b))
+        Expr.Pi(_, _, t, b, _) -> Bool.or(reservedIn(t), reservedIn(b))
+        Expr.Let(_, _, t, v, b) -> Bool.or(reservedIn(t), Bool.or(reservedIn(v), reservedIn(b)))
+        _ -> false
+
+verify reservedIn
+    reservedIn(Core.Exprs.cnst(Core.Names.str(Core.Names.str(Core.Names.anon(), "_nested"), "X"), [])) => true
+    reservedIn(Core.Exprs.fvar(0)) => false
+
+fn rootIs(n: Name, s: String) -> Bool
+    ? "The first component of n is the string s."
+    match n
+        Name.Str(Name.Anon, t, _) -> t == s
+        Name.Str(pre, _, _) -> rootIs(pre, s)
+        Name.Num(pre, _, _) -> rootIs(pre, s)
+        Name.Anon -> false
+
+verify rootIs
+    rootIs(Core.Names.num(Core.Names.str(Core.Names.anon(), "_nested"), 1), "_nested") => true
+
+fn nestedTypes(env: Env, names: List<Name>, tins: List<TypeIn>) -> Bool
+    ? "Some constructor uses an existing inductive type with a block type among its parameters."
+    match tins
+        [] -> false
+        [t, ..rest] -> Bool.or(nestedCtors(env, names, t.ctors), nestedTypes(env, names, rest))
+
+verify nestedTypes
+    nestedTypes(Check.State.envEmpty(), [], []) => false
+
+fn nestedCtors(env: Env, names: List<Name>, cs: List<CtorIn>) -> Bool
+    ? "Over constructor types."
+    match cs
+        [] -> false
+        [c, ..rest] -> Bool.or(nestedIn(env, names, c.ty), nestedCtors(env, names, rest))
+
+verify nestedCtors
+    nestedCtors(Check.State.envEmpty(), [], []) => false
+
+fn nestedIn(env: Env, names: List<Name>, e: Expr) -> Bool
+    ? "A nested occurrence anywhere in e."
+    match nestedHere(env, names, e)
+        true -> true
+        false -> match e
+            Expr.App(_, f, a) -> Bool.or(nestedIn(env, names, f), nestedIn(env, names, a))
+            Expr.Lam(_, _, t, b, _) -> Bool.or(nestedIn(env, names, t), nestedIn(env, names, b))
+            Expr.Pi(_, _, t, b, _) -> Bool.or(nestedIn(env, names, t), nestedIn(env, names, b))
+            Expr.Let(_, _, t, v, b) -> Bool.or(nestedIn(env, names, t), Bool.or(nestedIn(env, names, v), nestedIn(env, names, b)))
+            Expr.Proj(_, _, _, x) -> nestedIn(env, names, x)
+            _ -> false
+
+verify nestedIn
+    nestedIn(Check.State.envEmpty(), [], Core.Exprs.fvar(0)) => false
+
+fn nestedHere(env: Env, names: List<Name>, e: Expr) -> Bool
+    ? "e is I As ... with I an earlier inductive type and a block type in As."
+    match Core.Apps.fnOf(e)
+        Expr.Const(n, _) -> match Check.State.envGet(env, n)
+            Option.Some(Const.CInduct(iv)) -> paramsMention(List.take(Core.Apps.argsOf(e), iv.numParams), names)
+            _ -> false
+        _ -> false
+
+verify nestedHere
+    nestedHere(Check.State.envEmpty(), [], Core.Exprs.fvar(0)) => false
+
+fn paramsMention(args: List<Expr>, names: List<Name>) -> Bool
+    ? "Some argument mentions a block type."
+    match args
+        [] -> false
+        [a, ..rest] -> Bool.or(Check.Telescope.mentions(a, names), paramsMention(rest, names))
+
+verify paramsMention
+    paramsMention([], []) => false
+
+fn compareAll(env: Map<Name, Const>, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> Result<Unit, Fail>
+    ? "Every constant the export states equals the derived one."
+    match Bool.and(typesMatch(env, types), ctorsMatch(env, ctors))
+        false -> Result.Err(reject(firstMismatch(env, types, ctors)))
+        true -> recsMatch(env, recs)
+
+verify compareAll
+    compareAll({}, [], [], []) => Result.Ok(Unit)
+
+fn firstMismatch(env: Map<Name, Const>, types: List<IndType>, ctors: List<Ctor>) -> String
+    ? "Names the first type or constructor that differs."
+    match badType(env, types)
+        Option.Some(n) -> "inductive type '{nm(n)}' does not match the one the kernel derives"
+        Option.None -> match badCtor(env, ctors)
+            Option.Some(n) -> "invalid constructor '{nm(n)}'"
+            Option.None -> "mismatch"
+
+verify firstMismatch
+    firstMismatch({}, [], []) => "mismatch"
+
+fn typesMatch(env: Map<Name, Const>, types: List<IndType>) -> Bool
+    ? "All types match."
+    badType(env, types) == Option.None
+
+verify typesMatch
+    typesMatch({}, []) => true
+
+fn badType(env: Map<Name, Const>, types: List<IndType>) -> Option<Name>
+    ? "The first type that differs from the derived one."
+    match types
+        [] -> Option.None
+        [t, ..rest] -> match sameType(Map.get(env, t.head.name), t)
+            true -> badType(env, rest)
+            false -> Option.Some(t.head.name)
+
+verify badType
+    badType({}, []) => Option.None
+
+fn sameType(g: Option<Const>, t: IndType) -> Bool
+    ? "Every field equal, the type up to binder names."
+    match g
+        Option.Some(Const.CInduct(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == t.head.params, Core.Alpha.alphaEq(d.head.ty, t.head.ty)), Bool.and(d.numParams == t.numParams, d.numIndices == t.numIndices)), Bool.and(Bool.and(d.all == t.all, d.ctors == t.ctors), Bool.and(Bool.and(d.numNested == t.numNested, d.isRec == t.isRec), Bool.and(d.isUnsafe == t.isUnsafe, d.isReflexive == t.isReflexive))))
+        _ -> false
+
+verify sameType
+    sameType(Option.None, IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false)) => false
+
+fn ctorsMatch(env: Map<Name, Const>, ctors: List<Ctor>) -> Bool
+    ? "All constructors match."
+    badCtor(env, ctors) == Option.None
+
+verify ctorsMatch
+    ctorsMatch({}, []) => true
+
+fn badCtor(env: Map<Name, Const>, ctors: List<Ctor>) -> Option<Name>
+    ? "The first constructor that differs or was not derived."
+    match ctors
+        [] -> Option.None
+        [c, ..rest] -> match sameCtor(Map.get(env, c.head.name), c)
+            true -> badCtor(env, rest)
+            false -> Option.Some(c.head.name)
+
+verify badCtor
+    badCtor({}, []) => Option.None
+
+fn sameCtor(g: Option<Const>, c: Ctor) -> Bool
+    ? "Every field equal, the type up to binder names."
+    match g
+        Option.Some(Const.CCtor(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == c.head.params, Core.Alpha.alphaEq(d.head.ty, c.head.ty)), Bool.and(d.induct == c.induct, d.cidx == c.cidx)), Bool.and(Bool.and(d.numParams == c.numParams, d.numFields == c.numFields), d.isUnsafe == c.isUnsafe))
+        _ -> false
+
+verify sameCtor
+    sameCtor(Option.None, Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), induct = Core.Names.anon(), cidx = 0, numParams = 0, numFields = 0, isUnsafe = false)) => false
+
+fn recsMatch(env: Map<Name, Const>, recs: List<Rec>) -> Result<Unit, Fail>
+    ? "Every stated recursor equals the derived one."
+    match recs
+        [] -> Result.Ok(Unit)
+        [r, ..rest] -> match sameRec(Map.get(env, r.head.name), r)
+            true -> recsMatch(env, rest)
+            false -> Result.Err(reject("invalid recursor '{nm(r.head.name)}'"))
+
+verify recsMatch
+    recsMatch({}, []) => Result.Ok(Unit)
+
+fn sameRec(g: Option<Const>, r: Rec) -> Bool
+    ? "Every field and rule equal, terms up to binder names."
+    match g
+        Option.Some(Const.CRec(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == r.head.params, Core.Alpha.alphaEq(d.head.ty, r.head.ty)), Bool.and(d.all == r.all, d.numParams == r.numParams)), Bool.and(Bool.and(Bool.and(d.numIndices == r.numIndices, d.numMotives == r.numMotives), Bool.and(d.numMinors == r.numMinors, d.k == r.k)), Bool.and(d.isUnsafe == r.isUnsafe, sameRules(d.rules, r.rules))))
+        _ -> false
+
+verify sameRec
+    sameRec(Option.None, Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false)) => false
+
+fn sameRules(as: List<RecRule>, bs: List<RecRule>) -> Bool
+    ? "Rules pairwise equal."
+    match as
+        [] -> match bs
+            [] -> true
+            _ -> false
+        [a, ..arest] -> match bs
+            [] -> false
+            [b, ..brest] -> Bool.and(Bool.and(a.ctor == b.ctor, a.nfields == b.nfields), Bool.and(Core.Alpha.alphaEq(a.rhs, b.rhs), sameRules(arest, brest)))
+
+verify sameRules
+    sameRules([], []) => true
+
+fn addQuotDecl(env: Env, h: Head, kind: QuotKind) -> Result<Env, Fail>
+    ? "Adds the quotient package if needed, then compares the stated constant with the built one."
+    env2 = Check.Quot.addQuot(env)?
+    match Check.State.envGet(env2, h.name)
+        Option.Some(Const.CQuot(g, k)) -> match Bool.and(Bool.and(k == kind, g.params == h.params), Core.Alpha.alphaEq(g.ty, h.ty))
+            true -> Result.Ok(env2)
+            false -> Result.Err(reject("quotient constant mismatch on '{nm(h.name)}'"))
+        _ -> Result.Err(reject("'{nm(h.name)}' is not a quotient constant"))
+
+verify addQuotDecl
+    addQuotDecl(Check.State.envEmpty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), QuotKind.QType) => Result.Err(Fail.Reject("failed to initialize quot module, environment does not have 'Eq' type"))

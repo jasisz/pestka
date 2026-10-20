@@ -1,0 +1,80 @@
+module Apps
+    intent =
+        "Application spines: the head of f a1 ... an, its arguments in order,"
+        "and rebuilding an application from a head and arguments."
+    exposes [fnOf, argsOf, numArgs, mkApps, isApp, isConst, constName]
+    depends [Core.Names, Core.Exprs]
+    effects []
+
+fn fnOf(e: Expr) -> Expr
+    ? "The head of an application spine."
+    match e
+        Expr.App(_, f, _) -> fnOf(f)
+        _ -> e
+
+verify fnOf
+    fnOf(Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2)), Core.Exprs.fvar(3))) => Core.Exprs.fvar(1)
+    fnOf(Core.Exprs.fvar(1)) => Core.Exprs.fvar(1)
+
+fn argsOf(e: Expr) -> List<Expr>
+    ? "The arguments of an application spine, first argument first."
+    collect(e, [])
+
+verify argsOf
+    argsOf(Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2)), Core.Exprs.fvar(3))) => [Core.Exprs.fvar(2), Core.Exprs.fvar(3)]
+    argsOf(Core.Exprs.fvar(1)) => []
+
+fn collect(e: Expr, acc: List<Expr>) -> List<Expr>
+    ? "Walks the spine from the outside in, so the list comes out in order."
+    match e
+        Expr.App(_, f, a) -> collect(f, List.prepend(a, acc))
+        _ -> acc
+
+verify collect
+    collect(Core.Exprs.fvar(1), [Core.Exprs.fvar(2)]) => [Core.Exprs.fvar(2)]
+
+fn numArgs(e: Expr) -> Int
+    ? "Length of the spine."
+    match e
+        Expr.App(_, f, _) -> numArgs(f) + 1
+        _ -> 0
+
+verify numArgs
+    numArgs(Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 1
+
+fn mkApps(f: Expr, args: List<Expr>) -> Expr
+    ? "f applied to the arguments in order."
+    match args
+        [] -> f
+        [a, ..rest] -> mkApps(Core.Exprs.app(f, a), rest)
+
+verify mkApps
+    mkApps(Core.Exprs.fvar(1), [Core.Exprs.fvar(2), Core.Exprs.fvar(3)]) => Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2)), Core.Exprs.fvar(3))
+
+fn isApp(e: Expr) -> Bool
+    ? "An application node."
+    match e
+        Expr.App -> true
+        _ -> false
+
+verify isApp
+    isApp(Core.Exprs.fvar(1)) => false
+
+fn isConst(e: Expr, n: Name) -> Bool
+    ? "A constant with this name, at any levels."
+    match e
+        Expr.Const(m, _) -> m == n
+        _ -> false
+
+verify isConst
+    isConst(Core.Exprs.cnst(Core.Names.anon(), []), Core.Names.anon()) => true
+    isConst(Core.Exprs.fvar(1), Core.Names.anon()) => false
+
+fn constName(e: Expr) -> Option<Name>
+    ? "The name of a constant."
+    match e
+        Expr.Const(n, _) -> Option.Some(n)
+        _ -> Option.None
+
+verify constName
+    constName(Core.Exprs.fvar(1)) => Option.None
