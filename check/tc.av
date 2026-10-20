@@ -87,7 +87,7 @@ fn inferCached(st: St, e: Expr, only: Bool, hit: Option<Expr>) -> Result<RE, Fai
     ? "Uses a cached type or infers and records one."
     match hit
         Option.Some(t) -> Result.Ok(RE(e = t, st = st))
-        Option.None -> Result.Ok(remember(inferCore(st, e, only)?, e, only))
+        Option.None -> Result.Ok(remember(inferCore(st, e, [], only)?, e, only))
 
 verify inferCached
     resultExpr(inferCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), true, Option.Some(Core.Exprs.bvar(1)))) => Core.Exprs.bvar(1)
@@ -122,23 +122,107 @@ verify rememberAs
 verify remember
     Core.PMap.size(remember(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 0
 
-fn inferCore(st: St, e: Expr, only: Bool) -> Result<RE, Fail>
-    ? "One inference step by the shape of e."
+fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
+    ? "One inference step by the shape of e, whose loose bound variables stand for the free variables in env, the innermost first."
     match e
-        Expr.BVar -> Result.Err(bad("the type checker met a loose bound variable"))
+        Expr.BVar(i) -> boundType(st, List.drop(env, i))
         Expr.FVar(id) -> Result.Ok(RE(e = Check.State.localType(st, id)?, st = st))
         Expr.Sort(l) -> inferSort(st, l, only)
         Expr.Const(n, ls) -> inferConst(st, n, ls, only)
-        Expr.App(_, f, a) -> inferApp(st, e, f, a, only)
-        Expr.Lam -> lamLoop(st, e, [], [], only)
-        Expr.Pi -> piLoop(st, e, [], [], [], only)
-        Expr.Let -> letLoop(st, e, [], [], only)
+        Expr.App(_, f, a) -> inferApp(st, e, f, a, env, only)
+        Expr.Lam -> lamLoop(st, e, env, [], only)
+        Expr.Pi -> piLoop(st, e, env, [], [], only)
+        Expr.Let -> letLoop(st, e, env, [], only)
         Expr.NatLit -> Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.name1("Nat"), []), st = st))
         Expr.StrLit -> Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.name1("String"), []), st = st))
-        Expr.Proj(_, s, i, x) -> inferProj(st, s, i, x, only)
+        Expr.Proj(_, s, i, x) -> inferProj(st, s, i, x, env, only)
 
 verify inferCore
-    inferCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.strLit("a"), true) => Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.name1("String"), []), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+    inferCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.strLit("a"), [], true) => Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.name1("String"), []), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+    resultExpr(inferCore(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.natLit(7), Option.None, Binder.Default).st, Core.Exprs.bvar(0), [Core.Exprs.fvar(0)], true)) => Core.Exprs.natLit(7)
+
+fn boundType(st: St, rest: List<Expr>) -> Result<RE, Fail>
+    ? "The type of the free variable a bound variable stands for; with none, the variable is loose."
+    match rest
+        [] -> Result.Err(bad("the type checker met a loose bound variable"))
+        [x, .._] -> Result.Ok(RE(e = Check.State.localType(st, fvarId(x))?, st = st))
+
+verify boundType
+    boundType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), []) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
+
+fn inferIn(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
+    ? "Inference under binders, used past the depth where bodies stop being copied: the loose bound variables of e stand for the free variables in env, the innermost first. Checking walks a body as it is. Inference alone puts the variables in, since it is asked about terms that reduction built, which find the types of their parts only in that form. A closed part goes the usual way."
+    match Core.Exprs.looseRange(e) == 0
+        true -> infer(st, e, only)
+        false -> match only
+            true -> infer(st, minst(e, env), only)
+            false -> match worthKeeping(e)
+                false -> inferCore(st, e, env, only)
+                true -> openKeyed(st, e, env, env, only)
+
+verify inferIn
+    resultExpr(inferIn(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default), [Core.Exprs.fvar(0)], false)) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.fvar(0), Core.Exprs.fvar(0), Binder.Default)
+    inferIn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), [], true) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
+
+fn openKeyed(st: St, e: Expr, env: List<Expr>, used: List<Expr>, only: Bool) -> Result<RE, Fail>
+    ? "The cache key is e with the innermost variable of env."
+    match used
+        [] -> inferCore(st, e, env, only)
+        [x, .._] -> openCached(st, e, env, x, only)
+
+verify openKeyed
+    openKeyed(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [], [], true) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
+
+fn openCached(st: St, e: Expr, env: List<Expr>, x: Expr, only: Bool) -> Result<RE, Fail>
+    ? "An open term's type is cached under the term applied to x, the innermost variable of env. A variable heads an env only once, when its binder is opened, so x stands for the whole env; a term shared under the same binders, as a DAG shares it, is found again. The key keeps e's loose bound variables, so it is never a term that is checked."
+    match findOpen(Core.PMap.get(cacheFor(st, only), openHash(e, x)), e, x)
+        Option.Some(t) -> Result.Ok(RE(e = t, st = st))
+        Option.None -> Result.Ok(rememberOpen(inferCore(st, e, env, only)?, Core.Exprs.app(e, x), only))
+
+verify openCached
+    resultExpr(openCached(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.natLit(7), Option.None, Binder.Default).st, Core.Exprs.bvar(0), [Core.Exprs.fvar(0)], Core.Exprs.fvar(0), true)) => Core.Exprs.natLit(7)
+
+fn rememberOpen(r: RE, key: Expr, only: Bool) -> RE
+    ? "Records an open term's type under its key, in the cache for the mode."
+    match only
+        true -> RE(e = r.e, st = St.update(r.st, inferCache = Check.State.cachePut(r.st.inferCache, key, r.e)))
+        false -> RE(e = r.e, st = St.update(r.st, checkCache = Check.State.cachePut(r.st.checkCache, key, r.e)))
+
+verify rememberOpen
+    Core.PMap.size(rememberOpen(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), false).st.checkCache) => 1
+
+fn openHash(e: Expr, x: Expr) -> Int
+    ? "The hash of the key app(e, x), without building it."
+    Core.Hash.mix(Core.Hash.mix(4, Core.Exprs.hashOf(e)), Core.Exprs.hashOf(x))
+
+verify openHash law sameAsKey
+    given i: Int = [0, 1, 3]
+    given j: Int = [2, 9]
+    openHash(Core.Exprs.app(Core.Exprs.bvar(i), Core.Exprs.natLit(j)), Core.Exprs.fvar(j)) => Core.Exprs.hashOf(Core.Exprs.app(Core.Exprs.app(Core.Exprs.bvar(i), Core.Exprs.natLit(j)), Core.Exprs.fvar(j)))
+
+fn findOpen(bucket: List<Tuple<Expr, Expr>>, e: Expr, x: Expr) -> Option<Expr>
+    ? "The value stored under the key app(e, x)."
+    match bucket
+        [] -> Option.None
+        [(key, v), ..rest] -> match isOpenKey(key, e, x)
+            true -> Option.Some(v)
+            false -> findOpen(rest, e, x)
+
+verify findOpen
+    findOpen([(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))], Core.Exprs.bvar(0), Core.Exprs.fvar(2)) => Option.Some(Core.Exprs.natLit(1))
+    findOpen([(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))], Core.Exprs.bvar(0), Core.Exprs.fvar(3)) => Option.None
+
+fn isOpenKey(key: Expr, e: Expr, x: Expr) -> Bool
+    ? "Whether key is app(e, x), compared without building it."
+    match key
+        Expr.App(_, f, a) -> match a == x
+            true -> f == e
+            false -> false
+        _ -> false
+
+verify isOpenKey
+    isOpenKey(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(1)), Core.Exprs.bvar(0), Core.Exprs.fvar(1)) => true
+    isOpenKey(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.fvar(1)) => false
 
 fn checkLevel(st: St, l: Level) -> Result<Unit, Fail>
     ? "Every universe parameter must be one of the declaration's."
@@ -294,18 +378,34 @@ verify sortStateOf
     sortStateOf(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
 
 fn lamEnd(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
-    ? "Infers the opened body and closes it over the variables."
-    r = infer(st, Core.Subst.instantiate(e, rev), only)?
+    ? "Infers the body under its variables and closes the type over them."
+    r = bodyType(st, e, rev, List.len(ids), only)?
     Result.Ok(RE(e = Check.State.mkBinding(r.st, List.reverse(ids), cheapBeta(r.e), false, false), st = r.st))
 
 verify lamEnd
     resultExpr(lamEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [], [], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
 
+fn bodyType(st: St, e: Expr, rev: List<Expr>, k: Int, only: Bool) -> Result<RE, Fail>
+    ? "The type of a body under k binders just opened. While at most 512 binders are open around it, the body is copied with its variables put in and inferred as usual. Deeper than that it is inferred under its variables as it is: a body nested that deep would be copied once for every binder above it, and the copies of the levels above stay alive while the levels below are checked."
+    match st.open + k > 512
+        true -> openAgain(inferIn(St.update(st, open = st.open + k), e, rev, only)?, st.open)
+        false -> openAgain(infer(St.update(st, open = st.open + k), minst(e, rev), only)?, st.open)
+
+verify bodyType
+    resultExpr(bodyType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), [], 1, true)) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
+
+fn openAgain(r: RE, open: Int) -> Result<RE, Fail>
+    ? "The count of open binders as it was before the body."
+    Result.Ok(RE(e = r.e, st = St.update(r.st, open = open)))
+
+verify openAgain
+    resultExpr(openAgain(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0)) => Core.Exprs.natLit(1)
+
 fn piLoop(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, us: List<Level>, only: Bool) -> Result<RE, Fail>
     ? "Opens nested pis collecting the domains' levels; the result is the imax of them all."
     match e
         Expr.Pi(_, n, d, b, bi) -> piStep(st, n, Core.Subst.instantiate(d, rev), b, bi, rev, ids, us, only)
-        _ -> piEnd(st, Core.Subst.instantiate(e, rev), us, only)
+        _ -> piEnd(st, e, rev, us, only)
 
 verify piLoop
     resultExpr(piLoop(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default), [], [], [], false)) => Core.Exprs.sort(Level.Succ(Level.Zero))
@@ -320,14 +420,14 @@ fn piStep(st: St, n: Name, d: Expr, b: Expr, bi: Binder, rev: List<Expr>, ids: L
 verify piStep
     piStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default, [], [], [], true) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
 
-fn piEnd(st: St, e: Expr, us: List<Level>, only: Bool) -> Result<RE, Fail>
-    ? "imax of the domain levels and the codomain's."
-    t = infer(st, e, only)?
+fn piEnd(st: St, e: Expr, rev: List<Expr>, us: List<Level>, only: Bool) -> Result<RE, Fail>
+    ? "imax of the domain levels and the codomain's, inferred under the variables."
+    t = bodyType(st, e, rev, List.len(us), only)?
     s = ensureSort(t.st, t.e)?
     Result.Ok(RE(e = Core.Exprs.sort(imaxFold(us, sortLevel(s.e))), st = s.st))
 
 verify piEnd
-    resultExpr(piEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [Level.Zero], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
+    resultExpr(piEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [], [Level.Zero], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
 
 fn imaxFold(us: List<Level>, r: Level) -> Level
     ? "imax u_i r from the innermost domain out."
@@ -338,27 +438,37 @@ fn imaxFold(us: List<Level>, r: Level) -> Level
 verify imaxFold
     imaxFold([Level.Succ(Level.Zero)], Level.Zero) => Level.Zero
 
-fn inferApp(st: St, e: Expr, f: Expr, a: Expr, only: Bool) -> Result<RE, Fail>
+fn inferApp(st: St, e: Expr, f: Expr, a: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "Checking mode checks one application; inference walks the whole spine."
     match only
-        false -> appChecked(st, f, a)
-        true -> appSpine(st, e)
+        false -> appChecked(st, f, a, env)
+        true -> appSpine(st, e, env)
 
 verify inferApp
-    inferApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2), false) => Result.Err(Fail.Reject("function expected"))
+    inferApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2), [], false) => Result.Err(Fail.Reject("function expected"))
 
-fn appChecked(st: St, f: Expr, a: Expr) -> Result<RE, Fail>
+fn appChecked(st: St, f: Expr, a: Expr, env: List<Expr>) -> Result<RE, Fail>
     ? "The argument's type must equal the function's domain."
-    ft = check(st, f)?
+    ft = inferIn(st, f, env, false)?
     p = ensurePi(ft.st, ft.e)?
-    at = check(p.st, a)?
+    at = inferIn(p.st, a, env, false)?
     ok = defEqMaybeEager(at.st, at.e, domainOf(p.e), isEagerReduce(a))?
     match ok.b
-        true -> Result.Ok(RE(e = Core.Subst.instantiate1(bodyOf(p.e), a), st = ok.st))
+        true -> Result.Ok(RE(e = argInto(bodyOf(p.e), a, env), st = ok.st))
         false -> Result.Err(bad("application type mismatch"))
 
 verify appChecked
-    appChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero)) => Result.Err(Fail.Reject("function expected"))
+    appChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), []) => Result.Err(Fail.Reject("function expected"))
+
+fn argInto(body: Expr, a: Expr, env: List<Expr>) -> Expr
+    ? "The pi's body with the argument put in. Only then, when the body uses it, does the argument get its own variables put in."
+    match Core.Exprs.looseRange(body) == 0
+        true -> body
+        false -> Core.Subst.instantiate1(body, minst(a, env))
+
+verify argInto
+    argInto(Core.Exprs.natLit(1), Core.Exprs.bvar(0), [Core.Exprs.fvar(2)]) => Core.Exprs.natLit(1)
+    argInto(Core.Exprs.bvar(0), Core.Exprs.bvar(0), [Core.Exprs.fvar(2)]) => Core.Exprs.fvar(2)
 
 fn isEagerReduce(a: Expr) -> Bool
     ? "An argument of the form eagerReduce _ _."
@@ -383,32 +493,60 @@ fn restoreEager(r: RB, eager: Bool) -> Result<RB, Fail>
 verify restoreEager
     resultBool(restoreEager(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), false)) => true
 
-fn appSpine(st: St, e: Expr) -> Result<RE, Fail>
+fn appSpine(st: St, e: Expr, env: List<Expr>) -> Result<RE, Fail>
     ? "Infers f's type and peels one pi per argument, normalizing only when needed."
-    ft = infer(st, Core.Apps.fnOf(e), true)?
-    appWalk(ft.st, ft.e, Core.Apps.argsOf(e), [])
+    ft = inferIn(st, Core.Apps.fnOf(e), env, true)?
+    appWalk(ft.st, ft.e, Core.Apps.argsOf(e), [], env)
 
 verify appSpine
-    appSpine(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => Result.Err(Fail.Reject("function expected"))
+    appSpine(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), []) => Result.Err(Fail.Reject("function expected"))
 
-fn appWalk(st: St, ft: Expr, args: List<Expr>, pending: List<Expr>) -> Result<RE, Fail>
+fn appWalk(st: St, ft: Expr, args: List<Expr>, pending: List<Expr>, env: List<Expr>) -> Result<RE, Fail>
     ? "pending holds the arguments not yet substituted, newest first."
     match args
-        [] -> Result.Ok(RE(e = Core.Subst.instantiate(ft, pending), st = st))
+        [] -> Result.Ok(RE(e = argsInto(ft, pending, env), st = st))
         [x, ..rest] -> match ft
-            Expr.Pi(_, _, _, b, _) -> appWalk(st, b, rest, List.prepend(x, pending))
-            _ -> appWalkWhnf(st, Core.Subst.instantiate(ft, pending), x, rest)
+            Expr.Pi(_, _, _, b, _) -> appWalk(st, b, rest, List.prepend(x, pending), env)
+            _ -> appWalkWhnf(st, argsInto(ft, pending, env), x, rest, env)
 
 verify appWalk
-    resultExpr(appWalk(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), [Core.Exprs.natLit(1)], [])) => Core.Exprs.natLit(1)
+    resultExpr(appWalk(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), [Core.Exprs.natLit(1)], [], [])) => Core.Exprs.natLit(1)
 
-fn appWalkWhnf(st: St, ft: Expr, x: Expr, rest: List<Expr>) -> Result<RE, Fail>
+fn appWalkWhnf(st: St, ft: Expr, x: Expr, rest: List<Expr>, env: List<Expr>) -> Result<RE, Fail>
     ? "The function type was not syntactically a pi: normalize it."
     p = ensurePi(st, ft)?
-    appWalk(p.st, bodyOf(p.e), rest, [x])
+    appWalk(p.st, bodyOf(p.e), rest, [x], env)
 
 verify appWalkWhnf
-    appWalkWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), []) => Result.Err(Fail.Reject("function expected"))
+    appWalkWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), [], []) => Result.Err(Fail.Reject("function expected"))
+
+fn argsInto(ft: Expr, pending: List<Expr>, env: List<Expr>) -> Expr
+    ? "The walked pis' body with the arguments put in. Only then, when the body uses some, do the arguments get their own variables put in."
+    match Core.Exprs.looseRange(ft) == 0
+        true -> ft
+        false -> Core.Subst.instantiate(ft, minstAll(pending, env))
+
+verify argsInto
+    argsInto(Core.Exprs.bvar(1), [Core.Exprs.bvar(0), Core.Exprs.natLit(3)], [Core.Exprs.fvar(2)]) => Core.Exprs.natLit(3)
+    argsInto(Core.Exprs.bvar(0), [Core.Exprs.bvar(0), Core.Exprs.natLit(3)], [Core.Exprs.fvar(2)]) => Core.Exprs.fvar(2)
+
+fn minstAll(xs: List<Expr>, env: List<Expr>) -> List<Expr>
+    ? "minst on each."
+    match env
+        [] -> xs
+        _ -> minstEach(xs, env)
+
+verify minstAll
+    minstAll([Core.Exprs.bvar(0)], []) => [Core.Exprs.bvar(0)]
+
+fn minstEach(xs: List<Expr>, env: List<Expr>) -> List<Expr>
+    ? "Puts env's values in each term, keeping the order."
+    match xs
+        [] -> []
+        [x, ..rest] -> List.prepend(Core.Subst.instantiate(x, env), minstEach(rest, env))
+
+verify minstEach
+    minstEach([Core.Exprs.bvar(0), Core.Exprs.natLit(1)], [Core.Exprs.fvar(4)]) => [Core.Exprs.fvar(4), Core.Exprs.natLit(1)]
 
 fn letLoop(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Opens nested lets as let variables, then infers the body."
@@ -449,8 +587,8 @@ verify letValue
     letValue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero)) => Result.Err(Fail.Reject("let value type mismatch"))
 
 fn letEnd(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
-    ? "Infers the body and closes it with the lets it still uses."
-    r = infer(st, Core.Subst.instantiate(e, rev), only)?
+    ? "Infers the body under its variables and closes the type with the lets it still uses."
+    r = bodyType(st, e, rev, List.len(ids), only)?
     Result.Ok(RE(e = Check.State.mkBinding(r.st, List.reverse(ids), cheapBeta(r.e), false, true), st = r.st))
 
 verify letEnd
@@ -549,14 +687,14 @@ fn badProj() -> Fail
 verify badProj
     badProj() => Fail.Reject("invalid projection")
 
-fn inferProj(st: St, s: Name, idx: Int, x: Expr, only: Bool) -> Result<RE, Fail>
-    ? "x.idx where x's type is the structure s applied to its parameters."
-    t = infer(st, x, only)?
+fn inferProj(st: St, s: Name, idx: Int, x: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
+    ? "x.idx where x's type is the structure s applied to its parameters; the field types may mention x, so it gets its variables put in."
+    t = inferIn(st, x, env, only)?
     w = whnf(t.st, t.e)?
-    projFrom(w.st, s, idx, x, w.e, Core.Apps.fnOf(w.e), Core.Apps.argsOf(w.e))
+    projFrom(w.st, s, idx, minst(x, env), w.e, Core.Apps.fnOf(w.e), Core.Apps.argsOf(w.e))
 
 verify inferProj
-    inferProj(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), 0, Core.Exprs.natLit(1), true) => Result.Err(Fail.Reject("invalid projection"))
+    inferProj(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), 0, Core.Exprs.natLit(1), [], true) => Result.Err(Fail.Reject("invalid projection"))
 
 fn projFrom(st: St, s: Name, idx: Int, x: Expr, ty: Expr, head: Expr, args: List<Expr>) -> Result<RE, Fail>
     ? "The type's head must be the projection's structure."
