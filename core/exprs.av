@@ -285,6 +285,22 @@ fn pack(m: Meta) -> Int
 verify pack
     unpack(pack(Meta(hash = 1099511627688, range = 3, fvars = true, params = false, size = 7))) => Meta(hash = 1099511627688, range = 3, fvars = true, params = false, size = 7)
 
+verify pack law roundTrip
+    given hash: Int = [0, 1, 1099511627775]
+    given range: Int = [0, 1, 32766]
+    given size: Int = [0, 1, 63]
+    given fvars: Bool = [false, true]
+    given params: Bool = [false, true]
+    when Bool.and(Bool.and(hash >= 0, hash < 1099511627776), Bool.and(Bool.and(range >= 0, range < 32767), Bool.and(size >= 0, size <= 63)))
+    unpack(pack(Meta(hash = hash, range = range, fvars = fvars, params = params, size = size))) => Meta(hash = hash, range = range, fvars = fvars, params = params, size = size)
+
+verify pack law rangeNeverShrinks
+    given hash: Int = [0, 1099511627775]
+    given range: Int = [0, 1, 32766, 32767, 40000, 1099511627775]
+    given size: Int = [0, 200]
+    when Bool.and(Bool.and(hash >= 0, hash < 1099511627776), Bool.and(Bool.and(range >= 0, range <= 1099511627776), size >= 0))
+    unpack(pack(Meta(hash = hash, range = range, fvars = true, params = true, size = size))).range >= range => true
+
 fn flag(b: Bool) -> Int
     ? "A flag as a bit."
     match b
