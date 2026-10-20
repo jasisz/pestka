@@ -386,8 +386,8 @@ verify lamEnd
     resultExpr(lamEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [], [], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
 
 fn bodyType(st: St, e: Expr, rev: List<Expr>, k: Int, only: Bool) -> Result<RE, Fail>
-    ? "The type of a body under k binders just opened. While at most 512 binders are open around it, the body is copied with its variables put in and inferred as usual. Deeper than that it is inferred under its variables as it is: a body nested that deep would be copied once for every binder above it, and the copies of the levels above stay alive while the levels below are checked."
-    match st.open + k > 512
+    ? "The type of a body under k binders just opened. While at most 128 binders are open around it, the body is copied with its variables put in and inferred as usual. Deeper than that it is inferred under its variables as it is: a body nested that deep would be copied once for every binder above it, and the copies of the levels above stay alive while the levels below are checked."
+    match st.open + k > 128
         true -> openAgain(inferIn(St.update(st, open = st.open + k), e, rev, only)?, st.open)
         false -> openAgain(infer(St.update(st, open = st.open + k), minst(e, rev), only)?, st.open)
 
