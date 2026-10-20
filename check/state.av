@@ -126,10 +126,15 @@ record Local
     value: Option<Expr>
     binder: Binder
 
+type Locals
+    NoLocals
+    OneLocal(Int, Int, Local)
+    SomeLocals(Vector<Locals>)
+
 record St
     env: Env
     block: Map<Name, Const>
-    lctx: Map<Int, Local>
+    lctx: Locals
     next: Int
     params: List<Name>
     checkParams: Bool
@@ -160,7 +165,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, block = {}, lctx = {}, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.PMap.empty(), checkCache = Core.PMap.empty(), whnfCache = Core.PMap.empty(), coreCache = Core.PMap.empty(), eqOk = Core.PMap.empty(), eqFail = Core.PMap.empty(), eqNo = Core.PMap.empty(), unfoldCache = Core.PMap.empty(), closed = Core.PMap.empty(), open = 0)
+    St(env = env, block = {}, lctx = Locals.NoLocals, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.PMap.empty(), checkCache = Core.PMap.empty(), whnfCache = Core.PMap.empty(), coreCache = Core.PMap.empty(), eqOk = Core.PMap.empty(), eqFail = Core.PMap.empty(), eqNo = Core.PMap.empty(), unfoldCache = Core.PMap.empty(), closed = Core.PMap.empty(), open = 0)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0
@@ -249,7 +254,7 @@ verify declared
 
 fn localType(st: St, id: Int) -> Result<Expr, Fail>
     ? "The type of a free variable."
-    match Map.get(st.lctx, id)
+    match localGet(st.lctx, id, id)
         Option.Some(l) -> Result.Ok(l.ty)
         Option.None -> Result.Err(Fail.Reject("unknown free variable"))
 
@@ -258,7 +263,7 @@ verify localType
 
 fn localValue(st: St, id: Int) -> Option<Expr>
     ? "The value of a let-bound free variable."
-    match Map.get(st.lctx, id)
+    match localGet(st.lctx, id, id)
         Option.Some(l) -> l.value
         Option.None -> Option.None
 
@@ -268,11 +273,52 @@ verify localValue
 fn names(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder) -> RE
     ? "Declares a fresh free variable and returns it."
     id = st.next
-    RE(e = Core.Exprs.fvar(id), st = St.update(st, lctx = Map.set(st.lctx, id, Local(name = n, ty = ty, value = value, binder = bi)), next = id + 1))
+    RE(e = Core.Exprs.fvar(id), st = St.update(st, lctx = localPut(st.lctx, id, id, Local(name = n, ty = ty, value = value, binder = bi)), next = id + 1))
 
 verify names
     names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).e => Core.Exprs.fvar(0)
     names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).st.next => 1
+
+fn localGet(m: Locals, id: Int, rest: Int) -> Option<Local>
+    ? "The local of free variable id. The context is a persistent trie on the id's hexadecimal digits, lowest first; rest is the id with the digits above this node taken off. A state holding it can be shared, and declaring a variable copies one short path, where a Map whose owner was shared would be copied whole."
+    match m
+        Locals.NoLocals -> Option.None
+        Locals.OneLocal(k, _, l) -> match k == id
+            true -> Option.Some(l)
+            false -> Option.None
+        Locals.SomeLocals(v) -> localGet(Option.withDefault(Vector.get(v, Int.mod(rest, 16)), Locals.NoLocals), id, Int.div(rest, 16))
+
+verify localGet
+    localGet(localPut(localPut(Locals.NoLocals, 1, 1, sampleLocal(0)), 17, 17, sampleLocal(1)), 17, 17) => Option.Some(sampleLocal(1))
+    localGet(localPut(localPut(Locals.NoLocals, 1, 1, sampleLocal(0)), 17, 17, sampleLocal(1)), 1, 1) => Option.Some(sampleLocal(0))
+    localGet(localPut(Locals.NoLocals, 1, 1, sampleLocal(0)), 33, 33) => Option.None
+
+fn localPut(m: Locals, id: Int, rest: Int, l: Local) -> Locals
+    ? "Stores the local of free variable id; a leaf holding another id becomes a node with that leaf one digit further down."
+    match m
+        Locals.NoLocals -> Locals.OneLocal(id, rest, l)
+        Locals.OneLocal(k, krest, old) -> match k == id
+            true -> Locals.OneLocal(id, rest, l)
+            false -> localPut(Locals.SomeLocals(setLocals(Vector.new(16, Locals.NoLocals), Int.mod(krest, 16), Locals.OneLocal(k, Int.div(krest, 16), old))), id, rest, l)
+        Locals.SomeLocals(v) -> Locals.SomeLocals(setLocals(v, Int.mod(rest, 16), localPut(Option.withDefault(Vector.get(v, Int.mod(rest, 16)), Locals.NoLocals), id, Int.div(rest, 16), l)))
+
+verify localPut
+    localGet(localPut(localPut(Locals.NoLocals, 0, 0, sampleLocal(0)), 0, 0, sampleLocal(2)), 0, 0) => Option.Some(sampleLocal(2))
+    localGet(localPut(localPut(localPut(Locals.NoLocals, 0, 0, sampleLocal(0)), 256, 256, sampleLocal(1)), 16, 16, sampleLocal(2)), 256, 256) => Option.Some(sampleLocal(1))
+
+fn setLocals(v: Vector<Locals>, i: Int, child: Locals) -> Vector<Locals>
+    ? "Replaces one child; the index is always in range."
+    Option.withDefault(Vector.set(v, i, child), v)
+
+verify setLocals
+    Vector.len(setLocals(Vector.new(16, Locals.NoLocals), 3, Locals.NoLocals)) => 16
+
+fn sampleLocal(i: Int) -> Local
+    ? "A local for the examples, told apart by its type."
+    Local(name = Core.Names.anon(), ty = Core.Exprs.natLit(i), value = Option.None, binder = Binder.Default)
+
+verify sampleLocal
+    sampleLocal(3).ty => Core.Exprs.natLit(3)
 
 fn mkBinding(st: St, ids: List<Int>, body: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
     ? "Abstracts the free variables ids (outermost first) out of body, binding each with its type, or with let for a let variable."
@@ -292,7 +338,7 @@ verify wrap
 
 fn wrapOne(st: St, id: Int, before: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
     ? "One binder around r."
-    match Map.get(st.lctx, id)
+    match localGet(st.lctx, id, id)
         Option.None -> r
         Option.Some(l) -> wrapLocal(l, Core.Subst.abstractFVars(l.ty, before), before, r, isLam, dropDeadLet)
 
