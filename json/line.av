@@ -52,7 +52,8 @@ fn skipWs(s: String, i: Int) -> Int
         Option.Some("\t") -> skipWs(s, i + 1)
         Option.Some("\r") -> skipWs(s, i + 1)
         Option.Some("\n") -> skipWs(s, i + 1)
-        _ -> i
+        Option.Some -> i
+        Option.None -> i
 
 verify skipWs
     skipWs("  x", 0) => 2
@@ -151,7 +152,8 @@ fn elements(s: String, i: Int, acc: List<J>) -> P
     ? "Array elements after the opening bracket."
     match String.charAt(s, i)
         Option.Some("]") -> P.Ok(J.JArr(List.reverse(acc)), i + 1)
-        _ -> afterElement(s, value(s, i), acc)
+        Option.Some -> afterElement(s, value(s, i), acc)
+        Option.None -> afterElement(s, value(s, i), acc)
 
 verify elements
     elements("]", 0, []) => P.Ok(J.JArr([]), 1)
@@ -172,7 +174,8 @@ fn nextElement(s: String, i: Int, acc: List<J>) -> P
     match String.charAt(s, i)
         Option.Some(",") -> afterElement(s, value(s, skipWs(s, i + 1)), acc)
         Option.Some("]") -> P.Ok(J.JArr(List.reverse(acc)), i + 1)
-        _ -> P.Err("expected ',' or ']'", i)
+        Option.Some -> P.Err("expected ',' or ']'", i)
+        Option.None -> P.Err("expected ',' or ']'", i)
 
 verify nextElement
     nextElement("]", 0, [J.JInt(1)]) => P.Ok(J.JArr([J.JInt(1)]), 1)
@@ -183,7 +186,8 @@ fn members(s: String, i: Int, acc: List<Tuple<String, J>>) -> P
     match String.charAt(s, i)
         Option.Some("}}") -> P.Ok(J.JObj(List.reverse(acc)), i + 1)
         Option.Some("\"") -> member(s, Json.Escapes.text(s, i + 1), acc)
-        _ -> P.Err("expected a key", i)
+        Option.Some -> P.Err("expected a key", i)
+        Option.None -> P.Err("expected a key", i)
 
 verify members
     members("}}", 0, []) => P.Ok(J.JObj([]), 1)
@@ -202,7 +206,8 @@ fn memberValue(s: String, key: String, i: Int, acc: List<Tuple<String, J>>) -> P
     ? "Expects the colon, then parses the value."
     match String.charAt(s, i)
         Option.Some(":") -> afterMember(s, key, value(s, skipWs(s, i + 1)), acc)
-        _ -> P.Err("expected ':'", i)
+        Option.Some -> P.Err("expected ':'", i)
+        Option.None -> P.Err("expected ':'", i)
 
 verify memberValue
     memberValue(":1}}", "a", 0, []) => P.Ok(J.JObj([("a", J.JInt(1))]), 3)
@@ -222,7 +227,8 @@ fn nextMember(s: String, i: Int, acc: List<Tuple<String, J>>) -> P
     match String.charAt(s, i)
         Option.Some(",") -> members(s, skipWs(s, i + 1), acc)
         Option.Some("}}") -> P.Ok(J.JObj(List.reverse(acc)), i + 1)
-        _ -> P.Err("expected ',' or '}}'", i)
+        Option.Some -> P.Err("expected ',' or '}}'", i)
+        Option.None -> P.Err("expected ',' or '}}'", i)
 
 verify nextMember
     nextMember("}}", 0, []) => P.Ok(J.JObj([]), 1)

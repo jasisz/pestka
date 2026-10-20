@@ -258,7 +258,8 @@ fn digitAt(s: String, i: Int) -> Int
         Option.Some("7") -> 7
         Option.Some("8") -> 8
         Option.Some("9") -> 9
-        _ -> -1
+        Option.Some -> -1
+        Option.None -> -1
 
 verify digitAt
     digitAt("a7", 1) => 7
