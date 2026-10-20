@@ -70,7 +70,7 @@ verify fvarId
 
 fn typeOfFVar(st: St, e: Expr) -> Expr
     ? "The declared type of a free variable of the context."
-    Result.withDefault(Check.State.localType(st, fvarId(e)), Core.Exprs.bvar(0))
+    Result.withDefault(Check.State.localType(st.lctx, fvarId(e)), Core.Exprs.bvar(0))
 
 verify typeOfFVar
     typeOfFVar(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.fvar(9), Option.None, Binder.Default).st, Core.Exprs.fvar(0)) => Core.Exprs.fvar(9)
@@ -101,14 +101,14 @@ verify countPis
 
 fn piBinding(st: St, fvars: List<Expr>, body: Expr) -> Expr
     ? "Closes body as a pi over the free variables, outermost first."
-    Check.State.mkBinding(st, ids(fvars, []), body, false, false)
+    Check.State.mkBinding(st.lctx, ids(fvars, []), body, false, false)
 
 verify piBinding
     piBinding(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], Core.Exprs.fvar(0)) => Core.Exprs.fvar(0)
 
 fn lamBinding(st: St, fvars: List<Expr>, body: Expr) -> Expr
     ? "Closes body as a lambda over the free variables, outermost first."
-    Check.State.mkBinding(st, ids(fvars, []), body, true, false)
+    Check.State.mkBinding(st.lctx, ids(fvars, []), body, true, false)
 
 verify lamBinding
     lamBinding(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], Core.Exprs.fvar(0)) => Core.Exprs.fvar(0)

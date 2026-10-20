@@ -5,7 +5,7 @@ module State
         "counter, the universe parameters in scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Local, St, RE, RB, RO, envEmpty, envGet, envHas, envSet, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names]
+    exposes [Fail, Const, Env, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envHas, envSet, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.PMap, Core.Alpha]
     effects []
 
@@ -252,23 +252,23 @@ fn declared(st: St, n: Name) -> Bool
 verify declared
     declared(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon()) => false
 
-fn localType(st: St, id: Int) -> Result<Expr, Fail>
+fn localType(lctx: Locals, id: Int) -> Result<Expr, Fail>
     ? "The type of a free variable."
-    match localGet(st.lctx, id, id)
+    match localGet(lctx, id, id)
         Option.Some(l) -> Result.Ok(l.ty)
         Option.None -> Result.Err(Fail.Reject("unknown free variable"))
 
 verify localType
-    localType(fresh(envEmpty(), [], Safety.Safe), 3) => Result.Err(Fail.Reject("unknown free variable"))
+    localType(Locals.NoLocals, 3) => Result.Err(Fail.Reject("unknown free variable"))
 
-fn localValue(st: St, id: Int) -> Option<Expr>
+fn localValue(lctx: Locals, id: Int) -> Option<Expr>
     ? "The value of a let-bound free variable."
-    match localGet(st.lctx, id, id)
+    match localGet(lctx, id, id)
         Option.Some(l) -> l.value
         Option.None -> Option.None
 
 verify localValue
-    localValue(fresh(envEmpty(), [], Safety.Safe), 3) => Option.None
+    localValue(Locals.NoLocals, 3) => Option.None
 
 fn names(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder) -> RE
     ? "Declares a fresh free variable and returns it."
@@ -320,30 +320,30 @@ fn sampleLocal(i: Int) -> Local
 verify sampleLocal
     sampleLocal(3).ty => Core.Exprs.natLit(3)
 
-fn mkBinding(st: St, ids: List<Int>, body: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
+fn mkBinding(lctx: Locals, ids: List<Int>, body: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
     ? "Abstracts the free variables ids (outermost first) out of body, binding each with its type, or with let for a let variable."
-    wrap(st, List.reverse(ids), ids, Core.Subst.abstractFVars(body, ids), isLam, dropDeadLet)
+    wrap(lctx, List.reverse(ids), ids, Core.Subst.abstractFVars(body, ids), isLam, dropDeadLet)
 
 verify mkBinding
-    mkBinding(names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, [0], Core.Exprs.fvar(0), false, false) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
+    mkBinding(names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st.lctx, [0], Core.Exprs.fvar(0), false, false) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
 
-fn wrap(st: St, revIds: List<Int>, ids: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
+fn wrap(lctx: Locals, revIds: List<Int>, ids: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
     ? "Adds the binders from the innermost out; the type of variable i is abstracted over the variables before it."
     match revIds
         [] -> r
-        [id, ..rest] -> wrap(st, rest, ids, wrapOne(st, id, List.take(ids, List.len(rest)), r, isLam, dropDeadLet), isLam, dropDeadLet)
+        [id, ..rest] -> wrap(lctx, rest, ids, wrapOne(lctx, id, List.take(ids, List.len(rest)), r, isLam, dropDeadLet), isLam, dropDeadLet)
 
 verify wrap
-    wrap(fresh(envEmpty(), [], Safety.Safe), [], [], Core.Exprs.bvar(0), true, false) => Core.Exprs.bvar(0)
+    wrap(Locals.NoLocals, [], [], Core.Exprs.bvar(0), true, false) => Core.Exprs.bvar(0)
 
-fn wrapOne(st: St, id: Int, before: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
+fn wrapOne(lctx: Locals, id: Int, before: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
     ? "One binder around r."
-    match localGet(st.lctx, id, id)
+    match localGet(lctx, id, id)
         Option.None -> r
         Option.Some(l) -> wrapLocal(l, Core.Subst.abstractFVars(l.ty, before), before, r, isLam, dropDeadLet)
 
 verify wrapOne
-    wrapOne(fresh(envEmpty(), [], Safety.Safe), 0, [], Core.Exprs.bvar(0), true, false) => Core.Exprs.bvar(0)
+    wrapOne(Locals.NoLocals, 0, [], Core.Exprs.bvar(0), true, false) => Core.Exprs.bvar(0)
 
 fn wrapLocal(l: Local, ty: Expr, before: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
     ? "let for a let variable (dropped when dead and asked to), else lambda or pi."

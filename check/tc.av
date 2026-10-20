@@ -126,7 +126,7 @@ fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "One inference step by the shape of e, whose loose bound variables stand for the free variables in env, the innermost first."
     match e
         Expr.BVar(i) -> boundType(st, List.drop(env, i))
-        Expr.FVar(id) -> Result.Ok(RE(e = Check.State.localType(st, id)?, st = st))
+        Expr.FVar(id) -> Result.Ok(RE(e = Check.State.localType(st.lctx, id)?, st = st))
         Expr.Sort(l) -> inferSort(st, l, only)
         Expr.Const(n, ls) -> inferConst(st, n, ls, only)
         Expr.App(_, f, a) -> inferApp(st, e, f, a, env, only)
@@ -145,7 +145,7 @@ fn boundType(st: St, rest: List<Expr>) -> Result<RE, Fail>
     ? "The type of the free variable a bound variable stands for; with none, the variable is loose."
     match rest
         [] -> Result.Err(bad("the type checker met a loose bound variable"))
-        [x, .._] -> Result.Ok(RE(e = Check.State.localType(st, fvarId(x))?, st = st))
+        [x, .._] -> Result.Ok(RE(e = Check.State.localType(st.lctx, fvarId(x))?, st = st))
 
 verify boundType
     boundType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), []) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
@@ -380,7 +380,7 @@ verify sortStateOf
 fn lamEnd(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Infers the body under its variables and closes the type over them."
     r = bodyType(st, e, rev, List.len(ids), only)?
-    Result.Ok(RE(e = Check.State.mkBinding(r.st, List.reverse(ids), cheapBeta(r.e), false, false), st = r.st))
+    Result.Ok(RE(e = Check.State.mkBinding(r.st.lctx, List.reverse(ids), cheapBeta(r.e), false, false), st = r.st))
 
 verify lamEnd
     resultExpr(lamEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [], [], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
@@ -589,7 +589,7 @@ verify letValue
 fn letEnd(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Infers the body under its variables and closes the type with the lets it still uses."
     r = bodyType(st, e, rev, List.len(ids), only)?
-    Result.Ok(RE(e = Check.State.mkBinding(r.st, List.reverse(ids), cheapBeta(r.e), false, true), st = r.st))
+    Result.Ok(RE(e = Check.State.mkBinding(r.st.lctx, List.reverse(ids), cheapBeta(r.e), false, true), st = r.st))
 
 verify letEnd
     resultExpr(letEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [], [], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
@@ -819,7 +819,7 @@ verify projResultProp
 fn whnfCore(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "Beta, zeta, iota, quotient and projection reduction at the head, without unfolding definitions."
     match e
-        Expr.FVar(id) -> letVar(st, e, Check.State.localValue(st, id), cheapRec, cheapProj)
+        Expr.FVar(id) -> letVar(st, e, Check.State.localValue(st.lctx, id), cheapRec, cheapProj)
         Expr.App -> match rigidHead(st, Core.Apps.fnOf(e))
             true -> Result.Ok(RE(e = e, st = st))
             false -> coreCached(st, e, cheapRec, cheapProj)
@@ -838,7 +838,7 @@ fn rigidHead(st: St, f: Expr) -> Bool
             Option.Some(Const.CRec) -> false
             Option.Some(Const.CQuot) -> false
             _ -> true
-        Expr.FVar(id) -> Check.State.localValue(st, id) == Option.None
+        Expr.FVar(id) -> Check.State.localValue(st.lctx, id) == Option.None
         Expr.Sort -> true
         Expr.Pi -> true
         Expr.NatLit -> true
@@ -1314,7 +1314,7 @@ fn whnf(st: St, e: Expr) -> Result<RE, Fail>
         Expr.Pi -> Result.Ok(RE(e = e, st = st))
         Expr.NatLit -> Result.Ok(RE(e = e, st = st))
         Expr.StrLit -> Result.Ok(RE(e = e, st = st))
-        Expr.FVar(id) -> match Check.State.localValue(st, id)
+        Expr.FVar(id) -> match Check.State.localValue(st.lctx, id)
             Option.None -> Result.Ok(RE(e = e, st = st))
             Option.Some -> whnfCached(st, e)
         _ -> whnfCached(st, e)
@@ -1358,7 +1358,7 @@ fn deltaRigid(st: St, f: Expr) -> Bool
                 Option.Some(Const.CAxiom) -> true
                 Option.Some(Const.COpaque) -> true
                 _ -> false
-        Expr.FVar(id) -> Check.State.localValue(st, id) == Option.None
+        Expr.FVar(id) -> Check.State.localValue(st.lctx, id) == Option.None
         Expr.Sort -> true
         Expr.Pi -> true
         Expr.NatLit -> true
@@ -1400,7 +1400,7 @@ fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool,
             [] -> Result.Ok(RE(e = matTerm(t, env, ms).e, st = st))
         Expr.BVar(i) -> lclo(st, nthClo(env, i), stack, ms, delta, cheapRec, cheapProj)
         Expr.Let(_, _, _, v, body) -> lcore(st, body, List.prepend(closure(v, env, ms.next), env), stack, MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
-        Expr.FVar(id) -> lvar(st, t, Check.State.localValue(st, id), stack, ms, delta, cheapRec, cheapProj)
+        Expr.FVar(id) -> lvar(st, t, Check.State.localValue(st.lctx, id), stack, ms, delta, cheapRec, cheapProj)
         Expr.Const(n, ls) -> lconst(st, t, ls, Check.State.lookup(st, n), stack, ms, delta, cheapRec, cheapProj)
         Expr.Proj(_, s, i, x) -> lproject(st, s, i, matTerm(x, env, ms), stack, delta, cheapRec, cheapProj)
         _ -> Result.Ok(RE(e = lstuck(matTerm(t, env, ms), stack), st = st))
@@ -1766,7 +1766,7 @@ fn whnfCoreM(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fai
             false -> mcached(st, e, cheapRec, cheapProj)
         Expr.Let -> mcached(st, e, cheapRec, cheapProj)
         Expr.Proj -> mcached(st, e, cheapRec, cheapProj)
-        Expr.FVar(id) -> lvar(st, e, Check.State.localValue(st, id), [], MS(next = 0, forced = {}), false, cheapRec, cheapProj)
+        Expr.FVar(id) -> lvar(st, e, Check.State.localValue(st.lctx, id), [], MS(next = 0, forced = {}), false, cheapRec, cheapProj)
         _ -> Result.Ok(RE(e = e, st = st))
 
 verify whnfCoreM
