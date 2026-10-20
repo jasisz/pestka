@@ -184,3 +184,179 @@ fn powAcc(acc: Int, base: Int, bit: Int) -> Int
 
 verify powAcc
     powAcc(3, 2, 1) => 6
+
+fn natSpec(op: String, a: Int, b: Int) -> Result<Expr, Fail>
+    ? "The same operations by Lean's own definitions: each spec takes one step of its operation's recursion and leaves the operations below it (+, -, * on the way down) to Int, which the same law checks for those operations. What reducing the definitions would give, which the literal arithmetic must agree with."
+    match op
+        "add" -> Result.Ok(Core.Exprs.natLit(addSpec(a, b)))
+        "sub" -> Result.Ok(Core.Exprs.natLit(subSpec(a, b)))
+        "mul" -> Result.Ok(Core.Exprs.natLit(mulSpec(a, b)))
+        "div" -> Result.Ok(Core.Exprs.natLit(divSpec(a, b)))
+        "mod" -> Result.Ok(Core.Exprs.natLit(modSpec(a, b)))
+        "gcd" -> Result.Ok(Core.Exprs.natLit(gcdSpec(a, b)))
+        "beq" -> Result.Ok(boolExpr(beqSpec(a, b)))
+        "ble" -> Result.Ok(boolExpr(bleSpec(a, b)))
+        "land" -> Result.Ok(Core.Exprs.natLit(bitwiseSpec("land", a, b)))
+        "lor" -> Result.Ok(Core.Exprs.natLit(bitwiseSpec("lor", a, b)))
+        "xor" -> Result.Ok(Core.Exprs.natLit(bitwiseSpec("xor", a, b)))
+        "shiftRight" -> Result.Ok(Core.Exprs.natLit(shiftRightSpec(a, b)))
+        "shiftLeft" -> Result.Ok(Core.Exprs.natLit(shiftLeftSpec(a, b)))
+        "pow" -> Result.Ok(Core.Exprs.natLit(powSpec(a, b)))
+        _ -> Result.Err(Fail.Decline("unknown Nat operation {op}"))
+
+verify natSpec
+    natSpec("sub", 2, 5) => Result.Ok(Core.Exprs.natLit(0))
+    natSpec("xor", 6, 3) => Result.Ok(Core.Exprs.natLit(5))
+
+verify natOp law natSpec
+    given op: String = ["add", "sub", "mul", "div", "mod", "gcd", "beq", "ble", "land", "lor", "xor", "shiftRight", "shiftLeft", "pow"]
+    given a: Int = 0..12
+    given b: Int = 0..6
+    natOp(op, a, b) => natSpec(op, a, b)
+
+fn addSpec(n: Int, m: Int) -> Int
+    ? "Nat.add: n + 0 = n, n + (m + 1) = (n + m) + 1."
+    match m <= 0
+        true -> n
+        false -> addSpec(n, m - 1) + 1
+
+verify addSpec
+    addSpec(2, 3) => 5
+
+fn subSpec(n: Int, m: Int) -> Int
+    ? "Nat.sub: n - 0 = n, n - (m + 1) = pred (n - m), with pred 0 = 0."
+    match m <= 0
+        true -> n
+        false -> Int.max(subSpec(n, m - 1) - 1, 0)
+
+verify subSpec
+    subSpec(2, 5) => 0
+    subSpec(5, 2) => 3
+
+fn mulSpec(n: Int, m: Int) -> Int
+    ? "Nat.mul: n * 0 = 0, n * (m + 1) = n * m + n."
+    match m <= 0
+        true -> 0
+        false -> mulSpec(n, m - 1) + n
+
+verify mulSpec
+    mulSpec(3, 4) => 12
+
+fn divSpec(x: Int, y: Int) -> Int
+    ? "Nat.div by its equation: x / y = if 0 < y and y <= x then (x - y) / y + 1 else 0."
+    match Bool.and(y > 0, y <= x)
+        true -> divSpec(x - y, y) + 1
+        false -> 0
+
+verify divSpec
+    divSpec(7, 2) => 3
+    divSpec(7, 0) => 0
+
+fn modSpec(x: Int, y: Int) -> Int
+    ? "Nat.mod by its equation: x % y = if 0 < y and y <= x then (x - y) % y else x."
+    match Bool.and(y > 0, y <= x)
+        true -> modSpec(x - y, y)
+        false -> x
+
+verify modSpec
+    modSpec(7, 2) => 1
+    modSpec(7, 0) => 7
+
+fn gcdSpec(x: Int, y: Int) -> Int
+    ? "Nat.gcd: gcd 0 y = y, gcd (x + 1) y = gcd (y % (x + 1)) (x + 1)."
+    match x <= 0
+        true -> y
+        false -> gcdSpec(modSpec(y, x), x)
+
+verify gcdSpec
+    gcdSpec(12, 18) => 6
+    gcdSpec(0, 5) => 5
+
+fn beqSpec(n: Int, m: Int) -> Bool
+    ? "Nat.beq: zero equals only zero, successors compare their predecessors."
+    match n <= 0
+        true -> m <= 0
+        false -> match m <= 0
+            true -> false
+            false -> beqSpec(n - 1, m - 1)
+
+verify beqSpec
+    beqSpec(3, 3) => true
+    beqSpec(3, 2) => false
+
+fn bleSpec(n: Int, m: Int) -> Bool
+    ? "Nat.ble: zero is below everything, a successor is not below zero, successors compare their predecessors."
+    match n <= 0
+        true -> true
+        false -> match m <= 0
+            true -> false
+            false -> bleSpec(n - 1, m - 1)
+
+verify bleSpec
+    bleSpec(2, 3) => true
+    bleSpec(3, 2) => false
+
+fn bitwiseSpec(op: String, n: Int, m: Int) -> Int
+    ? "Nat.bitwise f n m for land, lor and xor: the last bits combined by f in front of the rest, built from the halves."
+    match n <= 0
+        true -> match bitOf(op, false, true)
+            true -> m
+            false -> 0
+        false -> match m <= 0
+            true -> match bitOf(op, true, false)
+                true -> n
+                false -> 0
+            false -> withBit(bitwiseSpec(op, Int.div(n, 2), Int.div(m, 2)), bitOf(op, Int.mod(n, 2) == 1, Int.mod(m, 2) == 1))
+
+verify bitwiseSpec
+    bitwiseSpec("land", 6, 3) => 2
+    bitwiseSpec("lor", 6, 3) => 7
+    bitwiseSpec("xor", 6, 3) => 5
+
+fn bitOf(op: String, x: Bool, y: Bool) -> Bool
+    ? "The Bool function behind land, lor and xor."
+    match op
+        "land" -> Bool.and(x, y)
+        "lor" -> Bool.or(x, y)
+        _ -> x != y
+
+verify bitOf
+    bitOf("xor", true, false) => true
+    bitOf("land", true, false) => false
+
+fn withBit(r: Int, bit: Bool) -> Int
+    ? "r + r, plus one when the bit is set."
+    match bit
+        true -> r + r + 1
+        false -> r + r
+
+verify withBit
+    withBit(3, true) => 7
+
+fn shiftLeftSpec(m: Int, n: Int) -> Int
+    ? "Nat.shiftLeft: m <<< 0 = m, m <<< (n + 1) = (2 * m) <<< n."
+    match n <= 0
+        true -> m
+        false -> shiftLeftSpec(2 * m, n - 1)
+
+verify shiftLeftSpec
+    shiftLeftSpec(3, 2) => 12
+
+fn shiftRightSpec(m: Int, n: Int) -> Int
+    ? "Nat.shiftRight: m >>> 0 = m, m >>> (n + 1) = (m >>> n) / 2."
+    match n <= 0
+        true -> m
+        false -> Int.div(shiftRightSpec(m, n - 1), 2)
+
+verify shiftRightSpec
+    shiftRightSpec(13, 2) => 3
+
+fn powSpec(m: Int, n: Int) -> Int
+    ? "Nat.pow: m ^ 0 = 1, m ^ (n + 1) = m ^ n * m."
+    match n <= 0
+        true -> 1
+        false -> powSpec(m, n - 1) * m
+
+verify powSpec
+    powSpec(2, 10) => 1024
+    powSpec(0, 0) => 1
