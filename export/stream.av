@@ -20,9 +20,16 @@ type Fed
 fn readFile(path: String, workers: Int) -> Outcome
     ? "Reads and parses the whole file, the parsing shared out among workers."
     ! [Disk.readText]
-    match Disk.readText(path)
+    match linesOf(path)
         Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
-        Result.Ok(text) -> whole(String.split(text, "\n"), workers)
+        Result.Ok(lines) -> whole(lines, workers)
+
+fn linesOf(path: String) -> Result<List<String>, String>
+    ? "The file's lines. The text itself is let go here, before any line is parsed: on mathlib it is 5.9 GB that the lines repeat. Reading in chunks of 64 MB instead held 18.7 GB at the end of reading mathlib against 21.3 GB, and took 252 s against 107 s, since each chunk is split while the workers wait."
+    ! [Disk.readText]
+    match Disk.readText(path)
+        Result.Err(e) -> Result.Err(e)
+        Result.Ok(text) -> Result.Ok(String.split(text, "\n"))
 
 fn whole(lines: List<String>, workers: Int) -> Outcome
     ? "Feeds every line; the verdict is where feeding stopped."
