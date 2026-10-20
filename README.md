@@ -13,14 +13,29 @@ Status: Pestka type checks definitions, theorems, inductive types (mutual
 and nested, with their recursors derived and compared with the export) and the
 quotient package. On the small Lean Kernel Arena tests (all but `perf/` and the
 large corpora) it answers 171 of 171 correctly. It checks all of `Init` from
-Lean 4.32.0 (57,277 declarations, none admitted unchecked) in about 20 s and
+Lean 4.32.0 (57,277 declarations, none admitted unchecked) in about 21 s and
 1.9 GB with eight workers on an Apple M2 Pro, and in about 80 s on one.
 
-Of the Arena's `perf/` tests, all pass within 3 GB and 60 s but two.
-`magma-list-deep-n36` takes about 73 s (the Arena allows 390 s).
-`app-lam` was measured at 7.3 s and about 3.7 GB on the same machine: opening
-a binder copies its body, and that test is built so that the copies add up
-quadratically. Checking binder bodies without copying them is the next step.
+Of the Arena's `perf/` tests, all pass within 3 GB and 60 s but one:
+`magma-list-deep-n36` takes about 73 s (the Arena allows 390 s). `app-lam`,
+built so that copying binder bodies adds up quadratically, takes 0.85 s and
+1.4 GB on the same machine.
+
+## How it checks
+
+The checker follows the reference kernel's algorithm, with these choices of
+its own:
+
+- Facts about closed terms (types, definitional equalities and
+  inequalities) are kept across declarations by each worker, which meets its
+  declarations in file order, so a fact found once holds in every later one.
+- Weak head normalization runs a machine whose arguments wait as terms with
+  their environment and are built only when needed, each at most once;
+  definitions unfold and recursor rules fire inside it.
+- Opening a binder substitutes its variable into the body, as the reference
+  does; past 128 open binders, bodies are inferred under their variables as
+  they are instead, so deep nesting does not copy each body once per binder
+  above it.
 
 ## Requirements
 
