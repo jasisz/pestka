@@ -5,10 +5,10 @@ module Main
         "declined: <why>. main returns the exit status: 0 accepted, 1 rejected,"
         "2 declined."
     depends [Core.Names, Check.State, Check.Decl, Export.Stream, Export.Tables]
-    effects [Args.get, Console.print, Disk.readText]
+    effects [Args.get, Console.print, Disk.readBytesAt]
 
 fn main() -> Int
-    ! [Args.get, Console.print, Disk.readText]
+    ! [Args.get, Console.print, Disk.readBytesAt]
     match Args.get()
         [path] -> report(Export.Stream.readFile(path, 8), 8)
         [path, n] -> report(Export.Stream.readFile(path, workersOf(n)), workersOf(n))

@@ -3,3 +3,8 @@
 # system allocator cost it about 9% of its time on one thread and half of
 # its memory on eight.
 allocator = "mimalloc"
+
+[[verify.costly]]
+fn = "expr"
+step-limit = 40000000
+reason = "The law sameAsSpec fills a whole chunk of the dense expression table (65536 entries) and one more to cross into the next."

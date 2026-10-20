@@ -1,12 +1,11 @@
 module Stream
     intent =
-        "Reads an export file whole and feeds its lines in order, the header"
-        "first. Reading in chunks with Disk.readBytesAt was tried and was"
-        "slower and larger (41 s and 5.9 GB on Init against 34 s and 5.4 GB):"
-        "the text is not what fills memory, the expression table is."
+        "Reads an export file a chunk at a time and feeds its lines in order,"
+        "the header first. Only one chunk's text and lines are held at once:"
+        "on mathlib the whole text is 5.9 GB and its lines as much again."
     exposes [Outcome, readFile]
-    depends [Export.Reader, Export.Tables]
-    effects [Disk.readText]
+    depends [Bytes, Export.Reader, Export.Tables]
+    effects [Disk.readBytesAt]
 
 type Outcome
     Read(Parsed)
@@ -18,18 +17,82 @@ type Fed
     Stop(Outcome)
 
 fn readFile(path: String, workers: Int) -> Outcome
-    ? "Reads and parses the whole file, the parsing shared out among workers."
-    ! [Disk.readText]
-    match linesOf(path)
-        Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
-        Result.Ok(lines) -> whole(lines, workers)
+    ? "Reads and parses the whole file, a chunk at a time, the parsing shared out among workers."
+    ! [Disk.readBytesAt]
+    chunked(path, 0, "", Export.Tables.empty(), 1, workers)
 
-fn linesOf(path: String) -> Result<List<String>, String>
-    ? "The file's lines. The text itself is let go here, before any line is parsed: on mathlib it is 5.9 GB that the lines repeat. Reading in chunks of 64 MB instead held 18.7 GB at the end of reading mathlib against 21.3 GB, and took 252 s against 107 s, since each chunk is split while the workers wait."
-    ! [Disk.readText]
-    match Disk.readText(path)
-        Result.Err(e) -> Result.Err(e)
-        Result.Ok(text) -> Result.Ok(String.split(text, "\n"))
+fn chunkBytes() -> Int
+    ? "How much of the file one chunk reads."
+    67108864
+
+verify chunkBytes
+    chunkBytes() > 0 => true
+
+fn chunked(path: String, offset: Int, carry: String, t: Tables, line: Int, workers: Int) -> Outcome
+    ? "Reads the chunk at offset; carry is the unfinished last line of the chunk before. At the end of the file, carry is the last line."
+    ! [Disk.readBytesAt]
+    match Disk.readBytesAt(path, offset, chunkBytes())
+        Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
+        Result.Ok(b) -> match Bytes.len(b) == 0
+            true -> atEnd(feed(t, [carry], line, workers))
+            false -> decoded(path, offset, carry, t, line, workers, b, 0)
+
+fn decoded(path: String, offset: Int, carry: String, t: Tables, line: Int, workers: Int, b: Bytes, cut: Int) -> Outcome
+    ? "The chunk as text, leaving out the bytes of a character its end cuts in two: at most three."
+    ! [Disk.readBytesAt]
+    match String.fromUtf8(Bytes.take(b, Bytes.len(b) - cut))
+        Result.Ok(text) -> splitChunk(path, offset + Bytes.len(b) - cut, splitApart("{carry}{text}"), t, line, workers)
+        Result.Err(e) -> match cut >= 3
+            true -> Outcome.Declined("cannot read {path}: {e}")
+            false -> decoded(path, offset, carry, t, line, workers, b, cut + 1)
+
+fn splitApart(text: String) -> List<String>
+    ? "The lines of a chunk, split on a thread of their own, so that their strings sit apart from the terms built from them and go back to the system once the chunk is read."
+    match (linesIn(text), nothing())!
+        (parts, _) -> parts
+
+verify splitApart
+    splitApart("a\nb") => ["a", "b"]
+
+fn linesIn(text: String) -> List<String>
+    ? "The lines of a text."
+    String.split(text, "\n")
+
+verify linesIn
+    linesIn("a\nb") => ["a", "b"]
+
+fn nothing() -> Int
+    ? "The other half of the product splitApart runs."
+    0
+
+verify nothing
+    nothing() => 0
+
+fn splitChunk(path: String, next: Int, parts: List<String>, t: Tables, line: Int, workers: Int) -> Outcome
+    ? "Feeds the chunk's complete lines; its last part is unfinished and waits for the next chunk."
+    ! [Disk.readBytesAt]
+    match feed(t, List.take(parts, List.len(parts) - 1), line, workers)
+        Fed.Stop(o) -> o
+        Fed.More(fed, at) -> chunked(path, next, lastPart(parts), fed, at, workers)
+
+fn lastPart(parts: List<String>) -> String
+    ? "The last of the parts a split gives; a split always gives at least one."
+    match List.drop(parts, List.len(parts) - 1)
+        [x, .._] -> x
+        [] -> ""
+
+verify lastPart
+    lastPart(["a", "b"]) => "b"
+    lastPart([""]) => ""
+
+fn atEnd(f: Fed) -> Outcome
+    ? "The verdict once the last line is fed."
+    match f
+        Fed.Stop(o) -> o
+        Fed.More(t, line) -> ended(line, t)
+
+verify atEnd
+    atEnd(Fed.More(Export.Tables.empty(), 1)) => Outcome.Rejected("empty file")
 
 fn whole(lines: List<String>, workers: Int) -> Outcome
     ? "Feeds every line; the verdict is where feeding stopped."

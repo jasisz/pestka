@@ -16,6 +16,9 @@ record Tables
     names: Map<Int, Name>
     levels: Map<Int, Level>
     exprs: Map<Int, Expr>
+    cur: Vector<Expr>
+    chunks: Vector<Vector<Expr>>
+    dense: Int
     nextName: Int
     nextLevel: Int
     nextExpr: Int
@@ -38,7 +41,7 @@ verify finish
 
 fn empty() -> Tables
     ? "Name 0 is the anonymous name and level 0 is zero; neither has a line."
-    Tables(names = {0 => Core.Names.anon()}, levels = {0 => Level.Zero}, exprs = {}, nextName = 1, nextLevel = 1, nextExpr = 0, decls = [], constants = 0)
+    Tables(names = {0 => Core.Names.anon()}, levels = {0 => Level.Zero}, exprs = {}, cur = freshChunk(), chunks = Vector.fromList([]), dense = 0, nextName = 1, nextLevel = 1, nextExpr = 0, decls = [], constants = 0)
 
 verify empty
     empty().nextName => 1
@@ -65,10 +68,79 @@ verify level
     level(empty(), 1) => Result.Err("unknown level index 1")
 
 fn expr(t: Tables, i: Int) -> Result<Expr, String>
-    ? "A defined expression by index."
+    ? "A defined expression by index: one defined out of order or again, then one of the dense run from 0."
     match Map.get(t.exprs, i)
         Option.Some(e) -> Result.Ok(e)
-        Option.None -> Result.Err("unknown expression index {i}")
+        Option.None -> match Bool.and(i >= 0, i < t.dense)
+            true -> Result.Ok(denseAt(t, i))
+            false -> Result.Err("unknown expression index {i}")
+
+fn denseAt(t: Tables, i: Int) -> Expr
+    ? "Expression i of the dense run, from the chunk it sits in; callers keep i below dense."
+    match i >= Vector.len(t.chunks) * 65536
+        true -> slot(Vector.get(t.cur, Int.mod(i, 65536)))
+        false -> inChunk(Vector.get(t.chunks, Int.div(i, 65536)), Int.mod(i, 65536))
+
+fn inChunk(c: Option<Vector<Expr>>, j: Int) -> Expr
+    ? "Place j of a frozen chunk. A match rather than a default: a default chunk would be built on every read."
+    match c
+        Option.Some(v) -> slot(Vector.get(v, j))
+        Option.None -> Core.Exprs.bvar(0)
+
+verify inChunk
+    inChunk(Option.None, 3) => Core.Exprs.bvar(0)
+
+fn slot(o: Option<Expr>) -> Expr
+    ? "What a place of a chunk holds; places below dense are always filled."
+    match o
+        Option.Some(e) -> e
+        Option.None -> Core.Exprs.bvar(0)
+
+verify slot
+    slot(Option.Some(Core.Exprs.natLit(1))) => Core.Exprs.natLit(1)
+
+verify denseAt
+    denseAt(sequential(empty(), 0, 3), 2) => Core.Exprs.natLit(2)
+
+verify expr law sameAsSpec
+    given n: Int = [0, 3, 65537]
+    given i: Int = [0, 2, 65535, 65536, 65537]
+    expr(sequential(empty(), 0, n), i) => exprSpec(n, i)
+
+verify expr law laterLineReplaces
+    given i: Int = [0, 4, 5, 6, 9]
+    expr(Result.withDefault(addExpr(sequential(Result.withDefault(addExpr(empty(), 5, Core.Exprs.natLit(100)), empty()), 0, 10), 5, Core.Exprs.natLit(200)), empty()), i) => replacedSpec(i)
+
+fn sequential(t: Tables, k: Int, n: Int) -> Tables
+    ? "t with expressions k to n - 1 defined in order, expression j being the literal j: what lean4export writes."
+    match k >= n
+        true -> t
+        false -> sequential(Result.withDefault(addExpr(t, k, Core.Exprs.natLit(k)), t), k + 1, n)
+
+verify sequential
+    sequential(empty(), 0, 2).dense => 2
+
+fn exprSpec(n: Int, i: Int) -> Result<Expr, String>
+    ? "What expr gives after expressions 0 to n - 1 were defined in order."
+    match Bool.and(i >= 0, i < n)
+        true -> Result.Ok(Core.Exprs.natLit(i))
+        false -> Result.Err("unknown expression index {i}")
+
+verify exprSpec
+    exprSpec(1, 1) => Result.Err("unknown expression index 1")
+
+fn replacedSpec(i: Int) -> Result<Expr, String>
+    ? "Expression 5 defined first as 100, then 0 to 9 in order, then 5 again as 200: the last line for an index wins."
+    match i == 5
+        true -> Result.Ok(Core.Exprs.natLit(200))
+        false -> Result.Ok(Core.Exprs.natLit(i))
+
+verify replacedSpec
+    replacedSpec(5) => Result.Ok(Core.Exprs.natLit(200))
+
+fn freshChunk() -> Vector<Expr>
+    ? "An empty chunk of the dense run: 65536 places."
+    Vector.new(65536, Core.Exprs.bvar(0))
 
 verify expr
     expr(empty(), 0) => Result.Err("unknown expression index 0")
@@ -109,8 +181,34 @@ verify addLevel
     Result.withDefault(addLevel(empty(), 1, Level.Zero), empty()).nextLevel => 2
 
 fn addExpr(t: Tables, i: Int, e: Expr) -> Result<Tables, String>
-    ? "Defines expression i."
-    Result.Ok(Tables.update(t, exprs = Map.set(t.exprs, i, e), nextExpr = t.nextExpr + 1))
+    ? "Defines expression i. lean4export numbers expressions 0, 1, 2 and on, so they go into chunks of a dense run, 16 bytes each; an index out of that order, or defined again, goes into the map, which expr reads first. On mathlib the map alone held 105 million entries, about 4.4 GB, twice that while it grew."
+    match Bool.and(i == t.dense, Bool.not(Map.has(t.exprs, i)))
+        true -> Result.Ok(denseAdd(t, e))
+        false -> Result.Ok(Tables.update(t, exprs = Map.set(t.exprs, i, e), nextExpr = t.nextExpr + 1))
+
+fn denseAdd(t: Tables, e: Expr) -> Tables
+    ? "Puts e at the end of the dense run; a full chunk joins the others and a fresh one starts."
+    j = Int.mod(t.dense, 65536)
+    match j == 65535
+        true -> Tables.update(t, chunks = withChunk(t.chunks, placed(t.cur, j, e)), cur = freshChunk(), dense = t.dense + 1, nextExpr = t.nextExpr + 1)
+        false -> Tables.update(t, cur = placed(t.cur, j, e), dense = t.dense + 1, nextExpr = t.nextExpr + 1)
+
+verify denseAdd
+    denseAdd(empty(), Core.Exprs.natLit(7)).dense => 1
+    Vector.len(denseAdd(Tables.update(empty(), dense = 65535), Core.Exprs.natLit(7)).chunks) => 1
+
+fn placed(v: Vector<Expr>, j: Int, e: Expr) -> Vector<Expr>
+    ? "v with e at j; j is always in range. The vector is used once, so the update happens in place."
+    match Vector.set(v, j, e)
+        Option.Some(w) -> w
+        Option.None -> freshChunk()
+
+verify placed
+    Vector.get(placed(freshChunk(), 3, Core.Exprs.natLit(1)), 3) => Option.Some(Core.Exprs.natLit(1))
+
+fn withChunk(chunks: Vector<Vector<Expr>>, c: Vector<Expr>) -> Vector<Vector<Expr>>
+    ? "The chunks with c after them: a few thousand at most, rebuilt once per 65536 expressions."
+    Vector.fromList(List.concat(List.fromVector(chunks), [c]))
 
 verify addExpr
     Result.withDefault(addExpr(empty(), 0, Core.Exprs.bvar(0)), empty()).nextExpr => 1
