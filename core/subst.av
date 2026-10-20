@@ -266,6 +266,69 @@ verify position
     position([3, 4], 4, 0) => 1
     position([], 4, 0) => -1
 
+fn applySpec(op: Op, e: Expr, offset: Int) -> Expr
+    ? "The operation by plain recursion, with no skipping by metadata and no memo: what apply must give."
+    match e
+        Expr.BVar(i) -> bvarCase(op, i, offset)
+        Expr.FVar(id) -> fvarCase(op, id, offset)
+        Expr.App(_, f, a) -> Core.Exprs.app(applySpec(op, f, offset), applySpec(op, a, offset))
+        Expr.Lam(_, n, t, b, bi) -> Core.Exprs.lam(n, applySpec(op, t, offset), applySpec(op, b, offset + 1), bi)
+        Expr.Pi(_, n, t, b, bi) -> Core.Exprs.pi(n, applySpec(op, t, offset), applySpec(op, b, offset + 1), bi)
+        Expr.Let(_, n, t, v, b) -> Core.Exprs.letE(n, applySpec(op, t, offset), applySpec(op, v, offset), applySpec(op, b, offset + 1))
+        Expr.Proj(_, sn, i, x) -> Core.Exprs.proj(sn, i, applySpec(op, x, offset))
+        _ -> e
+
+verify applySpec
+    applySpec(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1)), 1) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(2))
+
+verify apply law applySpec
+    given k: Int = 0..8
+    given which: Int = 0..4
+    given offset: Int = 0..2
+    apply(sampleOp(which), sampleTerm(k), offset) => applySpec(sampleOp(which), sampleTerm(k), offset)
+
+verify abstractFVars law undoneByInstantiateRev
+    given k: Int = 0..8
+    when Core.Exprs.looseRange(sampleTerm(k)) == 0
+    instantiateRev(abstractFVars(sampleTerm(k), [7, 8]), [Core.Exprs.fvar(7), Core.Exprs.fvar(8)]) => sampleTerm(k)
+
+fn sampleTerm(k: Int) -> Expr
+    ? "Terms for the laws: variables, binders, a let and a projection, and shared terms whose trees are large enough for the memo."
+    match k
+        0 -> Core.Exprs.bvar(0)
+        1 -> Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.fvar(7))
+        2 -> Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Binder.Default)
+        3 -> Core.Exprs.letE(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.fvar(8), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(2)))
+        4 -> Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.app(Core.Exprs.fvar(7), Core.Exprs.bvar(3)))
+        5 -> doubled(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(7)), 6)
+        6 -> doubled(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(2)), Binder.Default), 5)
+        7 -> Core.Exprs.app(Core.Exprs.fvar(7), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.fvar(8), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(7)), Binder.Default))
+        _ -> doubled(Core.Exprs.pi(Core.Names.anon(), Core.Exprs.fvar(8), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(7)), Binder.Default), 6)
+
+verify sampleTerm
+    Core.Exprs.treeSize(sampleTerm(5)) => 63
+
+fn doubled(e: Expr, n: Int) -> Expr
+    ? "e applied to itself, n times over: a shared DAG whose tree doubles at each level."
+    match n <= 0
+        true -> e
+        false -> doubled(Core.Exprs.app(e, e), n - 1)
+
+verify doubled
+    doubled(Core.Exprs.bvar(0), 1) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0))
+
+fn sampleOp(k: Int) -> Op
+    ? "Each kind of operation once, for the laws."
+    match k
+        0 -> Op.Inst([Core.Exprs.fvar(5), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(6))], 2)
+        1 -> Op.InstRev([Core.Exprs.fvar(5), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(6))], 2)
+        2 -> Op.Lift(1, 2)
+        3 -> Op.Lower(2, 1)
+        _ -> Op.Abstract([7, 8], 2)
+
+verify sampleOp
+    sampleOp(2) => Op.Lift(1, 2)
+
 fn instLevelParams(e: Expr, ps: List<Name>, us: List<Level>) -> Expr
     ? "Replaces universe parameters ps by us everywhere in e."
     lgo(e, ps, us, {}).e

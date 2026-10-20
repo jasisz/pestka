@@ -320,6 +320,43 @@ fn sampleLocal(i: Int) -> Local
 verify sampleLocal
     sampleLocal(3).ty => Core.Exprs.natLit(3)
 
+fn sampleLocals(n: Int) -> Locals
+    ? "A context with the variables 0 to n - 1, each told apart by its type, for the laws."
+    match n <= 0
+        true -> Locals.NoLocals
+        false -> localPut(sampleLocals(n - 1), n - 1, n - 1, sampleLocal(n - 1))
+
+verify sampleLocals
+    localGet(sampleLocals(3), 2, 2) => Option.Some(sampleLocal(2))
+
+verify localGet law holdsWhatWasPut
+    given n: Int = [0, 1, 16, 17, 300]
+    given id: Int = [0, 1, 15, 16, 17, 255, 256, 4097]
+    when id >= 0
+    localGet(localPut(sampleLocals(n), id, id, sampleLocal(-1)), id, id) => Option.Some(sampleLocal(-1))
+
+verify localGet law keepsTheOthers
+    given n: Int = [0, 1, 16, 17, 300]
+    given id: Int = [0, 1, 16, 255, 256, 4097]
+    given other: Int = [0, 1, 15, 16, 17, 256, 299, 4097]
+    when Bool.and(Bool.and(id >= 0, other >= 0), id != other)
+    localGet(localPut(sampleLocals(n), id, id, sampleLocal(-1)), other, other) => localGet(sampleLocals(n), other, other)
+
+verify localGet law findsEachDeclared
+    given n: Int = [0, 1, 16, 17, 300]
+    given id: Int = [0, 1, 15, 16, 17, 255, 256, 299, 300]
+    when id >= 0
+    localGet(sampleLocals(n), id, id) => declaredSpec(n, id)
+
+fn declaredSpec(n: Int, id: Int) -> Option<Local>
+    ? "What a context of the variables 0 to n - 1 holds for id."
+    match id < n
+        true -> Option.Some(sampleLocal(id))
+        false -> Option.None
+
+verify declaredSpec
+    declaredSpec(3, 5) => Option.None
+
 fn mkBinding(lctx: Locals, ids: List<Int>, body: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
     ? "Abstracts the free variables ids (outermost first) out of body, binding each with its type, or with let for a let variable."
     wrap(lctx, List.reverse(ids), ids, Core.Subst.abstractFVars(body, ids), isLam, dropDeadLet)
