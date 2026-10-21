@@ -5,7 +5,8 @@ module PMap
         "key at a time; an update copies one path of at most ten nodes. A"
         "copy of the trie is a copy of its root, so a state record holding"
         "it can be shared freely: an update never copies the whole table,"
-        "as a Map whose owner was cloned would."
+        "as a Map whose owner was cloned would. A branch keeps a mask of the"
+        "children it has and a vector of just those."
     exposes [PMap, empty, get, add, size, find]
     depends [Core.Exprs]
     effects []
@@ -21,10 +22,23 @@ decision PersistentCaches
     rejected = ["MapCaches"]
     impacts = [add, get]
 
+decision CompactBranches
+    date = "2026-10-21"
+    reason =
+        "A branch with all sixteen slots holds 768 bytes, most of them for"
+        "empty children: near the leaves a branch has one or two. With a"
+        "mask and only the children present, the heaviest mathlib"
+        "declaration's caches (eight million entries) take 9.1 GB instead"
+        "of 10.5 GB. Finding a child counts the mask's bits below it, by"
+        "and and shifts until Aver has a count of its own."
+    chosen = "CompactBranches"
+    rejected = ["FullBranches"]
+    impacts = [addAt, getAt]
+
 type PMap
     Empty
     Leaf(Int, List<Tuple<Expr, Expr>>)
-    Branch(Vector<PMap>, Int)
+    Branch(Int, Vector<PMap>, Int)
 
 fn empty() -> PMap
     ? "The empty trie."
@@ -38,10 +52,33 @@ fn size(m: PMap) -> Int
     match m
         PMap.Empty -> 0
         PMap.Leaf(_, b) -> List.len(b)
-        PMap.Branch(_, n) -> n
+        PMap.Branch(_, _, n) -> n
 
 verify size
     size(add(add(empty(), 1, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 17, (Core.Exprs.bvar(2), Core.Exprs.bvar(3)))) => 2
+
+fn sampleTrie(n: Int) -> PMap
+    ? "A trie of n entries, the i-th under the key 37 * i, for the laws: the keys share and split nibbles at every level."
+    match n <= 0
+        true -> PMap.Empty
+        false -> add(sampleTrie(n - 1), 37 * (n - 1), (Core.Exprs.natLit(n - 1), Core.Exprs.bvar(0)))
+
+verify sampleTrie
+    size(sampleTrie(300)) => 300
+
+fn addedSpec(n: Int, i: Int) -> Option<Expr>
+    ? "What a trie of the first n sample entries holds for the i-th."
+    match Bool.and(i >= 0, i < n)
+        true -> Option.Some(Core.Exprs.bvar(0))
+        false -> Option.None
+
+verify addedSpec
+    addedSpec(3, 3) => Option.None
+
+verify add law findsEachAdded
+    given n: Int = [0, 1, 2, 16, 17, 40, 300]
+    given i: Int = [0, 1, 15, 16, 39, 299]
+    find(sampleTrie(n), 37 * i, Core.Exprs.natLit(i)) => addedSpec(n, i)
 
 fn nibble(key: Int, shift: Int) -> Int
     ? "Four bits of the key starting at bit shift."
@@ -68,7 +105,7 @@ fn getAt(m: PMap, key: Int, shift: Int) -> List<Tuple<Expr, Expr>>
         PMap.Leaf(k, b) -> match k == key
             true -> b
             false -> []
-        PMap.Branch(v, _) -> getAt(Option.withDefault(Vector.get(v, nibble(key, shift)), PMap.Empty), key, shift + 4)
+        PMap.Branch(mask, v, _) -> getAt(childAt(mask, v, nibble(key, shift)), key, shift + 4)
 
 verify getAt
     getAt(PMap.Leaf(5, []), 6, 0) => []
@@ -87,14 +124,81 @@ fn addAt(m: PMap, key: Int, entry: Tuple<Expr, Expr>, shift: Int) -> PMap
         PMap.Leaf(k, b) -> match k == key
             true -> PMap.Leaf(k, List.prepend(entry, b))
             false -> addAt(split(k, b, shift), key, entry, shift)
-        PMap.Branch(v, n) -> PMap.Branch(setChild(v, nibble(key, shift), addAt(Option.withDefault(Vector.get(v, nibble(key, shift)), PMap.Empty), key, entry, shift + 4)), n + 1)
+        PMap.Branch(mask, v, n) -> addBelow(mask, v, n, nibble(key, shift), key, entry, shift)
 
 verify addAt
     size(addAt(PMap.Leaf(1, [(Core.Exprs.bvar(0), Core.Exprs.bvar(0))]), 17, (Core.Exprs.bvar(1), Core.Exprs.bvar(1)), 0)) => 2
 
+fn addBelow(mask: Int, v: Vector<PMap>, n: Int, nib: Int, key: Int, entry: Tuple<Expr, Expr>, shift: Int) -> PMap
+    ? "Inserts into the child under nib, made when the branch has none."
+    bit = bitOf(nib)
+    at = popCount16(Bits.and(mask, bit - 1))
+    match Bits.and(mask, bit) == 0
+        true -> PMap.Branch(Bits.or(mask, bit), inserted(v, at, PMap.Leaf(key, [entry])), n + 1)
+        false -> PMap.Branch(mask, setChild(v, at, addAt(Option.withDefault(Vector.get(v, at), PMap.Empty), key, entry, shift + 4)), n + 1)
+
+verify addBelow
+    size(addBelow(0, Vector.fromList([]), 0, 3, 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(0)), 0)) => 1
+
+fn childAt(mask: Int, v: Vector<PMap>, nib: Int) -> PMap
+    ? "The child under nib, or Empty."
+    bit = bitOf(nib)
+    match Bits.and(mask, bit) == 0
+        true -> PMap.Empty
+        false -> Option.withDefault(Vector.get(v, popCount16(Bits.and(mask, bit - 1))), PMap.Empty)
+
+verify childAt
+    childAt(0, Vector.fromList([]), 5) => PMap.Empty
+
+fn bitOf(nib: Int) -> Int
+    ? "The mask bit of a nibble."
+    Result.withDefault(Bits.shiftLeft(1, nib), 0)
+
+verify bitOf
+    bitOf(3) => 8
+
+fn popCount16(x: Int) -> Int
+    ? "Number of one bits in a mask of sixteen bits, by adding neighbouring counts."
+    a = x - Bits.and(Bits.shiftRight(x, 1), 21845)
+    b = Bits.and(a, 13107) + Bits.and(Bits.shiftRight(a, 2), 13107)
+    c = Bits.and(b + Bits.shiftRight(b, 4), 3855)
+    Bits.and(c + Bits.shiftRight(c, 8), 31)
+
+verify popCount16
+    popCount16(0) => 0
+    popCount16(65535) => 16
+    popCount16(41) => 3
+
+fn inserted(v: Vector<PMap>, at: Int, x: PMap) -> Vector<PMap>
+    ? "A vector one longer, with x at position at."
+    fillInsert(v, at, x, Result.withDefault(Vector.new(Vector.len(v) + 1, PMap.Empty), v), 0)
+
+verify inserted
+    Vector.len(inserted(Vector.fromList([PMap.Empty]), 0, PMap.Empty)) => 2
+
+fn fillInsert(src: Vector<PMap>, at: Int, x: PMap, dst: Vector<PMap>, i: Int) -> Vector<PMap>
+    ? "Copies src into dst around position at, where x goes."
+    match i > Vector.len(src)
+        true -> dst
+        false -> fillInsert(src, at, x, Option.withDefault(Vector.set(dst, i, picked(src, at, x, i)), dst), i + 1)
+
+verify fillInsert
+    Vector.len(fillInsert(Vector.fromList([]), 0, PMap.Empty, Vector.fromList([PMap.Empty]), 0)) => 1
+
+fn picked(src: Vector<PMap>, at: Int, x: PMap, i: Int) -> PMap
+    ? "What goes to position i of the longer vector."
+    match i == at
+        true -> x
+        false -> match i < at
+            true -> Option.withDefault(Vector.get(src, i), PMap.Empty)
+            false -> Option.withDefault(Vector.get(src, i - 1), PMap.Empty)
+
+verify picked
+    picked(Vector.fromList([]), 0, PMap.Empty, 0) => PMap.Empty
+
 fn split(k: Int, b: List<Tuple<Expr, Expr>>, shift: Int) -> PMap
     ? "A branch holding the old leaf under its nibble."
-    PMap.Branch(setChild(Vector.new(16, PMap.Empty), nibble(k, shift), PMap.Leaf(k, b)), List.len(b))
+    PMap.Branch(bitOf(nibble(k, shift)), Vector.fromList([PMap.Leaf(k, b)]), List.len(b))
 
 verify split
     size(split(1, [(Core.Exprs.bvar(0), Core.Exprs.bvar(0))], 0)) => 1
@@ -104,7 +208,7 @@ fn setChild(v: Vector<PMap>, i: Int, child: PMap) -> Vector<PMap>
     Option.withDefault(Vector.set(v, i, child), v)
 
 verify setChild
-    Vector.len(setChild(Vector.new(16, PMap.Empty), 3, PMap.Empty)) => 16
+    Vector.len(setChild(Vector.fromList([PMap.Empty]), 0, PMap.Empty)) => 1
 
 fn find(m: PMap, key: Int, e: Expr) -> Option<Expr>
     ? "The value paired with an expression equal to e in key's bucket."
