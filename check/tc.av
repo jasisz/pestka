@@ -1081,13 +1081,59 @@ verify recMajor
     resultOpt(recMajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, false, false)) => Option.None
 
 fn majorToCtor(st: St, rv: Rec, major: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "The reference order: K first, then whnf, then literal or structure expansion."
+    ? "K first; then structure eta before any reduction of the major, so that a major with no weak head normal form does not stop the recursor (lean4#15351); then whnf, and literal or structure expansion."
     m1 = kMajor(st, rv, major)?
-    m2 = whnfMaybe(m1.st, m1.e, cheapRec, cheapProj, cheapRec)?
+    m0 = etaBeforeWhnf(m1.st, rv, m1.e)?
+    match m0.e == m1.e
+        false -> Result.Ok(m0)
+        true -> majorReduced(whnfMaybe(m0.st, m1.e, cheapRec, cheapProj, cheapRec)?, rv)
+
+fn majorReduced(m2: RE, rv: Rec) -> Result<RE, Fail>
+    ? "After whnf: a literal becomes its constructor, a structure value is eta expanded."
     match m2.e
         Expr.NatLit(n) -> Result.Ok(RE(e = Check.Lits.natLitToCtor(n), st = m2.st))
         Expr.StrLit(s) -> whnf(m2.st, Check.Lits.strToCtor(s))
         _ -> toCtorWhenStructure(m2.st, majorInduct(rv), m2.e)
+
+verify majorReduced
+    resultExpr(majorReduced(RE(e = Core.Exprs.natLit(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false))) => Core.Exprs.cnst(Check.Lits.name2("Nat", "zero"), [])
+
+fn etaBeforeWhnf(st: St, rv: Rec, e: Expr) -> Result<RE, Fail>
+    ? "A major of a non-recursive structure that is not a constructor application becomes mk params e.0 ... e.(n-1) without being reduced. A proof only when the recursor eliminates into any sort: then every field is a proof and its projection is a proof; a proof of a structure that eliminates only into Prop, such as Exists, keeps the reference order."
+    induct = majorInduct(rv)
+    match Bool.and(isNonRecStructure(st, induct), Bool.not(isCtorApp(st, e)))
+        false -> Result.Ok(RE(e = e, st = st))
+        true -> etaTyped(whnfOf(inferType(st, e)?)?, rv, induct, e)
+
+verify etaBeforeWhnf
+    resultExpr(etaBeforeWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+
+fn etaTyped(w: RE, rv: Rec, induct: Name, e: Expr) -> Result<RE, Fail>
+    ? "Only when the type really is the structure; a proof only under large elimination."
+    match Core.Apps.isConst(Core.Apps.fnOf(w.e), induct)
+        false -> Result.Ok(RE(e = e, st = w.st))
+        true -> etaUnlessSmallProof(isProp(w.st, w.e)?, w.e, e, largeElim(w.st, rv, induct))
+
+verify etaTyped
+    resultExpr(etaTyped(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon(), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+
+fn etaUnlessSmallProof(p: RB, ty: Expr, e: Expr, large: Bool) -> Result<RE, Fail>
+    ? "Expands a value, or a proof whose recursor eliminates into any sort."
+    match Bool.or(Bool.not(p.b), large)
+        true -> Result.Ok(RE(e = expandEtaStruct(p.st, ty, e), st = p.st))
+        false -> Result.Ok(RE(e = e, st = p.st))
+
+verify etaUnlessSmallProof
+    resultExpr(etaUnlessSmallProof(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(0), false)) => Core.Exprs.fvar(0)
+
+fn largeElim(st: St, rv: Rec, induct: Name) -> Bool
+    ? "The recursor has one more universe parameter than its type: the motive may land in any sort."
+    match Check.State.lookup(st, induct)
+        Option.Some(Const.CInduct(iv)) -> List.len(rv.head.params) > List.len(iv.head.params)
+        _ -> false
+
+verify largeElim
+    largeElim(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon()) => false
 
 verify majorToCtor
     resultExpr(majorToCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Exprs.natLit(0), false, false)) => Core.Exprs.cnst(Check.Lits.name2("Nat", "zero"), [])
