@@ -29,8 +29,7 @@ decision CompactBranches
         "empty children: near the leaves a branch has one or two. With a"
         "mask and only the children present, the heaviest mathlib"
         "declaration's caches (eight million entries) take 9.1 GB instead"
-        "of 10.5 GB. Finding a child counts the mask's bits below it, by"
-        "and and shifts until Aver has a count of its own."
+        "of 10.5 GB. Finding a child counts the mask's bits below it."
     chosen = "CompactBranches"
     rejected = ["FullBranches"]
     impacts = [addAt, getAt]
@@ -132,7 +131,7 @@ verify addAt
 fn addBelow(mask: Int, v: Vector<PMap>, n: Int, nib: Int, key: Int, entry: Tuple<Expr, Expr>, shift: Int) -> PMap
     ? "Inserts into the child under nib, made when the branch has none."
     bit = bitOf(nib)
-    at = popCount16(Bits.and(mask, bit - 1))
+    at = Bits.popCount(Bits.and(mask, bit - 1), 16)
     match Bits.and(mask, bit) == 0
         true -> PMap.Branch(Bits.or(mask, bit), inserted(v, at, PMap.Leaf(key, [entry])), n + 1)
         false -> PMap.Branch(mask, setChild(v, at, addAt(Option.withDefault(Vector.get(v, at), PMap.Empty), key, entry, shift + 4)), n + 1)
@@ -145,7 +144,7 @@ fn childAt(mask: Int, v: Vector<PMap>, nib: Int) -> PMap
     bit = bitOf(nib)
     match Bits.and(mask, bit) == 0
         true -> PMap.Empty
-        false -> Option.withDefault(Vector.get(v, popCount16(Bits.and(mask, bit - 1))), PMap.Empty)
+        false -> Option.withDefault(Vector.get(v, Bits.popCount(Bits.and(mask, bit - 1), 16)), PMap.Empty)
 
 verify childAt
     childAt(0, Vector.fromList([]), 5) => PMap.Empty
@@ -156,18 +155,6 @@ fn bitOf(nib: Int) -> Int
 
 verify bitOf
     bitOf(3) => 8
-
-fn popCount16(x: Int) -> Int
-    ? "Number of one bits in a mask of sixteen bits, by adding neighbouring counts."
-    a = x - Bits.and(Bits.shiftRight(x, 1), 21845)
-    b = Bits.and(a, 13107) + Bits.and(Bits.shiftRight(a, 2), 13107)
-    c = Bits.and(b + Bits.shiftRight(b, 4), 3855)
-    Bits.and(c + Bits.shiftRight(c, 8), 31)
-
-verify popCount16
-    popCount16(0) => 0
-    popCount16(65535) => 16
-    popCount16(41) => 3
 
 fn inserted(v: Vector<PMap>, at: Int, x: PMap) -> Vector<PMap>
     ? "A vector one longer, with x at position at."
