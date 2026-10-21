@@ -1,0 +1,660 @@
+module Tc
+    intent =
+        "The second core's type checker: inference on values. A term is"
+        "inferred in two environments, the types and the values of its loose"
+        "bound variables (index 0 first), and its type comes back as a value,"
+        "so an application walks its function's type by extending the"
+        "type's environment and substitutes nothing. A binder declares a"
+        "variable at the next de Bruijn level. Weak head normalization does"
+        "beta, delta and projections of constructors on values; recursor"
+        "rules, quotients and Nat arithmetic, and definitional equality, are"
+        "still the first core's, reached through a bridge: values are read"
+        "back as terms in which each level is a free variable of the first"
+        "core's local context. The bridge goes as the second core grows."
+    exposes [NSt, NV, NB, start, infer, whnf, conv, sortOf, isProp]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps, Core.Decls, Core.Univ, Core.PMap, Check.State, Check.Tc, Check.Lits, Next.Value]
+    effects []
+
+record NSt
+    old: St
+    fvs: List<Expr>
+    ids: List<Val>
+    depth: Int
+    checked: PMap
+    inferred: PMap
+
+record NV
+    v: Val
+    st: NSt
+
+record NB
+    b: Bool
+    st: NSt
+
+fn start(old: St) -> NSt
+    ? "No binder open: every value is closed."
+    NSt(old = old, fvs = [], ids = [], depth = 0, checked = Core.PMap.empty(), inferred = Core.PMap.empty())
+
+verify start
+    start(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).depth => 0
+
+fn bad(msg: String) -> Fail
+    ? "A kernel error: the declaration is rejected."
+    Fail.Reject(msg)
+
+verify bad
+    bad("x") => Fail.Reject("x")
+
+fn sample() -> NSt
+    ? "An empty state, for the examples."
+    start(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+
+verify sample
+    sample().depth => 0
+
+fn termOf(st: NSt, v: Val) -> Expr
+    ? "A value as a term of the first core: each open level is its free variable."
+    Next.Value.matF(st.fvs, st.depth, st.depth, v)
+
+verify termOf
+    termOf(sample(), Val.Nat(1)) => Core.Exprs.natLit(1)
+
+fn enter(st: NSt, n: Name, dom: Val, bi: Binder) -> NV
+    ? "Opens a binder: the variable is the next level, declared to the first core as a free variable of type dom."
+    loc = Check.State.names(st.old, n, termOf(st, dom), Option.None, bi)
+    v = Val.Var(st.depth, [])
+    NV(v = v, st = NSt.update(st, old = loc.st, fvs = List.prepend(loc.e, st.fvs), ids = List.prepend(v, st.ids), depth = st.depth + 1))
+
+verify enter
+    enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).v => Val.Var(0, [])
+    enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).st.depth => 1
+
+fn leave(st: NSt, before: NSt) -> NSt
+    ? "Back to the binders open before; the first core's state, with its caches, stays."
+    NSt.update(st, fvs = before.fvs, ids = before.ids, depth = before.depth)
+
+verify leave
+    leave(enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).st, sample()).depth => 0
+
+fn infer(st: NSt, tenv: List<Val>, env: List<Val>, e: Expr, only: Bool) -> Result<NV, Fail>
+    ? "The type of e, whose loose bound variable i has type tenv[i] and value env[i]. In checking mode (only false) every application's argument is checked against the domain, every binder's domain must be a type, and constants and sorts must use declared universe parameters. A closed term's type is remembered."
+    match Core.Exprs.looseRange(e) == 0
+        true -> inferClosed(st, e, only, cachedType(st, e, only))
+        false -> inferCore(st, tenv, env, e, only)
+
+verify infer
+    resultVal(infer(sample(), [], [], Core.Exprs.natLit(1), false)) => Val.Cst(Check.Lits.name1("Nat"), [], [])
+    resultVal(infer(sample(), [], [], Core.Exprs.sort(Level.Zero), false)) => Val.Sort(Level.Succ(Level.Zero))
+    resultVal(infer(sample(), [], [], Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), false)) == Val.Sort(Level.Zero) => false
+
+fn resultVal(r: Result<NV, Fail>) -> Val
+    ? "Test helper: the value of a success; a stuck marker on an error."
+    match r
+        Result.Ok(x) -> x.v
+        Result.Err -> Val.Var(-99, [])
+
+verify resultVal
+    resultVal(Result.Err(Fail.Reject("x"))) => Val.Var(-99, [])
+
+fn cachedType(st: NSt, e: Expr, only: Bool) -> Option<Expr>
+    ? "A remembered type of the closed term e: a checked one serves both modes, an inferred one only inference."
+    match Core.PMap.find(st.checked, Core.Exprs.hashOf(e), e)
+        Option.Some(t) -> Option.Some(t)
+        Option.None -> match only
+            true -> Core.PMap.find(st.inferred, Core.Exprs.hashOf(e), e)
+            false -> Option.None
+
+verify cachedType
+    cachedType(sample(), Core.Exprs.natLit(1), true) => Option.None
+
+fn inferClosed(st: NSt, e: Expr, only: Bool, hit: Option<Expr>) -> Result<NV, Fail>
+    ? "A remembered type, or the type inferred now and remembered."
+    match hit
+        Option.Some(t) -> Result.Ok(NV(v = Next.Value.eval([], t), st = st))
+        Option.None -> remember(inferCore(st, [], [], e, only)?, e, only)
+
+verify inferClosed
+    resultVal(inferClosed(sample(), Core.Exprs.natLit(1), true, Option.Some(Core.Exprs.sort(Level.Zero)))) => Val.Sort(Level.Zero)
+
+fn remember(r: NV, e: Expr, only: Bool) -> Result<NV, Fail>
+    ? "Keeps the type of the closed term e as a closed term."
+    t = Next.Value.mat(0, r.v)
+    match only
+        true -> Result.Ok(NV(v = r.v, st = NSt.update(r.st, inferred = Core.PMap.add(r.st.inferred, Core.Exprs.hashOf(e), (e, t)))))
+        false -> Result.Ok(NV(v = r.v, st = NSt.update(r.st, checked = Core.PMap.add(r.st.checked, Core.Exprs.hashOf(e), (e, t)))))
+
+verify remember
+    Core.PMap.size(Result.withDefault(remember(NV(v = Val.Nat(1), st = sample()), Core.Exprs.natLit(2), false), NV(v = Val.Nat(0), st = sample())).st.checked) => 1
+
+fn inferCore(st: NSt, tenv: List<Val>, env: List<Val>, e: Expr, only: Bool) -> Result<NV, Fail>
+    ? "One case per kind of term."
+    match e
+        Expr.BVar(i) -> boundType(st, tenv, i)
+        Expr.FVar -> Result.Err(bad("the second core met a free variable"))
+        Expr.Sort(l) -> inferSort(st, l, only)
+        Expr.Const(n, ls) -> inferConst(st, n, ls, only)
+        Expr.App -> inferApp(st, tenv, env, e, only)
+        Expr.Lam -> lamLoop(st, st, tenv, env, e, [], only)
+        Expr.Pi -> piLoop(st, st, tenv, env, e, [], only)
+        Expr.Let(_, _, t, v, b) -> inferLet(st, tenv, env, t, v, b, only)
+        Expr.NatLit -> Result.Ok(NV(v = Val.Cst(Check.Lits.name1("Nat"), [], []), st = st))
+        Expr.StrLit -> Result.Ok(NV(v = Val.Cst(Check.Lits.name1("String"), [], []), st = st))
+        Expr.Proj(_, s, i, x) -> inferProj(st, tenv, env, s, i, x, only)
+
+verify inferCore
+    resultVal(inferCore(sample(), [Val.Sort(Level.Zero)], [Val.Var(0, [])], Core.Exprs.bvar(0), false)) => Val.Sort(Level.Zero)
+
+fn boundType(st: NSt, tenv: List<Val>, i: Int) -> Result<NV, Fail>
+    ? "A bound variable's type; one past the environment is not a term the checker can meet."
+    match i < List.len(tenv)
+        true -> Result.Ok(NV(v = Next.Value.nth(tenv, i), st = st))
+        false -> Result.Err(bad("the type checker met a loose bound variable"))
+
+verify boundType
+    boundType(sample(), [], 0) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
+
+fn levelOk(st: NSt, l: Level) -> Result<Unit, Fail>
+    ? "Every universe parameter must be one of the declaration's."
+    match st.old.checkParams
+        false -> Result.Ok(Unit)
+        true -> match Core.Univ.undefParam(l, st.old.params)
+            Option.Some(n) -> Result.Err(bad("undefined universe level parameter '{Core.Names.render(n)}'"))
+            Option.None -> Result.Ok(Unit)
+
+verify levelOk
+    levelOk(sample(), Level.Param(Core.Names.str(Core.Names.anon(), "u"))) => Result.Err(Fail.Reject("undefined universe level parameter 'u'"))
+
+fn levelsOk(st: NSt, ls: List<Level>) -> Result<Unit, Fail>
+    ? "levelOk on each."
+    match ls
+        [] -> Result.Ok(Unit)
+        [l, ..rest] -> levelsNext(levelOk(st, l)?, st, rest)
+
+verify levelsOk
+    levelsOk(sample(), []) => Result.Ok(Unit)
+
+fn levelsNext(u: Unit, st: NSt, rest: List<Level>) -> Result<Unit, Fail>
+    ? "Continues after one level passed."
+    levelsOk(st, rest)
+
+verify levelsNext
+    levelsNext(Unit, sample(), []) => Result.Ok(Unit)
+
+fn inferSort(st: NSt, l: Level, only: Bool) -> Result<NV, Fail>
+    ? "Sort u : Sort (u+1)."
+    match only
+        true -> Result.Ok(NV(v = Val.Sort(Level.Succ(l)), st = st))
+        false -> sortAfter(levelOk(st, l)?, st, l)
+
+verify inferSort
+    resultVal(inferSort(sample(), Level.Zero, false)) => Val.Sort(Level.Succ(Level.Zero))
+
+fn sortAfter(u: Unit, st: NSt, l: Level) -> Result<NV, Fail>
+    ? "The type of a checked sort."
+    Result.Ok(NV(v = Val.Sort(Level.Succ(l)), st = st))
+
+verify sortAfter
+    resultVal(sortAfter(Unit, sample(), Level.Zero)) => Val.Sort(Level.Succ(Level.Zero))
+
+fn inferConst(st: NSt, n: Name, ls: List<Level>, only: Bool) -> Result<NV, Fail>
+    ? "The constant's type at the given levels, evaluated."
+    match Check.State.lookup(st.old, n)
+        Option.None -> Result.Err(bad("unknown constant '{Core.Names.render(n)}'"))
+        Option.Some(c) -> constType(st, c, Check.State.headOf(c), ls, only)
+
+verify inferConst
+    inferConst(sample(), Core.Names.anon(), [], false) => Result.Err(Fail.Reject("unknown constant '[anonymous]'"))
+
+fn constType(st: NSt, c: Const, h: Head, ls: List<Level>, only: Bool) -> Result<NV, Fail>
+    ? "Checks the level count, and in checking mode safety and levels."
+    match List.len(h.params) == List.len(ls)
+        false -> Result.Err(bad("incorrect number of universe levels for '{Core.Names.render(h.name)}'"))
+        true -> match only
+            true -> Result.Ok(NV(v = Next.Value.eval([], Core.Subst.instLevelParams(h.ty, h.params, ls)), st = st))
+            false -> constSafety(st, c, h, ls)
+
+verify constType
+    resultVal(constType(sample(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], false)) => Val.Sort(Level.Zero)
+
+fn constSafety(st: NSt, c: Const, h: Head, ls: List<Level>) -> Result<NV, Fail>
+    ? "A safe declaration may use neither unsafe nor partial constants."
+    match Bool.and(Check.State.isUnsafe(c), st.old.safety != Safety.Unsafe)
+        true -> Result.Err(bad("invalid declaration, it uses unsafe declaration '{Core.Names.render(h.name)}'"))
+        false -> match Bool.and(Check.State.isPartial(c), st.old.safety == Safety.Safe)
+            true -> Result.Err(bad("invalid declaration, safe declaration must not contain partial declaration '{Core.Names.render(h.name)}'"))
+            false -> constLevels(levelsOk(st, ls)?, st, h, ls)
+
+verify constSafety
+    constSafety(sample(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), []) => Result.Err(Fail.Reject("invalid declaration, it uses unsafe declaration '[anonymous]'"))
+
+fn constLevels(u: Unit, st: NSt, h: Head, ls: List<Level>) -> Result<NV, Fail>
+    ? "The instantiated type once the levels passed."
+    Result.Ok(NV(v = Next.Value.eval([], Core.Subst.instLevelParams(h.ty, h.params, ls)), st = st))
+
+verify constLevels
+    resultVal(constLevels(Unit, sample(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.natLit(1)), [])) => Val.Nat(1)
+
+fn inferApp(st: NSt, tenv: List<Val>, env: List<Val>, e: Expr, only: Bool) -> Result<NV, Fail>
+    ? "The function's type, then each argument in turn: the type goes on as the codomain with the argument in its environment."
+    f = infer(st, tenv, env, Core.Apps.fnOf(e), only)?
+    argsLoop(f.st, tenv, env, f.v, Core.Apps.argsOf(e), only)
+
+verify inferApp
+    inferApp(sample(), [], [], Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), false) => Result.Err(Fail.Reject("function expected"))
+
+fn argsLoop(st: NSt, tenv: List<Val>, env: List<Val>, ft: Val, args: List<Expr>, only: Bool) -> Result<NV, Fail>
+    ? "One argument after another."
+    match args
+        [] -> Result.Ok(NV(v = ft, st = st))
+        [a, ..rest] -> argStep(whnf(st, ft)?, tenv, env, a, rest, only)
+
+verify argsLoop
+    resultVal(argsLoop(sample(), [], [], Val.Nat(1), [], false)) => Val.Nat(1)
+
+fn argStep(w: NV, tenv: List<Val>, env: List<Val>, a: Expr, rest: List<Expr>, only: Bool) -> Result<NV, Fail>
+    ? "The function's type must be a pi; in checking mode the argument's type must equal its domain."
+    match w.v
+        Val.Pi(_, dom, cenv, b, _) -> match only
+            true -> argsLoop(w.st, tenv, env, Next.Value.eval(List.prepend(Next.Value.delay(env, a), cenv), b), rest, only)
+            false -> argChecked(w.st, tenv, env, a, dom, cenv, b, rest)
+        _ -> Result.Err(bad("function expected"))
+
+verify argStep
+    argStep(NV(v = Val.Nat(1), st = sample()), [], [], Core.Exprs.natLit(1), [], false) => Result.Err(Fail.Reject("function expected"))
+
+fn argChecked(st: NSt, tenv: List<Val>, env: List<Val>, a: Expr, dom: Val, cenv: List<Val>, b: Expr, rest: List<Expr>) -> Result<NV, Fail>
+    ? "The argument's type against the domain."
+    t = infer(st, tenv, env, a, false)?
+    eq = conv(t.st, t.v, dom)?
+    match eq.b
+        true -> argsLoop(eq.st, tenv, env, Next.Value.eval(List.prepend(Next.Value.delay(env, a), cenv), b), rest, false)
+        false -> Result.Err(bad("application type mismatch"))
+
+verify argChecked
+    argChecked(sample(), [], [], Core.Exprs.sort(Level.Zero), Val.Sort(Level.Zero), [], Core.Exprs.bvar(0), []) => Result.Err(Fail.Reject("application type mismatch"))
+
+fn domainOk(st: NSt, tenv: List<Val>, env: List<Val>, d: Expr, only: Bool) -> Result<NV, Fail>
+    ? "A binder's domain, which in checking mode must be a type; returns its sort's value."
+    t = infer(st, tenv, env, d, only)?
+    sortOf(t.st, t.v)
+
+verify domainOk
+    domainOk(sample(), [], [], Core.Exprs.natLit(1), false) => Result.Err(Fail.Reject("type expected"))
+
+fn sortOf(st: NSt, t: Val) -> Result<NV, Fail>
+    ? "t in weak head normal form must be a sort; returns it."
+    w = whnf(st, t)?
+    match w.v
+        Val.Sort -> Result.Ok(w)
+        _ -> Result.Err(bad("type expected"))
+
+verify sortOf
+    sortOf(sample(), Val.Nat(1)) => Result.Err(Fail.Reject("type expected"))
+    resultVal(sortOf(sample(), Val.Sort(Level.Zero))) => Val.Sort(Level.Zero)
+
+fn lamLoop(st: NSt, before: NSt, tenv: List<Val>, env: List<Val>, e: Expr, binders: List<Tuple<Name, Expr, Binder>>, only: Bool) -> Result<NV, Fail>
+    ? "Opens nested lambdas, each at the next level, then infers the body; binders keeps each domain read back as a term, innermost first."
+    match e
+        Expr.Lam(_, n, d, b, bi) -> lamStep(st, before, tenv, env, n, d, b, bi, binders, only)
+        _ -> lamEnd(st, before, tenv, env, e, binders, only)
+
+verify lamLoop
+    resultVal(lamLoop(sample(), sample(), [], [], Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), [], false)) => Val.Pi(Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.sort(Level.Zero), Binder.Default)
+
+fn lamStep(st: NSt, before: NSt, tenv: List<Val>, env: List<Val>, n: Name, d: Expr, b: Expr, bi: Binder, binders: List<Tuple<Name, Expr, Binder>>, only: Bool) -> Result<NV, Fail>
+    ? "One lambda: the domain checked, then a variable for it."
+    s = typeChecked(st, tenv, env, d, only)?
+    dom = Next.Value.eval(env, d)
+    x = enter(s, n, dom, bi)
+    lamLoop(x.st, before, List.prepend(dom, tenv), List.prepend(x.v, env), b, List.prepend((n, Next.Value.mat(st.depth, dom), bi), binders), only)
+
+verify lamStep
+    resultVal(lamStep(sample(), sample(), [], [], Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default, [], true)) => Val.Pi(Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.sort(Level.Zero), Binder.Default)
+
+fn typeChecked(st: NSt, tenv: List<Val>, env: List<Val>, d: Expr, only: Bool) -> Result<NSt, Fail>
+    ? "In checking mode the domain must be a type."
+    match only
+        true -> Result.Ok(st)
+        false -> Result.Ok(domainOk(st, tenv, env, d, false)?.st)
+
+verify typeChecked
+    typeChecked(sample(), [], [], Core.Exprs.natLit(1), true) == Result.Ok(sample()) => true
+
+fn lamEnd(st: NSt, before: NSt, tenv: List<Val>, env: List<Val>, e: Expr, binders: List<Tuple<Name, Expr, Binder>>, only: Bool) -> Result<NV, Fail>
+    ? "The body's type closed over the lambdas as a pi: read back at the body's depth, wrapped in the domains, and evaluated where the lambdas began."
+    r = infer(st, tenv, env, e, only)?
+    t = wrapPis(binders, Next.Value.mat(r.st.depth, r.v))
+    Result.Ok(NV(v = Next.Value.eval(before.ids, t), st = leave(r.st, before)))
+
+verify lamEnd
+    resultVal(lamEnd(sample(), sample(), [], [], Core.Exprs.natLit(1), [], false)) => Val.Cst(Check.Lits.name1("Nat"), [], [])
+
+fn wrapPis(binders: List<Tuple<Name, Expr, Binder>>, body: Expr) -> Expr
+    ? "Pis around body, innermost binder first in the list."
+    match binders
+        [] -> body
+        [(n, d, bi), ..rest] -> wrapPis(rest, Core.Exprs.pi(n, d, body, bi))
+
+verify wrapPis
+    wrapPis([(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Binder.Default)], Core.Exprs.bvar(0)) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
+
+fn piLoop(st: NSt, before: NSt, tenv: List<Val>, env: List<Val>, e: Expr, us: List<Level>, only: Bool) -> Result<NV, Fail>
+    ? "Opens nested pis collecting their domains' levels; the type is the imax of them all and the body's."
+    match e
+        Expr.Pi(_, n, d, b, bi) -> piStep(st, before, tenv, env, n, d, b, bi, us, only)
+        _ -> piEnd(st, before, tenv, env, e, us, only)
+
+verify piLoop
+    resultVal(piLoop(sample(), sample(), [], [], Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default), [], false)) => Val.Sort(Level.Succ(Level.Zero))
+
+fn piStep(st: NSt, before: NSt, tenv: List<Val>, env: List<Val>, n: Name, d: Expr, b: Expr, bi: Binder, us: List<Level>, only: Bool) -> Result<NV, Fail>
+    ? "The domain's sort, then a variable for it."
+    s = domainOk(st, tenv, env, d, only)?
+    dom = Next.Value.eval(env, d)
+    x = enter(s.st, n, dom, bi)
+    piLoop(x.st, before, List.prepend(dom, tenv), List.prepend(x.v, env), b, List.prepend(levelOf(s.v), us), only)
+
+verify piStep
+    piStep(sample(), sample(), [], [], Core.Names.anon(), Core.Exprs.natLit(1), Core.Exprs.sort(Level.Zero), Binder.Default, [], false) => Result.Err(Fail.Reject("type expected"))
+
+fn levelOf(v: Val) -> Level
+    ? "The level of a sort."
+    match v
+        Val.Sort(l) -> l
+        _ -> Level.Zero
+
+verify levelOf
+    levelOf(Val.Sort(Level.Succ(Level.Zero))) => Level.Succ(Level.Zero)
+
+fn piEnd(st: NSt, before: NSt, tenv: List<Val>, env: List<Val>, e: Expr, us: List<Level>, only: Bool) -> Result<NV, Fail>
+    ? "The body's sort, folded with the domains' by imax from the innermost out."
+    s = domainOk(st, tenv, env, e, only)?
+    Result.Ok(NV(v = Val.Sort(imaxFold(us, levelOf(s.v))), st = leave(s.st, before)))
+
+verify piEnd
+    resultVal(piEnd(sample(), sample(), [], [], Core.Exprs.sort(Level.Zero), [], false)) => Val.Sort(Level.Succ(Level.Zero))
+
+fn imaxFold(us: List<Level>, r: Level) -> Level
+    ? "imax u_i r from the innermost domain out."
+    match us
+        [] -> r
+        [u, ..rest] -> imaxFold(rest, Core.Univ.mkImax(u, r))
+
+verify imaxFold
+    imaxFold([Level.Succ(Level.Zero)], Level.Zero) => Level.Zero
+
+fn inferLet(st: NSt, tenv: List<Val>, env: List<Val>, t: Expr, v: Expr, b: Expr, only: Bool) -> Result<NV, Fail>
+    ? "In checking mode the type is a type and the value has it; the body is inferred with the value in its environment."
+    s = letChecked(st, tenv, env, t, v, only)?
+    infer(s, List.prepend(Next.Value.eval(env, t), tenv), List.prepend(Next.Value.delay(env, v), env), b, only)
+
+verify inferLet
+    resultVal(inferLet(sample(), [], [], Core.Exprs.cnst(Check.Lits.name1("Nat"), []), Core.Exprs.natLit(1), Core.Exprs.bvar(0), true)) => Val.Cst(Check.Lits.name1("Nat"), [], [])
+
+fn letChecked(st: NSt, tenv: List<Val>, env: List<Val>, t: Expr, v: Expr, only: Bool) -> Result<NSt, Fail>
+    ? "The let's type and value."
+    match only
+        true -> Result.Ok(st)
+        false -> letValue(domainOk(st, tenv, env, t, false)?.st, tenv, env, t, v)
+
+verify letChecked
+    letChecked(sample(), [], [], Core.Exprs.natLit(1), Core.Exprs.natLit(1), false) => Result.Err(Fail.Reject("type expected"))
+
+fn letValue(st: NSt, tenv: List<Val>, env: List<Val>, t: Expr, v: Expr) -> Result<NSt, Fail>
+    ? "The value's type equals the declared one."
+    vt = infer(st, tenv, env, v, false)?
+    eq = conv(vt.st, vt.v, Next.Value.eval(env, t))?
+    match eq.b
+        true -> Result.Ok(eq.st)
+        false -> Result.Err(bad("let value type mismatch"))
+
+verify letValue
+    letValue(sample(), [], [], Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero)) => Result.Err(Fail.Reject("let value type mismatch"))
+
+fn badProj() -> Fail
+    ? "The one error every malformed projection gives."
+    Fail.Reject("invalid projection")
+
+verify badProj
+    badProj() => Fail.Reject("invalid projection")
+
+fn inferProj(st: NSt, tenv: List<Val>, env: List<Val>, s: Name, idx: Int, x: Expr, only: Bool) -> Result<NV, Fail>
+    ? "x.idx where x's type is the structure s applied to its parameters: the constructor's type is walked past the parameters and the earlier fields, each earlier field being the projection of x."
+    t = infer(st, tenv, env, x, only)?
+    w = whnf(t.st, t.v)?
+    projFrom(w.st, s, idx, Next.Value.eval(env, x), w.v)
+
+verify inferProj
+    inferProj(sample(), [], [], Core.Names.anon(), 0, Core.Exprs.natLit(1), false) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projFrom(st: NSt, s: Name, idx: Int, xv: Val, ty: Val) -> Result<NV, Fail>
+    ? "The type's head must be the projection's structure."
+    match ty
+        Val.Cst(n, ls, sp) -> match n == s
+            true -> projInduct(st, idx, xv, ty, ls, List.reverse(sp), Check.State.lookup(st.old, n))
+            false -> Result.Err(badProj())
+        _ -> Result.Err(badProj())
+
+verify projFrom
+    projFrom(sample(), Core.Names.anon(), 0, Val.Nat(1), Val.Nat(1)) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projInduct(st: NSt, idx: Int, xv: Val, ty: Val, ls: List<Level>, args: List<Val>, c: Option<Const>) -> Result<NV, Fail>
+    ? "A structure: one constructor, fully applied to parameters and indices."
+    match c
+        Option.Some(Const.CInduct(iv)) -> match iv.ctors
+            [k] -> match List.len(args) == iv.numParams + iv.numIndices
+                true -> projCtor(st, idx, xv, ty, ls, List.take(args, iv.numParams), iv.head.name, Check.State.lookup(st.old, k))
+                false -> Result.Err(badProj())
+            _ -> Result.Err(badProj())
+        _ -> Result.Err(badProj())
+
+verify projInduct
+    projInduct(sample(), 0, Val.Nat(1), Val.Nat(1), [], [], Option.None) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projCtor(st: NSt, idx: Int, xv: Val, ty: Val, ls: List<Level>, params: List<Val>, sname: Name, c: Option<Const>) -> Result<NV, Fail>
+    ? "Walks the constructor type past the parameters and the earlier fields."
+    match c
+        Option.Some(Const.CCtor(k)) -> projWalk(st, idx, xv, ty, sname, Next.Value.eval([], Core.Subst.instLevelParams(k.head.ty, k.head.params, ls)), params)
+        _ -> Result.Err(badProj())
+
+verify projCtor
+    projCtor(sample(), 0, Val.Nat(1), Val.Nat(1), [], [], Core.Names.anon(), Option.None) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projWalk(st: NSt, idx: Int, xv: Val, ty: Val, sname: Name, r: Val, params: List<Val>) -> Result<NV, Fail>
+    ? "Parameters, then fields, then the field's own type; out of a proof only proofs may be projected."
+    p = projParams(st, r, params)?
+    pp = isProp(p.st, ty)?
+    f = projFields(pp.st, p.v, sname, xv, 0, idx, pp.b)?
+    w = whnf(f.st, f.v)?
+    match w.v
+        Val.Pi(_, d, _, _, _) -> projResult(w.st, Next.Value.force(d), pp.b)
+        _ -> Result.Err(badProj())
+
+verify projWalk
+    projWalk(sample(), 0, Val.Nat(1), Val.Sort(Level.Zero), Core.Names.anon(), Val.Nat(1), []) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projParams(st: NSt, r: Val, params: List<Val>) -> Result<NV, Fail>
+    ? "Applies the constructor's type to the parameters."
+    match params
+        [] -> Result.Ok(NV(v = r, st = st))
+        [p, ..rest] -> projParam(whnf(st, r)?, p, rest)
+
+verify projParams
+    resultVal(projParams(sample(), Val.Nat(1), [])) => Val.Nat(1)
+
+fn projParam(w: NV, p: Val, rest: List<Val>) -> Result<NV, Fail>
+    ? "One parameter binder."
+    match w.v
+        Val.Pi(_, _, cenv, b, _) -> projParams(w.st, Next.Value.eval(List.prepend(p, cenv), b), rest)
+        _ -> Result.Err(badProj())
+
+verify projParam
+    projParam(NV(v = Val.Nat(1), st = sample()), Val.Nat(1), []) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projFields(st: NSt, r: Val, sname: Name, xv: Val, i: Int, idx: Int, propType: Bool) -> Result<NV, Fail>
+    ? "Earlier fields become projections of x."
+    match i >= idx
+        true -> Result.Ok(NV(v = r, st = st))
+        false -> projField(whnf(st, r)?, sname, xv, i, idx, propType)
+
+verify projFields
+    resultVal(projFields(sample(), Val.Nat(1), Core.Names.anon(), Val.Nat(1), 0, 0, false)) => Val.Nat(1)
+
+fn projField(w: NV, sname: Name, xv: Val, i: Int, idx: Int, propType: Bool) -> Result<NV, Fail>
+    ? "One earlier field; out of a proof, a field later fields depend on must be a proof too."
+    match w.v
+        Val.Pi(_, d, cenv, b, _) -> match Bool.and(propType, Core.Exprs.looseRange(b) > 0)
+            false -> projFields(w.st, Next.Value.eval(List.prepend(Val.Prj(sname, i, xv, []), cenv), b), sname, xv, i + 1, idx, propType)
+            true -> projFieldProp(isProp(w.st, Next.Value.force(d))?, cenv, b, sname, xv, i, idx)
+        _ -> Result.Err(badProj())
+
+verify projField
+    projField(NV(v = Val.Nat(1), st = sample()), Core.Names.anon(), Val.Nat(1), 0, 1, false) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projFieldProp(p: NB, cenv: List<Val>, b: Expr, sname: Name, xv: Val, i: Int, idx: Int) -> Result<NV, Fail>
+    ? "A dependent field of a proof."
+    match p.b
+        true -> projFields(p.st, Next.Value.eval(List.prepend(Val.Prj(sname, i, xv, []), cenv), b), sname, xv, i + 1, idx, true)
+        false -> Result.Err(badProj())
+
+verify projFieldProp
+    projFieldProp(NB(b = false, st = sample()), [], Core.Exprs.bvar(0), Core.Names.anon(), Val.Nat(1), 0, 1) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projResult(st: NSt, d: Val, propType: Bool) -> Result<NV, Fail>
+    ? "The field's type; out of a proof it must be a proposition."
+    match propType
+        false -> Result.Ok(NV(v = d, st = st))
+        true -> projResultProp(isProp(st, d)?, d)
+
+verify projResult
+    resultVal(projResult(sample(), Val.Nat(1), false)) => Val.Nat(1)
+
+fn projResultProp(p: NB, d: Val) -> Result<NV, Fail>
+    ? "Only a proposition may be projected out of a proof."
+    match p.b
+        true -> Result.Ok(NV(v = d, st = p.st))
+        false -> Result.Err(badProj())
+
+verify projResultProp
+    projResultProp(NB(b = false, st = sample()), Val.Nat(1)) => Result.Err(Fail.Reject("invalid projection"))
+
+fn isProp(st: NSt, t: Val) -> Result<NB, Fail>
+    ? "Whether the type t is a proposition, through the first core for now."
+    r = Check.Tc.isProp(st.old, termOf(st, t))?
+    Result.Ok(NB(b = r.b, st = NSt.update(st, old = r.st)))
+
+verify isProp
+    isProp(sample(), Val.Sort(Level.Zero)) == Result.Ok(NB(b = false, st = sample())) => true
+
+fn conv(st: NSt, a: Val, b: Val) -> Result<NB, Fail>
+    ? "Definitional equality, through the first core for now: both values read back with each open level as its free variable."
+    r = Check.Tc.isDefEq(st.old, termOf(st, a), termOf(st, b))?
+    Result.Ok(NB(b = r.b, st = NSt.update(st, old = r.st)))
+
+verify conv
+    conv(sample(), Val.Nat(1), Val.Nat(1)) == Result.Ok(NB(b = true, st = sample())) => true
+    conv(sample(), Val.Nat(1), Val.Nat(2)) == Result.Ok(NB(b = false, st = sample())) => true
+
+fn whnf(st: NSt, v: Val) -> Result<NV, Fail>
+    ? "Weak head normal form of a value: beta happened in evaluation already; here a definition unfolds and a projection of a constructor takes its field. A recursor, a quotient rule or Nat arithmetic goes to the first core's whnf for now."
+    w = Next.Value.force(v)
+    match w
+        Val.Cst(n, ls, sp) -> whnfConst(st, w, n, ls, sp, Check.State.lookup(st.old, n))
+        Val.Prj(s, i, x, sp) -> whnfProj(st, w, i, sp, whnf(st, x)?)
+        _ -> Result.Ok(NV(v = w, st = st))
+
+verify whnf
+    resultVal(whnf(sample(), Val.Delay([], Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.natLit(1))))) => Val.Nat(1)
+    resultVal(whnf(sample(), Val.Sort(Level.Zero))) => Val.Sort(Level.Zero)
+
+fn whnfConst(st: NSt, w: Val, n: Name, ls: List<Level>, sp: List<Val>, c: Option<Const>) -> Result<NV, Fail>
+    ? "A definition at the right number of levels unfolds into its value applied to the spine; recursors, quotient rules and Nat arithmetic on literals are the first core's; anything else is stuck."
+    match c
+        Option.Some(Const.CRec) -> viaFirst(st, w)
+        Option.Some(Const.CQuot) -> viaFirst(st, w)
+        Option.Some(k) -> match isNatArith(n, List.len(sp))
+            true -> viaFirst(st, w)
+            false -> unfoldOr(st, w, Check.State.headOf(k), Check.State.valueOf(k), ls, sp)
+        Option.None -> Result.Ok(NV(v = w, st = st))
+
+verify whnfConst
+    resultVal(whnfConst(sample(), Val.Nat(1), Core.Names.anon(), [], [], Option.None)) => Val.Nat(1)
+
+fn isNatArith(n: Name, k: Int) -> Bool
+    ? "Nat.succ on one argument or a binary Nat function on two, which the first core computes on literals."
+    match n
+        Name.Str(Name.Str(Name.Anon, "Nat", _), op, _) -> Bool.or(Bool.and(op == "succ", k == 1), Bool.and(Check.Lits.isNatOp(op), k == 2))
+        _ -> false
+
+verify isNatArith
+    isNatArith(Check.Lits.name2("Nat", "add"), 2) => true
+    isNatArith(Check.Lits.name2("Nat", "add"), 1) => false
+
+fn unfoldOr(st: NSt, w: Val, h: Head, v: Option<Expr>, ls: List<Level>, sp: List<Val>) -> Result<NV, Fail>
+    ? "Unfolds when there is a value and the level count agrees."
+    match v
+        Option.Some(body) -> match List.len(h.params) == List.len(ls)
+            true -> whnf(st, applyAll(Next.Value.eval([], Core.Subst.instLevelParams(body, h.params, ls)), List.reverse(sp)))
+            false -> Result.Ok(NV(v = w, st = st))
+        Option.None -> Result.Ok(NV(v = w, st = st))
+
+verify unfoldOr
+    resultVal(unfoldOr(sample(), Val.Nat(0), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Option.Some(Core.Exprs.natLit(3)), [], [])) => Val.Nat(3)
+
+fn applyAll(f: Val, args: List<Val>) -> Val
+    ? "f applied to the arguments, first argument first."
+    match args
+        [] -> f
+        [a, ..rest] -> applyAll(Next.Value.apply(f, a), rest)
+
+verify applyAll
+    applyAll(Val.Var(0, []), [Val.Nat(1), Val.Nat(2)]) => Val.Var(0, [Val.Nat(2), Val.Nat(1)])
+
+fn whnfProj(st: NSt, w: Val, i: Int, sp: List<Val>, x: NV) -> Result<NV, Fail>
+    ? "A projection of a constructor application takes its field; a projection of anything else is the first core's."
+    match x.v
+        Val.Cst(k, _, args) -> projOfCtor(x.st, w, i, sp, Check.State.lookup(x.st.old, k), List.reverse(args))
+        _ -> viaFirst(x.st, w)
+
+verify whnfProj
+    resultVal(whnfProj(sample(), Val.Nat(1), 0, [], NV(v = Val.Sort(Level.Zero), st = sample()))) => Val.Nat(1)
+
+fn projOfCtor(st: NSt, w: Val, i: Int, sp: List<Val>, c: Option<Const>, args: List<Val>) -> Result<NV, Fail>
+    ? "The constructor's field numParams + i, applied to the projection's own arguments."
+    match c
+        Option.Some(Const.CCtor(k)) -> match List.len(args) > k.numParams + i
+            true -> whnf(st, applyAll(Next.Value.nth(List.drop(args, k.numParams + i), 0), List.reverse(sp)))
+            false -> viaFirst(st, w)
+        _ -> viaFirst(st, w)
+
+verify projOfCtor
+    resultVal(projOfCtor(sample(), Val.Nat(1), 0, [], Option.None, [])) => Val.Nat(1)
+
+fn viaFirst(st: NSt, w: Val) -> Result<NV, Fail>
+    ? "The first core's whnf on the value read back; unchanged, the value stays as it is, else the result comes back with each level's free variable a level again."
+    t = termOf(st, w)
+    r = Check.Tc.whnf(st.old, t)?
+    match r.e == t
+        true -> Result.Ok(NV(v = w, st = NSt.update(st, old = r.st)))
+        false -> Result.Ok(NV(v = Next.Value.eval(st.ids, Core.Subst.abstractFVars(r.e, levelIds(st.fvs, []))), st = NSt.update(st, old = r.st)))
+
+verify viaFirst
+    resultVal(viaFirst(sample(), Val.Nat(1))) => Val.Nat(1)
+
+fn levelIds(fvs: List<Expr>, acc: List<Int>) -> List<Int>
+    ? "The free variable numbers of the levels, lowest level first; fvs lists the highest first."
+    match fvs
+        [] -> acc
+        [f, ..rest] -> levelIds(rest, List.prepend(fvarNumber(f), acc))
+
+verify levelIds
+    levelIds([Core.Exprs.fvar(8), Core.Exprs.fvar(3)], []) => [3, 8]
+
+fn fvarNumber(e: Expr) -> Int
+    ? "The number of a free variable."
+    match e
+        Expr.FVar(id) -> id
+        _ -> -1
+
+verify fvarNumber
+    fvarNumber(Core.Exprs.fvar(2)) => 2

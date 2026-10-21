@@ -1,0 +1,227 @@
+module Value
+    intent =
+        "Values for the second core: a term is evaluated in an environment"
+        "of values instead of having values substituted into it. A variable"
+        "is a de Bruijn level, counted from the outside, so entering a binder"
+        "extends the environment and copies nothing. An argument or a let"
+        "value waits as the term with its environment (Delay) until"
+        "something needs its head; a binder keeps its body with the"
+        "environment it was met in. Constants stay folded: unfolding a"
+        "definition, a recursor rule or a projection of a constructor is"
+        "weak head normalization's job, which needs the environment of"
+        "constants. A spine lists the arguments last first, so that applying"
+        "one more is a prepend. Terms come back only at the edges: quote reads"
+        "a value back with beta under binders, mat puts the environment back"
+        "into the waiting terms without evaluating them, the term the first"
+        "core would have built."
+    exposes [Val, eval, apply, force, nth, quote, mat, matF, delay]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps]
+    effects []
+
+type Val
+    Var(Int, List<Val>)
+    Free(Int, List<Val>)
+    Cst(Name, List<Level>, List<Val>)
+    Lam(Name, Val, List<Val>, Expr, Binder)
+    Pi(Name, Val, List<Val>, Expr, Binder)
+    Sort(Level)
+    Nat(Int)
+    Str(String)
+    Prj(Name, Int, Val, List<Val>)
+    Stuck(Val, List<Val>)
+    Delay(List<Val>, Expr)
+
+fn eval(env: List<Val>, e: Expr) -> Val
+    ? "The value of e when its loose bound variable i is env's i-th value (index 0 first): beta and let at the head, everything else waiting."
+    match e
+        Expr.BVar(i) -> force(nth(env, i))
+        Expr.FVar(id) -> Val.Free(id, [])
+        Expr.Sort(l) -> Val.Sort(l)
+        Expr.Const(n, ls) -> Val.Cst(n, ls, [])
+        Expr.App(_, f, a) -> apply(eval(env, f), delay(env, a))
+        Expr.Lam(_, n, d, b, bi) -> Val.Lam(n, delay(env, d), env, b, bi)
+        Expr.Pi(_, n, d, b, bi) -> Val.Pi(n, delay(env, d), env, b, bi)
+        Expr.Let(_, _, _, v, b) -> eval(List.prepend(delay(env, v), env), b)
+        Expr.NatLit(k) -> Val.Nat(k)
+        Expr.StrLit(s) -> Val.Str(s)
+        Expr.Proj(_, s, i, x) -> Val.Prj(s, i, eval(env, x), [])
+
+verify eval
+    eval([], Core.Exprs.natLit(3)) => Val.Nat(3)
+    eval([Val.Var(0, [])], Core.Exprs.bvar(0)) => Val.Var(0, [])
+    eval([], Core.Exprs.app(idLam(), Core.Exprs.natLit(1))) => Val.Nat(1)
+    eval([], Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(2), Core.Exprs.bvar(0))) => Val.Nat(2)
+
+fn idLam() -> Expr
+    ? "fun x => x, for the examples."
+    Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
+
+verify idLam
+    Core.Exprs.looseRange(idLam()) => 0
+
+fn delay(env: List<Val>, a: Expr) -> Val
+    ? "An argument as it waits: a variable is its value already, a leaf is evaluated on the spot, a closed term keeps no environment, anything else waits with env."
+    match a
+        Expr.BVar(i) -> nth(env, i)
+        Expr.Sort(l) -> Val.Sort(l)
+        Expr.Const(n, ls) -> Val.Cst(n, ls, [])
+        Expr.NatLit(k) -> Val.Nat(k)
+        Expr.StrLit(s) -> Val.Str(s)
+        Expr.FVar(id) -> Val.Free(id, [])
+        _ -> match Core.Exprs.looseRange(a) == 0
+            true -> Val.Delay([], a)
+            false -> Val.Delay(env, a)
+
+verify delay
+    delay([Val.Nat(5)], Core.Exprs.bvar(0)) => Val.Nat(5)
+    delay([Val.Nat(5)], idLam()) => Val.Delay([], idLam())
+    delay([Val.Nat(5)], Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => Val.Delay([Val.Nat(5)], Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)))
+
+fn force(v: Val) -> Val
+    ? "A waiting term evaluated; anything else as it is."
+    match v
+        Val.Delay(env, e) -> eval(env, e)
+        _ -> v
+
+verify force
+    force(Val.Delay([], Core.Exprs.natLit(4))) => Val.Nat(4)
+    force(Val.Nat(4)) => Val.Nat(4)
+
+fn nth(env: List<Val>, i: Int) -> Val
+    ? "The i-th value, index 0 first; a variable past the end stays a variable that names no level, which quote shows as the bound variable it was."
+    match env
+        [] -> Val.Var(-1 - i, [])
+        [v, ..rest] -> match i == 0
+            true -> v
+            false -> nth(rest, i - 1)
+
+verify nth
+    nth([Val.Nat(1), Val.Nat(2)], 1) => Val.Nat(2)
+    nth([], 2) => Val.Var(-3, [])
+
+fn apply(f: Val, a: Val) -> Val
+    ? "f applied to a: a lambda takes a into its environment; a variable, constant or projection keeps it on its spine; anything else is stuck with it."
+    match f
+        Val.Lam(_, _, cenv, b, _) -> eval(List.prepend(a, cenv), b)
+        Val.Var(l, sp) -> Val.Var(l, List.prepend(a, sp))
+        Val.Free(id, sp) -> Val.Free(id, List.prepend(a, sp))
+        Val.Cst(n, ls, sp) -> Val.Cst(n, ls, List.prepend(a, sp))
+        Val.Prj(s, i, x, sp) -> Val.Prj(s, i, x, List.prepend(a, sp))
+        Val.Stuck(h, sp) -> Val.Stuck(h, List.prepend(a, sp))
+        Val.Delay(env, e) -> apply(eval(env, e), a)
+        _ -> Val.Stuck(f, [a])
+
+verify apply
+    apply(Val.Var(0, []), Val.Nat(1)) => Val.Var(0, [Val.Nat(1)])
+    apply(Val.Lam(Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.bvar(0), Binder.Default), Val.Nat(7)) => Val.Nat(7)
+    apply(Val.Nat(1), Val.Nat(2)) => Val.Stuck(Val.Nat(1), [Val.Nat(2)])
+
+fn quote(d: Int, v: Val) -> Expr
+    ? "The value read back as a term under d binders, level l becoming bound variable d - 1 - l: beta-normal, as evaluation leaves it, with binder bodies evaluated under a fresh variable."
+    match v
+        Val.Var(l, sp) -> spineBack(d, Core.Exprs.bvar(d - 1 - l), List.reverse(sp))
+        Val.Free(id, sp) -> spineBack(d, Core.Exprs.fvar(id), List.reverse(sp))
+        Val.Cst(n, ls, sp) -> spineBack(d, Core.Exprs.cnst(n, ls), List.reverse(sp))
+        Val.Lam(n, dom, env, b, bi) -> Core.Exprs.lam(n, quote(d, dom), quote(d + 1, eval(List.prepend(Val.Var(d, []), env), b)), bi)
+        Val.Pi(n, dom, env, b, bi) -> Core.Exprs.pi(n, quote(d, dom), quote(d + 1, eval(List.prepend(Val.Var(d, []), env), b)), bi)
+        Val.Sort(l) -> Core.Exprs.sort(l)
+        Val.Nat(k) -> Core.Exprs.natLit(k)
+        Val.Str(s) -> Core.Exprs.strLit(s)
+        Val.Prj(s, i, x, sp) -> spineBack(d, Core.Exprs.proj(s, i, quote(d, x)), List.reverse(sp))
+        Val.Stuck(h, sp) -> spineBack(d, quote(d, h), List.reverse(sp))
+        Val.Delay(env, e) -> quote(d, eval(env, e))
+
+verify quote
+    quote(0, eval([], Core.Exprs.app(idLam(), Core.Exprs.natLit(1)))) => Core.Exprs.natLit(1)
+    quote(1, Val.Var(0, [Val.Nat(2)])) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(2))
+    quote(0, eval([], idLam())) => idLam()
+
+fn spineBack(d: Int, h: Expr, args: List<Val>) -> Expr
+    ? "The head applied to the arguments read back, first argument first."
+    match args
+        [] -> h
+        [a, ..rest] -> spineBack(d, Core.Exprs.app(h, quote(d, a)), rest)
+
+verify spineBack
+    spineBack(0, Core.Exprs.fvar(1), [Val.Nat(1), Val.Nat(2)]) => Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.natLit(1)), Core.Exprs.natLit(2))
+
+fn mat(d: Int, v: Val) -> Expr
+    ? "The value as a term under d binders without evaluating anything more: a waiting term and a binder's body get their environments put back in, read back the same way, so the result is the term substitution would have built."
+    matF([], 0, d, v)
+
+verify mat
+    mat(0, Val.Delay([], Core.Exprs.app(idLam(), Core.Exprs.natLit(1)))) => Core.Exprs.app(idLam(), Core.Exprs.natLit(1))
+    mat(1, Val.Delay([Val.Var(0, [])], Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)))) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0))
+    mat(0, eval([], idLam())) => idLam()
+
+fn matF(fvs: List<Expr>, n: Int, d: Int, v: Val) -> Expr
+    ? "mat where the levels below n are the free variables fvs (level n - 1 first) and the levels from n up to d are bound variables."
+    match v
+        Val.Var(l, sp) -> matSpine(fvs, n, d, levelTerm(fvs, n, d, l), List.reverse(sp))
+        Val.Free(id, sp) -> matSpine(fvs, n, d, Core.Exprs.fvar(id), List.reverse(sp))
+        Val.Cst(c, ls, sp) -> matSpine(fvs, n, d, Core.Exprs.cnst(c, ls), List.reverse(sp))
+        Val.Lam(x, dom, env, b, bi) -> Core.Exprs.lam(x, matF(fvs, n, d, dom), matUnder(fvs, n, d, env, b), bi)
+        Val.Pi(x, dom, env, b, bi) -> Core.Exprs.pi(x, matF(fvs, n, d, dom), matUnder(fvs, n, d, env, b), bi)
+        Val.Sort(l) -> Core.Exprs.sort(l)
+        Val.Nat(k) -> Core.Exprs.natLit(k)
+        Val.Str(s) -> Core.Exprs.strLit(s)
+        Val.Prj(s, i, x, sp) -> matSpine(fvs, n, d, Core.Exprs.proj(s, i, matF(fvs, n, d, x)), List.reverse(sp))
+        Val.Stuck(h, sp) -> matSpine(fvs, n, d, matF(fvs, n, d, h), List.reverse(sp))
+        Val.Delay(env, e) -> matIn(fvs, n, d, env, e)
+
+verify matF
+    matF([Core.Exprs.fvar(7)], 1, 1, Val.Var(0, [])) => Core.Exprs.fvar(7)
+    matF([Core.Exprs.fvar(7)], 1, 2, Val.Var(1, [Val.Var(0, [])])) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(7))
+
+fn levelTerm(fvs: List<Expr>, n: Int, d: Int, l: Int) -> Expr
+    ? "Level l as a term: its free variable below n, a bound variable from n up."
+    match l < n
+        true -> nthExpr(fvs, n - 1 - l)
+        false -> Core.Exprs.bvar(d - 1 - l)
+
+verify levelTerm
+    levelTerm([Core.Exprs.fvar(4), Core.Exprs.fvar(3)], 2, 3, 0) => Core.Exprs.fvar(3)
+    levelTerm([Core.Exprs.fvar(4), Core.Exprs.fvar(3)], 2, 3, 2) => Core.Exprs.bvar(0)
+
+fn nthExpr(es: List<Expr>, i: Int) -> Expr
+    ? "The i-th term, index 0 first; past the end a bound variable that shows the gap."
+    match es
+        [] -> Core.Exprs.bvar(i)
+        [e, ..rest] -> match i == 0
+            true -> e
+            false -> nthExpr(rest, i - 1)
+
+verify nthExpr
+    nthExpr([Core.Exprs.fvar(1)], 0) => Core.Exprs.fvar(1)
+
+fn matSpine(fvs: List<Expr>, n: Int, d: Int, h: Expr, args: List<Val>) -> Expr
+    ? "The head applied to the arguments as terms, first argument first."
+    match args
+        [] -> h
+        [a, ..rest] -> matSpine(fvs, n, d, Core.Exprs.app(h, matF(fvs, n, d, a)), rest)
+
+verify matSpine
+    matSpine([], 0, 0, Core.Exprs.fvar(1), [Val.Delay([], idLam())]) => Core.Exprs.app(Core.Exprs.fvar(1), idLam())
+
+fn matIn(fvs: List<Expr>, n: Int, d: Int, env: List<Val>, e: Expr) -> Expr
+    ? "e with the first values of env put in for its loose bound variables, as terms under d binders; only as many as e can see."
+    Core.Subst.instantiate(e, matEnv(fvs, n, d, List.take(env, Core.Exprs.looseRange(e))))
+
+verify matIn
+    matIn([], 0, 2, [Val.Var(1, []), Val.Var(0, [])], Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1))
+
+fn matUnder(fvs: List<Expr>, n: Int, d: Int, env: List<Val>, b: Expr) -> Expr
+    ? "A binder's body as a term under d + 1 binders: index 0 stays the binder's own variable, the others take env's values."
+    matIn(fvs, n, d + 1, List.prepend(Val.Var(d, []), env), b)
+
+verify matUnder
+    matUnder([], 0, 0, [], Core.Exprs.bvar(0)) => Core.Exprs.bvar(0)
+
+fn matEnv(fvs: List<Expr>, n: Int, d: Int, env: List<Val>) -> List<Expr>
+    ? "Each value as a term under d binders."
+    match env
+        [] -> []
+        [v, ..rest] -> List.prepend(matF(fvs, n, d, v), matEnv(fvs, n, d, rest))
+
+verify matEnv
+    matEnv([], 0, 1, [Val.Var(0, []), Val.Nat(3)]) => [Core.Exprs.bvar(0), Core.Exprs.natLit(3)]
