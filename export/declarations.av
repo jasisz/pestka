@@ -9,7 +9,8 @@ module Declarations
 
 fn declLine(t: Tables, kind: String, o: List<Tuple<String, J>>) -> Result<Tables, String>
     ? "One declaration line, already split into its kind and its object."
-    Result.Ok(Export.Tables.addDecl(t, declOf(t, kind, o)?))
+    d = declOf(t, kind, o)?
+    Result.Ok(Export.Tables.addDecl(t, d))
 
 verify declLine
     declLine(Export.Tables.empty(), "lemma", []) => Result.Err("unknown declaration kind 'lemma'")

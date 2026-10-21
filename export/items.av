@@ -54,24 +54,49 @@ fn levelLine(t: Tables, fs: List<Tuple<String, J>>) -> Result<Tables, String>
     ? "A Level.succ, max, imax or param line."
     i = Json.Access.int(fs, "il")?
     match otherKey(fs, "il")
-        "succ" -> Export.Tables.addLevel(t, i, Level.Succ(Export.Tables.level(t, Json.Access.int(fs, "succ")?)?))
+        "succ" -> succAdded(t, i, Json.Access.int(fs, "succ")?)
         "max" -> levelPair(t, i, Json.Access.ints(fs, "max")?, true)
         "imax" -> levelPair(t, i, Json.Access.ints(fs, "imax")?, false)
-        "param" -> Export.Tables.addLevel(t, i, Level.Param(Export.Tables.name(t, Json.Access.int(fs, "param")?)?))
+        "param" -> paramAdded(t, i, Json.Access.int(fs, "param")?)
         k -> Result.Err("unknown level kind '{k}'")
 
 verify levelLine
     Result.withDefault(levelLine(Export.Tables.empty(), [("il", J.JInt(1)), ("succ", J.JInt(0))]), Export.Tables.empty()).nextLevel => 2
     levelLine(Export.Tables.empty(), [("il", J.JInt(1)), ("succ", J.JInt(3))]) => Result.Err("unknown level index 3")
 
+fn succAdded(t: Tables, i: Int, k: Int) -> Result<Tables, String>
+    ? "Level i is the successor of level k. The tables are read before they are passed on, so that the update has them alone and changes their maps in place."
+    l = Export.Tables.level(t, k)?
+    Export.Tables.addLevel(t, i, Level.Succ(l))
+
+verify succAdded
+    Result.withDefault(succAdded(Export.Tables.empty(), 1, 0), Export.Tables.empty()).nextLevel => 2
+
+fn paramAdded(t: Tables, i: Int, k: Int) -> Result<Tables, String>
+    ? "Level i is the universe parameter named by name k, read before the tables are passed on."
+    n = Export.Tables.name(t, k)?
+    Export.Tables.addLevel(t, i, Level.Param(n))
+
+verify paramAdded
+    Result.withDefault(paramAdded(Export.Tables.empty(), 1, 0), Export.Tables.empty()).nextLevel => 2
+
 fn levelPair(t: Tables, i: Int, ids: List<Int>, isMax: Bool) -> Result<Tables, String>
     ? "max or imax of exactly two earlier levels."
     match ids
-        [a, b] -> levelPairOf(t, i, Export.Tables.level(t, a)?, Export.Tables.level(t, b)?, isMax)
+        [a, b] -> levelsRead(t, i, a, b, isMax)
         _ -> Result.Err("max and imax take exactly two levels")
 
 verify levelPair
     levelPair(Export.Tables.empty(), 1, [0], true) => Result.Err("max and imax take exactly two levels")
+
+fn levelsRead(t: Tables, i: Int, a: Int, b: Int, isMax: Bool) -> Result<Tables, String>
+    ? "The two levels read before the tables are passed on."
+    la = Export.Tables.level(t, a)?
+    lb = Export.Tables.level(t, b)?
+    levelPairOf(t, i, la, lb, isMax)
+
+verify levelsRead
+    levelsRead(Export.Tables.empty(), 1, 0, 7, true) => Result.Err("unknown level index 7")
 
 fn levelPairOf(t: Tables, i: Int, a: Level, b: Level, isMax: Bool) -> Result<Tables, String>
     ? "Builds the max or imax node."
@@ -85,7 +110,8 @@ verify levelPairOf
 fn exprLine(t: Tables, fs: List<Tuple<String, J>>) -> Result<Tables, String>
     ? "One expression line."
     i = Json.Access.int(fs, "ie")?
-    Export.Tables.addExpr(t, i, exprOf(t, otherKey(fs, "ie"), fs)?)
+    e = exprOf(t, otherKey(fs, "ie"), fs)?
+    Export.Tables.addExpr(t, i, e)
 
 verify exprLine
     Result.withDefault(exprLine(Export.Tables.empty(), [("bvar", J.JInt(0)), ("ie", J.JInt(0))]), Export.Tables.empty()).nextExpr => 1
