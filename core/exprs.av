@@ -217,7 +217,7 @@ fn hashOf(e: Expr) -> Int
     p = packedOf(e)
     match p < 0
         true -> metaOf(e).hash
-        false -> Int.div(p, 8388608)
+        false -> Int.div(p, 4194304)
 
 verify hashOf
     hashOf(bvar(0)) == hashOf(bvar(0)) => true
@@ -236,7 +236,7 @@ fn rangeIn(p: Int) -> Int
     ? "The loose range in a packed word; a leaf other than a bound variable has none."
     match p < 0
         true -> 0
-        false -> rangeOf(Int.mod(p, 32768))
+        false -> rangeOf(Int.mod(p, 16384))
 
 verify rangeIn
     rangeIn(-1) => 0
@@ -265,7 +265,7 @@ fn flagsIn(p: Int) -> Int
     ? "The two flags of a packed word, free variables as 2 and universe parameters as 1; none for a leaf."
     match p < 0
         true -> 0
-        false -> Int.mod(Int.div(p, 32768), 4)
+        false -> Int.mod(Int.div(p, 16384), 4)
 
 verify flagsIn
     flagsIn(-1) => 0
@@ -279,27 +279,35 @@ verify sized
     sized(63) => 63
 
 fn pack(m: Meta) -> Int
-    ? "The metadata in one machine word: hash (40 bits), size (6 bits), two flags, and the loose range (15 bits, saturated) lowest, so that the most read field is one remainder away."
-    ((m.hash * 64 + Int.min(m.size, 63)) * 4 + flag(m.fvars) * 2 + flag(m.params)) * 32768 + Int.min(m.range, 32767)
+    ? "The metadata in one machine word: hash (40 bits), size (6 bits), two flags, and the loose range (14 bits, saturated) lowest, so that the most read field is one remainder away. Sixty-two bits in all, which compiled Aver keeps in the word without a box."
+    ((m.hash * 64 + Int.min(m.size, 63)) * 4 + flag(m.fvars) * 2 + flag(m.params)) * 16384 + Int.min(m.range, 16383)
 
 verify pack
     unpack(pack(Meta(hash = 1099511627688, range = 3, fvars = true, params = false, size = 7))) => Meta(hash = 1099511627688, range = 3, fvars = true, params = false, size = 7)
 
 verify pack law roundTrip
     given hash: Int = [0, 1, 1099511627775]
-    given range: Int = [0, 1, 32766]
+    given range: Int = [0, 1, 16382]
     given size: Int = [0, 1, 63]
     given fvars: Bool = [false, true]
     given params: Bool = [false, true]
-    when Bool.and(Bool.and(hash >= 0, hash < 1099511627776), Bool.and(Bool.and(range >= 0, range < 32767), Bool.and(size >= 0, size <= 63)))
+    when Bool.and(Bool.and(hash >= 0, hash < 1099511627776), Bool.and(Bool.and(range >= 0, range < 16383), Bool.and(size >= 0, size <= 63)))
     unpack(pack(Meta(hash = hash, range = range, fvars = fvars, params = params, size = size))) => Meta(hash = hash, range = range, fvars = fvars, params = params, size = size)
 
 verify pack law rangeNeverShrinks
     given hash: Int = [0, 1099511627775]
-    given range: Int = [0, 1, 32766, 32767, 40000, 1099511627775]
+    given range: Int = [0, 1, 16382, 16383, 40000, 1099511627775]
     given size: Int = [0, 200]
     when Bool.and(Bool.and(hash >= 0, hash < 1099511627776), Bool.and(Bool.and(range >= 0, range <= 1099511627776), size >= 0))
     unpack(pack(Meta(hash = hash, range = range, fvars = true, params = true, size = size))).range >= range => true
+
+verify pack law fitsSixtyTwoBits
+    given hash: Int = [0, 1099511627688]
+    given range: Int = [0, 16383, 1099511627776]
+    given size: Int = [0, 63, 200]
+    given fvars: Bool = [false, true]
+    when Bool.and(Bool.and(hash >= 0, hash < 1099511627689), Bool.and(range >= 0, size >= 0))
+    pack(Meta(hash = hash, range = range, fvars = fvars, params = fvars, size = size)) < 4611686018427387904 => true
 
 fn flag(b: Bool) -> Int
     ? "A flag as a bit."
@@ -312,7 +320,7 @@ verify flag
 
 fn unpack(i: Int) -> Meta
     ? "The metadata back; a saturated range reads as unbounded, which only ever makes traversals look further."
-    Meta(hash = Int.div(i, 8388608), range = rangeOf(Int.mod(i, 32768)), fvars = flagsIn(i) >= 2, params = Int.mod(flagsIn(i), 2) == 1, size = Int.mod(Int.div(i, 131072), 64))
+    Meta(hash = Int.div(i, 4194304), range = rangeOf(Int.mod(i, 16384)), fvars = flagsIn(i) >= 2, params = Int.mod(flagsIn(i), 2) == 1, size = Int.mod(Int.div(i, 65536), 64))
 
 verify unpack
     unpack(pack(Meta(hash = 5, range = 40000, fvars = false, params = true, size = 63))).range => 1099511627776
@@ -320,12 +328,12 @@ verify unpack
 
 fn rangeOf(r: Int) -> Int
     ? "The stored range, or a bound larger than any index when it was saturated."
-    match r == 32767
+    match r == 16383
         true -> 1099511627776
         false -> r
 
 verify rangeOf
-    rangeOf(32767) => 1099511627776
+    rangeOf(16383) => 1099511627776
     rangeOf(4) => 4
 
 fn treeSize(e: Expr) -> Int
@@ -333,7 +341,7 @@ fn treeSize(e: Expr) -> Int
     p = packedOf(e)
     match p < 0
         true -> 1
-        false -> Int.mod(Int.div(p, 131072), 64)
+        false -> Int.mod(Int.div(p, 65536), 64)
 
 verify treeSize
     treeSize(app(bvar(0), app(bvar(1), bvar(2)))) => 5
