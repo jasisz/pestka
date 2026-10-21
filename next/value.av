@@ -2,8 +2,9 @@ module Value
     intent =
         "Values for the second core: a term is evaluated in an environment"
         "of values instead of having values substituted into it. A variable"
-        "is a de Bruijn level, counted from the outside, so entering a binder"
-        "extends the environment and copies nothing. An argument or a let"
+        "is a number unique in the declaration, so entering a binder extends"
+        "the environment and copies nothing, and a value means the same"
+        "wherever it is met. An argument or a let"
         "value waits as the term with its environment (Delay) until"
         "something needs its head; a binder keeps its body with the"
         "environment it was met in. Constants stay folded: unfolding a"
@@ -14,8 +15,8 @@ module Value
         "a value back with beta under binders, mat puts the environment back"
         "into the waiting terms without evaluating them, the term the first"
         "core would have built."
-    exposes [Val, eval, apply, force, nth, quote, mat, matF, delay, same]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps]
+    exposes [Val, eval, apply, force, nth, quote, mat, delay, same, hashOf]
+    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps]
     effects []
 
 type Val
@@ -116,144 +117,132 @@ verify apply
     apply(Val.Lam(Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.bvar(0), Binder.Default), Val.Nat(7)) => Val.Nat(7)
     apply(Val.Nat(1), Val.Nat(2)) => Val.Stuck(Val.Nat(1), [Val.Nat(2)])
 
-fn quote(d: Int, v: Val) -> Expr
-    ? "The value read back as a term under d binders, level l becoming bound variable d - 1 - l: beta-normal, as evaluation leaves it, with binder bodies evaluated under a fresh variable."
+fn quote(path: List<Int>, v: Val) -> Expr
+    ? "The value read back as a term, beta-normal as evaluation leaves it, with binder bodies evaluated under a fresh variable. path lists the variables in scope, innermost first: a variable's bound index is its position there."
     match v
-        Val.Var(l, sp) -> spineBack(d, Core.Exprs.bvar(d - 1 - l), List.reverse(sp))
-        Val.Free(id, sp) -> spineBack(d, Core.Exprs.fvar(id), List.reverse(sp))
-        Val.Cst(n, ls, sp) -> spineBack(d, Core.Exprs.cnst(n, ls), List.reverse(sp))
-        Val.Lam(n, dom, env, b, bi) -> Core.Exprs.lam(n, quote(d, dom), quote(d + 1, eval(List.prepend(Val.Var(d, []), env), b)), bi)
-        Val.Pi(n, dom, env, b, bi) -> Core.Exprs.pi(n, quote(d, dom), quote(d + 1, eval(List.prepend(Val.Var(d, []), env), b)), bi)
+        Val.Var(x, sp) -> spineBack(path, varTerm(path, x), List.reverse(sp))
+        Val.Free(id, sp) -> spineBack(path, Core.Exprs.fvar(id), List.reverse(sp))
+        Val.Cst(n, ls, sp) -> spineBack(path, Core.Exprs.cnst(n, ls), List.reverse(sp))
+        Val.Lam(n, dom, env, b, bi) -> Core.Exprs.lam(n, quote(path, dom), quoteUnder(path, env, b), bi)
+        Val.Pi(n, dom, env, b, bi) -> Core.Exprs.pi(n, quote(path, dom), quoteUnder(path, env, b), bi)
         Val.Sort(l) -> Core.Exprs.sort(l)
         Val.Nat(k) -> Core.Exprs.natLit(k)
         Val.Str(s) -> Core.Exprs.strLit(s)
-        Val.Prj(s, i, x, sp) -> spineBack(d, Core.Exprs.proj(s, i, quote(d, x)), List.reverse(sp))
-        Val.Stuck(h, sp) -> spineBack(d, quote(d, h), List.reverse(sp))
-        Val.Delay(env, e) -> quote(d, eval(env, e))
+        Val.Prj(s, i, x, sp) -> spineBack(path, Core.Exprs.proj(s, i, quote(path, x)), List.reverse(sp))
+        Val.Stuck(h, sp) -> spineBack(path, quote(path, h), List.reverse(sp))
+        Val.Delay(env, e) -> quote(path, eval(env, e))
 
 verify quote
-    quote(0, eval([], Core.Exprs.app(idLam(), Core.Exprs.natLit(1)))) => Core.Exprs.natLit(1)
-    quote(1, Val.Var(0, [Val.Nat(2)])) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(2))
-    quote(0, eval([], idLam())) => idLam()
+    quote([], eval([], Core.Exprs.app(idLam(), Core.Exprs.natLit(1)))) => Core.Exprs.natLit(1)
+    quote([7], Val.Var(7, [Val.Nat(2)])) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(2))
+    quote([], eval([], idLam())) => idLam()
 
-fn spineBack(d: Int, h: Expr, args: List<Val>) -> Expr
+fn quoteUnder(path: List<Int>, env: List<Val>, b: Expr) -> Expr
+    ? "A binder's body evaluated under a fresh variable and read back."
+    x = scratch(path)
+    quote(List.prepend(x, path), eval(List.prepend(Val.Var(x, []), env), b))
+
+verify quoteUnder
+    quoteUnder([], [], Core.Exprs.bvar(0)) => Core.Exprs.bvar(0)
+
+fn scratch(path: List<Int>) -> Int
+    ? "A variable for a binder met while reading back, distinct from every variable of the checker (which are not negative) and from every placeholder for a missing environment entry."
+    -1099511627776 - List.len(path)
+
+verify scratch
+    scratch([]) => -1099511627776
+
+fn varTerm(path: List<Int>, x: Int) -> Expr
+    ? "A variable as a term: its position in path; a placeholder for a missing environment entry stays past the path; a variable out of scope shows as a free variable, which the checker rejects."
+    match positionOf(path, x, 0)
+        Option.Some(i) -> Core.Exprs.bvar(i)
+        Option.None -> match Bool.and(x < 0, x > -1099511627776)
+            true -> Core.Exprs.bvar(List.len(path) - 1 - x)
+            false -> Core.Exprs.fvar(x)
+
+verify varTerm
+    varTerm([4, 2], 2) => Core.Exprs.bvar(1)
+    varTerm([4], -1) => Core.Exprs.bvar(1)
+
+fn positionOf(path: List<Int>, x: Int, i: Int) -> Option<Int>
+    ? "Where x is in path, counting from i."
+    match path
+        [] -> Option.None
+        [y, ..rest] -> match y == x
+            true -> Option.Some(i)
+            false -> positionOf(rest, x, i + 1)
+
+verify positionOf
+    positionOf([5, 6], 6, 0) => Option.Some(1)
+
+fn spineBack(path: List<Int>, h: Expr, args: List<Val>) -> Expr
     ? "The head applied to the arguments read back, first argument first."
     match args
         [] -> h
-        [a, ..rest] -> spineBack(d, Core.Exprs.app(h, quote(d, a)), rest)
+        [a, ..rest] -> spineBack(path, Core.Exprs.app(h, quote(path, a)), rest)
 
 verify spineBack
-    spineBack(0, Core.Exprs.fvar(1), [Val.Nat(1), Val.Nat(2)]) => Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.natLit(1)), Core.Exprs.natLit(2))
+    spineBack([], Core.Exprs.fvar(1), [Val.Nat(1), Val.Nat(2)]) => Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.natLit(1)), Core.Exprs.natLit(2))
 
-fn mat(d: Int, v: Val) -> Expr
-    ? "The value as a term under d binders without evaluating anything more: a waiting term and a binder's body get their environments put back in, read back the same way, so the result is the term substitution would have built."
-    matF([], 0, d, v)
-
-verify mat
-    mat(0, Val.Delay([], Core.Exprs.app(idLam(), Core.Exprs.natLit(1)))) => Core.Exprs.app(idLam(), Core.Exprs.natLit(1))
-    mat(1, Val.Delay([Val.Var(0, [])], Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)))) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0))
-    mat(0, eval([], idLam())) => idLam()
-
-fn matF(fvs: List<Expr>, n: Int, d: Int, v: Val) -> Expr
-    ? "mat where the levels below n are the free variables fvs (level n - 1 first) and the levels from n up to d are bound variables."
+fn mat(path: List<Int>, v: Val) -> Expr
+    ? "The value as a term without evaluating anything more: a waiting term and a binder's body get their environments put back in, read back the same way, so the result is the term substitution would have built. path as for quote."
     match v
-        Val.Var(l, sp) -> matSpine(fvs, n, d, levelTerm(fvs, n, d, l), List.reverse(sp))
-        Val.Free(id, sp) -> matSpine(fvs, n, d, Core.Exprs.fvar(id), List.reverse(sp))
-        Val.Cst(c, ls, sp) -> matSpine(fvs, n, d, Core.Exprs.cnst(c, ls), List.reverse(sp))
-        Val.Lam(x, dom, env, b, bi) -> Core.Exprs.lam(x, matF(fvs, n, d, dom), matUnder(fvs, n, d, env, b), bi)
-        Val.Pi(x, dom, env, b, bi) -> Core.Exprs.pi(x, matF(fvs, n, d, dom), matUnder(fvs, n, d, env, b), bi)
+        Val.Var(x, sp) -> matSpine(path, varTerm(path, x), List.reverse(sp))
+        Val.Free(id, sp) -> matSpine(path, Core.Exprs.fvar(id), List.reverse(sp))
+        Val.Cst(c, ls, sp) -> matSpine(path, Core.Exprs.cnst(c, ls), List.reverse(sp))
+        Val.Lam(x, dom, env, b, bi) -> Core.Exprs.lam(x, mat(path, dom), matUnder(path, env, b), bi)
+        Val.Pi(x, dom, env, b, bi) -> Core.Exprs.pi(x, mat(path, dom), matUnder(path, env, b), bi)
         Val.Sort(l) -> Core.Exprs.sort(l)
         Val.Nat(k) -> Core.Exprs.natLit(k)
         Val.Str(s) -> Core.Exprs.strLit(s)
-        Val.Prj(s, i, x, sp) -> matSpine(fvs, n, d, Core.Exprs.proj(s, i, matF(fvs, n, d, x)), List.reverse(sp))
-        Val.Stuck(h, sp) -> matSpine(fvs, n, d, matF(fvs, n, d, h), List.reverse(sp))
-        Val.Delay(env, e) -> matIn(fvs, n, d, env, e)
+        Val.Prj(s, i, x, sp) -> matSpine(path, Core.Exprs.proj(s, i, mat(path, x)), List.reverse(sp))
+        Val.Stuck(h, sp) -> matSpine(path, mat(path, h), List.reverse(sp))
+        Val.Delay(env, e) -> matIn(path, env, e)
 
-verify matF
-    matF([Core.Exprs.fvar(7)], 1, 1, Val.Var(0, [])) => Core.Exprs.fvar(7)
-    matF([Core.Exprs.fvar(7)], 1, 2, Val.Var(1, [Val.Var(0, [])])) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(7))
+verify mat
+    mat([], Val.Delay([], Core.Exprs.app(idLam(), Core.Exprs.natLit(1)))) => Core.Exprs.app(idLam(), Core.Exprs.natLit(1))
+    mat([3], Val.Delay([Val.Var(3, [])], Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)))) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0))
+    mat([], eval([], idLam())) => idLam()
+    mat([5, 3], Val.Var(3, [Val.Var(5, [])])) => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(0))
 
-fn levelTerm(fvs: List<Expr>, n: Int, d: Int, l: Int) -> Expr
-    ? "Level l as a term: its free variable below n, a bound variable from n up."
-    match l < n
-        true -> nthExpr(fvs, n - 1 - l)
-        false -> Core.Exprs.bvar(d - 1 - l)
-
-verify levelTerm
-    levelTerm([Core.Exprs.fvar(4), Core.Exprs.fvar(3)], 2, 3, 0) => Core.Exprs.fvar(3)
-    levelTerm([Core.Exprs.fvar(4), Core.Exprs.fvar(3)], 2, 3, 2) => Core.Exprs.bvar(0)
-
-fn nthExpr(es: List<Expr>, i: Int) -> Expr
-    ? "The i-th term, index 0 first; past the end a bound variable that shows the gap."
-    match es
-        [] -> Core.Exprs.bvar(i)
-        [e, ..rest] -> match i == 0
-            true -> e
-            false -> nthExpr(rest, i - 1)
-
-verify nthExpr
-    nthExpr([Core.Exprs.fvar(1)], 0) => Core.Exprs.fvar(1)
-
-fn matSpine(fvs: List<Expr>, n: Int, d: Int, h: Expr, args: List<Val>) -> Expr
+fn matSpine(path: List<Int>, h: Expr, args: List<Val>) -> Expr
     ? "The head applied to the arguments as terms, first argument first."
     match args
         [] -> h
-        [a, ..rest] -> matSpine(fvs, n, d, Core.Exprs.app(h, matF(fvs, n, d, a)), rest)
+        [a, ..rest] -> matSpine(path, Core.Exprs.app(h, mat(path, a)), rest)
 
 verify matSpine
-    matSpine([], 0, 0, Core.Exprs.fvar(1), [Val.Delay([], idLam())]) => Core.Exprs.app(Core.Exprs.fvar(1), idLam())
+    matSpine([], Core.Exprs.fvar(1), [Val.Delay([], idLam())]) => Core.Exprs.app(Core.Exprs.fvar(1), idLam())
 
-fn matIn(fvs: List<Expr>, n: Int, d: Int, env: List<Val>, e: Expr) -> Expr
-    ? "e with the first values of env put in for its loose bound variables, as terms under d binders; only as many as e can see."
-    Core.Subst.instantiate(e, matEnv(fvs, n, d, List.take(env, Core.Exprs.looseRange(e))))
+fn matIn(path: List<Int>, env: List<Val>, e: Expr) -> Expr
+    ? "e with the first values of env put in for its loose bound variables, as terms in path's scope; only as many as e can see."
+    Core.Subst.instantiate(e, matEnv(path, List.take(env, Core.Exprs.looseRange(e))))
 
 verify matIn
-    matIn([], 0, 2, [Val.Var(1, []), Val.Var(0, [])], Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1))
+    matIn([9, 8], [Val.Var(9, []), Val.Var(8, [])], Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1))
 
-fn matUnder(fvs: List<Expr>, n: Int, d: Int, env: List<Val>, b: Expr) -> Expr
-    ? "A binder's body as a term under d + 1 binders: index 0 stays the binder's own variable, the others take env's values."
-    matIn(fvs, n, d + 1, List.prepend(Val.Var(d, []), env), b)
+fn matUnder(path: List<Int>, env: List<Val>, b: Expr) -> Expr
+    ? "A binder's body as a term one binder deeper: index 0 stays the binder's own variable, the others take env's values."
+    x = scratch(path)
+    matIn(List.prepend(x, path), List.prepend(Val.Var(x, []), env), b)
 
 verify matUnder
-    matUnder([], 0, 0, [], Core.Exprs.bvar(0)) => Core.Exprs.bvar(0)
+    matUnder([], [], Core.Exprs.bvar(0)) => Core.Exprs.bvar(0)
 
-fn matEnv(fvs: List<Expr>, n: Int, d: Int, env: List<Val>) -> List<Expr>
-    ? "Each value as a term under d binders."
+fn matEnv(path: List<Int>, env: List<Val>) -> List<Expr>
+    ? "Each value as a term in path's scope."
     match env
         [] -> []
-        [v, ..rest] -> List.prepend(matF(fvs, n, d, v), matEnv(fvs, n, d, rest))
+        [v, ..rest] -> List.prepend(mat(path, v), matEnv(path, rest))
 
 verify matEnv
-    matEnv([], 0, 1, [Val.Var(0, []), Val.Nat(3)]) => [Core.Exprs.bvar(0), Core.Exprs.natLit(3)]
+    matEnv([4], [Val.Var(4, []), Val.Nat(3)]) => [Core.Exprs.bvar(0), Core.Exprs.natLit(3)]
 
 fn same(a: Val, b: Val) -> Bool
-    ? "Syntactic equality of values, where a waiting term or a binder's body is compared with only the part of its environment it can see: the same term in two environments that agree on what it reads is the same value. Cheap and never wrong; equal values it misses are found by conversion."
-    match a
-        Val.Delay(ea, ta) -> match b
-            Val.Delay(eb, tb) -> Bool.and(ta == tb, sameSeen(ea, eb, Core.Exprs.looseRange(ta)))
-            _ -> false
-        Val.Var(l, sa) -> match b
-            Val.Var(m, sb) -> Bool.and(l == m, sameAll(sa, sb))
-            _ -> false
-        Val.Free(i, sa) -> match b
-            Val.Free(j, sb) -> Bool.and(i == j, sameAll(sa, sb))
-            _ -> false
-        Val.Cst(n, ls, sa) -> match b
-            Val.Cst(m, ks, sb) -> Bool.and(Bool.and(n == m, ls == ks), sameAll(sa, sb))
-            _ -> false
-        Val.Lam(_, da, ea, ta, _) -> match b
-            Val.Lam(_, db, eb, tb, _) -> sameBinder(da, ea, ta, db, eb, tb)
-            _ -> false
-        Val.Pi(_, da, ea, ta, _) -> match b
-            Val.Pi(_, db, eb, tb, _) -> sameBinder(da, ea, ta, db, eb, tb)
-            _ -> false
-        Val.Prj(s1, i, x, sa) -> match b
-            Val.Prj(s2, j, y, sb) -> Bool.and(Bool.and(s1 == s2, i == j), Bool.and(same(x, y), sameAll(sa, sb)))
-            _ -> false
-        Val.Stuck(x, sa) -> match b
-            Val.Stuck(y, sb) -> Bool.and(same(x, y), sameAll(sa, sb))
-            _ -> false
-        _ -> a == b
+    ? "Syntactic equality of values, where a waiting term or a binder's body is compared with only the part of its environment it can see: the same term in two environments that agree on what it reads is the same value. Plain equality first, which meets a shared part once; then the comparison by what is seen, eight levels deep. Never wrong; equal values it misses are found by conversion."
+    match a == b
+        true -> true
+        false -> sameIn(a, b, 8)
 
 verify same
     same(Val.Delay([Val.Nat(1), Val.Nat(2)], Core.Exprs.bvar(0)), Val.Delay([Val.Nat(1), Val.Nat(3)], Core.Exprs.bvar(0))) => true
@@ -261,40 +250,156 @@ verify same
     same(Val.Var(0, [Val.Nat(1)]), Val.Var(0, [Val.Nat(1)])) => true
     same(Val.Nat(1), Val.Nat(2)) => false
 
-fn sameBinder(da: Val, ea: List<Val>, ta: Expr, db: Val, eb: List<Val>, tb: Expr) -> Bool
+fn sameIn(a: Val, b: Val, depth: Int) -> Bool
+    ? "The comparison by what is seen, with depth levels left; past them only plain equality."
+    match depth <= 0
+        true -> a == b
+        false -> sameKind(a, b, depth - 1)
+
+verify sameIn
+    sameIn(Val.Nat(1), Val.Nat(1), 0) => true
+
+fn sameKind(a: Val, b: Val, depth: Int) -> Bool
+    ? "Kind by kind."
+    match a
+        Val.Delay(ea, ta) -> match b
+            Val.Delay(eb, tb) -> Bool.and(ta == tb, sameSeen(ea, eb, Core.Exprs.looseRange(ta), depth))
+            _ -> false
+        Val.Var(l, sa) -> match b
+            Val.Var(m, sb) -> Bool.and(l == m, sameAll(sa, sb, depth))
+            _ -> false
+        Val.Free(i, sa) -> match b
+            Val.Free(j, sb) -> Bool.and(i == j, sameAll(sa, sb, depth))
+            _ -> false
+        Val.Cst(n, ls, sa) -> match b
+            Val.Cst(m, ks, sb) -> Bool.and(Bool.and(n == m, ls == ks), sameAll(sa, sb, depth))
+            _ -> false
+        Val.Lam(_, da, ea, ta, _) -> match b
+            Val.Lam(_, db, eb, tb, _) -> sameBinder(da, ea, ta, db, eb, tb, depth)
+            _ -> false
+        Val.Pi(_, da, ea, ta, _) -> match b
+            Val.Pi(_, db, eb, tb, _) -> sameBinder(da, ea, ta, db, eb, tb, depth)
+            _ -> false
+        Val.Prj(s1, i, x, sa) -> match b
+            Val.Prj(s2, j, y, sb) -> Bool.and(Bool.and(s1 == s2, i == j), Bool.and(sameIn(x, y, depth), sameAll(sa, sb, depth)))
+            _ -> false
+        Val.Stuck(x, sa) -> match b
+            Val.Stuck(y, sb) -> Bool.and(sameIn(x, y, depth), sameAll(sa, sb, depth))
+            _ -> false
+        _ -> a == b
+
+verify sameKind
+    sameKind(Val.Nat(1), Val.Nat(1), 3) => true
+
+fn sameBinder(da: Val, ea: List<Val>, ta: Expr, db: Val, eb: List<Val>, tb: Expr, depth: Int) -> Bool
     ? "Same domain and the same body seeing the same environment below its own variable."
-    Bool.and(Bool.and(ta == tb, same(da, db)), sameSeen(ea, eb, Core.Exprs.looseRange(ta) - 1))
+    Bool.and(Bool.and(ta == tb, sameIn(da, db, depth)), sameSeen(ea, eb, Core.Exprs.looseRange(ta) - 1, depth))
 
 verify sameBinder
-    sameBinder(Val.Nat(0), [Val.Nat(1)], Core.Exprs.bvar(0), Val.Nat(0), [Val.Nat(2)], Core.Exprs.bvar(0)) => true
+    sameBinder(Val.Nat(0), [Val.Nat(1)], Core.Exprs.bvar(0), Val.Nat(0), [Val.Nat(2)], Core.Exprs.bvar(0), 3) => true
 
-fn sameSeen(a: List<Val>, b: List<Val>, k: Int) -> Bool
+fn sameSeen(a: List<Val>, b: List<Val>, k: Int, depth: Int) -> Bool
     ? "The first k values of two environments are the same."
     match k <= 0
         true -> true
         false -> match a
             [x, ..ar] -> match b
-                [y, ..br] -> match same(x, y)
-                    true -> sameSeen(ar, br, k - 1)
+                [y, ..br] -> match sameIn(x, y, depth)
+                    true -> sameSeen(ar, br, k - 1, depth)
                     false -> false
                 [] -> false
             [] -> b == []
 
 verify sameSeen
-    sameSeen([Val.Nat(1)], [Val.Nat(1), Val.Nat(2)], 1) => true
-    sameSeen([], [], 3) => true
+    sameSeen([Val.Nat(1)], [Val.Nat(1), Val.Nat(2)], 1, 3) => true
+    sameSeen([], [], 3, 3) => true
 
-fn sameAll(a: List<Val>, b: List<Val>) -> Bool
+fn sameAll(a: List<Val>, b: List<Val>, depth: Int) -> Bool
     ? "Two spines of the same values."
     match a
         [] -> b == []
         [x, ..ar] -> match b
             [] -> false
-            [y, ..br] -> match same(x, y)
-                true -> sameAll(ar, br)
+            [y, ..br] -> match sameIn(x, y, depth)
+                true -> sameAll(ar, br, depth)
                 false -> false
 
 verify sameAll
-    sameAll([Val.Nat(1)], [Val.Nat(1)]) => true
-    sameAll([Val.Nat(1)], []) => false
+    sameAll([Val.Nat(1)], [Val.Nat(1)], 3) => true
+    sameAll([Val.Nat(1)], [], 3) => false
+
+fn hashOf(v: Val) -> Int
+    ? "A hash of a value's content, four levels deep, consistent with same: values that are the same hash alike. A waiting term or a binder's body counts its term and the part of its environment it reads; a deeper part counts only its kind."
+    hashIn(v, 4)
+
+verify hashOf
+    hashOf(Val.Delay([Val.Nat(1), Val.Nat(2)], Core.Exprs.bvar(0))) == hashOf(Val.Delay([Val.Nat(1), Val.Nat(3)], Core.Exprs.bvar(0))) => true
+    hashOf(Val.Nat(1)) == hashOf(Val.Nat(2)) => false
+
+fn hashIn(v: Val, depth: Int) -> Int
+    ? "The hash with depth levels left."
+    match depth <= 0
+        true -> kindOf(v)
+        false -> match v
+            Val.Var(l, sp) -> spineHash(Core.Hash.mix(21, Int.mod(l + 1000, 1099511627689)), sp, depth - 1)
+            Val.Free(id, sp) -> spineHash(Core.Hash.mix(22, id), sp, depth - 1)
+            Val.Cst(n, ls, sp) -> spineHash(Core.Hash.mix(23, levelsHash(ls, Core.Names.hashOf(n))), sp, depth - 1)
+            Val.Lam(_, d, env, b, _) -> envHash(Core.Hash.mix(Core.Hash.mix(24, Core.Exprs.hashOf(b)), hashIn(d, depth - 1)), env, Core.Exprs.looseRange(b) - 1, depth - 1)
+            Val.Pi(_, d, env, b, _) -> envHash(Core.Hash.mix(Core.Hash.mix(25, Core.Exprs.hashOf(b)), hashIn(d, depth - 1)), env, Core.Exprs.looseRange(b) - 1, depth - 1)
+            Val.Sort(l) -> Core.Hash.mix(26, Core.Levels.hashOf(l))
+            Val.Nat(k) -> Core.Hash.mix(27, Int.mod(k, 1099511627689))
+            Val.Str(s) -> Core.Hash.mix(28, String.len(s))
+            Val.Prj(s, i, x, sp) -> spineHash(Core.Hash.mix(Core.Hash.mix(Core.Hash.mix(29, Core.Names.hashOf(s)), i), hashIn(x, depth - 1)), sp, depth - 1)
+            Val.Stuck(x, sp) -> spineHash(Core.Hash.mix(30, hashIn(x, depth - 1)), sp, depth - 1)
+            Val.Delay(env, e) -> envHash(Core.Hash.mix(31, Core.Exprs.hashOf(e)), env, Core.Exprs.looseRange(e), depth - 1)
+
+verify hashIn
+    hashIn(Val.Nat(5), 0) == hashIn(Val.Nat(6), 0) => true
+
+fn kindOf(v: Val) -> Int
+    ? "Which kind of value, as a small number."
+    match v
+        Val.Var -> 1
+        Val.Free -> 2
+        Val.Cst -> 3
+        Val.Lam -> 4
+        Val.Pi -> 5
+        Val.Sort -> 6
+        Val.Nat -> 7
+        Val.Str -> 8
+        Val.Prj -> 9
+        Val.Stuck -> 10
+        Val.Delay -> 11
+
+verify kindOf
+    kindOf(Val.Nat(3)) => 7
+
+fn levelsHash(ls: List<Level>, acc: Int) -> Int
+    ? "Folds universe levels into a hash."
+    match ls
+        [] -> acc
+        [l, ..rest] -> levelsHash(rest, Core.Hash.mix(acc, Core.Levels.hashOf(l)))
+
+verify levelsHash
+    levelsHash([], 4) => 4
+
+fn spineHash(h: Int, sp: List<Val>, depth: Int) -> Int
+    ? "Folds a spine's values into a hash."
+    match sp
+        [] -> h
+        [a, ..rest] -> spineHash(Core.Hash.mix(h, hashIn(a, depth)), rest, depth)
+
+verify spineHash
+    spineHash(3, [], 2) => 3
+
+fn envHash(h: Int, env: List<Val>, k: Int, depth: Int) -> Int
+    ? "Folds the first k values of an environment into a hash."
+    match k <= 0
+        true -> h
+        false -> match env
+            [] -> h
+            [a, ..rest] -> envHash(Core.Hash.mix(h, hashIn(a, depth)), rest, k - 1, depth)
+
+verify envHash
+    envHash(3, [Val.Nat(1)], 0, 2) => 3
 

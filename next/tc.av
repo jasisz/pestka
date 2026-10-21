@@ -5,7 +5,9 @@ module Tc
         "bound variables (index 0 first), and its type comes back as a value,"
         "so an application walks its function's type by extending the"
         "type's environment and substitutes nothing. A binder declares a"
-        "variable at the next de Bruijn level, whose type the state keeps."
+        "variable numbered afresh in the declaration, whose type the state"
+        "keeps, so that a value means the same wherever it is met and"
+        "normal forms and answers of conversion can be remembered."
         "Weak head normalization, the type of a value and definitional"
         "equality work on values too, following the reference kernel's"
         "steps; a term is built only for the type of a lambda, read back"
@@ -13,16 +15,22 @@ module Tc
         "constants, the declaration's universe parameters and the"
         "instantiated values of definitions."
     exposes [NSt, NV, NB, start, infer, inferVal, whnf, whnfCore, conv, sortOf, isProp]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps, Core.Decls, Core.Univ, Core.PMap, Check.State, Check.Tc, Check.Lits, Next.Value]
+    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps, Core.Decls, Core.Univ, Core.PMap, Check.State, Check.Tc, Check.Lits, Next.Value, Next.VMap]
     effects []
 
 record NSt
     old: St
+    path: List<Int>
     tys: List<Val>
     ids: List<Val>
     depth: Int
-    checked: PMap
-    inferred: PMap
+    next: Int
+    checked: VMap
+    inferred: VMap
+    ctypes: VMap
+    whnfs: VMap
+    eqYes: VMap
+    eqNo: VMap
 
 record NV
     v: Val
@@ -34,7 +42,7 @@ record NB
 
 fn start(old: St) -> NSt
     ? "No binder open: every value is closed."
-    NSt(old = old, tys = [], ids = [], depth = 0, checked = Core.PMap.empty(), inferred = Core.PMap.empty())
+    NSt(old = old, path = [], tys = [], ids = [], depth = 0, next = 0, checked = Next.VMap.empty(), inferred = Next.VMap.empty(), ctypes = Next.VMap.empty(), whnfs = Next.VMap.empty(), eqYes = Next.VMap.empty(), eqNo = Next.VMap.empty())
 
 verify start
     start(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).depth => 0
@@ -54,9 +62,9 @@ verify sample
     sample().depth => 0
 
 fn enter(st: NSt, n: Name, dom: Val, bi: Binder) -> NV
-    ? "Opens a binder: the variable is the next level, of type dom."
-    v = Val.Var(st.depth, [])
-    NV(v = v, st = NSt.update(st, tys = List.prepend(dom, st.tys), ids = List.prepend(v, st.ids), depth = st.depth + 1))
+    ? "Opens a binder: a variable numbered afresh in the declaration, of type dom, innermost on the path."
+    v = Val.Var(st.next, [])
+    NV(v = v, st = NSt.update(st, path = List.prepend(st.next, st.path), tys = List.prepend(dom, st.tys), ids = List.prepend(v, st.ids), depth = st.depth + 1, next = st.next + 1))
 
 verify enter
     enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).v => Val.Var(0, [])
@@ -64,7 +72,7 @@ verify enter
 
 fn leave(st: NSt, before: NSt) -> NSt
     ? "Back to the binders open before; caches stay."
-    NSt.update(st, tys = before.tys, ids = before.ids, depth = before.depth)
+    NSt.update(st, path = before.path, tys = before.tys, ids = before.ids, depth = before.depth)
 
 verify leave
     leave(enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).st, sample()).depth => 0
@@ -89,35 +97,34 @@ fn resultVal(r: Result<NV, Fail>) -> Val
 verify resultVal
     resultVal(Result.Err(Fail.Reject("x"))) => Val.Var(-99, [])
 
-fn cachedType(st: NSt, e: Expr, only: Bool) -> Option<Expr>
-    ? "A remembered type of the closed term e: a checked one serves both modes, an inferred one only inference."
-    match Core.PMap.find(st.checked, Core.Exprs.hashOf(e), e)
+fn cachedType(st: NSt, e: Expr, only: Bool) -> Option<Val>
+    ? "A remembered type of the closed term e, kept under the term waiting with no environment: a checked one serves both modes, an inferred one only inference."
+    match Next.VMap.find(st.checked, Core.Exprs.hashOf(e), Val.Delay([], e))
         Option.Some(t) -> Option.Some(t)
         Option.None -> match only
-            true -> Core.PMap.find(st.inferred, Core.Exprs.hashOf(e), e)
+            true -> Next.VMap.find(st.inferred, Core.Exprs.hashOf(e), Val.Delay([], e))
             false -> Option.None
 
 verify cachedType
     cachedType(sample(), Core.Exprs.natLit(1), true) => Option.None
 
-fn inferClosed(st: NSt, e: Expr, only: Bool, hit: Option<Expr>) -> Result<NV, Fail>
+fn inferClosed(st: NSt, e: Expr, only: Bool, hit: Option<Val>) -> Result<NV, Fail>
     ? "A remembered type, or the type inferred now and remembered."
     match hit
-        Option.Some(t) -> Result.Ok(NV(v = Next.Value.eval([], t), st = st))
+        Option.Some(t) -> Result.Ok(NV(v = t, st = st))
         Option.None -> remember(inferCore(st, [], [], e, only)?, e, only)
 
 verify inferClosed
-    resultVal(inferClosed(sample(), Core.Exprs.natLit(1), true, Option.Some(Core.Exprs.sort(Level.Zero)))) => Val.Sort(Level.Zero)
+    resultVal(inferClosed(sample(), Core.Exprs.natLit(1), true, Option.Some(Val.Sort(Level.Zero)))) => Val.Sort(Level.Zero)
 
 fn remember(r: NV, e: Expr, only: Bool) -> Result<NV, Fail>
-    ? "Keeps the type of the closed term e as a closed term."
-    t = Next.Value.mat(0, r.v)
+    ? "Keeps the type of the closed term e."
     match only
-        true -> Result.Ok(NV(v = r.v, st = NSt.update(r.st, inferred = Core.PMap.add(r.st.inferred, Core.Exprs.hashOf(e), (e, t)))))
-        false -> Result.Ok(NV(v = r.v, st = NSt.update(r.st, checked = Core.PMap.add(r.st.checked, Core.Exprs.hashOf(e), (e, t)))))
+        true -> Result.Ok(NV(v = r.v, st = NSt.update(r.st, inferred = Next.VMap.add(r.st.inferred, Core.Exprs.hashOf(e), (Val.Delay([], e), r.v)))))
+        false -> Result.Ok(NV(v = r.v, st = NSt.update(r.st, checked = Next.VMap.add(r.st.checked, Core.Exprs.hashOf(e), (Val.Delay([], e), r.v)))))
 
 verify remember
-    Core.PMap.size(Result.withDefault(remember(NV(v = Val.Nat(1), st = sample()), Core.Exprs.natLit(2), false), NV(v = Val.Nat(0), st = sample())).st.checked) => 1
+    Next.VMap.size(Result.withDefault(remember(NV(v = Val.Nat(1), st = sample()), Core.Exprs.natLit(2), false), NV(v = Val.Nat(0), st = sample())).st.checked) => 1
 
 fn inferCore(st: NSt, tenv: List<Val>, env: List<Val>, e: Expr, only: Bool) -> Result<NV, Fail>
     ? "One case per kind of term."
@@ -203,7 +210,7 @@ fn constType(st: NSt, c: Const, h: Head, ls: List<Level>, only: Bool) -> Result<
     match List.len(h.params) == List.len(ls)
         false -> Result.Err(bad("incorrect number of universe levels for '{Core.Names.render(h.name)}'"))
         true -> match only
-            true -> Result.Ok(NV(v = Next.Value.eval([], Core.Subst.instLevelParams(h.ty, h.params, ls)), st = st))
+            true -> Result.Ok(typeAt(st, h, ls))
             false -> constSafety(st, c, h, ls)
 
 verify constType
@@ -222,7 +229,30 @@ verify constSafety
 
 fn constLevels(u: Unit, st: NSt, h: Head, ls: List<Level>) -> Result<NV, Fail>
     ? "The instantiated type once the levels passed."
-    Result.Ok(NV(v = Next.Value.eval([], Core.Subst.instLevelParams(h.ty, h.params, ls)), st = st))
+    Result.Ok(typeAt(st, h, ls))
+
+fn typeAt(st: NSt, h: Head, ls: List<Level>) -> NV
+    ? "A constant's type at universe levels, evaluated, remembered for the rest of the declaration."
+    match Next.VMap.find(st.ctypes, levelsKey(h.name, ls), Val.Cst(h.name, ls, []))
+        Option.Some(t) -> NV(v = t, st = st)
+        Option.None -> typeStore(st, h, ls, Next.Value.eval([], Core.Subst.instLevelParams(h.ty, h.params, ls)))
+
+verify typeAt
+    typeAt(sample(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.natLit(1)), []).v => Val.Nat(1)
+
+fn typeStore(st: NSt, h: Head, ls: List<Level>, t: Val) -> NV
+    ? "Remembers a constant's type at levels."
+    NV(v = t, st = NSt.update(st, ctypes = Next.VMap.add(st.ctypes, levelsKey(h.name, ls), (Val.Cst(h.name, ls, []), t))))
+
+verify typeStore
+    Next.VMap.size(typeStore(sample(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.natLit(1)), [], Val.Nat(1)).st.ctypes) => 1
+
+fn levelsKey(n: Name, ls: List<Level>) -> Int
+    ? "A key for a constant at levels."
+    Core.Exprs.hashOf(Core.Exprs.cnst(n, ls))
+
+verify levelsKey
+    levelsKey(Core.Names.anon(), []) == levelsKey(Core.Names.anon(), [Level.Zero]) => false
 
 verify constLevels
     resultVal(constLevels(Unit, sample(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.natLit(1)), [])) => Val.Nat(1)
@@ -299,7 +329,7 @@ fn lamStep(st: NSt, before: NSt, tenv: List<Val>, env: List<Val>, n: Name, d: Ex
     s = typeChecked(st, tenv, env, d, only)?
     dom = Next.Value.eval(env, d)
     x = enter(s, n, dom, bi)
-    lamLoop(x.st, before, List.prepend(dom, tenv), List.prepend(x.v, env), b, List.prepend((n, Next.Value.mat(st.depth, dom), bi), binders), only)
+    lamLoop(x.st, before, List.prepend(dom, tenv), List.prepend(x.v, env), b, List.prepend((n, Next.Value.mat(st.path, dom), bi), binders), only)
 
 verify lamStep
     resultVal(lamStep(sample(), sample(), [], [], Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default, [], true)) => Val.Pi(Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.sort(Level.Zero), Binder.Default)
@@ -316,7 +346,7 @@ verify typeChecked
 fn lamEnd(st: NSt, before: NSt, tenv: List<Val>, env: List<Val>, e: Expr, binders: List<Tuple<Name, Expr, Binder>>, only: Bool) -> Result<NV, Fail>
     ? "The body's type closed over the lambdas as a pi: read back at the body's depth, wrapped in the domains, and evaluated where the lambdas began."
     r = infer(st, tenv, env, e, only)?
-    t = wrapPis(binders, Next.Value.mat(r.st.depth, r.v))
+    t = wrapPis(binders, Next.Value.mat(r.st.path, r.v))
     Result.Ok(NV(v = Next.Value.eval(before.ids, t), st = leave(r.st, before)))
 
 verify lamEnd
@@ -591,15 +621,26 @@ fn none(st: NSt) -> Result<NO, Fail>
 verify none
     none(sample()) == Result.Ok(NO(o = Option.None, st = sample())) => true
 
-fn tyOfLevel(st: NSt, l: Int) -> Result<Val, Fail>
-    ? "The type of the variable at level l."
-    match Bool.and(l >= 0, l < st.depth)
-        true -> Result.Ok(Next.Value.nth(st.tys, st.depth - 1 - l))
-        false -> Result.Err(bad("the type checker met a loose bound variable"))
+fn tyOfVar(st: NSt, x: Int) -> Result<Val, Fail>
+    ? "The type of variable x, which must be in scope."
+    typeOn(st.path, st.tys, x)
 
-verify tyOfLevel
-    tyOfLevel(sample(), 0) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
-    tyOfLevel(enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).st, 0) => Result.Ok(Val.Sort(Level.Zero))
+verify tyOfVar
+    tyOfVar(sample(), 0) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
+    tyOfVar(enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).st, 0) => Result.Ok(Val.Sort(Level.Zero))
+
+fn typeOn(path: List<Int>, tys: List<Val>, x: Int) -> Result<Val, Fail>
+    ? "Walks the path and the types together."
+    match path
+        [] -> Result.Err(bad("the type checker met a loose bound variable"))
+        [y, ..rest] -> match tys
+            [] -> Result.Err(bad("the type checker met a loose bound variable"))
+            [t, ..trest] -> match y == x
+                true -> Result.Ok(t)
+                false -> typeOn(rest, trest, x)
+
+verify typeOn
+    typeOn([3, 1], [Val.Nat(3), Val.Nat(1)], 1) => Result.Ok(Val.Nat(1))
 
 fn argsOf(sp: List<Val>) -> List<Val>
     ? "A spine's arguments, first argument first."
@@ -612,8 +653,8 @@ fn inferVal(st: NSt, v: Val) -> Result<NV, Fail>
     ? "The type of a value, by its head: a variable's type, a constant's type at its levels or a projection's field type, walked along the spine; a lambda's type from its body's under a fresh variable."
     w = Next.Value.force(v)
     match w
-        Val.Var(l, sp) -> spineType(st, tyOfLevel(st, l)?, argsOf(sp))
-        Val.Cst(n, ls, sp) -> spineType(st, constTypeOnly(st, n, ls)?, argsOf(sp))
+        Val.Var(x, sp) -> spineType(st, tyOfVar(st, x)?, argsOf(sp))
+        Val.Cst(n, ls, sp) -> constSpine(constTypeOnly(st, n, ls)?, sp)
         Val.Prj(s, i, x, sp) -> projSpine(st, s, i, x, sp)
         Val.Sort(l) -> Result.Ok(NV(v = Val.Sort(Level.Succ(l)), st = st))
         Val.Nat -> Result.Ok(NV(v = Val.Cst(Check.Lits.name1("Nat"), [], []), st = st))
@@ -626,14 +667,21 @@ verify inferVal
     resultVal(inferVal(sample(), Val.Sort(Level.Zero))) => Val.Sort(Level.Succ(Level.Zero))
     resultVal(inferVal(enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).st, Val.Var(0, []))) => Val.Sort(Level.Zero)
 
-fn constTypeOnly(st: NSt, n: Name, ls: List<Level>) -> Result<Val, Fail>
+fn constTypeOnly(st: NSt, n: Name, ls: List<Level>) -> Result<NV, Fail>
     ? "A constant's type at the given levels, unchecked."
     match Check.State.lookup(st.old, n)
         Option.None -> Result.Err(bad("unknown constant '{Core.Names.render(n)}'"))
-        Option.Some(c) -> Result.Ok(Next.Value.eval([], Core.Subst.instLevelParams(Check.State.headOf(c).ty, Check.State.headOf(c).params, ls)))
+        Option.Some(c) -> Result.Ok(typeAt(st, Check.State.headOf(c), ls))
 
 verify constTypeOnly
     constTypeOnly(sample(), Core.Names.anon(), []) => Result.Err(Fail.Reject("unknown constant '[anonymous]'"))
+
+fn constSpine(t: NV, sp: List<Val>) -> Result<NV, Fail>
+    ? "A constant's type along its spine."
+    spineType(t.st, t.v, argsOf(sp))
+
+verify constSpine
+    resultVal(constSpine(NV(v = Val.Nat(1), st = sample()), [])) => Val.Nat(1)
 
 fn spineType(st: NSt, ty: Val, xs: List<Val>) -> Result<NV, Fail>
     ? "A function's type applied to arguments, first argument first."
@@ -667,7 +715,7 @@ fn lamType(st: NSt, n: Name, dom: Val, env: List<Val>, b: Expr, bi: Binder) -> R
     ? "pi x : dom, the type of the body under a fresh x, read back and evaluated where the lambda is."
     x = enter(st, n, dom, bi)
     r = inferVal(x.st, Next.Value.eval(List.prepend(x.v, env), b))?
-    t = Core.Exprs.pi(n, Next.Value.mat(st.depth, dom), Next.Value.mat(st.depth + 1, r.v), bi)
+    t = Core.Exprs.pi(n, Next.Value.mat(st.path, dom), Next.Value.mat(x.st.path, r.v), bi)
     Result.Ok(NV(v = Next.Value.eval(st.ids, t), st = leave(r.st, st)))
 
 verify lamType
@@ -695,16 +743,39 @@ verify isProp
     resultBool(isProp(sample(), Val.Sort(Level.Zero))) => false
 
 fn whnf(st: NSt, v: Val) -> Result<NV, Fail>
-    ? "Weak head normal form: whnfCore, then Nat arithmetic on literals, then one definition unfolded, until nothing changes."
+    ? "Weak head normal form, remembered: a variable is numbered once in the declaration, so a value means the same wherever it is met."
+    whnfHit(st, v, Next.VMap.find(st.whnfs, Next.Value.hashOf(v), v))
+
+verify whnf
+    resultVal(whnf(sample(), Val.Delay([], Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.natLit(1))))) => Val.Nat(1)
+    resultVal(whnf(sample(), Val.Sort(Level.Zero))) => Val.Sort(Level.Zero)
+
+fn whnfHit(st: NSt, v: Val, hit: Option<Val>) -> Result<NV, Fail>
+    ? "A remembered normal form, or one computed now and remembered."
+    match hit
+        Option.Some(r) -> Result.Ok(NV(v = r, st = st))
+        Option.None -> whnfKeep(whnfRaw(st, v)?, v)
+
+verify whnfHit
+    resultVal(whnfHit(sample(), Val.Nat(1), Option.Some(Val.Nat(2)))) => Val.Nat(2)
+
+fn whnfKeep(r: NV, v: Val) -> Result<NV, Fail>
+    ? "Remembers v's normal form."
+    Result.Ok(NV(v = r.v, st = NSt.update(r.st, whnfs = Next.VMap.add(r.st.whnfs, Next.Value.hashOf(v), (v, r.v)))))
+
+verify whnfKeep
+    Next.VMap.size(Result.withDefault(whnfKeep(NV(v = Val.Nat(1), st = sample()), Val.Nat(1)), NV(v = Val.Nat(0), st = sample())).st.whnfs) => 1
+
+fn whnfRaw(st: NSt, v: Val) -> Result<NV, Fail>
+    ? "whnfCore, then Nat arithmetic on literals, then one definition unfolded, until nothing changes."
     c = whnfCore(st, v, false)?
     n = natStep(c.st, c.v)?
     match n.o
         Option.Some(x) -> whnf(n.st, x)
         Option.None -> whnfDelta(c.v, unfold(n.st, c.v))
 
-verify whnf
-    resultVal(whnf(sample(), Val.Delay([], Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.natLit(1))))) => Val.Nat(1)
-    resultVal(whnf(sample(), Val.Sort(Level.Zero))) => Val.Sort(Level.Zero)
+verify whnfRaw
+    resultVal(whnfRaw(sample(), Val.Sort(Level.Zero))) => Val.Sort(Level.Zero)
 
 fn whnfDelta(v: Val, u: NO) -> Result<NV, Fail>
     ? "Goes on after an unfolding."
@@ -1093,8 +1164,17 @@ fn natStep(st: NSt, v: Val) -> Result<NO, Fail>
         _ -> none(st)
 
 verify natStep
-    natStep(sample(), Val.Cst(Check.Lits.name2("Nat", "succ"), [], [Val.Nat(4)])) == Result.Ok(NO(o = Option.Some(Val.Nat(5)), st = sample())) => true
-    natStep(sample(), Val.Cst(Check.Lits.name2("Nat", "add"), [], [Val.Nat(4), Val.Nat(3)])) == Result.Ok(NO(o = Option.Some(Val.Nat(7)), st = sample())) => true
+    resultNO(natStep(sample(), Val.Cst(Check.Lits.name2("Nat", "succ"), [], [Val.Nat(4)]))) => Option.Some(Val.Nat(5))
+    resultNO(natStep(sample(), Val.Cst(Check.Lits.name2("Nat", "add"), [], [Val.Nat(4), Val.Nat(3)]))) => Option.Some(Val.Nat(7))
+
+fn resultNO(r: Result<NO, Fail>) -> Option<Val>
+    ? "Test helper: the step of a success; none on an error."
+    match r
+        Result.Ok(x) -> x.o
+        Result.Err -> Option.None
+
+verify resultNO
+    resultNO(Result.Err(Fail.Reject("x"))) => Option.None
 
 fn natValue(v: Val) -> Option<Int>
     ? "A literal or Nat.zero as a number."
@@ -1200,7 +1280,47 @@ fn conv(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
     q = quick(st, a, b)?
     match decided(q.i)
         true -> Result.Ok(NB(b = q.i == 1, st = q.st))
-        false -> boolTrue(q.st, a, b)
+        false -> convClosed(q.st, a, b, pairKey(a, b))
+
+fn pairKey(a: Val, b: Val) -> Int
+    ? "A key for a pair in either order."
+    ha = Next.Value.hashOf(a)
+    hb = Next.Value.hashOf(b)
+    Core.Hash.mix(Int.min(ha, hb), Int.max(ha, hb))
+
+verify pairKey
+    pairKey(Val.Nat(1), Val.Nat(2)) == pairKey(Val.Nat(2), Val.Nat(1)) => true
+
+fn convClosed(st: NSt, a: Val, b: Val, key: Int) -> Result<NB, Fail>
+    ? "A remembered answer, or the answer found now and remembered, as equal or as different: a value means the same wherever it is met in the declaration."
+    match hasPair(Next.VMap.get(st.eqYes, key), a, b)
+        true -> yes(st)
+        false -> match hasPair(Next.VMap.get(st.eqNo, key), a, b)
+            true -> no(st)
+            false -> keepAnswer(boolTrue(st, a, b)?, a, b, key)
+
+verify convClosed
+    resultBool(convClosed(sample(), Val.Nat(1), Val.Nat(2), 0)) => false
+
+fn hasPair(bucket: List<Tuple<Val, Val>>, a: Val, b: Val) -> Bool
+    ? "The pair, in either order, is in the bucket."
+    match bucket
+        [] -> false
+        [(x, y), ..rest] -> match Bool.or(Bool.and(Next.Value.same(x, a), Next.Value.same(y, b)), Bool.and(Next.Value.same(x, b), Next.Value.same(y, a)))
+            true -> true
+            false -> hasPair(rest, a, b)
+
+verify hasPair
+    hasPair([(Val.Nat(1), Val.Nat(2))], Val.Nat(2), Val.Nat(1)) => true
+
+fn keepAnswer(r: NB, a: Val, b: Val, key: Int) -> Result<NB, Fail>
+    ? "Remembers the answer for the pair."
+    match r.b
+        true -> Result.Ok(NB(b = true, st = NSt.update(r.st, eqYes = Next.VMap.add(r.st.eqYes, key, (a, b)))))
+        false -> Result.Ok(NB(b = false, st = NSt.update(r.st, eqNo = Next.VMap.add(r.st.eqNo, key, (a, b)))))
+
+verify keepAnswer
+    Next.VMap.size(Result.withDefault(keepAnswer(NB(b = false, st = sample()), Val.Nat(1), Val.Nat(2), 7), NB(b = true, st = sample())).st.eqNo) => 1
 
 verify conv
     resultBool(conv(sample(), Val.Nat(1), Val.Nat(1))) => true
@@ -1416,7 +1536,16 @@ fn proofType(tt: NV, s: Val) -> Result<NI, Fail>
         true -> proofTypes(p.st, tt.v, s)
 
 verify proofType
-    proofType(NV(v = Val.Sort(Level.Zero), st = sample()), Val.Nat(0)) == Result.Ok(NI(i = 0, st = sample())) => true
+    resultNI(proofType(NV(v = Val.Sort(Level.Zero), st = sample()), Val.Nat(0))) => 0
+
+fn resultNI(r: Result<NI, Fail>) -> Int
+    ? "Test helper: the three-way answer of a success; -1 on an error."
+    match r
+        Result.Ok(x) -> x.i
+        Result.Err -> -1
+
+verify resultNI
+    resultNI(Result.Err(Fail.Reject("x"))) => -1
 
 fn proofTypes(st: NSt, tType: Val, s: Val) -> Result<NI, Fail>
     ? "Compares the two proofs' types."
