@@ -152,12 +152,15 @@ Compiled to Rust, which is the build meant for large inputs:
 
 ```bash
 bin/build                  # aver compile + cargo build --release into .build/
-.build/target/release/main FILE.ndjson [WORKERS]
+.build/target/release/main FILE.ndjson [WORKERS [old|next|both]]
 tests/run.sh               # every export under tests/export against its expected status
 tests/arena.sh DIR         # the small Lean Kernel Arena tests, each under bin/capped
 ```
 
-`bin/build` uses the `aver` on `PATH`, or the one `AVER` names.
+`bin/build` uses the `aver` on `PATH`, or the one `AVER` names. The third
+argument picks the core: `old` (the default), `next` (the second core, in
+`next/`, being built), or `both`, which checks every deferred declaration
+with each and rejects at the first where their answers differ.
 
 Pestka builds the environment in file order, checking inductive types and
 the quotient package as it meets them, and then checks the types and

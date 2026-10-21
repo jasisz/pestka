@@ -1,0 +1,65 @@
+module Decl
+    intent =
+        "The second core's entry point: checks a deferred declaration's type"
+        "and value against the environment before it, as Check.Decl does with"
+        "the first core. The second core is to work on values (terms with"
+        "their environment, variables as de Bruijn levels) instead of terms"
+        "rewritten by substitution. Until its parts exist this entry checks"
+        "with the first core's functions, so that the command line, the"
+        "comparison of the two cores and the facts each keeps across"
+        "declarations are in place first."
+    exposes [Facts, empty, check]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.PMap, Check.State, Check.Tc]
+    effects []
+
+record Facts
+    closed: PMap
+
+fn empty() -> Facts
+    ? "No facts yet: what a worker starts with."
+    Facts(closed = Core.PMap.empty())
+
+verify empty
+    Core.PMap.size(empty().closed) => 0
+
+fn check(env: Env, upTo: Int, head: Head, value: Option<Expr>, isThm: Bool, facts: Facts) -> Result<Facts, Fail>
+    ? "The type is a type, a theorem's type a proposition, and the value's type equal to the declared one, against the constants of env placed before upTo. Returns the facts kept for later declarations."
+    t = Check.Tc.check(St.update(Check.State.fresh(env, head.params, Safety.Safe), upTo = upTo, closed = facts.closed), head.ty)?
+    s = Check.Tc.ensureSort(t.st, t.e)?
+    match value
+        Option.None -> Result.Ok(Facts(closed = s.st.closed))
+        Option.Some(v) -> valueChecks(propIfTheorem(s.st, head.ty, isThm)?, head.ty, v)
+
+verify check
+    check(Check.State.envEmpty(), 0, Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Option.Some(Core.Exprs.sort(Level.Zero)), false, empty()) => Result.Err(Fail.Reject("declaration type mismatch"))
+    check(Check.State.envEmpty(), 0, Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Option.None, false, empty()) == Result.Ok(empty()) => true
+    check(Check.State.envEmpty(), 0, Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.natLit(1)), Option.None, false, empty()) => Result.Err(Fail.Reject("type expected"))
+
+fn propIfTheorem(st: St, ty: Expr, isThm: Bool) -> Result<St, Fail>
+    ? "A theorem must state a proposition."
+    match isThm
+        false -> Result.Ok(st)
+        true -> propOrFail(Check.Tc.isProp(st, ty)?)
+
+verify propIfTheorem
+    propIfTheorem(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), true) => Result.Err(Fail.Reject("theorem type is not Prop"))
+
+fn propOrFail(p: RB) -> Result<St, Fail>
+    ? "Passes a proposition."
+    match p.b
+        true -> Result.Ok(p.st)
+        false -> Result.Err(Fail.Reject("theorem type is not Prop"))
+
+verify propOrFail
+    propOrFail(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("theorem type is not Prop"))
+
+fn valueChecks(st: St, ty: Expr, v: Expr) -> Result<Facts, Fail>
+    ? "The value's type equal to the declared one."
+    vt = Check.Tc.check(st, v)?
+    eq = Check.Tc.isDefEq(vt.st, vt.e, ty)?
+    match eq.b
+        true -> Result.Ok(Facts(closed = eq.st.closed))
+        false -> Result.Err(Fail.Reject("declaration type mismatch"))
+
+verify valueChecks
+    valueChecks(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero)) => Result.Err(Fail.Reject("declaration type mismatch"))

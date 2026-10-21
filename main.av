@@ -3,16 +3,19 @@ module Main
         "Pestka's command line: read one lean4export file and give a verdict."
         "The verdict is the last line printed: accepted, rejected: <why> or"
         "declined: <why>. main returns the exit status: 0 accepted, 1 rejected,"
-        "2 declined."
+        "2 declined. An optional third argument picks the core: old (the"
+        "default), next, or both, which checks every deferred declaration"
+        "with each and rejects at the first where their answers differ."
     depends [Core.Names, Check.State, Check.Decl, Export.Stream, Export.Tables]
     effects [Args.get, Console.print, Disk.readBytesAt]
 
 fn main() -> Int
     ! [Args.get, Console.print, Disk.readBytesAt]
     match Args.get()
-        [path] -> report(Export.Stream.readFile(path, 8), 8)
-        [path, n] -> report(Export.Stream.readFile(path, workersOf(n)), workersOf(n))
-        _ -> declined("usage: pestka FILE.ndjson [WORKERS]")
+        [path] -> report(Export.Stream.readFile(path, 8), 8, Core.Old)
+        [path, n] -> report(Export.Stream.readFile(path, workersOf(n)), workersOf(n), Core.Old)
+        [path, n, c] -> report(Export.Stream.readFile(path, workersOf(n)), workersOf(n), coreOf(c))
+        _ -> declined("usage: pestka FILE.ndjson [WORKERS [old|next|both]]")
 
 fn workersOf(n: String) -> Int
     ? "The number of workers asked for, at least one; anything unreadable means eight."
@@ -25,19 +28,31 @@ verify workersOf
     workersOf("0") => 1
     workersOf("x") => 8
 
-fn report(o: Outcome, workers: Int) -> Int
+fn coreOf(c: String) -> Core
+    ? "The core asked for; anything else is the first core."
+    match c
+        "next" -> Core.Next
+        "both" -> Core.Both
+        _ -> Core.Old
+
+verify coreOf
+    coreOf("both") => Core.Both
+    coreOf("next") => Core.Next
+    coreOf("x") => Core.Old
+
+fn report(o: Outcome, workers: Int, core: Core) -> Int
     ? "Prints the verdict."
     ! [Console.print]
     match o
         Outcome.Rejected(why) -> rejected(why)
         Outcome.Declined(why) -> declined(why)
-        Outcome.Read(t) -> summary(t, workers)
+        Outcome.Read(t) -> summary(t, workers, core)
 
-fn summary(p: Parsed, workers: Int) -> Int
+fn summary(p: Parsed, workers: Int, core: Core) -> Int
     ? "Counts of what the file defines, then the checking verdict."
     ! [Console.print]
     Console.print("constants {p.constants}, declarations {List.len(p.decls)}, names {p.names}, levels {p.levels}, expressions {p.exprs}")
-    verdict(Check.Decl.checkParallel(p.decls, workers))
+    verdict(Check.Decl.checkParallel(p.decls, workers, core))
 
 fn verdict(r: Result<Run, Fail>) -> Int
     ? "Accepted only when every declaration was checked; admitted inductive blocks make it a decline."
