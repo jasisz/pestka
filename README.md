@@ -26,18 +26,18 @@ four workers (the Arena's setting) on an Apple M2 Pro:
 
 | Test | Verdict | Time | Peak memory |
 |---|---|---|---|
-| `init` (58,170 declarations) | accepted | about 21 s on eight workers | 1.9 GB |
-| `std` (98,086) | accepted | 52 s | 3.1 GB |
-| `reachability` | accepted | 21 s | 0.8 GB |
-| `con-leche` | accepted | 95 s | 3.6 GB |
-| `cedar` | accepted | 63 s | 4.6 GB |
-| `cslib` | accepted | 484 s | 9.2 GB |
-| `mathlib` | being measured | | |
+| `init` (58,170 declarations) | accepted | 23 s | 0.9 GB |
+| `std` (98,086) | accepted | 43 s | 1.0 GB |
+| `reachability` | accepted | 21 s | 0.4 GB |
+| `con-leche` | accepted | 76 s | 1.2 GB |
+| `cedar` | accepted | 56 s | 1.4 GB |
+| `mathlib` (702,040) | accepted | 951 s | 6.6 GB |
+| `cslib` | accepted | 484 s | 9.2 GB, with an earlier version |
 
 `navier-stokes-euler` pins Lean 4.34.0-rc2, whose `lake` crashes on this
-macOS, so it has not been exported here. `Init` takes about 67 s on one
-worker. Of `perf/`, `magma-list-deep-n36` takes 73 s (the
-Arena allows 390 s) and `app-lam` 0.5 s and 0.4 GB.
+macOS, so it has not been exported here. `Init` takes about 57 s on one
+worker. Of `perf/`, `magma-list-deep-n36` takes 70 s (the
+Arena allows 390 s) and `app-lam` under a second.
 
 ## What it does differently
 
