@@ -26,7 +26,7 @@ record Run
 
 record Job
     pos: Int
-    env: Env
+    upTo: Int
     head: Head
     value: Option<Expr>
     isThm: Bool
@@ -37,6 +37,7 @@ record Admitted
     at: Int
 
 record Chunk
+    env: Env
     jobs: List<Job>
 
 record Checked
@@ -47,7 +48,7 @@ record Checked
 fn checkAll(decls: List<Decl>) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations before the first failure the building met, one after another."
     a = admit(decls)
-    finish(a, checkJobs(List.reverse(a.run.jobs), a.run.closed, a.at))
+    finish(a, checkJobs(List.reverse(a.run.jobs), a.run.env, a.run.closed, a.at))
 
 fn admit(decls: List<Decl>) -> Admitted
     ? "Builds the environment from nothing; the deferred declarations wait in the result."
@@ -74,23 +75,23 @@ fn dropLate(jobs: List<Job>, limit: Int, acc: List<Job>) -> List<Job>
 verify dropLate
     dropLate([], 0, []) => []
 
-fn chunks(jobs: List<Job>, size: Int, cur: List<Job>, n: Int, acc: List<Chunk>) -> List<Chunk>
-    ? "Consecutive runs of size jobs, in file order; neighbours in a file share the most, which keeps the per-chunk caches useful."
+fn chunks(jobs: List<Job>, env: Env, size: Int, cur: List<Job>, n: Int, acc: List<Chunk>) -> List<Chunk>
+    ? "Consecutive runs of size jobs, in file order, each with the whole environment; neighbours in a file share the most, which keeps the per-chunk caches useful."
     match jobs
         [] -> match cur
             [] -> List.reverse(acc)
-            _ -> List.reverse(List.prepend(Chunk(jobs = List.reverse(cur)), acc))
+            _ -> List.reverse(List.prepend(Chunk(env = env, jobs = List.reverse(cur)), acc))
         [j, ..rest] -> match n + 1 >= size
-            true -> chunks(rest, size, [], 0, List.prepend(Chunk(jobs = List.reverse(List.prepend(j, cur))), acc))
-            false -> chunks(rest, size, List.prepend(j, cur), n + 1, acc)
+            true -> chunks(rest, env, size, [], 0, List.prepend(Chunk(env = env, jobs = List.reverse(List.prepend(j, cur))), acc))
+            false -> chunks(rest, env, size, List.prepend(j, cur), n + 1, acc)
 
 verify chunks
-    chunks([], 4, [], 0, []) => []
+    chunks([], Check.State.envEmpty(), 4, [], 0, []) => []
 
 fn checkParallel(decls: List<Decl>, workers: Int) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations on workers at once: runs of 16 consecutive declarations are dealt to the workers in turn, which evens out their loads, and each worker checks its runs in file order."
     a = admit(decls)
-    combine(a, runWorkers(deal(chunks(due(a), 16, [], 0, []), workers, 0, emptyGroups(workers, []))))
+    combine(a, runWorkers(deal(chunks(due(a), a.run.env, 16, [], 0, []), workers, 0, emptyGroups(workers, []))))
 
 verify checkParallel
     checkParallel([], 4) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
@@ -123,7 +124,7 @@ fn addAt(groups: List<List<Chunk>>, k: Int, c: Chunk, before: List<List<Chunk>>)
             false -> addAt(rest, k - 1, c, List.prepend(g, before))
 
 verify addAt
-    addAt([[], []], 1, Chunk(jobs = []), []) => [[], [Chunk(jobs = [])]]
+    addAt([[], []], 1, Chunk(env = Check.State.envEmpty(), jobs = []), []) => [[], [Chunk(env = Check.State.envEmpty(), jobs = [])]]
 
 fn reverseEach(groups: List<List<Chunk>>, acc: List<List<Chunk>>) -> List<List<Chunk>>
     ? "Each group back in file order."
@@ -163,35 +164,35 @@ fn groupLoop(g: List<Chunk>, closed: PMap, count: Int) -> Checked
     ? "Run after run."
     match g
         [] -> Checked(failure = Option.None, at = 0, count = count)
-        [c, ..rest] -> chunkLoop(c.jobs, rest, closed, count)
+        [c, ..rest] -> chunkLoop(c.jobs, c.env, rest, closed, count)
 
 verify groupLoop
     groupLoop([], Core.PMap.empty(), 2).count => 2
 
 fn checkChunk(c: Chunk) -> Checked
     ? "Checks one run of deferred declarations with a cache of its own; the first failure is reported with its place in the file."
-    chunkLoop(c.jobs, [], Core.PMap.empty(), 0)
+    chunkLoop(c.jobs, c.env, [], Core.PMap.empty(), 0)
 
 verify checkChunk
-    checkChunk(Chunk(jobs = [])) => Checked(failure = Option.None, at = 0, count = 0)
+    checkChunk(Chunk(env = Check.State.envEmpty(), jobs = [])) => Checked(failure = Option.None, at = 0, count = 0)
 
-fn chunkLoop(jobs: List<Job>, more: List<Chunk>, closed: PMap, count: Int) -> Checked
+fn chunkLoop(jobs: List<Job>, env: Env, more: List<Chunk>, closed: PMap, count: Int) -> Checked
     ? "One job after another, then the next run, until one fails."
     match jobs
         [] -> groupLoop(more, closed, count)
-        [j, ..rest] -> chunkNext(jobChecks(j, closed), j, rest, more, count)
+        [j, ..rest] -> chunkNext(jobChecks(j, env, closed), j, env, rest, more, count)
 
 verify chunkLoop
-    chunkLoop([], [], Core.PMap.empty(), 3).count => 3
+    chunkLoop([], Check.State.envEmpty(), [], Core.PMap.empty(), 3).count => 3
 
-fn chunkNext(r: Result<PMap, Fail>, j: Job, rest: List<Job>, more: List<Chunk>, count: Int) -> Checked
+fn chunkNext(r: Result<PMap, Fail>, j: Job, env: Env, rest: List<Job>, more: List<Chunk>, count: Int) -> Checked
     ? "Goes on, or stops with the named failure and its position."
     match r
-        Result.Ok(closed) -> chunkLoop(rest, more, closed, count + 1)
+        Result.Ok(closed) -> chunkLoop(rest, env, more, closed, count + 1)
         Result.Err(e) -> Checked(failure = Option.Some(failNamed(e, j.head.name)), at = j.pos, count = count)
 
 verify chunkNext
-    chunkNext(Result.Err(Fail.Reject("bad")), Job(pos = 4, env = Check.State.envEmpty(), head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), [], [], 0) => Checked(failure = Option.Some(Fail.Reject("x: bad")), at = 4, count = 0)
+    chunkNext(Result.Err(Fail.Reject("bad")), Job(pos = 4, upTo = 0, head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), Check.State.envEmpty(), [], [], 0) => Checked(failure = Option.Some(Fail.Reject("x: bad")), at = 4, count = 0)
 
 fn combine(a: Admitted, results: List<Checked>) -> Result<Run, Fail>
     ? "The first failure in file order across the chunks and the building; otherwise the run with every deferred declaration counted."
@@ -233,25 +234,25 @@ fn admitNext(run: Run, r: Result<Run, Fail>, rest: List<Decl>) -> Admitted
 verify admitNext
     admitNext(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Result.Err(Fail.Reject("x")), []).failure => Option.Some(Fail.Reject("x"))
 
-fn checkJobs(jobs: List<Job>, closed: PMap, limit: Int) -> Result<PMap, Fail>
+fn checkJobs(jobs: List<Job>, env: Env, closed: PMap, limit: Int) -> Result<PMap, Fail>
     ? "The deferred declarations in file order, up to the position where the building failed."
     match jobs
         [] -> Result.Ok(closed)
         [j, ..rest] -> match j.pos < limit
             false -> Result.Ok(closed)
-            true -> jobDone(jobChecks(j, closed), j, rest, limit)
+            true -> jobDone(jobChecks(j, env, closed), j, env, rest, limit)
 
 verify checkJobs
-    checkJobs([], Core.PMap.empty(), 0) => Result.Ok(Core.PMap.empty())
+    checkJobs([], Check.State.envEmpty(), Core.PMap.empty(), 0) => Result.Ok(Core.PMap.empty())
 
-fn jobDone(r: Result<PMap, Fail>, j: Job, rest: List<Job>, limit: Int) -> Result<PMap, Fail>
+fn jobDone(r: Result<PMap, Fail>, j: Job, env: Env, rest: List<Job>, limit: Int) -> Result<PMap, Fail>
     ? "Goes on, or names the declaration that failed."
     match r
-        Result.Ok(closed) -> checkJobs(rest, closed, limit)
+        Result.Ok(closed) -> checkJobs(rest, env, closed, limit)
         Result.Err(e) -> Result.Err(failNamed(e, j.head.name))
 
 verify jobDone
-    jobDone(Result.Err(Fail.Reject("bad")), Job(pos = 0, env = Check.State.envEmpty(), head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), [], 1) => Result.Err(Fail.Reject("x: bad"))
+    jobDone(Result.Err(Fail.Reject("bad")), Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), Check.State.envEmpty(), [], 1) => Result.Err(Fail.Reject("x: bad"))
 
 fn finish(a: Admitted, b: Result<PMap, Fail>) -> Result<Run, Fail>
     ? "A deferred failure comes first in the file; then the building's own; else everything passed."
@@ -264,15 +265,15 @@ fn finish(a: Admitted, b: Result<PMap, Fail>) -> Result<Run, Fail>
 verify finish
     finish(Admitted(run = Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), failure = Option.Some(Fail.Reject("late")), at = 3), Result.Err(Fail.Reject("early"))) => Result.Err(Fail.Reject("early"))
 
-fn jobChecks(j: Job, closed: PMap) -> Result<PMap, Fail>
-    ? "A deferred declaration against the environment before it: the type is a type, a theorem's type a proposition, and the value's type equal to the declared one. Returns the shared cache of checked closed terms."
-    st = typeIsSort(Check.Tc.check(St.update(Check.State.fresh(j.env, j.head.params, Safety.Safe), closed = closed), j.head.ty)?)?
+fn jobChecks(j: Job, env: Env, closed: PMap) -> Result<PMap, Fail>
+    ? "A deferred declaration against the environment before it, the constants of env placed before the job's: the type is a type, a theorem's type a proposition, and the value's type equal to the declared one. Returns the shared cache of checked closed terms."
+    st = typeIsSort(Check.Tc.check(St.update(Check.State.fresh(env, j.head.params, Safety.Safe), upTo = j.upTo, closed = closed), j.head.ty)?)?
     match j.value
         Option.None -> Result.Ok(st.closed)
         Option.Some(v) -> valueChecks(st, j.head.ty, v, j.isThm)
 
 verify jobChecks
-    jobChecks(Job(pos = 0, env = Check.State.envEmpty(), head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Core.PMap.empty()) => Result.Err(Fail.Reject("declaration type mismatch"))
+    jobChecks(Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.envEmpty(), Core.PMap.empty()) => Result.Err(Fail.Reject("declaration type mismatch"))
 
 verify checkAll
     checkAll([]) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
@@ -317,7 +318,7 @@ fn addDecl(run: Run, d: Decl) -> Result<Run, Fail>
 fn defer(run: Run, h: Head, v: Option<Expr>, isThm: Bool, c: Const) -> Result<Run, Fail>
     ? "A new name and distinct universe parameters now; the constant joins the environment, and its type and value are checked later against the environment before it."
     ok = newHead(run.env, h)?
-    Result.Ok(Run.update(run, env = Check.State.envSet(run.env, h.name, c), jobs = List.prepend(Job(pos = run.pos, env = run.env, head = h, value = v, isThm = isThm), run.jobs), pos = run.pos + 1))
+    Result.Ok(Run.update(run, env = Check.State.envSet(run.env, h.name, c), jobs = List.prepend(Job(pos = run.pos, upTo = Check.State.envSize(run.env), head = h, value = v, isThm = isThm), run.jobs), pos = run.pos + 1))
 
 verify defer
     Result.withDefault(defer(Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Option.None, false, Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)), Run(env = Check.State.envEmpty(), closed = Core.PMap.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).pos => 1

@@ -5,7 +5,7 @@ module State
         "counter, the universe parameters in scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envHas, envSet, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.PMap, Core.Alpha]
     effects []
 
@@ -23,9 +23,14 @@ type Const
     CCtor(Ctor)
     CRec(Rec)
 
+record Placed
+    name: Name
+    c: Const
+    at: Int
+
 type Env
     Empty
-    Leaf(Int, List<Tuple<Name, Const>>)
+    Leaf(Int, List<Placed>)
     Branch(Vector<Env>, Int)
 
 decision PersistentEnvironment
@@ -33,14 +38,24 @@ decision PersistentEnvironment
     reason =
         "The environment only grows, one declaration at a time, and a"
         "checker of declaration i must see exactly the constants before i."
-        "A persistent hash trie keyed by the hash each name carries gives"
-        "every point of the file its own environment for the price of one"
-        "root, so declarations can be checked apart, and in parallel, against"
-        "the environment they would see in order. It also never copies the"
-        "whole environment when a copy of it is alive, as a Map does."
+        "A persistent hash trie keyed by the hash each name carries never"
+        "copies the whole environment when a copy of it is alive, as a Map"
+        "does."
     chosen = "PersistentEnvironment"
-    rejected = ["MapWithPositions", "Map"]
+    rejected = ["Map"]
     impacts = [Env, envSet, envGet]
+
+decision PlacedConstants
+    date = "2026-10-21"
+    reason =
+        "A version of the trie for every deferred declaration costs a copied"
+        "path of 16-slot nodes each, about 4 KB: 3.2 GB on mathlib, kept"
+        "until the end. Instead each constant carries its place, the number"
+        "of constants before it, and a declaration is checked against the"
+        "whole environment, seeing only the constants placed before its own."
+    chosen = "PlacedConstants"
+    rejected = ["VersionPerDeclaration"]
+    impacts = [Env, envSet, envGetBefore, St]
 
 fn envEmpty() -> Env
     ? "The empty environment."
@@ -64,7 +79,7 @@ fn envHas(env: Env, n: Name) -> Bool
 verify envHas
     envHas(envSet(envEmpty(), Core.Names.anon(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.anon()) => true
 
-fn envBucket(env: Env, key: Int, shift: Int) -> List<Tuple<Name, Const>>
+fn envBucket(env: Env, key: Int, shift: Int) -> List<Placed>
     ? "The bucket of a hash, descending four bits at a time."
     match env
         Env.Empty -> []
@@ -76,25 +91,94 @@ fn envBucket(env: Env, key: Int, shift: Int) -> List<Tuple<Name, Const>>
 verify envBucket
     envBucket(Env.Leaf(5, []), 6, 0) => []
 
-fn envFind(bucket: List<Tuple<Name, Const>>, n: Name) -> Option<Const>
+fn envFind(bucket: List<Placed>, n: Name) -> Option<Const>
     ? "The newest constant of the bucket named n."
     match bucket
         [] -> Option.None
-        [(k, c), ..rest] -> match k == n
-            true -> Option.Some(c)
+        [p, ..rest] -> match p.name == n
+            true -> Option.Some(p.c)
             false -> envFind(rest, n)
 
 verify envFind
     envFind([], Core.Names.anon()) => Option.None
 
+fn envGetBefore(env: Env, n: Name, upTo: Int) -> Option<Const>
+    ? "The constant named n when it was placed before upTo: the environment as it was when it held upTo constants."
+    envFindBefore(envBucket(env, Core.Names.hashOf(n), 0), n, upTo)
+
+verify envGetBefore
+    envGetBefore(sampleEnv(3), sampleName(1), 2) => Option.Some(sampleConst(1))
+    envGetBefore(sampleEnv(3), sampleName(2), 2) => Option.None
+
+fn envFindBefore(bucket: List<Placed>, n: Name, upTo: Int) -> Option<Const>
+    ? "The constant of the bucket named n, if placed before upTo."
+    match bucket
+        [] -> Option.None
+        [p, ..rest] -> match p.name == n
+            true -> placedBefore(p, upTo)
+            false -> envFindBefore(rest, n, upTo)
+
+verify envFindBefore
+    envFindBefore([], Core.Names.anon(), 1) => Option.None
+
+fn placedBefore(p: Placed, upTo: Int) -> Option<Const>
+    ? "The constant, when its place is below upTo."
+    match p.at < upTo
+        true -> Option.Some(p.c)
+        false -> Option.None
+
+verify placedBefore
+    placedBefore(Placed(name = Core.Names.anon(), c = sampleConst(0), at = 4), 4) => Option.None
+    placedBefore(Placed(name = Core.Names.anon(), c = sampleConst(0), at = 3), 4) => Option.Some(sampleConst(0))
+
+fn envSize(env: Env) -> Int
+    ? "Number of constants."
+    match env
+        Env.Empty -> 0
+        Env.Leaf(_, b) -> List.len(b)
+        Env.Branch(_, n) -> n
+
+verify envSize
+    envSize(sampleEnv(20)) => 20
+
+fn sampleName(i: Int) -> Name
+    ? "The name of the i-th constant of the sample environments."
+    Core.Names.num(Core.Names.str(Core.Names.anon(), "c"), i)
+
+verify sampleName
+    sampleName(1) == sampleName(2) => false
+
+fn sampleConst(i: Int) -> Const
+    ? "The i-th constant of the sample environments, told apart by its type."
+    Const.CAxiom(Head(name = sampleName(i), params = [], ty = Core.Exprs.natLit(i)), false)
+
+verify sampleConst
+    headOf(sampleConst(2)).name => sampleName(2)
+
+fn sampleEnv(n: Int) -> Env
+    ? "An environment of the constants 0 to n - 1, added in order, for the laws."
+    match n <= 0
+        true -> Env.Empty
+        false -> envSet(sampleEnv(n - 1), sampleName(n - 1), sampleConst(n - 1))
+
+verify sampleEnv
+    envGet(sampleEnv(3), sampleName(2)) => Option.Some(sampleConst(2))
+
+verify envGetBefore law asTheEnvironmentWas
+    given n: Int = [0, 1, 2, 16, 17, 40]
+    given upTo: Int = [0, 1, 2, 16, 17, 40]
+    given i: Int = [0, 1, 15, 16, 39]
+    when upTo <= n
+    envGetBefore(sampleEnv(n), sampleName(i), upTo) => envGet(sampleEnv(upTo), sampleName(i))
+
 fn envSet(env: Env, n: Name, c: Const) -> Env
-    ? "Adds a constant; it shadows any older one of the same name, which the checker never lets in."
-    envAdd(env, Core.Names.hashOf(n), (n, c), 0)
+    ? "Adds a constant, placed after all those before it; it shadows any older one of the same name, which the checker never lets in."
+    envAdd(env, Core.Names.hashOf(n), Placed(name = n, c = c, at = envSize(env)), 0)
 
 verify envSet
     envHas(envSet(envSet(envEmpty(), Core.Names.str(Core.Names.anon(), "a"), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.str(Core.Names.anon(), "b"), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.str(Core.Names.anon(), "a")) => true
 
-fn envAdd(env: Env, key: Int, entry: Tuple<Name, Const>, shift: Int) -> Env
+fn envAdd(env: Env, key: Int, entry: Placed, shift: Int) -> Env
     ? "Inserts below this node, copying one path; a leaf with another hash becomes a branch."
     match env
         Env.Empty -> Env.Leaf(key, [entry])
@@ -104,7 +188,7 @@ fn envAdd(env: Env, key: Int, entry: Tuple<Name, Const>, shift: Int) -> Env
         Env.Branch(v, count) -> Env.Branch(envChild(v, envNibble(key, shift), envAdd(Option.withDefault(Vector.get(v, envNibble(key, shift)), Env.Empty), key, entry, shift + 4)), count + 1)
 
 verify envAdd
-    envBucket(envAdd(Env.Leaf(1, []), 17, (Core.Names.anon(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), 0), 17, 0) == [] => false
+    envBucket(envAdd(Env.Leaf(1, []), 17, Placed(name = Core.Names.anon(), c = sampleConst(0), at = 0), 0), 17, 0) == [] => false
 
 fn envChild(v: Vector<Env>, i: Int, child: Env) -> Vector<Env>
     ? "Replaces one child; the index is always in range."
@@ -133,6 +217,7 @@ type Locals
 
 record St
     env: Env
+    upTo: Int
     block: Map<Name, Const>
     lctx: Locals
     next: Int
@@ -165,7 +250,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, block = {}, lctx = Locals.NoLocals, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.PMap.empty(), checkCache = Core.PMap.empty(), whnfCache = Core.PMap.empty(), coreCache = Core.PMap.empty(), eqOk = Core.PMap.empty(), eqFail = Core.PMap.empty(), eqNo = Core.PMap.empty(), unfoldCache = Core.PMap.empty(), closed = Core.PMap.empty(), open = 0)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.PMap.empty(), checkCache = Core.PMap.empty(), whnfCache = Core.PMap.empty(), coreCache = Core.PMap.empty(), eqOk = Core.PMap.empty(), eqFail = Core.PMap.empty(), eqNo = Core.PMap.empty(), unfoldCache = Core.PMap.empty(), closed = Core.PMap.empty(), open = 0)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0
@@ -228,26 +313,26 @@ verify hintsOf
     hintsOf(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0))) => Hints.Opaque
 
 fn lookup(st: St, n: Name) -> Option<Const>
-    ? "A constant of the inductive block being added, or of the environment. The block's constants are kept apart until the block is accepted, so the environment is only read while a block is checked and is never copied for it."
+    ? "A constant of the inductive block being added, or of the environment placed before upTo. The block's constants are kept apart until the block is accepted, so the environment is only read while a block is checked and is never copied for it."
     match Map.len(st.block) == 0
-        true -> envGet(st.env, n)
-        false -> blockFirst(Map.get(st.block, n), st.env, n)
+        true -> envGetBefore(st.env, n, st.upTo)
+        false -> blockFirst(Map.get(st.block, n), st.env, n, st.upTo)
 
 verify lookup
     lookup(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon()) => Option.None
 
-fn blockFirst(b: Option<Const>, env: Env, n: Name) -> Option<Const>
+fn blockFirst(b: Option<Const>, env: Env, n: Name, upTo: Int) -> Option<Const>
     ? "The block's constant, else the environment's."
     match b
         Option.Some -> b
-        Option.None -> envGet(env, n)
+        Option.None -> envGetBefore(env, n, upTo)
 
 verify blockFirst
-    blockFirst(Option.None, envEmpty(), Core.Names.anon()) => Option.None
+    blockFirst(Option.None, envEmpty(), Core.Names.anon(), 0) => Option.None
 
 fn declared(st: St, n: Name) -> Bool
     ? "Whether the name is taken, in the block being added or in the environment."
-    Bool.or(Map.has(st.block, n), envHas(st.env, n))
+    Bool.or(Map.has(st.block, n), envGetBefore(st.env, n, st.upTo) != Option.None)
 
 verify declared
     declared(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon()) => false
