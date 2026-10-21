@@ -1,0 +1,75 @@
+module Cache
+    intent =
+        "A cache of the checker: a map from a hash to the bucket of"
+        "(key, value) pairs whose keys have that hash. The key is"
+        "compared structurally, so a shared hash only costs a longer"
+        "bucket. The checker hands its state on rather than keeping it,"
+        "so a cache is updated in place."
+    exposes [empty, get, add, size, find]
+    depends [Core.Exprs]
+    effects []
+
+decision MapCaches
+    date = "2026-10-21"
+    reason =
+        "A persistent trie copied a path of ten nodes on every write, and"
+        "freed ten, to keep an old version of the cache that nothing ever"
+        "went back to: the checker's memory stayed low because no old"
+        "version lived. Since Aver moves a Map threaded through record"
+        "results, and with the state handed on rather than read after it"
+        "is passed, a write finds the map with one owner and changes it in"
+        "place. Init: 579.7 G instructions retired with the trie, 480.5 G"
+        "with maps on four workers (wall 18.3 s to 15.6 s), 533.4 G to"
+        "441.7 G on one, with the same peak memory."
+    chosen = "MapCaches"
+    rejected = ["PersistentCaches"]
+    impacts = [add, get]
+
+fn empty() -> Map<Int, List<Tuple<Expr, Expr>>>
+    ? "No entries."
+    {}
+
+verify empty
+    size(empty()) => 0
+
+fn size(m: Map<Int, List<Tuple<Expr, Expr>>>) -> Int
+    ? "Number of hashes with an entry."
+    Map.len(m)
+
+verify size
+    size(add(add(empty(), 1, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 17, (Core.Exprs.bvar(2), Core.Exprs.bvar(3)))) => 2
+
+fn get(m: Map<Int, List<Tuple<Expr, Expr>>>, key: Int) -> List<Tuple<Expr, Expr>>
+    ? "The bucket stored under key, or an empty one."
+    Option.withDefault(Map.get(m, key), [])
+
+verify get
+    get(empty(), 3) => []
+    get(add(empty(), 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 3) => [(Core.Exprs.bvar(0), Core.Exprs.bvar(1))]
+
+fn add(m: Map<Int, List<Tuple<Expr, Expr>>>, key: Int, entry: Tuple<Expr, Expr>) -> Map<Int, List<Tuple<Expr, Expr>>>
+    ? "Prepends entry to key's bucket. The map is read first and then named once, so that the set changes it in place."
+    b = get(m, key)
+    Map.set(m, key, List.prepend(entry, b))
+
+verify add
+    get(add(add(empty(), 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 3, (Core.Exprs.bvar(2), Core.Exprs.bvar(3))), 3) => [(Core.Exprs.bvar(2), Core.Exprs.bvar(3)), (Core.Exprs.bvar(0), Core.Exprs.bvar(1))]
+
+fn find(m: Map<Int, List<Tuple<Expr, Expr>>>, key: Int, e: Expr) -> Option<Expr>
+    ? "The value paired with an expression equal to e in key's bucket."
+    findIn(get(m, key), e)
+
+verify find
+    find(add(empty(), 4, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 4, Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
+    find(add(empty(), 4, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 4, Core.Exprs.bvar(2)) => Option.None
+
+fn findIn(bucket: List<Tuple<Expr, Expr>>, e: Expr) -> Option<Expr>
+    ? "Linear search of a bucket."
+    match bucket
+        [] -> Option.None
+        [(k, v), ..rest] -> match k == e
+            true -> Option.Some(v)
+            false -> findIn(rest, e)
+
+verify findIn
+    findIn([], Core.Exprs.bvar(0)) => Option.None

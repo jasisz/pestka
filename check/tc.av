@@ -6,7 +6,7 @@ module Tc
         "structures, equality normalizes, inference checks equality), so"
         "they live in one module. Every function threads the checker state."
     exposes [RI, LD, inferType, check, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.PMap, Core.Alpha, Check.State, Check.Lits, Core.Hash]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Cache, Core.Alpha, Check.State, Check.Lits, Core.Hash]
     effects []
 
 decision CongruenceAfterSteps
@@ -90,14 +90,14 @@ fn shared(e: Expr) -> Bool
 verify shared
     shared(Core.Exprs.natLit(1)) => false
 
-fn cacheFor(st: St, only: Bool) -> PMap
+fn cacheFor(st: St, only: Bool) -> Map<Int, List<Tuple<Expr, Expr>>>
     ? "Inference and checking keep separate caches."
     match only
         true -> st.inferCache
         false -> st.checkCache
 
 verify cacheFor
-    Core.PMap.size(cacheFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), true)) => 0
+    Core.Cache.size(cacheFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), true)) => 0
 
 fn inferCached(st: St, e: Expr, only: Bool, hit: Option<Expr>) -> Result<RE, Fail>
     ? "Uses a cached type or infers and records one."
@@ -134,9 +134,9 @@ fn rememberAs(r: RE, e: Expr, only: Bool) -> RE
 
 
 verify rememberAs
-    Core.PMap.size(rememberAs(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 1
+    Core.Cache.size(rememberAs(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 1
 verify remember
-    Core.PMap.size(remember(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 0
+    Core.Cache.size(remember(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 0
 
 fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "One inference step by the shape of e, whose loose bound variables stand for the free variables in env, the innermost first."
@@ -191,7 +191,7 @@ verify openKeyed
 
 fn openCached(st: St, e: Expr, env: List<Expr>, x: Expr, only: Bool) -> Result<RE, Fail>
     ? "An open term's type is cached under the term applied to x, the innermost variable of env. A variable heads an env only once, when its binder is opened, so x stands for the whole env; a term shared under the same binders, as a DAG shares it, is found again. The key keeps e's loose bound variables, so it is never a term that is checked."
-    match findOpen(Core.PMap.get(cacheFor(st, only), openHash(e, x)), e, x)
+    match findOpen(Core.Cache.get(cacheFor(st, only), openHash(e, x)), e, x)
         Option.Some(t) -> Result.Ok(RE(e = t, st = st))
         Option.None -> Result.Ok(rememberOpen(inferCore(st, e, env, only)?, Core.Exprs.app(e, x), only))
 
@@ -205,7 +205,7 @@ fn rememberOpen(r: RE, key: Expr, only: Bool) -> RE
         false -> RE(e = r.e, st = St.update(r.st, checkCache = Check.State.cachePut(r.st.checkCache, key, r.e)))
 
 verify rememberOpen
-    Core.PMap.size(rememberOpen(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), false).st.checkCache) => 1
+    Core.Cache.size(rememberOpen(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), false).st.checkCache) => 1
 
 fn openHash(e: Expr, x: Expr) -> Int
     ? "The hash of the key app(e, x), without building it."
@@ -396,16 +396,18 @@ verify sortStateOf
 fn lamEnd(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Infers the body under its variables and closes the type over them."
     r = bodyType(st, e, rev, List.len(ids), only)?
-    Result.Ok(RE(e = Check.State.mkBinding(r.st.lctx, List.reverse(ids), cheapBeta(r.e), false, false), st = r.st))
+    closed = Check.State.mkBinding(r.st.lctx, List.reverse(ids), cheapBeta(r.e), false, false)
+    Result.Ok(RE(e = closed, st = r.st))
 
 verify lamEnd
     resultExpr(lamEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [], [], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
 
 fn bodyType(st: St, e: Expr, rev: List<Expr>, k: Int, only: Bool) -> Result<RE, Fail>
     ? "The type of a body under k binders just opened. While at most 128 binders are open around it, the body is copied with its variables put in and inferred as usual. Deeper than that it is inferred under its variables as it is: a body nested that deep would be copied once for every binder above it, and the copies of the levels above stay alive while the levels below are checked."
-    match st.open + k > 128
-        true -> openAgain(inferIn(St.update(st, open = st.open + k), e, rev, only)?, st.open)
-        false -> openAgain(infer(St.update(st, open = st.open + k), minst(e, rev), only)?, st.open)
+    was = st.open
+    match was + k > 128
+        true -> openAgain(inferIn(St.update(st, open = was + k), e, rev, only)?, was)
+        false -> openAgain(infer(St.update(st, open = was + k), minst(e, rev), only)?, was)
 
 verify bodyType
     resultExpr(bodyType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), [], 1, true)) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
@@ -495,9 +497,10 @@ verify isEagerReduce
 
 fn defEqMaybeEager(st: St, x: Expr, y: Expr, eager: Bool) -> Result<RB, Fail>
     ? "Definitional equality, in eager mode when asked; the mode is restored after."
+    was = st.eager
     match eager
         false -> isDefEq(st, x, y)
-        true -> restoreEager(isDefEq(St.update(st, eager = true), x, y)?, st.eager)
+        true -> restoreEager(isDefEq(St.update(st, eager = true), x, y)?, was)
 
 verify defEqMaybeEager
     resultBool(defEqMaybeEager(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(0), true)) => true
@@ -605,7 +608,8 @@ verify letValue
 fn letEnd(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Infers the body under its variables and closes the type with the lets it still uses."
     r = bodyType(st, e, rev, List.len(ids), only)?
-    Result.Ok(RE(e = Check.State.mkBinding(r.st.lctx, List.reverse(ids), cheapBeta(r.e), false, true), st = r.st))
+    closed = Check.State.mkBinding(r.st.lctx, List.reverse(ids), cheapBeta(r.e), false, true)
+    Result.Ok(RE(e = closed, st = r.st))
 
 verify letEnd
     resultExpr(letEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [], [], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
@@ -892,7 +896,7 @@ fn coreStore(r: RE, e: Expr, cheap: Bool) -> Result<RE, Fail>
         false -> Result.Ok(RE(e = r.e, st = St.update(r.st, coreCache = Check.State.cachePut(r.st.coreCache, e, r.e))))
 
 verify coreStore
-    Core.PMap.size(coreStore(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(1), false)?.st.coreCache) => 1
+    Core.Cache.size(coreStore(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(1), false)?.st.coreCache) => 1
 
 fn coreWork(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "One whnfCore step by shape."
@@ -1359,7 +1363,7 @@ fn ruleCached(st: St, rule: RecRule, rv: Rec, ls: List<Level>, key: Expr) -> RE
         Option.None -> ruleStore(st, key, Core.Subst.instLevelParams(rule.rhs, rv.head.params, ls))
 
 verify ruleCached
-    Core.PMap.size(ruleCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [Level.Zero], Core.Exprs.natLit(9)).st.unfoldCache) => 1
+    Core.Cache.size(ruleCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [Level.Zero], Core.Exprs.natLit(9)).st.unfoldCache) => 1
 
 fn ruleStore(st: St, key: Expr, v: Expr) -> RE
     ? "Remembers an instantiated right-hand side."
@@ -1869,7 +1873,7 @@ fn whnfStore(st: St, orig: Expr, r: Expr) -> RE
         false -> RE(e = r, st = st)
 
 verify whnfStore
-    Core.PMap.size(whnfStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1)).st.whnfCache) => 0
+    Core.Cache.size(whnfStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1)).st.whnfCache) => 0
 
 fn unfoldDefinition(st: St, e: Expr) -> RO
     ? "Unfolds the head constant if it is a definition or theorem at the right number of levels."
@@ -1909,7 +1913,7 @@ fn unfoldStore(st: St, f: Expr, v: Option<Expr>) -> RO
         Option.None -> RO(o = v, st = st)
 
 verify unfoldStore
-    Core.PMap.size(unfoldStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), []), Option.Some(Core.Exprs.natLit(1))).st.unfoldCache) => 1
+    Core.Cache.size(unfoldStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), []), Option.Some(Core.Exprs.natLit(1))).st.unfoldCache) => 1
 
 fn unfoldValue(c: Option<Const>, ls: List<Level>) -> Option<Expr>
     ? "Value at the given levels, when the counts agree."
@@ -2072,7 +2076,7 @@ fn remembered(r: RB, t: Expr, s: Expr) -> Result<RB, Fail>
 verify remembered
     resultBool(remembered(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => false
 
-fn keptNo(fails: PMap, t: Expr, s: Expr) -> PMap
+fn keptNo(fails: Map<Int, List<Tuple<Expr, Expr>>>, t: Expr, s: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
     ? "Failures of this declaration. Its free variables are its own, each with one type and value, so a pair that was different stays different; terms with loose bound variables are left out, as are pairs too small to be worth an entry."
     match Bool.and(Core.Exprs.looseRange(t) == 0, Core.Exprs.looseRange(s) == 0)
         false -> fails
@@ -2081,34 +2085,34 @@ fn keptNo(fails: PMap, t: Expr, s: Expr) -> PMap
             false -> fails
 
 verify keptNo
-    Core.PMap.size(keptNo(Core.PMap.empty(), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.fvar(3))) => 1
-    Core.PMap.size(keptNo(Core.PMap.empty(), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.fvar(3))) => 0
-    Core.PMap.size(keptNo(Core.PMap.empty(), Core.Exprs.fvar(0), Core.Exprs.fvar(3))) => 0
+    Core.Cache.size(keptNo(Core.Cache.empty(), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.fvar(3))) => 1
+    Core.Cache.size(keptNo(Core.Cache.empty(), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.fvar(3))) => 0
+    Core.Cache.size(keptNo(Core.Cache.empty(), Core.Exprs.fvar(0), Core.Exprs.fvar(3))) => 0
 
 verify isDefEq
     resultBool(isDefEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Max(Level.Zero, Level.Zero)), Core.Exprs.bvar(0), Binder.Implicit))) => true
     resultBool(isDefEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(5), Core.Exprs.natLit(4))) => false
     resultBool(isDefEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.natLit(1)), Core.Exprs.natLit(1))) => true
 
-fn keptPair(closed: PMap, t: Expr, s: Expr) -> PMap
+fn keptPair(closed: Map<Int, List<Tuple<Expr, Expr>>>, t: Expr, s: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
     ? "The cache kept across declarations, with the pair when it belongs there."
     match sharedPair(t, s)
         true -> Check.State.closedPairPut(closed, t, s)
         false -> closed
 
 verify keptPair
-    Core.PMap.size(keptPair(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.fvar(0))) => 0
-    Core.PMap.size(keptPair(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
+    Core.Cache.size(keptPair(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.fvar(0))) => 0
+    Core.Cache.size(keptPair(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
 
-fn keptFail(closed: PMap, t: Expr, s: Expr) -> PMap
+fn keptFail(closed: Map<Int, List<Tuple<Expr, Expr>>>, t: Expr, s: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
     ? "The cache kept across declarations, with the pair as different when it belongs there."
     match sharedPair(t, s)
         true -> Check.State.closedFailPut(closed, t, s)
         false -> closed
 
 verify keptFail
-    Core.PMap.size(keptFail(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.fvar(0))) => 0
-    Core.PMap.size(keptFail(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
+    Core.Cache.size(keptFail(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.fvar(0))) => 0
+    Core.Cache.size(keptFail(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
 
 fn sharedPair(t: Expr, s: Expr) -> Bool
     ? "A pair whose equality holds in every later declaration of a worker: both terms with no free variable, whose numbers mean something else in every declaration. Universe parameters may occur: definitional equality never checks them against the declaration's own, and compares levels by their names alone. The worker meets declarations in file order and the environment only grows, so nothing the answer used changes."
@@ -2320,7 +2324,7 @@ fn quickParts(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
 
 verify quickParts
     quickParts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2))) => Result.Ok(RI(i = 0, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
-    resultInt(quickParts(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), eqOk = Check.State.pairPut(Core.PMap.empty(), Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2)))) => 1
+    resultInt(quickParts(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), eqOk = Check.State.pairPut(Core.Cache.empty(), Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2)))) => 1
 
 fn congruent(st: St, t: Expr, s: Expr) -> Bool
     ? "Identical, already found equal, or made of such parts."

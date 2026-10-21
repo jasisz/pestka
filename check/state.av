@@ -6,7 +6,7 @@ module State
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
     exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names]
-    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.PMap, Core.Alpha]
+    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache, Core.Alpha]
     effects []
 
 type Fail
@@ -225,15 +225,15 @@ record St
     checkParams: Bool
     safety: Safety
     eager: Bool
-    inferCache: PMap
-    checkCache: PMap
-    whnfCache: PMap
-    coreCache: PMap
-    eqOk: PMap
-    eqFail: PMap
-    eqNo: PMap
-    unfoldCache: PMap
-    closed: PMap
+    inferCache: Map<Int, List<Tuple<Expr, Expr>>>
+    checkCache: Map<Int, List<Tuple<Expr, Expr>>>
+    whnfCache: Map<Int, List<Tuple<Expr, Expr>>>
+    coreCache: Map<Int, List<Tuple<Expr, Expr>>>
+    eqOk: Map<Int, List<Tuple<Expr, Expr>>>
+    eqFail: Map<Int, List<Tuple<Expr, Expr>>>
+    eqNo: Map<Int, List<Tuple<Expr, Expr>>>
+    unfoldCache: Map<Int, List<Tuple<Expr, Expr>>>
+    closed: Map<Int, List<Tuple<Expr, Expr>>>
     open: Int
 
 record RE
@@ -250,7 +250,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.PMap.empty(), checkCache = Core.PMap.empty(), whnfCache = Core.PMap.empty(), coreCache = Core.PMap.empty(), eqOk = Core.PMap.empty(), eqFail = Core.PMap.empty(), eqNo = Core.PMap.empty(), unfoldCache = Core.PMap.empty(), closed = Core.PMap.empty(), open = 0)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0
@@ -480,13 +480,13 @@ fn wrapLocal(l: Local, ty: Expr, before: List<Int>, r: Expr, isLam: Bool, dropDe
 verify wrapLocal
     wrapLocal(Local(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), value = Option.Some(Core.Exprs.sort(Level.Zero)), binder = Binder.Default), Core.Exprs.sort(Level.Zero), [], Core.Exprs.sort(Level.Zero), false, true) => Core.Exprs.sort(Level.Zero)
 
-fn cacheGet(cache: PMap, key: Expr) -> Option<Expr>
+fn cacheGet(cache: Map<Int, List<Tuple<Expr, Expr>>>, key: Expr) -> Option<Expr>
     ? "A cached result for key, found by hash and confirmed by equality."
-    findIn(Core.PMap.get(cache, Core.Exprs.hashOf(key)), key)
+    findIn(Core.Cache.get(cache, Core.Exprs.hashOf(key)), key)
 
 verify cacheGet
-    cacheGet(Core.PMap.empty(), Core.Exprs.bvar(0)) => Option.None
-    cacheGet(cachePut(Core.PMap.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
+    cacheGet(Core.Cache.empty(), Core.Exprs.bvar(0)) => Option.None
+    cacheGet(cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
 
 fn findIn(bucket: List<Tuple<Expr, Expr>>, key: Expr) -> Option<Expr>
     ? "The value stored under an equal key."
@@ -499,12 +499,12 @@ fn findIn(bucket: List<Tuple<Expr, Expr>>, key: Expr) -> Option<Expr>
 verify findIn
     findIn([], Core.Exprs.bvar(0)) => Option.None
 
-fn cachePut(cache: PMap, key: Expr, v: Expr) -> PMap
+fn cachePut(cache: Map<Int, List<Tuple<Expr, Expr>>>, key: Expr, v: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
     ? "Stores a result under the key's hash."
-    Core.PMap.add(cache, Core.Exprs.hashOf(key), (key, v))
+    Core.Cache.add(cache, Core.Exprs.hashOf(key), (key, v))
 
 verify cachePut
-    Core.PMap.size(cachePut(Core.PMap.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => 1
+    Core.Cache.size(cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => 1
 
 fn pairKey(a: Expr, b: Expr) -> Int
     ? "One key for an unordered pair."
@@ -515,13 +515,13 @@ fn pairKey(a: Expr, b: Expr) -> Int
 verify pairKey
     pairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) == pairKey(Core.Exprs.bvar(1), Core.Exprs.bvar(0)) => true
 
-fn pairGet(cache: PMap, a: Expr, b: Expr) -> Bool
+fn pairGet(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded."
-    hasPair(Core.PMap.get(cache, pairKey(a, b)), a, b)
+    hasPair(Core.Cache.get(cache, pairKey(a, b)), a, b)
 
 verify pairGet
-    pairGet(pairPut(Core.PMap.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(1), Core.Exprs.bvar(0)) => true
-    pairGet(Core.PMap.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)) => false
+    pairGet(pairPut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(1), Core.Exprs.bvar(0)) => true
+    pairGet(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)) => false
 
 fn hasPair(bucket: List<Tuple<Expr, Expr>>, a: Expr, b: Expr) -> Bool
     ? "Membership in either order."
@@ -543,12 +543,12 @@ fn alike(x: Expr, a: Expr) -> Bool
 verify alike
     alike(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.str(Core.Names.anon(), "x"), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)) => true
 
-fn pairPut(cache: PMap, a: Expr, b: Expr) -> PMap
+fn pairPut(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
     ? "Records the pair."
-    Core.PMap.add(cache, pairKey(a, b), (a, b))
+    Core.Cache.add(cache, pairKey(a, b), (a, b))
 
 verify pairPut
-    Core.PMap.size(pairPut(Core.PMap.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => 1
+    Core.Cache.size(pairPut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => 1
 
 fn closedPairKey(a: Expr, b: Expr) -> Int
     ? "The key of a pair in the cache kept across declarations: above every term hash, so that it never meets an entry for a type there."
@@ -557,20 +557,20 @@ fn closedPairKey(a: Expr, b: Expr) -> Int
 verify closedPairKey
     closedPairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) > 1099511627775 => true
 
-fn closedPairGet(cache: PMap, a: Expr, b: Expr) -> Bool
+fn closedPairGet(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded in the cache kept across declarations."
-    hasPair(Core.PMap.get(cache, closedPairKey(a, b)), a, b)
+    hasPair(Core.Cache.get(cache, closedPairKey(a, b)), a, b)
 
 verify closedPairGet
-    closedPairGet(closedPairPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
-    closedPairGet(pairPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
+    closedPairGet(closedPairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
+    closedPairGet(pairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
 
-fn closedPairPut(cache: PMap, a: Expr, b: Expr) -> PMap
+fn closedPairPut(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
     ? "Records the pair in the cache kept across declarations."
-    Core.PMap.add(cache, closedPairKey(a, b), (a, b))
+    Core.Cache.add(cache, closedPairKey(a, b), (a, b))
 
 verify closedPairPut
-    Core.PMap.size(closedPairPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
+    Core.Cache.size(closedPairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
 
 fn closedFailKey(a: Expr, b: Expr) -> Int
     ? "The key of a pair known to differ, in the cache kept across declarations: above the keys of equal pairs."
@@ -579,17 +579,17 @@ fn closedFailKey(a: Expr, b: Expr) -> Int
 verify closedFailKey
     closedFailKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) > 2199023255551 => true
 
-fn closedFailGet(cache: PMap, a: Expr, b: Expr) -> Bool
+fn closedFailGet(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded as different in the cache kept across declarations."
-    hasPair(Core.PMap.get(cache, closedFailKey(a, b)), a, b)
+    hasPair(Core.Cache.get(cache, closedFailKey(a, b)), a, b)
 
 verify closedFailGet
-    closedFailGet(closedFailPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
-    closedFailGet(closedPairPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
+    closedFailGet(closedFailPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
+    closedFailGet(closedPairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
 
-fn closedFailPut(cache: PMap, a: Expr, b: Expr) -> PMap
+fn closedFailPut(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
     ? "Records the pair as different in the cache kept across declarations."
-    Core.PMap.add(cache, closedFailKey(a, b), (a, b))
+    Core.Cache.add(cache, closedFailKey(a, b), (a, b))
 
 verify closedFailPut
-    Core.PMap.size(closedFailPut(Core.PMap.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
+    Core.Cache.size(closedFailPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1

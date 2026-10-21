@@ -8,18 +8,18 @@ module Decl
         "definitional equality still goes to the first core's through"
         "Next.Tc's bridge."
     exposes [Facts, empty, check]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.PMap, Check.State, Check.Tc, Next.Value, Next.Tc]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Cache, Check.State, Check.Tc, Next.Value, Next.Tc]
     effects []
 
 record Facts
-    closed: PMap
+    closed: Map<Int, List<Tuple<Expr, Expr>>>
 
 fn empty() -> Facts
     ? "No facts yet: what a worker starts with."
-    Facts(closed = Core.PMap.empty())
+    Facts(closed = Core.Cache.empty())
 
 verify empty
-    Core.PMap.size(empty().closed) => 0
+    Core.Cache.size(empty().closed) => 0
 
 fn check(env: Env, upTo: Int, head: Head, value: Option<Expr>, isThm: Bool, facts: Facts) -> Result<Facts, Fail>
     ? "The type is a type, a theorem's type a proposition, and the value's type equal to the declared one, against the constants of env placed before upTo. Returns the facts kept for later declarations."

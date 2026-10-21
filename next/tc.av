@@ -15,7 +15,7 @@ module Tc
         "constants, the declaration's universe parameters and the"
         "instantiated values of definitions."
     exposes [NSt, NV, NB, start, infer, inferVal, checkAgainst, whnf, whnfCore, conv, sortOf, isProp]
-    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps, Core.Decls, Core.Univ, Core.PMap, Check.State, Check.Tc, Check.Lits, Next.Value, Next.VMap]
+    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps, Core.Decls, Core.Univ, Core.Cache, Check.State, Check.Tc, Check.Lits, Next.Value, Next.VMap]
     effects []
 
 record NSt
@@ -1324,7 +1324,7 @@ fn storeAt(old: St, key: Expr, x: Expr) -> RE
     RE(e = x, st = St.update(old, unfoldCache = Check.State.cachePut(old.unfoldCache, key, x)))
 
 verify storeAt
-    Core.PMap.size(storeAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(9), Core.Exprs.natLit(1)).st.unfoldCache) => 1
+    Core.Cache.size(storeAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(9), Core.Exprs.natLit(1)).st.unfoldCache) => 1
 
 fn applyAll(f: Val, xs: List<Val>) -> Val
     ? "f applied to the arguments, first argument first."

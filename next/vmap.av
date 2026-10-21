@@ -1,7 +1,7 @@
 module VMap
     intent =
         "A persistent hash trie from Int keys to buckets of value pairs, for"
-        "the second core's caches; the same trie as Core.PMap. Sixteen-way"
+        "the second core's caches; the same trie as Core.Cache. Sixteen-way"
         "branching on four bits of the"
         "key at a time; an update copies one path of at most ten nodes. A"
         "copy of the trie is a copy of its root, so a state record holding"

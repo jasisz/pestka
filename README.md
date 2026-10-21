@@ -44,10 +44,12 @@ Arena allows 390 s) and `app-lam` under a second.
 The checker follows the reference kernel's algorithm. What is its own:
 
 - **It is written in Aver**, a pure functional language compiled to Rust:
-  the checker's state is a value passed from function to function, never
-  updated in place. A state can be kept and gone back to, so the caches and
-  the local context are persistent tries that share structure; a lookup
-  table copied whole at every fork was the main cost in early versions.
+  the checker's state is a value passed from function to function. A state
+  could be kept and gone back to, but the checker never does: it hands its
+  state on, so the compiled code finds each cache with a single owner and
+  updates it in place. Caches kept as persistent tries, copying a path on
+  every write so that an old version nobody held stayed intact, cost 17%
+  more instructions on `Init`.
 - **Declarations are checked in parallel with a sequential verdict.** The
   environment is built in file order; the other declarations are then
   checked on several workers, each against the environment at its own place

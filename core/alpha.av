@@ -7,16 +7,16 @@ module Alpha
         "different hashes answer at once; equal subterms found once are"
         "remembered, so a shared subterm is compared once."
     exposes [alphaEq, alphaEqList]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.PMap]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Cache]
     effects []
 
 record AR
     b: Bool
-    memo: PMap
+    memo: Map<Int, List<Tuple<Expr, Expr>>>
 
 fn alphaEq(a: Expr, b: Expr) -> Bool
     ? "a and b are the same term up to binder names and annotations."
-    aeq(a, b, Core.PMap.empty()).b
+    aeq(a, b, Core.Cache.empty()).b
 
 verify alphaEq
     alphaEq(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.str(Core.Names.anon(), "x"), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Implicit)) => true
@@ -37,36 +37,36 @@ verify alphaEqList
     alphaEqList([Core.Exprs.bvar(0)], [Core.Exprs.bvar(0)]) => true
     alphaEqList([], [Core.Exprs.bvar(0)]) => false
 
-fn aeq(a: Expr, b: Expr, memo: PMap) -> AR
+fn aeq(a: Expr, b: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>) -> AR
     ? "Identical terms, a hash mismatch, a remembered pair, or a structural comparison."
     match a == b
         true -> AR(b = true, memo = memo)
         false -> match Core.Exprs.hashOf(a) == Core.Exprs.hashOf(b)
             false -> AR(b = false, memo = memo)
-            true -> aeqSeen(a, b, memo, Core.PMap.find(memo, Core.Exprs.hashOf(a), a))
+            true -> aeqSeen(a, b, memo, Core.Cache.find(memo, Core.Exprs.hashOf(a), a))
 
 verify aeq
-    aeq(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.PMap.empty()).b => true
+    aeq(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Cache.empty()).b => true
 
-fn aeqSeen(a: Expr, b: Expr, memo: PMap, seen: Option<Expr>) -> AR
+fn aeqSeen(a: Expr, b: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>, seen: Option<Expr>) -> AR
     ? "A pair already found equal is equal again."
     match seen == Option.Some(b)
         true -> AR(b = true, memo = memo)
         false -> aeqStore(aeqNode(a, b, memo), a, b)
 
 verify aeqSeen
-    aeqSeen(Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.PMap.empty(), Option.Some(Core.Exprs.bvar(1))).b => true
+    aeqSeen(Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Cache.empty(), Option.Some(Core.Exprs.bvar(1))).b => true
 
 fn aeqStore(r: AR, a: Expr, b: Expr) -> AR
     ? "Remembers an equal pair."
     match r.b
-        true -> AR(b = true, memo = Core.PMap.add(r.memo, Core.Exprs.hashOf(a), (a, b)))
+        true -> AR(b = true, memo = Core.Cache.add(r.memo, Core.Exprs.hashOf(a), (a, b)))
         false -> r
 
 verify aeqStore
-    Core.PMap.size(aeqStore(AR(b = true, memo = Core.PMap.empty()), Core.Exprs.bvar(0), Core.Exprs.bvar(0)).memo) => 1
+    Core.Cache.size(aeqStore(AR(b = true, memo = Core.Cache.empty()), Core.Exprs.bvar(0), Core.Exprs.bvar(0)).memo) => 1
 
-fn aeqNode(a: Expr, b: Expr, memo: PMap) -> AR
+fn aeqNode(a: Expr, b: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>) -> AR
     ? "Same constructor, equal parts; binder names and annotations are not compared."
     match a
         Expr.App(_, f, x) -> match b
@@ -89,9 +89,9 @@ fn aeqNode(a: Expr, b: Expr, memo: PMap) -> AR
         _ -> AR(b = a == b, memo = memo)
 
 verify aeqNode
-    aeqNode(Core.Exprs.natLit(1), Core.Exprs.natLit(1), Core.PMap.empty()).b => true
+    aeqNode(Core.Exprs.natLit(1), Core.Exprs.natLit(1), Core.Cache.empty()).b => true
 
-fn aeq2(a1: Expr, b1: Expr, a2: Expr, b2: Expr, memo: PMap) -> AR
+fn aeq2(a1: Expr, b1: Expr, a2: Expr, b2: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>) -> AR
     ? "Two pairs, the second only if the first is equal."
     r = aeq(a1, b1, memo)
     match r.b
@@ -99,9 +99,9 @@ fn aeq2(a1: Expr, b1: Expr, a2: Expr, b2: Expr, memo: PMap) -> AR
         false -> r
 
 verify aeq2
-    aeq2(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Exprs.bvar(2), Core.PMap.empty()).b => false
+    aeq2(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Exprs.bvar(2), Core.Cache.empty()).b => false
 
-fn aeq3(a1: Expr, b1: Expr, a2: Expr, b2: Expr, a3: Expr, b3: Expr, memo: PMap) -> AR
+fn aeq3(a1: Expr, b1: Expr, a2: Expr, b2: Expr, a3: Expr, b3: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>) -> AR
     ? "Three pairs in order."
     r = aeq(a1, b1, memo)
     match r.b
@@ -109,4 +109,4 @@ fn aeq3(a1: Expr, b1: Expr, a2: Expr, b2: Expr, a3: Expr, b3: Expr, memo: PMap) 
         false -> r
 
 verify aeq3
-    aeq3(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Exprs.bvar(1), Core.Exprs.bvar(2), Core.Exprs.bvar(2), Core.PMap.empty()).b => true
+    aeq3(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Exprs.bvar(1), Core.Exprs.bvar(2), Core.Exprs.bvar(2), Core.Cache.empty()).b => true
