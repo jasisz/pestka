@@ -14,7 +14,7 @@ module Value
         "a value back with beta under binders, mat puts the environment back"
         "into the waiting terms without evaluating them, the term the first"
         "core would have built."
-    exposes [Val, eval, apply, force, nth, quote, mat, matF, delay]
+    exposes [Val, eval, apply, force, nth, quote, mat, matF, delay, same]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps]
     effects []
 
@@ -225,3 +225,76 @@ fn matEnv(fvs: List<Expr>, n: Int, d: Int, env: List<Val>) -> List<Expr>
 
 verify matEnv
     matEnv([], 0, 1, [Val.Var(0, []), Val.Nat(3)]) => [Core.Exprs.bvar(0), Core.Exprs.natLit(3)]
+
+fn same(a: Val, b: Val) -> Bool
+    ? "Syntactic equality of values, where a waiting term or a binder's body is compared with only the part of its environment it can see: the same term in two environments that agree on what it reads is the same value. Cheap and never wrong; equal values it misses are found by conversion."
+    match a
+        Val.Delay(ea, ta) -> match b
+            Val.Delay(eb, tb) -> Bool.and(ta == tb, sameSeen(ea, eb, Core.Exprs.looseRange(ta)))
+            _ -> false
+        Val.Var(l, sa) -> match b
+            Val.Var(m, sb) -> Bool.and(l == m, sameAll(sa, sb))
+            _ -> false
+        Val.Free(i, sa) -> match b
+            Val.Free(j, sb) -> Bool.and(i == j, sameAll(sa, sb))
+            _ -> false
+        Val.Cst(n, ls, sa) -> match b
+            Val.Cst(m, ks, sb) -> Bool.and(Bool.and(n == m, ls == ks), sameAll(sa, sb))
+            _ -> false
+        Val.Lam(_, da, ea, ta, _) -> match b
+            Val.Lam(_, db, eb, tb, _) -> sameBinder(da, ea, ta, db, eb, tb)
+            _ -> false
+        Val.Pi(_, da, ea, ta, _) -> match b
+            Val.Pi(_, db, eb, tb, _) -> sameBinder(da, ea, ta, db, eb, tb)
+            _ -> false
+        Val.Prj(s1, i, x, sa) -> match b
+            Val.Prj(s2, j, y, sb) -> Bool.and(Bool.and(s1 == s2, i == j), Bool.and(same(x, y), sameAll(sa, sb)))
+            _ -> false
+        Val.Stuck(x, sa) -> match b
+            Val.Stuck(y, sb) -> Bool.and(same(x, y), sameAll(sa, sb))
+            _ -> false
+        _ -> a == b
+
+verify same
+    same(Val.Delay([Val.Nat(1), Val.Nat(2)], Core.Exprs.bvar(0)), Val.Delay([Val.Nat(1), Val.Nat(3)], Core.Exprs.bvar(0))) => true
+    same(Val.Delay([Val.Nat(1)], Core.Exprs.bvar(0)), Val.Delay([Val.Nat(2)], Core.Exprs.bvar(0))) => false
+    same(Val.Var(0, [Val.Nat(1)]), Val.Var(0, [Val.Nat(1)])) => true
+    same(Val.Nat(1), Val.Nat(2)) => false
+
+fn sameBinder(da: Val, ea: List<Val>, ta: Expr, db: Val, eb: List<Val>, tb: Expr) -> Bool
+    ? "Same domain and the same body seeing the same environment below its own variable."
+    Bool.and(Bool.and(ta == tb, same(da, db)), sameSeen(ea, eb, Core.Exprs.looseRange(ta) - 1))
+
+verify sameBinder
+    sameBinder(Val.Nat(0), [Val.Nat(1)], Core.Exprs.bvar(0), Val.Nat(0), [Val.Nat(2)], Core.Exprs.bvar(0)) => true
+
+fn sameSeen(a: List<Val>, b: List<Val>, k: Int) -> Bool
+    ? "The first k values of two environments are the same."
+    match k <= 0
+        true -> true
+        false -> match a
+            [x, ..ar] -> match b
+                [y, ..br] -> match same(x, y)
+                    true -> sameSeen(ar, br, k - 1)
+                    false -> false
+                [] -> false
+            [] -> b == []
+
+verify sameSeen
+    sameSeen([Val.Nat(1)], [Val.Nat(1), Val.Nat(2)], 1) => true
+    sameSeen([], [], 3) => true
+
+fn sameAll(a: List<Val>, b: List<Val>) -> Bool
+    ? "Two spines of the same values."
+    match a
+        [] -> b == []
+        [x, ..ar] -> match b
+            [] -> false
+            [y, ..br] -> match same(x, y)
+                true -> sameAll(ar, br)
+                false -> false
+
+verify sameAll
+    sameAll([Val.Nat(1)], [Val.Nat(1)]) => true
+    sameAll([Val.Nat(1)], []) => false
+

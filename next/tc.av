@@ -5,19 +5,20 @@ module Tc
         "bound variables (index 0 first), and its type comes back as a value,"
         "so an application walks its function's type by extending the"
         "type's environment and substitutes nothing. A binder declares a"
-        "variable at the next de Bruijn level. Weak head normalization does"
-        "beta, delta and projections of constructors on values; recursor"
-        "rules, quotients and Nat arithmetic, and definitional equality, are"
-        "still the first core's, reached through a bridge: values are read"
-        "back as terms in which each level is a free variable of the first"
-        "core's local context. The bridge goes as the second core grows."
-    exposes [NSt, NV, NB, start, infer, whnf, conv, sortOf, isProp]
+        "variable at the next de Bruijn level, whose type the state keeps."
+        "Weak head normalization, the type of a value and definitional"
+        "equality work on values too, following the reference kernel's"
+        "steps; a term is built only for the type of a lambda, read back"
+        "from its body's type. The first core's state serves for the"
+        "constants, the declaration's universe parameters and the"
+        "instantiated values of definitions."
+    exposes [NSt, NV, NB, start, infer, inferVal, whnf, whnfCore, conv, sortOf, isProp]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps, Core.Decls, Core.Univ, Core.PMap, Check.State, Check.Tc, Check.Lits, Next.Value]
     effects []
 
 record NSt
     old: St
-    fvs: List<Expr>
+    tys: List<Val>
     ids: List<Val>
     depth: Int
     checked: PMap
@@ -33,7 +34,7 @@ record NB
 
 fn start(old: St) -> NSt
     ? "No binder open: every value is closed."
-    NSt(old = old, fvs = [], ids = [], depth = 0, checked = Core.PMap.empty(), inferred = Core.PMap.empty())
+    NSt(old = old, tys = [], ids = [], depth = 0, checked = Core.PMap.empty(), inferred = Core.PMap.empty())
 
 verify start
     start(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).depth => 0
@@ -52,26 +53,18 @@ fn sample() -> NSt
 verify sample
     sample().depth => 0
 
-fn termOf(st: NSt, v: Val) -> Expr
-    ? "A value as a term of the first core: each open level is its free variable."
-    Next.Value.matF(st.fvs, st.depth, st.depth, v)
-
-verify termOf
-    termOf(sample(), Val.Nat(1)) => Core.Exprs.natLit(1)
-
 fn enter(st: NSt, n: Name, dom: Val, bi: Binder) -> NV
-    ? "Opens a binder: the variable is the next level, declared to the first core as a free variable of type dom."
-    loc = Check.State.names(st.old, n, termOf(st, dom), Option.None, bi)
+    ? "Opens a binder: the variable is the next level, of type dom."
     v = Val.Var(st.depth, [])
-    NV(v = v, st = NSt.update(st, old = loc.st, fvs = List.prepend(loc.e, st.fvs), ids = List.prepend(v, st.ids), depth = st.depth + 1))
+    NV(v = v, st = NSt.update(st, tys = List.prepend(dom, st.tys), ids = List.prepend(v, st.ids), depth = st.depth + 1))
 
 verify enter
     enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).v => Val.Var(0, [])
     enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).st.depth => 1
 
 fn leave(st: NSt, before: NSt) -> NSt
-    ? "Back to the binders open before; the first core's state, with its caches, stays."
-    NSt.update(st, fvs = before.fvs, ids = before.ids, depth = before.depth)
+    ? "Back to the binders open before; caches stay."
+    NSt.update(st, tys = before.tys, ids = before.ids, depth = before.depth)
 
 verify leave
     leave(enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).st, sample()).depth => 0
@@ -538,123 +531,1600 @@ fn projResultProp(p: NB, d: Val) -> Result<NV, Fail>
 verify projResultProp
     projResultProp(NB(b = false, st = sample()), Val.Nat(1)) => Result.Err(Fail.Reject("invalid projection"))
 
-fn isProp(st: NSt, t: Val) -> Result<NB, Fail>
-    ? "Whether the type t is a proposition, through the first core for now."
-    r = Check.Tc.isProp(st.old, termOf(st, t))?
-    Result.Ok(NB(b = r.b, st = NSt.update(st, old = r.st)))
+record NO
+    o: Option<Val>
+    st: NSt
 
-verify isProp
-    isProp(sample(), Val.Sort(Level.Zero)) == Result.Ok(NB(b = false, st = sample())) => true
+record NI
+    i: Int
+    st: NSt
 
-fn conv(st: NSt, a: Val, b: Val) -> Result<NB, Fail>
-    ? "Definitional equality, through the first core for now: both values read back with each open level as its free variable."
-    r = Check.Tc.isDefEq(st.old, termOf(st, a), termOf(st, b))?
-    Result.Ok(NB(b = r.b, st = NSt.update(st, old = r.st)))
+record LDV
+    status: Int
+    t: Val
+    s: Val
+    st: NSt
 
-verify conv
-    conv(sample(), Val.Nat(1), Val.Nat(1)) == Result.Ok(NB(b = true, st = sample())) => true
-    conv(sample(), Val.Nat(1), Val.Nat(2)) == Result.Ok(NB(b = false, st = sample())) => true
+fn yes(st: NSt) -> Result<NB, Fail>
+    ? "Equal."
+    Result.Ok(NB(b = true, st = st))
 
-fn whnf(st: NSt, v: Val) -> Result<NV, Fail>
-    ? "Weak head normal form of a value: beta happened in evaluation already; here a definition unfolds and a projection of a constructor takes its field. A recursor, a quotient rule or Nat arithmetic goes to the first core's whnf for now."
+verify yes
+    resultBool(yes(sample())) => true
+
+fn no(st: NSt) -> Result<NB, Fail>
+    ? "Not equal."
+    Result.Ok(NB(b = false, st = st))
+
+verify no
+    resultBool(no(sample())) => false
+
+fn resultBool(r: Result<NB, Fail>) -> Bool
+    ? "Test helper: the answer of a success; false on an error."
+    match r
+        Result.Ok(x) -> x.b
+        Result.Err -> false
+
+verify resultBool
+    resultBool(Result.Err(Fail.Reject("x"))) => false
+
+fn tri(b: Bool) -> Int
+    ? "A boolean as a decided three-way answer: 1 equal, 2 different."
+    match b
+        true -> 1
+        false -> 2
+
+verify tri
+    tri(false) => 2
+
+fn decided(i: Int) -> Bool
+    ? "1 or 2."
+    Bool.or(i == 1, i == 2)
+
+verify decided
+    decided(0) => false
+
+fn none(st: NSt) -> Result<NO, Fail>
+    ? "No step."
+    Result.Ok(NO(o = Option.None, st = st))
+
+verify none
+    none(sample()) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn tyOfLevel(st: NSt, l: Int) -> Result<Val, Fail>
+    ? "The type of the variable at level l."
+    match Bool.and(l >= 0, l < st.depth)
+        true -> Result.Ok(Next.Value.nth(st.tys, st.depth - 1 - l))
+        false -> Result.Err(bad("the type checker met a loose bound variable"))
+
+verify tyOfLevel
+    tyOfLevel(sample(), 0) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
+    tyOfLevel(enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).st, 0) => Result.Ok(Val.Sort(Level.Zero))
+
+fn argsOf(sp: List<Val>) -> List<Val>
+    ? "A spine's arguments, first argument first."
+    List.reverse(sp)
+
+verify argsOf
+    argsOf([Val.Nat(2), Val.Nat(1)]) => [Val.Nat(1), Val.Nat(2)]
+
+fn inferVal(st: NSt, v: Val) -> Result<NV, Fail>
+    ? "The type of a value, by its head: a variable's type, a constant's type at its levels or a projection's field type, walked along the spine; a lambda's type from its body's under a fresh variable."
     w = Next.Value.force(v)
     match w
-        Val.Cst(n, ls, sp) -> whnfConst(st, w, n, ls, sp, Check.State.lookup(st.old, n))
-        Val.Prj(s, i, x, sp) -> whnfProj(st, w, i, sp, whnf(st, x)?)
-        _ -> Result.Ok(NV(v = w, st = st))
+        Val.Var(l, sp) -> spineType(st, tyOfLevel(st, l)?, argsOf(sp))
+        Val.Cst(n, ls, sp) -> spineType(st, constTypeOnly(st, n, ls)?, argsOf(sp))
+        Val.Prj(s, i, x, sp) -> projSpine(st, s, i, x, sp)
+        Val.Sort(l) -> Result.Ok(NV(v = Val.Sort(Level.Succ(l)), st = st))
+        Val.Nat -> Result.Ok(NV(v = Val.Cst(Check.Lits.name1("Nat"), [], []), st = st))
+        Val.Str -> Result.Ok(NV(v = Val.Cst(Check.Lits.name1("String"), [], []), st = st))
+        Val.Lam(n, dom, env, b, bi) -> lamType(st, n, dom, env, b, bi)
+        Val.Pi(n, dom, env, b, bi) -> piType(st, n, dom, env, b, bi)
+        _ -> Result.Err(bad("the type checker met a value it cannot type"))
+
+verify inferVal
+    resultVal(inferVal(sample(), Val.Sort(Level.Zero))) => Val.Sort(Level.Succ(Level.Zero))
+    resultVal(inferVal(enter(sample(), Core.Names.anon(), Val.Sort(Level.Zero), Binder.Default).st, Val.Var(0, []))) => Val.Sort(Level.Zero)
+
+fn constTypeOnly(st: NSt, n: Name, ls: List<Level>) -> Result<Val, Fail>
+    ? "A constant's type at the given levels, unchecked."
+    match Check.State.lookup(st.old, n)
+        Option.None -> Result.Err(bad("unknown constant '{Core.Names.render(n)}'"))
+        Option.Some(c) -> Result.Ok(Next.Value.eval([], Core.Subst.instLevelParams(Check.State.headOf(c).ty, Check.State.headOf(c).params, ls)))
+
+verify constTypeOnly
+    constTypeOnly(sample(), Core.Names.anon(), []) => Result.Err(Fail.Reject("unknown constant '[anonymous]'"))
+
+fn spineType(st: NSt, ty: Val, xs: List<Val>) -> Result<NV, Fail>
+    ? "A function's type applied to arguments, first argument first."
+    match xs
+        [] -> Result.Ok(NV(v = ty, st = st))
+        [a, ..rest] -> spineNext(whnf(st, ty)?, a, rest)
+
+verify spineType
+    resultVal(spineType(sample(), Val.Nat(1), [])) => Val.Nat(1)
+
+fn spineNext(w: NV, a: Val, rest: List<Val>) -> Result<NV, Fail>
+    ? "One argument: the codomain with a in its environment."
+    match w.v
+        Val.Pi(_, _, cenv, b, _) -> spineType(w.st, Next.Value.eval(List.prepend(a, cenv), b), rest)
+        _ -> Result.Err(bad("function expected"))
+
+verify spineNext
+    spineNext(NV(v = Val.Nat(1), st = sample()), Val.Nat(1), []) => Result.Err(Fail.Reject("function expected"))
+
+fn projSpine(st: NSt, s: Name, i: Int, x: Val, sp: List<Val>) -> Result<NV, Fail>
+    ? "The field's type, along the projection's own arguments."
+    t = inferVal(st, x)?
+    w = whnf(t.st, t.v)?
+    f = projFrom(w.st, s, i, x, w.v)?
+    spineType(f.st, f.v, argsOf(sp))
+
+verify projSpine
+    projSpine(sample(), Core.Names.anon(), 0, Val.Nat(1), []) => Result.Err(Fail.Reject("invalid projection"))
+
+fn lamType(st: NSt, n: Name, dom: Val, env: List<Val>, b: Expr, bi: Binder) -> Result<NV, Fail>
+    ? "pi x : dom, the type of the body under a fresh x, read back and evaluated where the lambda is."
+    x = enter(st, n, dom, bi)
+    r = inferVal(x.st, Next.Value.eval(List.prepend(x.v, env), b))?
+    t = Core.Exprs.pi(n, Next.Value.mat(st.depth, dom), Next.Value.mat(st.depth + 1, r.v), bi)
+    Result.Ok(NV(v = Next.Value.eval(st.ids, t), st = leave(r.st, st)))
+
+verify lamType
+    resultVal(lamType(sample(), Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.bvar(0), Binder.Default)) => Val.Pi(Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.sort(Level.Zero), Binder.Default)
+
+fn piType(st: NSt, n: Name, dom: Val, env: List<Val>, b: Expr, bi: Binder) -> Result<NV, Fail>
+    ? "The imax of the domain's sort and the body's under a fresh variable."
+    d = inferVal(st, dom)?
+    ds = sortOf(d.st, d.v)?
+    x = enter(ds.st, n, dom, bi)
+    r = inferVal(x.st, Next.Value.eval(List.prepend(x.v, env), b))?
+    bs = sortOf(r.st, r.v)?
+    Result.Ok(NV(v = Val.Sort(Core.Univ.mkImax(levelOf(ds.v), levelOf(bs.v))), st = leave(bs.st, st)))
+
+verify piType
+    resultVal(piType(sample(), Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.sort(Level.Zero), Binder.Default)) => Val.Sort(Level.Succ(Level.Zero))
+
+fn isProp(st: NSt, t: Val) -> Result<NB, Fail>
+    ? "Whether the type t is a proposition: its type is a sort whose level is zero up to normalization."
+    k = inferVal(st, t)?
+    s = sortOf(k.st, k.v)?
+    Result.Ok(NB(b = Core.Univ.normalizesToZero(levelOf(s.v)), st = s.st))
+
+verify isProp
+    resultBool(isProp(sample(), Val.Sort(Level.Zero))) => false
+
+fn whnf(st: NSt, v: Val) -> Result<NV, Fail>
+    ? "Weak head normal form: whnfCore, then Nat arithmetic on literals, then one definition unfolded, until nothing changes."
+    c = whnfCore(st, v, false)?
+    n = natStep(c.st, c.v)?
+    match n.o
+        Option.Some(x) -> whnf(n.st, x)
+        Option.None -> whnfDelta(c.v, unfold(n.st, c.v))
 
 verify whnf
     resultVal(whnf(sample(), Val.Delay([], Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.natLit(1))))) => Val.Nat(1)
     resultVal(whnf(sample(), Val.Sort(Level.Zero))) => Val.Sort(Level.Zero)
 
-fn whnfConst(st: NSt, w: Val, n: Name, ls: List<Level>, sp: List<Val>, c: Option<Const>) -> Result<NV, Fail>
-    ? "A definition at the right number of levels unfolds into its value applied to the spine; recursors, quotient rules and Nat arithmetic on literals are the first core's; anything else is stuck."
+fn whnfDelta(v: Val, u: NO) -> Result<NV, Fail>
+    ? "Goes on after an unfolding."
+    match u.o
+        Option.Some(x) -> whnf(u.st, x)
+        Option.None -> Result.Ok(NV(v = v, st = u.st))
+
+verify whnfDelta
+    resultVal(whnfDelta(Val.Nat(1), NO(o = Option.None, st = sample()))) => Val.Nat(1)
+
+fn whnfCore(st: NSt, v: Val, cheapProj: Bool) -> Result<NV, Fail>
+    ? "Beta happened in evaluation; here a projection of a constructor takes its field, a recursor applied to a constructor fires its rule, and a quotient rule applies. cheapProj brings a projected structure only to whnfCore."
+    w = Next.Value.force(v)
+    match w
+        Val.Prj(s, i, x, sp) -> projStep(st, w, i, sp, structOf(st, x, cheapProj)?, cheapProj)
+        Val.Cst(n, ls, sp) -> constStep(st, w, n, ls, sp, Check.State.lookup(st.old, n), cheapProj)
+        _ -> Result.Ok(NV(v = w, st = st))
+
+verify whnfCore
+    resultVal(whnfCore(sample(), Val.Nat(3), false)) => Val.Nat(3)
+
+fn structOf(st: NSt, x: Val, cheapProj: Bool) -> Result<NV, Fail>
+    ? "The projected structure, normalized as far as asked."
+    match cheapProj
+        true -> whnfCore(st, x, true)
+        false -> whnf(st, x)
+
+verify structOf
+    resultVal(structOf(sample(), Val.Nat(1), true)) => Val.Nat(1)
+
+fn projStep(st: NSt, w: Val, i: Int, sp: List<Val>, x: NV, cheapProj: Bool) -> Result<NV, Fail>
+    ? "A constructor application gives its field numParams + i, applied to the projection's own arguments; anything else stays a projection of the normalized structure."
+    match x.v
+        Val.Cst(k, _, xsp) -> fieldOf(x.st, w, i, sp, x.v, Check.State.lookup(x.st.old, k), argsOf(xsp), cheapProj)
+        Val.Str(s) -> projStep(x.st, w, i, sp, whnf(x.st, Next.Value.eval([], Check.Lits.strToCtor(s)))?, cheapProj)
+        _ -> Result.Ok(NV(v = stuckProj(w, x.v), st = x.st))
+
+verify projStep
+    resultVal(projStep(sample(), Val.Prj(Core.Names.anon(), 0, Val.Var(0, []), []), 0, [], NV(v = Val.Var(0, []), st = sample()), false)) => Val.Prj(Core.Names.anon(), 0, Val.Var(0, []), [])
+
+fn stuckProj(w: Val, x: Val) -> Val
+    ? "The projection with its structure normalized."
+    match w
+        Val.Prj(s, i, _, sp) -> Val.Prj(s, i, x, sp)
+        _ -> w
+
+verify stuckProj
+    stuckProj(Val.Prj(Core.Names.anon(), 1, Val.Nat(0), []), Val.Nat(5)) => Val.Prj(Core.Names.anon(), 1, Val.Nat(5), [])
+
+fn fieldOf(st: NSt, w: Val, i: Int, sp: List<Val>, x: Val, c: Option<Const>, xs: List<Val>, cheapProj: Bool) -> Result<NV, Fail>
+    ? "The field of a constructor application."
     match c
-        Option.Some(Const.CRec) -> viaFirst(st, w)
-        Option.Some(Const.CQuot) -> viaFirst(st, w)
-        Option.Some(k) -> match isNatArith(n, List.len(sp))
-            true -> viaFirst(st, w)
-            false -> unfoldOr(st, w, Check.State.headOf(k), Check.State.valueOf(k), ls, sp)
-        Option.None -> Result.Ok(NV(v = w, st = st))
+        Option.Some(Const.CCtor(k)) -> match List.len(xs) > k.numParams + i
+            true -> whnfCore(st, applyAll(Next.Value.nth(List.drop(xs, k.numParams + i), 0), argsOf(sp)), cheapProj)
+            false -> Result.Ok(NV(v = stuckProj(w, x), st = st))
+        _ -> Result.Ok(NV(v = stuckProj(w, x), st = st))
 
-verify whnfConst
-    resultVal(whnfConst(sample(), Val.Nat(1), Core.Names.anon(), [], [], Option.None)) => Val.Nat(1)
+verify fieldOf
+    resultVal(fieldOf(sample(), Val.Prj(Core.Names.anon(), 0, Val.Nat(0), []), 0, [], Val.Nat(0), Option.None, [], false)) => Val.Prj(Core.Names.anon(), 0, Val.Nat(0), [])
 
-fn isNatArith(n: Name, k: Int) -> Bool
-    ? "Nat.succ on one argument or a binary Nat function on two, which the first core computes on literals."
+fn constStep(st: NSt, w: Val, n: Name, ls: List<Level>, sp: List<Val>, c: Option<Const>, cheapProj: Bool) -> Result<NV, Fail>
+    ? "A recursor or a quotient rule may fire; then the result is normalized again."
+    r = ruleStep(st, n, ls, sp, c)?
+    match r.o
+        Option.Some(x) -> whnfCore(r.st, x, cheapProj)
+        Option.None -> Result.Ok(NV(v = w, st = r.st))
+
+verify constStep
+    resultVal(constStep(sample(), Val.Nat(1), Core.Names.anon(), [], [], Option.None, false)) => Val.Nat(1)
+
+fn ruleStep(st: NSt, n: Name, ls: List<Level>, sp: List<Val>, c: Option<Const>) -> Result<NO, Fail>
+    ? "Iota for a recursor, the computation rules of Quot.lift and Quot.ind."
+    match c
+        Option.Some(Const.CRec(rv)) -> recStep(st, ls, rv, argsOf(sp), rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices)
+        Option.Some(Const.CQuot) -> quotStep(st, n, argsOf(sp))
+        _ -> none(st)
+
+verify ruleStep
+    ruleStep(sample(), Core.Names.anon(), [], [], Option.None) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn quotStep(st: NSt, n: Name, xs: List<Val>) -> Result<NO, Fail>
+    ? "Quot.lift f h (Quot.mk r a) is f a, and Quot.ind likewise; the function is argument 3."
     match n
-        Name.Str(Name.Str(Name.Anon, "Nat", _), op, _) -> Bool.or(Bool.and(op == "succ", k == 1), Bool.and(Check.Lits.isNatOp(op), k == 2))
+        Name.Str(Name.Str(Name.Anon, "Quot", _), "lift", _) -> quotAt(st, xs, 5)
+        Name.Str(Name.Str(Name.Anon, "Quot", _), "ind", _) -> quotAt(st, xs, 4)
+        _ -> none(st)
+
+verify quotStep
+    quotStep(sample(), Core.Names.anon(), []) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn quotAt(st: NSt, xs: List<Val>, mkPos: Int) -> Result<NO, Fail>
+    ? "Needs the Quot.mk argument at mkPos."
+    match List.len(xs) > mkPos
+        false -> none(st)
+        true -> quotMk(whnf(st, Next.Value.nth(xs, mkPos))?, xs, mkPos)
+
+verify quotAt
+    quotAt(sample(), [], 4) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn quotMk(mk: NV, xs: List<Val>, mkPos: Int) -> Result<NO, Fail>
+    ? "Fires only on Quot.mk with its three arguments."
+    match mk.v
+        Val.Cst(Name.Str(Name.Str(Name.Anon, "Quot", _), "mk", _), _, [a, _, _]) -> Result.Ok(NO(o = Option.Some(applyAll(Next.Value.apply(Next.Value.nth(xs, 3), a), List.drop(xs, mkPos + 1))), st = mk.st))
+        _ -> none(mk.st)
+
+verify quotMk
+    quotMk(NV(v = Val.Nat(1), st = sample()), [], 4) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn recStep(st: NSt, ls: List<Level>, rv: Rec, xs: List<Val>, majorIdx: Int) -> Result<NO, Fail>
+    ? "Only a recursor with its major premise present reduces."
+    match majorIdx >= List.len(xs)
+        true -> none(st)
+        false -> recFire(majorToCtor(st, rv, Next.Value.nth(xs, majorIdx))?, ls, rv, xs, majorIdx)
+
+verify recStep
+    recStep(sample(), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn majorToCtor(st: NSt, rv: Rec, major: Val) -> Result<NV, Fail>
+    ? "K first; then structure eta before reducing the major; then whnf, literals as constructors, and eta for structure values."
+    m1 = kMajor(st, rv, major)?
+    m0 = etaBefore(m1.st, rv, m1.v)?
+    match m0.o
+        Option.Some(x) -> Result.Ok(NV(v = x, st = m0.st))
+        Option.None -> majorReduced(whnf(m0.st, m1.v)?, rv)
+
+verify majorToCtor
+    resultVal(majorToCtor(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Val.Nat(0))) => Val.Cst(Check.Lits.name2("Nat", "zero"), [], [])
+
+fn majorReduced(m: NV, rv: Rec) -> Result<NV, Fail>
+    ? "A literal becomes its constructor; a structure value is eta expanded."
+    match m.v
+        Val.Nat(k) -> Result.Ok(NV(v = natCtor(k), st = m.st))
+        Val.Str(s) -> whnf(m.st, Next.Value.eval([], Check.Lits.strToCtor(s)))
+        _ -> structValue(m.st, majorInduct(rv), m.v)
+
+verify majorReduced
+    resultVal(majorReduced(NV(v = Val.Nat(2), st = sample()), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false))) => Val.Cst(Check.Lits.name2("Nat", "succ"), [], [Val.Nat(1)])
+
+fn natCtor(k: Int) -> Val
+    ? "A literal as Nat.zero or Nat.succ of the literal below it."
+    match k == 0
+        true -> Val.Cst(Check.Lits.name2("Nat", "zero"), [], [])
+        false -> Val.Cst(Check.Lits.name2("Nat", "succ"), [], [Val.Nat(k - 1)])
+
+verify natCtor
+    natCtor(0) => Val.Cst(Check.Lits.name2("Nat", "zero"), [], [])
+
+fn kMajor(st: NSt, rv: Rec, major: Val) -> Result<NV, Fail>
+    ? "For a K-like recursor the major may be replaced by the nullary constructor when the types agree."
+    match rv.k
+        false -> Result.Ok(NV(v = major, st = st))
+        true -> kTyped(whnfOf(inferVal(st, major)?)?, rv, major)
+
+verify kMajor
+    resultVal(kMajor(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Val.Nat(4))) => Val.Nat(4)
+
+fn whnfOf(r: NV) -> Result<NV, Fail>
+    ? "whnf of a result."
+    whnf(r.st, r.v)
+
+verify whnfOf
+    resultVal(whnfOf(NV(v = Val.Nat(1), st = sample()))) => Val.Nat(1)
+
+fn kTyped(w: NV, rv: Rec, major: Val) -> Result<NV, Fail>
+    ? "The major's type must be the inductive type; its first constructor applied to the parameters is the candidate."
+    match w.v
+        Val.Cst(n, ls, sp) -> match n == majorInduct(rv)
+            true -> kCandidate(w.st, w.v, major, firstCtor(w.st, n), ls, List.take(argsOf(sp), rv.numParams))
+            false -> Result.Ok(NV(v = major, st = w.st))
+        _ -> Result.Ok(NV(v = major, st = w.st))
+
+verify kTyped
+    resultVal(kTyped(NV(v = Val.Nat(1), st = sample()), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = true, isUnsafe = false), Val.Nat(4))) => Val.Nat(4)
+
+fn kCandidate(st: NSt, ty: Val, major: Val, k: Option<Name>, ls: List<Level>, params: List<Val>) -> Result<NV, Fail>
+    ? "Uses the constructor only when its type equals the major's."
+    match k
+        Option.None -> Result.Ok(NV(v = major, st = st))
+        Option.Some(c) -> kCheck(st, ty, major, applyAll(Val.Cst(c, ls, []), params))
+
+verify kCandidate
+    resultVal(kCandidate(sample(), Val.Nat(1), Val.Nat(4), Option.None, [], [])) => Val.Nat(4)
+
+fn kCheck(st: NSt, ty: Val, major: Val, cand: Val) -> Result<NV, Fail>
+    ? "The equality test of K."
+    ct = inferVal(st, cand)?
+    eq = conv(ct.st, ty, ct.v)?
+    match eq.b
+        true -> Result.Ok(NV(v = cand, st = eq.st))
+        false -> Result.Ok(NV(v = major, st = eq.st))
+
+verify kCheck
+    resultVal(kCheck(sample(), Val.Sort(Level.Succ(Level.Zero)), Val.Nat(4), Val.Sort(Level.Zero))) => Val.Sort(Level.Zero)
+
+fn firstCtor(st: NSt, n: Name) -> Option<Name>
+    ? "The first constructor of an inductive type."
+    match Check.State.lookup(st.old, n)
+        Option.Some(Const.CInduct(iv)) -> match iv.ctors
+            [k, .._] -> Option.Some(k)
+            [] -> Option.None
+        _ -> Option.None
+
+verify firstCtor
+    firstCtor(sample(), Core.Names.anon()) => Option.None
+
+fn majorInduct(rv: Rec) -> Name
+    ? "The inductive type of the major premise, read off the recursor's type."
+    majorAfter(rv.head.ty, rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices)
+
+verify majorInduct
+    majorInduct(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("Nat"), []), Core.Exprs.bvar(0), Binder.Default)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false)) => Check.Lits.name1("Nat")
+
+fn majorAfter(t: Expr, n: Int) -> Name
+    ? "Skips n binders and names the head of the next domain."
+    match t
+        Expr.Pi(_, _, d, b, _) -> match n == 0
+            true -> Option.withDefault(Core.Apps.constName(Core.Apps.fnOf(d)), Core.Names.anon())
+            false -> majorAfter(b, n - 1)
+        _ -> Core.Names.anon()
+
+verify majorAfter
+    majorAfter(Core.Exprs.bvar(0), 0) => Core.Names.anon()
+
+fn isNonRecStructure(st: NSt, n: Name) -> Bool
+    ? "One constructor, no indices, not recursive."
+    match Check.State.lookup(st.old, n)
+        Option.Some(Const.CInduct(iv)) -> Bool.and(List.len(iv.ctors) == 1, Bool.and(iv.numIndices == 0, Bool.not(iv.isRec)))
         _ -> false
 
-verify isNatArith
-    isNatArith(Check.Lits.name2("Nat", "add"), 2) => true
-    isNatArith(Check.Lits.name2("Nat", "add"), 1) => false
+verify isNonRecStructure
+    isNonRecStructure(sample(), Core.Names.anon()) => false
 
-fn unfoldOr(st: NSt, w: Val, h: Head, v: Option<Expr>, ls: List<Level>, sp: List<Val>) -> Result<NV, Fail>
-    ? "Unfolds when there is a value and the level count agrees."
+fn isCtorApp(st: NSt, v: Val) -> Bool
+    ? "Headed by a constructor."
     match v
-        Option.Some(body) -> match List.len(h.params) == List.len(ls)
-            true -> whnf(st, applyAll(Next.Value.eval([], Core.Subst.instLevelParams(body, h.params, ls)), List.reverse(sp)))
-            false -> Result.Ok(NV(v = w, st = st))
-        Option.None -> Result.Ok(NV(v = w, st = st))
+        Val.Cst(n, _, _) -> match Check.State.lookup(st.old, n)
+            Option.Some(Const.CCtor) -> true
+            _ -> false
+        _ -> false
 
-verify unfoldOr
-    resultVal(unfoldOr(sample(), Val.Nat(0), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Option.Some(Core.Exprs.natLit(3)), [], [])) => Val.Nat(3)
+verify isCtorApp
+    isCtorApp(sample(), Val.Nat(1)) => false
 
-fn applyAll(f: Val, args: List<Val>) -> Val
+fn etaBefore(st: NSt, rv: Rec, e: Val) -> Result<NO, Fail>
+    ? "A major of a non-recursive structure that is not a constructor application becomes mk params e.0 ... e.(n-1) without being reduced; a proof only when the recursor eliminates into any sort."
+    induct = majorInduct(rv)
+    match Bool.and(isNonRecStructure(st, induct), Bool.not(isCtorApp(st, Next.Value.force(e))))
+        false -> none(st)
+        true -> etaTyped(whnfOf(inferVal(st, e)?)?, rv, induct, e)
+
+verify etaBefore
+    etaBefore(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Val.Nat(1)) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn etaTyped(w: NV, rv: Rec, induct: Name, e: Val) -> Result<NO, Fail>
+    ? "Only when the type really is the structure; a proof only under large elimination."
+    match w.v
+        Val.Cst(n, _, _) -> match n == induct
+            true -> etaUnlessSmallProof(isProp(w.st, w.v)?, w.v, e, largeElim(w.st, rv, induct))
+            false -> none(w.st)
+        _ -> none(w.st)
+
+verify etaTyped
+    etaTyped(NV(v = Val.Nat(1), st = sample()), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon(), Val.Nat(1)) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn etaUnlessSmallProof(p: NB, ty: Val, e: Val, large: Bool) -> Result<NO, Fail>
+    ? "Expands a value, or a proof whose recursor eliminates into any sort."
+    match Bool.or(Bool.not(p.b), large)
+        true -> Result.Ok(NO(o = expandStruct(p.st, ty, e), st = p.st))
+        false -> none(p.st)
+
+verify etaUnlessSmallProof
+    etaUnlessSmallProof(NB(b = true, st = sample()), Val.Nat(1), Val.Nat(0), false) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn largeElim(st: NSt, rv: Rec, induct: Name) -> Bool
+    ? "The recursor has one more universe parameter than its type."
+    match Check.State.lookup(st.old, induct)
+        Option.Some(Const.CInduct(iv)) -> List.len(rv.head.params) > List.len(iv.head.params)
+        _ -> false
+
+verify largeElim
+    largeElim(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon()) => false
+
+fn structValue(st: NSt, induct: Name, e: Val) -> Result<NV, Fail>
+    ? "After whnf: a value of a non-recursive structure that is not a constructor application becomes mk params e.0 ... (not for proofs)."
+    match Bool.and(isNonRecStructure(st, induct), Bool.not(isCtorApp(st, e)))
+        false -> Result.Ok(NV(v = e, st = st))
+        true -> structTyped(whnfOf(inferVal(st, e)?)?, induct, e)
+
+verify structValue
+    resultVal(structValue(sample(), Core.Names.anon(), Val.Nat(1))) => Val.Nat(1)
+
+fn structTyped(w: NV, induct: Name, e: Val) -> Result<NV, Fail>
+    ? "Only when the type really is the structure and not a proposition."
+    match w.v
+        Val.Cst(n, _, _) -> match n == induct
+            true -> structUnlessProof(isProp(w.st, w.v)?, w.v, e)
+            false -> Result.Ok(NV(v = e, st = w.st))
+        _ -> Result.Ok(NV(v = e, st = w.st))
+
+verify structTyped
+    resultVal(structTyped(NV(v = Val.Nat(1), st = sample()), Core.Names.anon(), Val.Nat(2))) => Val.Nat(2)
+
+fn structUnlessProof(p: NB, ty: Val, e: Val) -> Result<NV, Fail>
+    ? "Eta expands unless e is a proof."
+    match p.b
+        true -> Result.Ok(NV(v = e, st = p.st))
+        false -> Result.Ok(NV(v = Option.withDefault(expandStruct(p.st, ty, e), e), st = p.st))
+
+verify structUnlessProof
+    resultVal(structUnlessProof(NB(b = true, st = sample()), Val.Nat(1), Val.Nat(2))) => Val.Nat(2)
+
+fn expandStruct(st: NSt, ty: Val, e: Val) -> Option<Val>
+    ? "mk params e.0 ... e.(n-1), from the structure type's parameters."
+    match ty
+        Val.Cst(n, ls, sp) -> expandWith(st, n, ls, argsOf(sp), e, firstCtor(st, n))
+        _ -> Option.None
+
+verify expandStruct
+    expandStruct(sample(), Val.Nat(1), Val.Nat(2)) => Option.None
+
+fn expandWith(st: NSt, n: Name, ls: List<Level>, xs: List<Val>, e: Val, k: Option<Name>) -> Option<Val>
+    ? "Needs the constructor's parameter and field counts."
+    match k
+        Option.Some(c) -> match Check.State.lookup(st.old, c)
+            Option.Some(Const.CCtor(kv)) -> Option.Some(projApps(applyAll(Val.Cst(c, ls, []), List.take(xs, kv.numParams)), n, e, 0, kv.numFields))
+            _ -> Option.None
+        Option.None -> Option.None
+
+verify expandWith
+    expandWith(sample(), Core.Names.anon(), [], [], Val.Nat(1), Option.None) => Option.None
+
+fn projApps(acc: Val, n: Name, e: Val, i: Int, count: Int) -> Val
+    ? "Applies e.i for i below count."
+    match i >= count
+        true -> acc
+        false -> projApps(Next.Value.apply(acc, Val.Prj(n, i, e, [])), n, e, i + 1, count)
+
+verify projApps
+    projApps(Val.Var(0, []), Core.Names.anon(), Val.Var(1, []), 0, 1) => Val.Var(0, [Val.Prj(Core.Names.anon(), 0, Val.Var(1, []), [])])
+
+fn recFire(m: NV, ls: List<Level>, rv: Rec, xs: List<Val>, majorIdx: Int) -> Result<NO, Fail>
+    ? "The rule of the major's constructor: its right-hand side at the recursor's levels, applied to params, motives, minors, the constructor's fields and the arguments after the major."
+    match m.v
+        Val.Cst(k, _, msp) -> recRule(m.st, ruleFor(rv.rules, k), ls, rv, xs, majorIdx, argsOf(msp))
+        _ -> none(m.st)
+
+verify recFire
+    recFire(NV(v = Val.Nat(1), st = sample()), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn ruleFor(rules: List<RecRule>, k: Name) -> Option<RecRule>
+    ? "The rule for constructor k."
+    match rules
+        [] -> Option.None
+        [r, ..rest] -> match r.ctor == k
+            true -> Option.Some(r)
+            false -> ruleFor(rest, k)
+
+verify ruleFor
+    ruleFor([], Core.Names.anon()) => Option.None
+
+fn recRule(st: NSt, rule: Option<RecRule>, ls: List<Level>, rv: Rec, xs: List<Val>, majorIdx: Int, margs: List<Val>) -> Result<NO, Fail>
+    ? "Fires when the constructor has its fields and the levels count agrees."
+    match rule
+        Option.None -> none(st)
+        Option.Some(r) -> match Bool.or(r.nfields > List.len(margs), List.len(ls) != List.len(rv.head.params))
+            true -> none(st)
+            false -> ruleApplied(st, atLevels(st, Core.Exprs.app(Core.Exprs.cnst(rv.head.name, ls), Core.Exprs.cnst(r.ctor, [])), r.rhs, rv.head.params, ls), r, rv, xs, majorIdx, margs)
+
+verify recRule
+    recRule(sample(), Option.None, [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, []) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn ruleApplied(st: NSt, rhs: RE, r: RecRule, rv: Rec, xs: List<Val>, majorIdx: Int, margs: List<Val>) -> Result<NO, Fail>
+    ? "rhs params motives minors fields extra-arguments; the right-hand side at the recursor's levels is remembered like an unfolded value, under the recursor at its levels applied to the rule's constructor."
+    Result.Ok(NO(o = Option.Some(applyAll(applyAll(applyAll(Next.Value.eval([], rhs.e), List.take(xs, rv.numParams + rv.numMotives + rv.numMinors)), List.drop(margs, List.len(margs) - r.nfields)), List.drop(xs, majorIdx + 1))), st = NSt.update(st, old = rhs.st)))
+
+verify ruleApplied
+    ruleApplied(sample(), RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, []) == Result.Ok(NO(o = Option.Some(Val.Nat(1)), st = sample())) => true
+
+fn natStep(st: NSt, v: Val) -> Result<NO, Fail>
+    ? "Nat.succ of a literal, and the binary Nat functions on two literals."
+    match v
+        Val.Cst(Name.Str(Name.Str(Name.Anon, "Nat", _), "succ", _), [], [a]) -> natSucc(whnf(st, a)?)
+        Val.Cst(Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), [], [b, a]) -> match Check.Lits.isNatOp(op)
+            true -> natFirst(whnf(st, a)?, op, b)
+            false -> none(st)
+        _ -> none(st)
+
+verify natStep
+    natStep(sample(), Val.Cst(Check.Lits.name2("Nat", "succ"), [], [Val.Nat(4)])) == Result.Ok(NO(o = Option.Some(Val.Nat(5)), st = sample())) => true
+    natStep(sample(), Val.Cst(Check.Lits.name2("Nat", "add"), [], [Val.Nat(4), Val.Nat(3)])) == Result.Ok(NO(o = Option.Some(Val.Nat(7)), st = sample())) => true
+
+fn natValue(v: Val) -> Option<Int>
+    ? "A literal or Nat.zero as a number."
+    match v
+        Val.Nat(k) -> Option.Some(k)
+        Val.Cst(Name.Str(Name.Str(Name.Anon, "Nat", _), "zero", _), [], []) -> Option.Some(0)
+        _ -> Option.None
+
+verify natValue
+    natValue(Val.Cst(Check.Lits.name2("Nat", "zero"), [], [])) => Option.Some(0)
+
+fn natSucc(a: NV) -> Result<NO, Fail>
+    ? "succ of a literal."
+    match natValue(a.v)
+        Option.Some(k) -> Result.Ok(NO(o = Option.Some(Val.Nat(k + 1)), st = a.st))
+        Option.None -> none(a.st)
+
+verify natSucc
+    natSucc(NV(v = Val.Var(0, []), st = sample())) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn natFirst(x: NV, op: String, b: Val) -> Result<NO, Fail>
+    ? "The first argument as a literal."
+    match natValue(x.v)
+        Option.None -> none(x.st)
+        Option.Some(va) -> natSecond(whnf(x.st, b)?, op, va)
+
+verify natFirst
+    natFirst(NV(v = Val.Var(0, []), st = sample()), "add", Val.Nat(1)) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn natSecond(y: NV, op: String, va: Int) -> Result<NO, Fail>
+    ? "The second argument as a literal, then the operation."
+    match natValue(y.v)
+        Option.None -> none(y.st)
+        Option.Some(vb) -> Result.Ok(NO(o = Option.Some(Next.Value.eval([], Check.Lits.natOp(op, va, vb)?)), st = y.st))
+
+verify natSecond
+    natSecond(NV(v = Val.Nat(2), st = sample()), "mul", 3) == Result.Ok(NO(o = Option.Some(Val.Nat(6)), st = sample())) => true
+
+fn deltaOf(st: NSt, v: Val) -> Option<Const>
+    ? "The head's definition, when delta reduction can unfold it: a value and the right number of levels."
+    match v
+        Val.Cst(n, ls, _) -> match Check.State.lookup(st.old, n)
+            Option.Some(k) -> match Check.State.valueOf(k)
+                Option.Some -> match List.len(Check.State.headOf(k).params) == List.len(ls)
+                    true -> Option.Some(k)
+                    false -> Option.None
+                Option.None -> Option.None
+            Option.None -> Option.None
+        _ -> Option.None
+
+verify deltaOf
+    deltaOf(sample(), Val.Nat(1)) => Option.None
+
+fn unfold(st: NSt, v: Val) -> NO
+    ? "The head definition's value at its levels, applied to the spine."
+    match v
+        Val.Cst(n, ls, sp) -> match deltaOf(st, v)
+            Option.Some(k) -> unfolded(st, atLevels(st, Core.Exprs.cnst(n, ls), Option.withDefault(Check.State.valueOf(k), Core.Exprs.bvar(0)), Check.State.headOf(k).params, ls), argsOf(sp))
+            Option.None -> NO(o = Option.None, st = st)
+        _ -> NO(o = Option.None, st = st)
+
+verify unfold
+    unfold(sample(), Val.Nat(1)) == NO(o = Option.None, st = sample()) => true
+
+fn unfolded(st: NSt, body: RE, xs: List<Val>) -> NO
+    ? "The value evaluated and applied to the arguments."
+    NO(o = Option.Some(applyAll(Next.Value.eval([], body.e), xs)), st = NSt.update(st, old = body.st))
+
+verify unfolded
+    unfolded(sample(), RE(e = Core.Exprs.natLit(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), []).o => Option.Some(Val.Nat(2))
+
+fn atLevels(st: NSt, key: Expr, body: Expr, ps: List<Name>, ls: List<Level>) -> RE
+    ? "A definition's value or a rule's right-hand side at universe levels, remembered under key for the rest of the declaration: instantiating the levels walks all of it each time."
+    match ls
+        [] -> RE(e = body, st = st.old)
+        _ -> match Check.State.cacheGet(st.old.unfoldCache, key)
+            Option.Some(x) -> RE(e = x, st = st.old)
+            Option.None -> storeAt(st.old, key, Core.Subst.instLevelParams(body, ps, ls))
+
+verify atLevels
+    atLevels(sample(), Core.Exprs.natLit(9), Core.Exprs.natLit(1), [], []).e => Core.Exprs.natLit(1)
+
+fn storeAt(old: St, key: Expr, x: Expr) -> RE
+    ? "Remembers an instantiated body."
+    RE(e = x, st = St.update(old, unfoldCache = Check.State.cachePut(old.unfoldCache, key, x)))
+
+verify storeAt
+    Core.PMap.size(storeAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(9), Core.Exprs.natLit(1)).st.unfoldCache) => 1
+
+fn applyAll(f: Val, xs: List<Val>) -> Val
     ? "f applied to the arguments, first argument first."
-    match args
+    match xs
         [] -> f
         [a, ..rest] -> applyAll(Next.Value.apply(f, a), rest)
 
 verify applyAll
     applyAll(Val.Var(0, []), [Val.Nat(1), Val.Nat(2)]) => Val.Var(0, [Val.Nat(2), Val.Nat(1)])
 
-fn whnfProj(st: NSt, w: Val, i: Int, sp: List<Val>, x: NV) -> Result<NV, Fail>
-    ? "A projection of a constructor application takes its field; a projection of anything else is the first core's."
-    match x.v
-        Val.Cst(k, _, args) -> projOfCtor(x.st, w, i, sp, Check.State.lookup(x.st.old, k), List.reverse(args))
-        _ -> viaFirst(x.st, w)
+fn conv(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "Definitional equality of two values of the same depth: the easy cases, then the reference's steps on values."
+    a = Next.Value.force(t)
+    b = Next.Value.force(s)
+    q = quick(st, a, b)?
+    match decided(q.i)
+        true -> Result.Ok(NB(b = q.i == 1, st = q.st))
+        false -> boolTrue(q.st, a, b)
 
-verify whnfProj
-    resultVal(whnfProj(sample(), Val.Nat(1), 0, [], NV(v = Val.Sort(Level.Zero), st = sample()))) => Val.Nat(1)
+verify conv
+    resultBool(conv(sample(), Val.Nat(1), Val.Nat(1))) => true
+    resultBool(conv(sample(), Val.Nat(1), Val.Nat(2))) => false
+    resultBool(conv(sample(), Val.Delay([], Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.sort(Level.Zero))), Val.Sort(Level.Zero))) => true
 
-fn projOfCtor(st: NSt, w: Val, i: Int, sp: List<Val>, c: Option<Const>, args: List<Val>) -> Result<NV, Fail>
-    ? "The constructor's field numParams + i, applied to the projection's own arguments."
-    match c
-        Option.Some(Const.CCtor(k)) -> match List.len(args) > k.numParams + i
-            true -> whnf(st, applyAll(Next.Value.nth(List.drop(args, k.numParams + i), 0), List.reverse(sp)))
-            false -> viaFirst(st, w)
-        _ -> viaFirst(st, w)
+fn quick(st: NSt, t: Val, s: Val) -> Result<NI, Fail>
+    ? "The same value; binders, sorts and literals of the same kind."
+    match Next.Value.same(t, s)
+        true -> Result.Ok(NI(i = 1, st = st))
+        false -> quickKinds(st, t, s)
 
-verify projOfCtor
-    resultVal(projOfCtor(sample(), Val.Nat(1), 0, [], Option.None, [])) => Val.Nat(1)
+verify quick
+    quick(sample(), Val.Nat(1), Val.Str("1")) == Result.Ok(NI(i = 2, st = sample())) => true
 
-fn viaFirst(st: NSt, w: Val) -> Result<NV, Fail>
-    ? "The first core's whnf on the value read back; unchanged, the value stays as it is, else the result comes back with each level's free variable a level again."
-    t = termOf(st, w)
-    r = Check.Tc.whnf(st.old, t)?
-    match r.e == t
-        true -> Result.Ok(NV(v = w, st = NSt.update(st, old = r.st)))
-        false -> Result.Ok(NV(v = Next.Value.eval(st.ids, Core.Subst.abstractFVars(r.e, levelIds(st.fvs, []))), st = NSt.update(st, old = r.st)))
+fn quickKinds(st: NSt, t: Val, s: Val) -> Result<NI, Fail>
+    ? "By kind: binders compare domain and body, sorts their levels, literals their values."
+    match t
+        Val.Lam(n, d1, e1, b1, bi) -> match s
+            Val.Lam(_, d2, e2, b2, _) -> triOfB(bindersEq(st, n, d1, e1, b1, bi, d2, e2, b2)?)
+            _ -> Result.Ok(NI(i = 0, st = st))
+        Val.Pi(n, d1, e1, b1, bi) -> match s
+            Val.Pi(_, d2, e2, b2, _) -> triOfB(bindersEq(st, n, d1, e1, b1, bi, d2, e2, b2)?)
+            _ -> Result.Ok(NI(i = 0, st = st))
+        Val.Sort(a) -> match s
+            Val.Sort(b) -> Result.Ok(NI(i = tri(Core.Univ.isEquiv(a, b)), st = st))
+            _ -> Result.Ok(NI(i = 0, st = st))
+        Val.Nat(a) -> match s
+            Val.Nat(b) -> Result.Ok(NI(i = tri(a == b), st = st))
+            Val.Str -> Result.Ok(NI(i = 2, st = st))
+            _ -> Result.Ok(NI(i = 0, st = st))
+        Val.Str(a) -> match s
+            Val.Str(b) -> Result.Ok(NI(i = tri(a == b), st = st))
+            Val.Nat -> Result.Ok(NI(i = 2, st = st))
+            _ -> Result.Ok(NI(i = 0, st = st))
+        _ -> Result.Ok(NI(i = 0, st = st))
 
-verify viaFirst
-    resultVal(viaFirst(sample(), Val.Nat(1))) => Val.Nat(1)
+verify quickKinds
+    quickKinds(sample(), Val.Sort(Level.Zero), Val.Sort(Level.Succ(Level.Zero))) == Result.Ok(NI(i = 2, st = sample())) => true
 
-fn levelIds(fvs: List<Expr>, acc: List<Int>) -> List<Int>
-    ? "The free variable numbers of the levels, lowest level first; fvs lists the highest first."
-    match fvs
-        [] -> acc
-        [f, ..rest] -> levelIds(rest, List.prepend(fvarNumber(f), acc))
+fn triOfB(r: NB) -> Result<NI, Fail>
+    ? "A boolean answer as a decided three-way one."
+    Result.Ok(NI(i = tri(r.b), st = r.st))
 
-verify levelIds
-    levelIds([Core.Exprs.fvar(8), Core.Exprs.fvar(3)], []) => [3, 8]
+verify triOfB
+    triOfB(NB(b = true, st = sample())) == Result.Ok(NI(i = 1, st = sample())) => true
 
-fn fvarNumber(e: Expr) -> Int
-    ? "The number of a free variable."
+fn bindersEq(st: NSt, n: Name, d1: Val, e1: List<Val>, b1: Expr, bi: Binder, d2: Val, e2: List<Val>, b2: Expr) -> Result<NB, Fail>
+    ? "Equal domains, then equal bodies under one fresh variable of the domain."
+    d = conv(st, d1, d2)?
+    match d.b
+        false -> no(d.st)
+        true -> bodies(d.st, n, d1, e1, b1, bi, e2, b2)
+
+verify bindersEq
+    resultBool(bindersEq(sample(), Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.bvar(0), Binder.Default, Val.Sort(Level.Zero), [], Core.Exprs.bvar(0))) => true
+
+fn bodies(st: NSt, n: Name, d1: Val, e1: List<Val>, b1: Expr, bi: Binder, e2: List<Val>, b2: Expr) -> Result<NB, Fail>
+    ? "The two bodies with the same fresh variable."
+    x = enter(st, n, d1, bi)
+    r = conv(x.st, Next.Value.eval(List.prepend(x.v, e1), b1), Next.Value.eval(List.prepend(x.v, e2), b2))?
+    Result.Ok(NB(b = r.b, st = leave(r.st, st)))
+
+verify bodies
+    resultBool(bodies(sample(), Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.bvar(0), Binder.Default, [], Core.Exprs.sort(Level.Zero))) => false
+
+fn closedVal(v: Val) -> Bool
+    ? "Whether a value surely mentions no variable, looking at most six levels deep: values share their parts, so a full walk could visit a part once per path to it. Past the limit the answer is no, which only skips a shortcut."
+    closedIn(v, 6)
+
+verify closedVal
+    closedVal(Val.Cst(Core.Names.anon(), [], [Val.Nat(1)])) => true
+    closedVal(Val.Var(0, [])) => false
+
+fn closedIn(v: Val, depth: Int) -> Bool
+    ? "Literals and sorts; a waiting term whose environment is closed where it reads it; a constant applied to closed values."
+    match depth <= 0
+        true -> false
+        false -> match v
+            Val.Nat -> true
+            Val.Str -> true
+            Val.Sort -> true
+            Val.Delay(env, e) -> closedSeen(env, Core.Exprs.looseRange(e), depth - 1)
+            Val.Cst(_, _, sp) -> allClosed(sp, depth - 1)
+            _ -> false
+
+verify closedIn
+    closedIn(Val.Nat(1), 0) => false
+
+fn closedSeen(env: List<Val>, k: Int, depth: Int) -> Bool
+    ? "The first k values of an environment are closed."
+    match k <= 0
+        true -> true
+        false -> match env
+            [] -> false
+            [v, ..rest] -> match closedIn(v, depth)
+                true -> closedSeen(rest, k - 1, depth)
+                false -> false
+
+verify closedSeen
+    closedSeen([Val.Nat(1), Val.Var(0, [])], 1, 3) => true
+    closedSeen([Val.Nat(1), Val.Var(0, [])], 2, 3) => false
+
+fn allClosed(vs: List<Val>, depth: Int) -> Bool
+    ? "closedIn on each."
+    match vs
+        [] -> true
+        [v, ..rest] -> match closedIn(v, depth)
+            true -> allClosed(rest, depth)
+            false -> false
+
+verify allClosed
+    allClosed([], 1) => true
+
+fn boolTrue(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "Proof by reflection: a closed term against Bool.true is evaluated."
+    match Bool.and(closedVal(t), s == Val.Cst(Check.Lits.name2("Bool", "true"), [], []))
+        true -> boolTrueWhnf(whnf(st, t)?, t, s)
+        false -> coreWhnf(st, t, s)
+
+verify boolTrue
+    resultBool(boolTrue(sample(), Val.Sort(Level.Zero), Val.Sort(Level.Succ(Level.Zero)))) => false
+
+fn boolTrueWhnf(w: NV, t: Val, s: Val) -> Result<NB, Fail>
+    ? "Equal if it evaluated to Bool.true; otherwise the general path."
+    match w.v == Val.Cst(Check.Lits.name2("Bool", "true"), [], [])
+        true -> yes(w.st)
+        false -> coreWhnf(w.st, t, s)
+
+verify boolTrueWhnf
+    resultBool(boolTrueWhnf(NV(v = Val.Cst(Check.Lits.name2("Bool", "true"), [], []), st = sample()), Val.Nat(0), Val.Nat(0))) => true
+
+fn coreWhnf(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "whnfCore on both sides with cheap projections, and the easy cases again if anything changed."
+    tn = whnfCore(st, t, true)?
+    sn = whnfCore(tn.st, s, true)?
+    match Bool.or(tn.v != t, sn.v != s)
+        true -> afterQuick(quickParts(sn.st, tn.v, sn.v)?, tn.v, sn.v)
+        false -> proofIrrelStep(sn.st, tn.v, sn.v)
+
+verify coreWhnf
+    resultBool(coreWhnf(sample(), Val.Nat(1), Val.Nat(2))) => false
+
+fn afterQuick(q: NI, t: Val, s: Val) -> Result<NB, Fail>
+    ? "Stops on a known answer."
+    match decided(q.i)
+        true -> Result.Ok(NB(b = q.i == 1, st = q.st))
+        false -> proofIrrelStep(q.st, t, s)
+
+verify afterQuick
+    resultBool(afterQuick(NI(i = 1, st = sample()), Val.Nat(0), Val.Nat(1))) => true
+
+fn quickParts(st: NSt, t: Val, s: Val) -> Result<NI, Fail>
+    ? "The easy cases, and then equal parts: two applications of the same head with identical arguments are equal."
+    q = quick(st, t, s)?
+    match decided(q.i)
+        true -> Result.Ok(q)
+        false -> match sameParts(t, s)
+            true -> Result.Ok(NI(i = 1, st = q.st))
+            false -> Result.Ok(q)
+
+verify quickParts
+    quickParts(sample(), Val.Var(0, [Val.Nat(1)]), Val.Var(0, [Val.Nat(1)])) == Result.Ok(NI(i = 1, st = sample())) => true
+
+fn sameParts(t: Val, s: Val) -> Bool
+    ? "Same head and pairwise identical arguments, a waiting argument counting as identical to an equal one."
+    match t
+        Val.Var(l, a) -> match s
+            Val.Var(m, b) -> Bool.and(l == m, Next.Value.same(Val.Var(0, a), Val.Var(0, b)))
+            _ -> false
+        Val.Cst(n, ls, a) -> match s
+            Val.Cst(m, ks, b) -> Bool.and(Bool.and(n == m, Core.Univ.isEquivList(ls, ks)), Next.Value.same(Val.Var(0, a), Val.Var(0, b)))
+            _ -> false
+        _ -> false
+
+verify sameParts
+    sameParts(Val.Var(0, []), Val.Var(1, [])) => false
+
+fn proofIrrelStep(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "Two proofs of the same proposition are equal; otherwise lazy delta."
+    p = proofIrrel(st, t, s)?
+    match decided(p.i)
+        true -> Result.Ok(NB(b = p.i == 1, st = p.st))
+        false -> afterLazy(lazyDelta(p.st, t, s)?)
+
+verify proofIrrelStep
+    resultBool(proofIrrelStep(sample(), Val.Sort(Level.Zero), Val.Sort(Level.Succ(Level.Zero)))) => false
+
+fn proofIrrel(st: NSt, t: Val, s: Val) -> Result<NI, Fail>
+    ? "If t proves a proposition, t and s are equal exactly when their types are; a value with no type to infer is not a proof."
+    match typable(t)
+        false -> Result.Ok(NI(i = 0, st = st))
+        true -> proofType(inferVal(st, t)?, s)
+
+verify proofIrrel
+    proofIrrel(sample(), Val.Stuck(Val.Nat(0), []), Val.Nat(0)) == Result.Ok(NI(i = 0, st = sample())) => true
+
+fn typable(v: Val) -> Bool
+    ? "Values whose type inferVal finds."
+    match v
+        Val.Stuck -> false
+        Val.Free -> false
+        _ -> true
+
+verify typable
+    typable(Val.Nat(1)) => true
+
+fn proofType(tt: NV, s: Val) -> Result<NI, Fail>
+    ? "Whether t's type is a proposition."
+    p = isProp(tt.st, tt.v)?
+    match p.b
+        false -> Result.Ok(NI(i = 0, st = p.st))
+        true -> proofTypes(p.st, tt.v, s)
+
+verify proofType
+    proofType(NV(v = Val.Sort(Level.Zero), st = sample()), Val.Nat(0)) == Result.Ok(NI(i = 0, st = sample())) => true
+
+fn proofTypes(st: NSt, tType: Val, s: Val) -> Result<NI, Fail>
+    ? "Compares the two proofs' types."
+    ts = inferVal(st, s)?
+    r = conv(ts.st, tType, ts.v)?
+    Result.Ok(NI(i = tri(r.b), st = r.st))
+
+verify proofTypes
+    proofTypes(sample(), Val.Sort(Level.Zero), Val.Sort(Level.Zero)) == Result.Ok(NI(i = 2, st = sample())) => true
+
+fn afterLazy(ld: LDV) -> Result<NB, Fail>
+    ? "After lazy delta: a known answer, or the remaining structural cases."
+    match ld.status
+        1 -> yes(ld.st)
+        2 -> no(ld.st)
+        _ -> afterDelta(ld.st, ld.t, ld.s)
+
+verify afterLazy
+    resultBool(afterLazy(LDV(status = 1, t = Val.Nat(0), s = Val.Nat(1), st = sample()))) => true
+
+fn isNatZero(v: Val) -> Bool
+    ? "Nat.zero or the literal 0."
+    natValue(v) == Option.Some(0)
+
+verify isNatZero
+    isNatZero(Val.Nat(0)) => true
+
+fn natPred(v: Val) -> Option<Val>
+    ? "n for a literal n+1 or Nat.succ n."
+    match v
+        Val.Nat(k) -> match k > 0
+            true -> Option.Some(Val.Nat(k - 1))
+            false -> Option.None
+        Val.Cst(Name.Str(Name.Str(Name.Anon, "Nat", _), "succ", _), [], [a]) -> Option.Some(a)
+        _ -> Option.None
+
+verify natPred
+    natPred(Val.Nat(3)) => Option.Some(Val.Nat(2))
+    natPred(Val.Nat(0)) => Option.None
+
+fn lazyDelta(st: NSt, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "Zero against zero and successor against successor; Nat arithmetic on closed values; then one unfolding step at a time, the higher definition first, until the sides meet or nothing unfolds."
+    match Bool.and(isNatZero(t), isNatZero(s))
+        true -> Result.Ok(LDV(status = 1, t = t, s = s, st = st))
+        false -> offsetPreds(st, t, s, natPred(t), natPred(s))
+
+verify lazyDelta
+    lazyDelta(sample(), Val.Nat(0), Val.Nat(0)) == Result.Ok(LDV(status = 1, t = Val.Nat(0), s = Val.Nat(0), st = sample())) => true
+
+fn offsetPreds(st: NSt, t: Val, s: Val, pt: Option<Val>, ps: Option<Val>) -> Result<LDV, Fail>
+    ? "Both successors: compare the predecessors."
+    match pt
+        Option.Some(a) -> match ps
+            Option.Some(b) -> ldOf(conv(st, a, b)?, t, s)
+            Option.None -> lazyNat(st, t, s)
+        Option.None -> lazyNat(st, t, s)
+
+verify offsetPreds
+    offsetPreds(sample(), Val.Nat(1), Val.Nat(1), Option.Some(Val.Nat(0)), Option.Some(Val.Nat(0))) == Result.Ok(LDV(status = 1, t = Val.Nat(1), s = Val.Nat(1), st = sample())) => true
+
+fn ldOf(r: NB, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "A boolean answer as a finished lazy delta."
+    Result.Ok(LDV(status = tri(r.b), t = t, s = s, st = r.st))
+
+verify ldOf
+    ldOf(NB(b = false, st = sample()), Val.Nat(0), Val.Nat(1)) == Result.Ok(LDV(status = 2, t = Val.Nat(0), s = Val.Nat(1), st = sample())) => true
+
+fn lazyNat(st: NSt, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "Closed values get Nat arithmetic first."
+    match Bool.and(closedVal(t), closedVal(s))
+        true -> lazyNatLeft(natStep(st, t)?, t, s)
+        false -> lazyStep(st, t, s)
+
+verify lazyNat
+    lazyNat(sample(), Val.Var(0, []), Val.Var(0, [])) == Result.Ok(LDV(status = 0, t = Val.Var(0, []), s = Val.Var(0, []), st = sample())) => true
+
+fn lazyNatLeft(r: NO, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "t reduced by arithmetic decides it."
+    match r.o
+        Option.Some(x) -> ldOf(conv(r.st, x, s)?, t, s)
+        Option.None -> lazyNatRight(natStep(r.st, s)?, t, s)
+
+verify lazyNatLeft
+    lazyNatLeft(NO(o = Option.Some(Val.Nat(2)), st = sample()), Val.Nat(5), Val.Nat(2)) == Result.Ok(LDV(status = 1, t = Val.Nat(5), s = Val.Nat(2), st = sample())) => true
+
+fn lazyNatRight(r: NO, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "s reduced by arithmetic decides it."
+    match r.o
+        Option.Some(x) -> ldOf(conv(r.st, t, x)?, t, s)
+        Option.None -> lazyStep(r.st, t, s)
+
+verify lazyNatRight
+    lazyNatRight(NO(o = Option.Some(Val.Nat(2)), st = sample()), Val.Nat(2), Val.Nat(5)) == Result.Ok(LDV(status = 1, t = Val.Nat(2), s = Val.Nat(5), st = sample())) => true
+
+fn lazyStep(st: NSt, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "One unfolding step; status 3 means go round again."
+    r = deltaStep(st, t, s)?
+    match r.status
+        3 -> lazyDelta(r.st, r.t, r.s)
+        _ -> Result.Ok(r)
+
+verify lazyStep
+    lazyStep(sample(), Val.Var(0, []), Val.Var(1, [])) == Result.Ok(LDV(status = 0, t = Val.Var(0, []), s = Val.Var(1, []), st = sample())) => true
+
+fn deltaStep(st: NSt, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "Unfolds the side that can be unfolded, or the higher one when both can."
+    match deltaOf(st, t)
+        Option.None -> match deltaOf(st, s)
+            Option.None -> Result.Ok(LDV(status = 0, t = t, s = s, st = st))
+            Option.Some -> unfoldRight(st, t, s)
+        Option.Some(ct) -> match deltaOf(st, s)
+            Option.None -> unfoldLeft(st, t, s)
+            Option.Some(cs) -> unfoldBoth(st, t, s, ct, cs)
+
+verify deltaStep
+    deltaStep(sample(), Val.Nat(0), Val.Nat(1)) == Result.Ok(LDV(status = 0, t = Val.Nat(0), s = Val.Nat(1), st = sample())) => true
+
+fn unfoldWhnf(st: NSt, v: Val) -> Result<NV, Fail>
+    ? "Unfolds the head and takes whnfCore with cheap projections."
+    u = unfold(st, v)
+    match u.o
+        Option.Some(x) -> whnfCore(u.st, x, true)
+        Option.None -> Result.Ok(NV(v = v, st = u.st))
+
+verify unfoldWhnf
+    resultVal(unfoldWhnf(sample(), Val.Nat(1))) => Val.Nat(1)
+
+fn projApp(st: NSt, v: Val) -> Result<NO, Fail>
+    ? "A value headed by a projection, if whnfCore changes it."
+    match v
+        Val.Prj -> changedTo(whnfCore(st, v, false)?, v)
+        _ -> none(st)
+
+verify projApp
+    projApp(sample(), Val.Nat(1)) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn changedTo(w: NV, v: Val) -> Result<NO, Fail>
+    ? "Some only when different."
+    match w.v == v
+        true -> none(w.st)
+        false -> Result.Ok(NO(o = Option.Some(w.v), st = w.st))
+
+verify changedTo
+    changedTo(NV(v = Val.Nat(1), st = sample()), Val.Nat(1)) == Result.Ok(NO(o = Option.None, st = sample())) => true
+
+fn unfoldLeft(st: NSt, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "Only t unfolds; a projection on the other side is reduced instead when it can be."
+    pa = projApp(st, s)?
+    match pa.o
+        Option.Some(s2) -> afterStep(pa.st, t, s2)
+        Option.None -> unfoldedLeft(unfoldWhnf(pa.st, t)?, s)
+
+verify unfoldLeft
+    unfoldLeft(sample(), Val.Nat(1), Val.Nat(1)) == Result.Ok(LDV(status = 1, t = Val.Nat(1), s = Val.Nat(1), st = sample())) => true
+
+fn unfoldedLeft(u: NV, s: Val) -> Result<LDV, Fail>
+    ? "After unfolding t."
+    afterStep(u.st, u.v, s)
+
+verify unfoldedLeft
+    unfoldedLeft(NV(v = Val.Nat(1), st = sample()), Val.Nat(1)) == Result.Ok(LDV(status = 1, t = Val.Nat(1), s = Val.Nat(1), st = sample())) => true
+
+fn unfoldRight(st: NSt, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "Only s unfolds; symmetric to unfoldLeft."
+    pa = projApp(st, t)?
+    match pa.o
+        Option.Some(t2) -> afterStep(pa.st, t2, s)
+        Option.None -> unfoldedRight(unfoldWhnf(pa.st, s)?, t)
+
+verify unfoldRight
+    unfoldRight(sample(), Val.Nat(1), Val.Nat(1)) == Result.Ok(LDV(status = 1, t = Val.Nat(1), s = Val.Nat(1), st = sample())) => true
+
+fn unfoldedRight(u: NV, t: Val) -> Result<LDV, Fail>
+    ? "After unfolding s."
+    afterStep(u.st, t, u.v)
+
+verify unfoldedRight
+    unfoldedRight(NV(v = Val.Nat(1), st = sample()), Val.Nat(2)) == Result.Ok(LDV(status = 2, t = Val.Nat(2), s = Val.Nat(1), st = sample())) => true
+
+fn unfoldBoth(st: NSt, t: Val, s: Val, ct: Const, cs: Const) -> Result<LDV, Fail>
+    ? "Both unfold: by hints; the same regular definition first tries equal arguments."
+    c = hintOrder(Check.State.hintsOf(ct), Check.State.hintsOf(cs))
+    match c < 0
+        true -> unfoldedLeft(unfoldWhnf(st, t)?, s)
+        false -> match c > 0
+            true -> unfoldedRight(unfoldWhnf(st, s)?, t)
+            false -> sameHead(st, t, s, ct, cs)
+
+verify unfoldBoth
+    unfoldBoth(sample(), Val.Nat(1), Val.Nat(1), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0)), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0))) == Result.Ok(LDV(status = 1, t = Val.Nat(1), s = Val.Nat(1), st = sample())) => true
+
+fn sameHead(st: NSt, t: Val, s: Val, ct: Const, cs: Const) -> Result<LDV, Fail>
+    ? "f as =?= f bs for a regular f: equal arguments settle it."
+    match Bool.and(Bool.and(spineLen(t) > 0, spineLen(s) > 0), Bool.and(Check.State.headOf(ct).name == Check.State.headOf(cs).name, isRegular(Check.State.hintsOf(ct))))
+        false -> unfoldBothNow(st, t, s)
+        true -> tryArgs(st, t, s, ct)
+
+verify sameHead
+    sameHead(sample(), Val.Nat(1), Val.Nat(1), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0)), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0))) == Result.Ok(LDV(status = 1, t = Val.Nat(1), s = Val.Nat(1), st = sample())) => true
+
+fn spineLen(v: Val) -> Int
+    ? "The number of arguments of an application value."
+    match v
+        Val.Cst(_, _, sp) -> List.len(sp)
+        Val.Var(_, sp) -> List.len(sp)
+        Val.Prj(_, _, _, sp) -> List.len(sp)
+        Val.Stuck(_, sp) -> List.len(sp)
+        _ -> 0
+
+verify spineLen
+    spineLen(Val.Var(0, [Val.Nat(1)])) => 1
+
+fn spineOf(v: Val) -> List<Val>
+    ? "An application value's spine, last argument first."
+    match v
+        Val.Cst(_, _, sp) -> sp
+        Val.Var(_, sp) -> sp
+        Val.Prj(_, _, _, sp) -> sp
+        Val.Stuck(_, sp) -> sp
+        _ -> []
+
+verify spineOf
+    spineOf(Val.Nat(1)) => []
+
+fn levelsOfHead(v: Val) -> List<Level>
+    ? "The universe levels of a constant head."
+    match v
+        Val.Cst(_, ls, _) -> ls
+        _ -> []
+
+verify levelsOfHead
+    levelsOfHead(Val.Nat(1)) => []
+
+fn tryArgs(st: NSt, t: Val, s: Val, c: Const) -> Result<LDV, Fail>
+    ? "Equal levels and arguments mean equal values; otherwise unfold both. Arguments the definition never uses are not compared."
+    match Core.Univ.isEquivList(levelsOfHead(t), levelsOfHead(s))
+        false -> unfoldBothNow(st, t, s)
+        true -> argsTried(spinesEq(st, spineOf(t), spineOf(s), unusedArgs(c, spineLen(t)))?, t, s)
+
+verify tryArgs
+    tryArgs(sample(), Val.Nat(1), Val.Nat(1), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0))) == Result.Ok(LDV(status = 1, t = Val.Nat(1), s = Val.Nat(1), st = sample())) => true
+
+fn spinesEq(st: NSt, a: List<Val>, b: List<Val>, skip: List<Bool>) -> Result<NB, Fail>
+    ? "Pairwise equal arguments of two spines of the same length, last first, leaving out those flagged in skip."
+    match a
+        [] -> match b
+            [] -> yes(st)
+            _ -> no(st)
+        [x, ..ar] -> match b
+            [] -> no(st)
+            [y, ..br] -> match skip
+                [true, ..rest] -> spinesEq(st, ar, br, rest)
+                [false, ..rest] -> spineThen(conv(st, x, y)?, ar, br, rest)
+                [] -> spineThen(conv(st, x, y)?, ar, br, [])
+
+verify spinesEq
+    resultBool(spinesEq(sample(), [Val.Nat(1)], [Val.Nat(1)], [])) => true
+    resultBool(spinesEq(sample(), [Val.Nat(1)], [Val.Nat(2)], [true])) => true
+    resultBool(spinesEq(sample(), [Val.Nat(1)], [], [])) => false
+
+fn spineThen(r: NB, a: List<Val>, b: List<Val>, skip: List<Bool>) -> Result<NB, Fail>
+    ? "Continues with the rest of the spines."
+    match r.b
+        true -> spinesEq(r.st, a, b, skip)
+        false -> no(r.st)
+
+verify spineThen
+    resultBool(spineThen(NB(b = false, st = sample()), [], [], [])) => false
+
+fn argsTried(r: NB, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "Outcome of the argument comparison."
+    match r.b
+        true -> Result.Ok(LDV(status = 1, t = t, s = s, st = r.st))
+        false -> unfoldBothNow(r.st, t, s)
+
+verify argsTried
+    argsTried(NB(b = true, st = sample()), Val.Nat(0), Val.Nat(1)) == Result.Ok(LDV(status = 1, t = Val.Nat(0), s = Val.Nat(1), st = sample())) => true
+
+fn unfoldBothNow(st: NSt, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "Unfolds both sides."
+    u = unfoldWhnf(st, t)?
+    v = unfoldWhnf(u.st, s)?
+    afterStep(v.st, u.v, v.v)
+
+verify unfoldBothNow
+    unfoldBothNow(sample(), Val.Nat(1), Val.Nat(2)) == Result.Ok(LDV(status = 2, t = Val.Nat(1), s = Val.Nat(2), st = sample())) => true
+
+fn afterStep(st: NSt, t: Val, s: Val) -> Result<LDV, Fail>
+    ? "The easy cases after a step; undecided means go round again."
+    q = quickParts(st, t, s)?
+    match decided(q.i)
+        true -> Result.Ok(LDV(status = q.i, t = t, s = s, st = q.st))
+        false -> Result.Ok(LDV(status = 3, t = t, s = s, st = q.st))
+
+verify afterStep
+    afterStep(sample(), Val.Nat(1), Val.Nat(1)) == Result.Ok(LDV(status = 1, t = Val.Nat(1), s = Val.Nat(1), st = sample())) => true
+
+fn afterDelta(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "Same constant at equivalent levels, same variable, or projections of the same field compared lazily; otherwise whnfCore again."
+    match sameAtom(t, s)
+        true -> yes(st)
+        false -> eqProj(st, t, s)
+
+verify afterDelta
+    resultBool(afterDelta(sample(), Val.Var(1, []), Val.Var(1, []))) => true
+
+fn sameAtom(t: Val, s: Val) -> Bool
+    ? "The same constant at equivalent levels, or the same variable, with no arguments."
+    match t
+        Val.Cst(a, la, []) -> match s
+            Val.Cst(b, lb, []) -> Bool.and(a == b, Core.Univ.isEquivList(la, lb))
+            _ -> false
+        Val.Var(a, []) -> match s
+            Val.Var(b, []) -> a == b
+            _ -> false
+        _ -> false
+
+verify sameAtom
+    sameAtom(Val.Var(1, []), Val.Var(2, [])) => false
+
+fn eqProj(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "Projections of the same field, with no arguments, compare their structures lazily first."
+    match t
+        Val.Prj(s1, i1, c1, []) -> match s
+            Val.Prj(s2, i2, c2, []) -> match Bool.and(s1 == s2, i1 == i2)
+                true -> projAfter(lazyProj(st, c1, c2, s1, i1)?, t, s)
+                false -> rewhnf(st, t, s)
+            _ -> rewhnf(st, t, s)
+        _ -> rewhnf(st, t, s)
+
+verify eqProj
+    resultBool(eqProj(sample(), Val.Prj(Core.Names.anon(), 0, Val.Var(0, []), []), Val.Prj(Core.Names.anon(), 0, Val.Var(0, []), []))) => true
+
+fn projAfter(r: NB, t: Val, s: Val) -> Result<NB, Fail>
+    ? "Equal structures settle it; otherwise go on."
+    match r.b
+        true -> yes(r.st)
+        false -> rewhnf(r.st, t, s)
+
+verify projAfter
+    resultBool(projAfter(NB(b = true, st = sample()), Val.Nat(0), Val.Nat(1))) => true
+
+fn lazyProj(st: NSt, t: Val, s: Val, sname: Name, idx: Int) -> Result<NB, Fail>
+    ? "t.idx =?= s.idx: unfold the structures lazily, and compare the fields once neither unfolds."
+    r = deltaStep(st, t, s)?
+    match r.status
+        3 -> lazyProj(r.st, r.t, r.s, sname, idx)
+        1 -> yes(r.st)
+        _ -> projFallback(r.st, r.t, r.s, sname, idx)
+
+verify lazyProj
+    resultBool(lazyProj(sample(), Val.Var(0, []), Val.Var(0, []), Core.Names.anon(), 0)) => true
+
+fn projFallback(st: NSt, t: Val, s: Val, sname: Name, idx: Int) -> Result<NB, Fail>
+    ? "Fields of constructor applications, else the structures themselves."
+    a = whnfCore(st, Val.Prj(sname, idx, t, []), true)?
+    b = whnfCore(a.st, Val.Prj(sname, idx, s, []), true)?
+    match Bool.and(isPrj(a.v), isPrj(b.v))
+        true -> conv(b.st, t, s)
+        false -> conv(b.st, a.v, b.v)
+
+verify projFallback
+    resultBool(projFallback(sample(), Val.Var(0, []), Val.Var(0, []), Core.Names.anon(), 0)) => true
+
+fn isPrj(v: Val) -> Bool
+    ? "A projection value."
+    match v
+        Val.Prj -> true
+        _ -> false
+
+verify isPrj
+    isPrj(Val.Nat(1)) => false
+
+fn rewhnf(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "whnfCore again, now normalizing projected structures fully; anything new starts over."
+    a = whnfCore(st, t, false)?
+    b = whnfCore(a.st, s, false)?
+    match Bool.or(a.v != t, b.v != s)
+        true -> conv(b.st, a.v, b.v)
+        false -> eqFinal(b.st, t, s)
+
+verify rewhnf
+    resultBool(rewhnf(sample(), Val.Var(1, []), Val.Var(2, []))) => false
+
+fn eqFinal(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "Both sides in weak head normal form: congruence, eta, structure eta, string literals, unit-like types."
+    a = defEqApp(st, t, s)?
+    match a.b
+        true -> yes(a.st)
+        false -> eqEta(etaExpansion(a.st, t, s)?, t, s)
+
+verify eqFinal
+    resultBool(eqFinal(sample(), Val.Var(1, [Val.Nat(2)]), Val.Var(1, [Val.Nat(2)]))) => true
+
+fn defEqApp(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "Congruence: the same head and equal arguments."
+    match Bool.and(spineLen(t) > 0, spineLen(t) == spineLen(s))
+        false -> no(st)
+        true -> headsThen(headsEq(st, t, s)?, spineOf(t), spineOf(s))
+
+verify defEqApp
+    resultBool(defEqApp(sample(), Val.Var(0, [Val.Nat(1)]), Val.Var(0, [Val.Nat(2)]))) => false
+
+fn headsEq(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "The heads of two applications: the same variable, the same constant at equivalent levels, equal projections, or equal stuck heads."
+    match t
+        Val.Var(a, _) -> match s
+            Val.Var(b, _) -> Result.Ok(NB(b = a == b, st = st))
+            _ -> no(st)
+        Val.Cst(a, la, _) -> match s
+            Val.Cst(b, lb, _) -> Result.Ok(NB(b = Bool.and(a == b, Core.Univ.isEquivList(la, lb)), st = st))
+            _ -> no(st)
+        Val.Prj(a, i, x, _) -> match s
+            Val.Prj(b, j, y, _) -> match Bool.and(a == b, i == j)
+                true -> conv(st, x, y)
+                false -> no(st)
+            _ -> no(st)
+        Val.Stuck(x, _) -> match s
+            Val.Stuck(y, _) -> conv(st, x, y)
+            _ -> no(st)
+        _ -> no(st)
+
+verify headsEq
+    resultBool(headsEq(sample(), Val.Var(0, []), Val.Var(0, []))) => true
+
+fn headsThen(r: NB, a: List<Val>, b: List<Val>) -> Result<NB, Fail>
+    ? "Then the arguments, first argument first."
+    match r.b
+        true -> spinesEq(r.st, List.reverse(a), List.reverse(b), [])
+        false -> no(r.st)
+
+verify headsThen
+    resultBool(headsThen(NB(b = true, st = sample()), [], [])) => true
+
+fn eqEta(r: NB, t: Val, s: Val) -> Result<NB, Fail>
+    ? "After eta expansion."
+    match r.b
+        true -> yes(r.st)
+        false -> eqEtaStruct(etaStruct(r.st, t, s)?, t, s)
+
+verify eqEta
+    resultBool(eqEta(NB(b = true, st = sample()), Val.Nat(0), Val.Nat(1))) => true
+
+fn etaExpansion(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "fun x => f x against f, in either direction."
+    a = etaCore(st, t, s)?
+    match a.b
+        true -> yes(a.st)
+        false -> etaCore(a.st, s, t)
+
+verify etaExpansion
+    resultBool(etaExpansion(sample(), Val.Nat(0), Val.Nat(1))) => false
+
+fn etaCore(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "t a lambda, s not: t's body under a fresh variable against s applied to it."
+    match t
+        Val.Lam(n, d, env, b, bi) -> match s
+            Val.Lam -> no(st)
+            _ -> etaBody(st, n, d, env, b, bi, s)
+        _ -> no(st)
+
+verify etaCore
+    resultBool(etaCore(sample(), Val.Lam(Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(0)), Binder.Default), Val.Var(-1, []))) => true
+
+fn etaBody(st: NSt, n: Name, d: Val, env: List<Val>, b: Expr, bi: Binder, s: Val) -> Result<NB, Fail>
+    ? "The two sides applied to one fresh variable."
+    x = enter(st, n, d, bi)
+    r = conv(x.st, Next.Value.eval(List.prepend(x.v, env), b), Next.Value.apply(s, x.v))?
+    Result.Ok(NB(b = r.b, st = leave(r.st, st)))
+
+verify etaBody
+    resultBool(etaBody(enter(sample(), Core.Names.anon(), Val.Pi(Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.sort(Level.Zero), Binder.Default), Binder.Default).st, Core.Names.anon(), Val.Sort(Level.Zero), [Val.Var(0, [])], Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(0)), Binder.Default, Val.Var(0, []))) => true
+
+fn eqEtaStruct(r: NB, t: Val, s: Val) -> Result<NB, Fail>
+    ? "After structure eta."
+    match r.b
+        true -> yes(r.st)
+        false -> eqString(stringExpansion(r.st, t, s)?, t, s)
+
+verify eqEtaStruct
+    resultBool(eqEtaStruct(NB(b = true, st = sample()), Val.Nat(0), Val.Nat(1))) => true
+
+fn etaStruct(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "x against mk x.1 ... x.n, in either direction."
+    a = etaStructCore(st, t, s)?
+    match a.b
+        true -> yes(a.st)
+        false -> etaStructCore(a.st, s, t)
+
+verify etaStruct
+    resultBool(etaStruct(sample(), Val.Nat(0), Val.Nat(1))) => false
+
+fn etaStructCore(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "s must be a full constructor application of a non-recursive structure."
+    match s
+        Val.Cst(n, _, sp) -> match Check.State.lookup(st.old, n)
+            Option.Some(Const.CCtor(k)) -> match Bool.and(List.len(sp) == k.numParams + k.numFields, isNonRecStructure(st, k.induct))
+                true -> etaStructTypes(st, t, s, k, List.drop(argsOf(sp), k.numParams))
+                false -> no(st)
+            _ -> no(st)
+        _ -> no(st)
+
+verify etaStructCore
+    resultBool(etaStructCore(sample(), Val.Nat(0), Val.Nat(1))) => false
+
+fn etaStructTypes(st: NSt, t: Val, s: Val, k: Ctor, fields: List<Val>) -> Result<NB, Fail>
+    ? "Equal types, then each field against the projection of t."
+    it = inferVal(st, t)?
+    is = inferVal(it.st, s)?
+    eq = conv(is.st, it.v, is.v)?
+    match eq.b
+        false -> no(eq.st)
+        true -> fieldsEq(eq.st, t, fields, k.induct, 0)
+
+verify etaStructTypes
+    resultBool(etaStructTypes(sample(), Val.Sort(Level.Zero), Val.Sort(Level.Succ(Level.Zero)), Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), induct = Core.Names.anon(), cidx = 0, numParams = 0, numFields = 0, isUnsafe = false), [])) => false
+
+fn fieldsEq(st: NSt, t: Val, fields: List<Val>, induct: Name, i: Int) -> Result<NB, Fail>
+    ? "Field i against t.i."
+    match fields
+        [] -> yes(st)
+        [x, ..rest] -> fieldNext(conv(st, Val.Prj(induct, i, t, []), x)?, t, rest, induct, i)
+
+verify fieldsEq
+    resultBool(fieldsEq(sample(), Val.Nat(0), [], Core.Names.anon(), 0)) => true
+
+fn fieldNext(r: NB, t: Val, rest: List<Val>, induct: Name, i: Int) -> Result<NB, Fail>
+    ? "Stops at the first unequal field."
+    match r.b
+        true -> fieldsEq(r.st, t, rest, induct, i + 1)
+        false -> no(r.st)
+
+verify fieldNext
+    resultBool(fieldNext(NB(b = false, st = sample()), Val.Nat(0), [], Core.Names.anon(), 0)) => false
+
+fn stringExpansion(st: NSt, t: Val, s: Val) -> Result<NI, Fail>
+    ? "A string literal against String.ofList of something: the literal expanded."
+    a = stringCore(st, t, s)?
+    match decided(a.i)
+        true -> Result.Ok(a)
+        false -> stringCore(a.st, s, t)
+
+verify stringExpansion
+    stringExpansion(sample(), Val.Nat(0), Val.Nat(1)) == Result.Ok(NI(i = 0, st = sample())) => true
+
+fn stringCore(st: NSt, t: Val, s: Val) -> Result<NI, Fail>
+    ? "One direction of the expansion."
+    match t
+        Val.Str(x) -> match s
+            Val.Cst(Name.Str(Name.Str(Name.Anon, "String", _), "ofList", _), [], [_]) -> triOfB(conv(st, Next.Value.eval([], Check.Lits.strToCtor(x)), s)?)
+            _ -> Result.Ok(NI(i = 0, st = st))
+        _ -> Result.Ok(NI(i = 0, st = st))
+
+verify stringCore
+    stringCore(sample(), Val.Nat(0), Val.Nat(1)) == Result.Ok(NI(i = 0, st = sample())) => true
+
+fn eqString(q: NI, t: Val, s: Val) -> Result<NB, Fail>
+    ? "After string literal expansion; the last resort is a unit-like type."
+    match decided(q.i)
+        true -> Result.Ok(NB(b = q.i == 1, st = q.st))
+        false -> unitLike(q.st, t, s)
+
+verify eqString
+    resultBool(eqString(NI(i = 2, st = sample()), Val.Nat(0), Val.Nat(0))) => false
+
+fn unitLike(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
+    ? "Values of a structure with one field-less constructor are all equal."
+    match typable(t)
+        false -> no(st)
+        true -> unitTyped(whnfOf(inferVal(st, t)?)?, s)
+
+verify unitLike
+    resultBool(unitLike(sample(), Val.Stuck(Val.Nat(0), []), Val.Nat(0))) => false
+
+fn unitTyped(w: NV, s: Val) -> Result<NB, Fail>
+    ? "Needs a structure whose constructor has no fields, and s of the same type."
+    match w.v
+        Val.Cst(n, _, _) -> match Bool.and(isNonRecStructure(w.st, n), noFields(w.st, firstCtor(w.st, n)))
+            true -> unitTypes(w.st, w.v, s)
+            false -> no(w.st)
+        _ -> no(w.st)
+
+verify unitTyped
+    resultBool(unitTyped(NV(v = Val.Nat(1), st = sample()), Val.Nat(0))) => false
+
+fn noFields(st: NSt, k: Option<Name>) -> Bool
+    ? "The constructor has no fields."
+    match k
+        Option.Some(c) -> match Check.State.lookup(st.old, c)
+            Option.Some(Const.CCtor(kv)) -> kv.numFields == 0
+            _ -> false
+        Option.None -> false
+
+verify noFields
+    noFields(sample(), Option.None) => false
+
+fn unitTypes(st: NSt, tType: Val, s: Val) -> Result<NB, Fail>
+    ? "Equal when s has the same type."
+    ts = inferVal(st, s)?
+    conv(ts.st, tType, ts.v)
+
+verify unitTypes
+    resultBool(unitTypes(sample(), Val.Sort(Level.Succ(Level.Zero)), Val.Sort(Level.Zero))) => true
+
+fn hintOrder(a: Hints, b: Hints) -> Int
+    ? "Negative: unfold the left side; positive: the right; zero: both."
+    match a
+        Hints.Regular(ha) -> match b
+            Hints.Regular(hb) -> regularOrder(ha, hb)
+            Hints.Opaque -> -1
+            Hints.Abbrev -> 1
+        Hints.Opaque -> match b
+            Hints.Opaque -> 0
+            _ -> 1
+        Hints.Abbrev -> match b
+            Hints.Abbrev -> 0
+            Hints.Opaque -> -1
+            Hints.Regular -> -1
+
+verify hintOrder
+    hintOrder(Hints.Regular(3), Hints.Regular(1)) => -1
+    hintOrder(Hints.Opaque, Hints.Abbrev) => 1
+    hintOrder(Hints.Abbrev, Hints.Regular(2)) => -1
+
+fn regularOrder(ha: Int, hb: Int) -> Int
+    ? "The greater height unfolds first."
+    match ha == hb
+        true -> 0
+        false -> match ha > hb
+            true -> -1
+            false -> 1
+
+verify regularOrder
+    regularOrder(1, 1) => 0
+
+fn isRegular(h: Hints) -> Bool
+    ? "A regular definition."
+    match h
+        Hints.Regular -> true
+        _ -> false
+
+verify isRegular
+    isRegular(Hints.Opaque) => false
+
+fn dropFirst() -> Const
+    ? "A sample regular definition that ignores its argument: fun x => 0."
+    Const.CDefn(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(0), Binder.Default), Hints.Regular(1), Safety.Safe)
+
+verify dropFirst
+    Check.State.hintsOf(dropFirst()) => Hints.Regular(1)
+
+fn unusedArgs(c: Const, k: Int) -> List<Bool>
+    ? "For k arguments of c, last first: whether c's value drops the argument. Only when the arguments cover every leading lambda of the value, so that unfolding both sides leaves the body alone, in which that variable does not occur. No flags means compare everything."
+    match Check.State.valueOf(c)
+        Option.Some(v) -> unusedFrom(lamBody(v), lamCount(v, 0), k)
+        Option.None -> []
+
+verify unusedArgs
+    unusedArgs(dropFirst(), 1) => [true]
+    unusedArgs(dropFirst(), 2) => [false, true]
+    unusedArgs(dropFirst(), 0) => []
+
+fn lamCount(e: Expr, acc: Int) -> Int
+    ? "How many lambdas e starts with, plus acc."
     match e
-        Expr.FVar(id) -> id
-        _ -> -1
+        Expr.Lam(_, _, _, b, _) -> lamCount(b, acc + 1)
+        _ -> acc
 
-verify fvarNumber
-    fvarNumber(Core.Exprs.fvar(2)) => 2
+verify lamCount
+    lamCount(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 0) => 1
+
+fn lamBody(e: Expr) -> Expr
+    ? "e without its leading lambdas."
+    match e
+        Expr.Lam(_, _, _, b, _) -> lamBody(b)
+        _ -> e
+
+verify lamBody
+    lamBody(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)) => Core.Exprs.bvar(0)
+
+fn unusedFrom(body: Expr, n: Int, k: Int) -> List<Bool>
+    ? "Flags for k arguments over a body under n lambdas; none when the k arguments do not reach the body."
+    match k < n
+        true -> []
+        false -> unusedLoop(body, n, 0, k, [])
+
+verify unusedFrom
+    unusedFrom(Core.Exprs.bvar(0), 2, 1) => []
+    unusedFrom(Core.Exprs.bvar(0), 2, 2) => [false, true]
+
+fn unusedLoop(body: Expr, n: Int, i: Int, k: Int, acc: List<Bool>) -> List<Bool>
+    ? "Prepends the flag of argument i, first argument first, so the last argument's flag ends up at the front. Argument i is the variable n - 1 - i of the body."
+    match i >= k
+        true -> acc
+        false -> unusedLoop(body, n, i + 1, k, List.prepend(Bool.and(i < n, Bool.not(mentions(body, n - 1 - i))), acc))
+
+verify unusedLoop
+    unusedLoop(Core.Exprs.bvar(1), 2, 0, 3, []) => [false, true, false]
+
+fn mentions(body: Expr, j: Int) -> Bool
+    ? "Whether variable j may occur in body: not when it is outside the loose range, looked up in a small body, assumed in a large one so that a shared term is never walked as a tree."
+    match Core.Exprs.looseRange(body) <= j
+        true -> false
+        false -> match Core.Exprs.treeSize(body) < 63
+            true -> Core.Subst.hasLooseBVar(body, j)
+            false -> true
+
+verify mentions
+    mentions(Core.Exprs.bvar(0), 1) => false
+    mentions(Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(0)), 1) => false
+    mentions(Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(0)), 2) => true
