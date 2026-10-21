@@ -9,6 +9,22 @@ module Tc
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.PMap, Core.Alpha, Check.State, Check.Lits, Core.Hash]
     effects []
 
+decision CongruenceAfterSteps
+    date = "2026-10-21"
+    reason =
+        "After a reduction step the reference kernel asks whether the two"
+        "sides are made of parts already found equal, through its"
+        "equivalence manager. Without that, two applications of the same"
+        "coercion whose arguments were each proved equal went down the whole"
+        "chain of instances again for every new combination of arguments:"
+        "the heaviest mathlib declaration took 198 s and 4.9 GB, with 6.9"
+        "million unfoldings of distinct terms. Checking the parts against"
+        "identity and remembered equalities first, it takes 12 s and 0.5 GB;"
+        "all of mathlib 16 minutes instead of 31."
+    chosen = "CongruenceAfterSteps"
+    rejected = ["WholePairsOnly"]
+    impacts = [quickParts, afterStep, eqCoreWhnf]
+
 record RI
     i: Int
     st: St
@@ -2098,7 +2114,7 @@ fn eqCoreWhnf(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
     tn = whnfCoreM(st, t, false, true)?
     sn = whnfCoreM(tn.st, s, false, true)?
     match Bool.or(tn.e != t, sn.e != s)
-        true -> eqAfterQuick(quick(sn.st, tn.e, sn.e)?, tn.e, sn.e)
+        true -> eqAfterQuick(quickParts(sn.st, tn.e, sn.e)?, tn.e, sn.e)
         false -> eqProofIrrel(sn.st, tn.e, sn.e)
 
 verify eqCoreWhnf
@@ -2246,6 +2262,51 @@ fn quick(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
 
 verify quick
     quick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.strLit("1")) => Result.Ok(RI(i = 2, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn quickParts(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
+    ? "The easy cases, and then equal parts: an application or projection whose children are pairwise identical or already found equal is equal, as the reference's equivalence check after a reduction step finds. Definitional equality is a congruence, so this holds whatever was compared before."
+    q = quick(st, t, s)?
+    match decided(q.i)
+        true -> Result.Ok(q)
+        false -> match congruentParts(q.st, t, s)
+            true -> Result.Ok(RI(i = 1, st = q.st))
+            false -> Result.Ok(q)
+
+verify quickParts
+    quickParts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2))) => Result.Ok(RI(i = 0, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+    resultInt(quickParts(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), eqOk = Check.State.pairPut(Core.PMap.empty(), Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2)))) => 1
+
+fn congruent(st: St, t: Expr, s: Expr) -> Bool
+    ? "Identical, already found equal, or made of such parts."
+    match sameTerm(t, s)
+        true -> true
+        false -> match known(st, t, s)
+            true -> true
+            false -> congruentParts(st, t, s)
+
+verify congruent
+    congruent(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1)) => true
+    congruent(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2)) => false
+
+fn congruentParts(st: St, t: Expr, s: Expr) -> Bool
+    ? "Two applications with congruent functions and arguments, or two projections of the same field of congruent structures."
+    match t
+        Expr.App(_, f, a) -> match s
+            Expr.App(_, g, b) -> match congruent(st, f, g)
+                true -> congruent(st, a, b)
+                false -> false
+            _ -> false
+        Expr.Proj(_, n, i, x) -> match s
+            Expr.Proj(_, m, j, y) -> match Bool.and(n == m, i == j)
+                true -> congruent(st, x, y)
+                false -> false
+            _ -> false
+        _ -> false
+
+verify congruentParts
+    congruentParts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1))) => true
+    congruentParts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 1, Core.Exprs.fvar(1))) => false
+    congruentParts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1)) => false
 
 fn known(st: St, t: Expr, s: Expr) -> Bool
     ? "A success recorded in this declaration, or one an earlier declaration kept for closed terms."
@@ -2736,7 +2797,7 @@ verify unfoldBothNow
 
 fn afterStep(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
     ? "The easy cases after a step; undecided means continue."
-    q = quick(st, t, s)?
+    q = quickParts(st, t, s)?
     match decided(q.i)
         true -> Result.Ok(LD(status = q.i, t = t, s = s, st = q.st))
         false -> Result.Ok(LD(status = 3, t = t, s = s, st = q.st))
