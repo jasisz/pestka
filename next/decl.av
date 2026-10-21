@@ -54,9 +54,8 @@ verify propOrFail
     propOrFail(NB(b = false, st = Next.Tc.start(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))) => Result.Err(Fail.Reject("theorem type is not Prop"))
 
 fn valueChecks(st: NSt, ty: Expr, v: Expr) -> Result<Facts, Fail>
-    ? "The value's type equal to the declared one."
-    vt = Next.Tc.infer(st, [], [], v, false)?
-    eq = Next.Tc.conv(vt.st, vt.v, Next.Value.eval([], ty))?
+    ? "The value checked against the declared type."
+    eq = Next.Tc.checkAgainst(st, [], [], v, Next.Value.eval([], ty))?
     match eq.b
         true -> Result.Ok(Facts(closed = eq.st.old.closed))
         false -> Result.Err(Fail.Reject("declaration type mismatch"))

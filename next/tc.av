@@ -14,7 +14,7 @@ module Tc
         "from its body's type. The first core's state serves for the"
         "constants, the declaration's universe parameters and the"
         "instantiated values of definitions."
-    exposes [NSt, NV, NB, start, infer, inferVal, whnf, whnfCore, conv, sortOf, isProp]
+    exposes [NSt, NV, NB, start, infer, inferVal, checkAgainst, whnf, whnfCore, conv, sortOf, isProp]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps, Core.Decls, Core.Univ, Core.PMap, Check.State, Check.Tc, Check.Lits, Next.Value, Next.VMap]
     effects []
 
@@ -286,15 +286,63 @@ verify argStep
     argStep(NV(v = Val.Nat(1), st = sample()), [], [], Core.Exprs.natLit(1), [], false) => Result.Err(Fail.Reject("function expected"))
 
 fn argChecked(st: NSt, tenv: List<Val>, env: List<Val>, a: Expr, dom: Val, cenv: List<Val>, b: Expr, rest: List<Expr>) -> Result<NV, Fail>
-    ? "The argument's type against the domain."
-    t = infer(st, tenv, env, a, false)?
-    eq = conv(t.st, t.v, dom)?
+    ? "The argument checked against the domain."
+    eq = checkAgainst(st, tenv, env, a, dom)?
     match eq.b
         true -> argsLoop(eq.st, tenv, env, Next.Value.eval(List.prepend(Next.Value.delay(env, a), cenv), b), rest, false)
         false -> Result.Err(bad("application type mismatch"))
 
 verify argChecked
     argChecked(sample(), [], [], Core.Exprs.sort(Level.Zero), Val.Sort(Level.Zero), [], Core.Exprs.bvar(0), []) => Result.Err(Fail.Reject("application type mismatch"))
+
+fn checkAgainst(st: NSt, tenv: List<Val>, env: List<Val>, e: Expr, expected: Val) -> Result<NB, Fail>
+    ? "Whether e has the type expected, in checking mode. A lambda is checked against a pi without its own type being built: its domain must be a type equal to the pi's, and its body is checked against the pi's codomain under one fresh variable, the steps that comparing the lambda's type with expected would take. Anything else is inferred and compared."
+    match e
+        Expr.Lam(_, n, d, b, bi) -> lamAgainst(whnf(st, expected)?, tenv, env, e, n, d, b, bi)
+        _ -> inferAgainst(st, tenv, env, e, expected)
+
+verify checkAgainst
+    resultBool(checkAgainst(sample(), [], [], Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Val.Pi(Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.sort(Level.Zero), Binder.Default))) => true
+    resultBool(checkAgainst(sample(), [], [], Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Val.Pi(Core.Names.anon(), Val.Sort(Level.Zero), [], Core.Exprs.bvar(0), Binder.Default))) => false
+    resultBool(checkAgainst(sample(), [], [], Core.Exprs.sort(Level.Zero), Val.Sort(Level.Succ(Level.Zero)))) => true
+
+fn inferAgainst(st: NSt, tenv: List<Val>, env: List<Val>, e: Expr, expected: Val) -> Result<NB, Fail>
+    ? "e's type, inferred in checking mode, against expected."
+    t = infer(st, tenv, env, e, false)?
+    conv(t.st, t.v, expected)
+
+verify inferAgainst
+    resultBool(inferAgainst(sample(), [], [], Core.Exprs.sort(Level.Zero), Val.Sort(Level.Zero))) => false
+
+fn lamAgainst(w: NV, tenv: List<Val>, env: List<Val>, e: Expr, n: Name, d: Expr, b: Expr, bi: Binder) -> Result<NB, Fail>
+    ? "A lambda against what expected normalizes to: a pi compares binder by binder; anything else takes the lambda's type."
+    match w.v
+        Val.Pi(_, dom2, cenv, b2, _) -> lamDomain(w.st, tenv, env, n, d, b, bi, dom2, cenv, b2)
+        _ -> inferAgainst(w.st, tenv, env, e, w.v)
+
+verify lamAgainst
+    resultBool(lamAgainst(NV(v = Val.Sort(Level.Zero), st = sample()), [], [], Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)) => false
+
+fn lamDomain(st: NSt, tenv: List<Val>, env: List<Val>, n: Name, d: Expr, b: Expr, bi: Binder, dom2: Val, cenv: List<Val>, b2: Expr) -> Result<NB, Fail>
+    ? "The lambda's domain is a type equal to the pi's."
+    s = typeChecked(st, tenv, env, d, false)?
+    dom = Next.Value.eval(env, d)
+    eq = conv(s, dom, dom2)?
+    match eq.b
+        false -> no(eq.st)
+        true -> lamAgainstBody(eq.st, tenv, env, n, dom, b, bi, cenv, b2)
+
+verify lamDomain
+    resultBool(lamDomain(sample(), [], [], Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default, Val.Sort(Level.Succ(Level.Zero)), [], Core.Exprs.bvar(0))) => false
+
+fn lamAgainstBody(st: NSt, tenv: List<Val>, env: List<Val>, n: Name, dom: Val, b: Expr, bi: Binder, cenv: List<Val>, b2: Expr) -> Result<NB, Fail>
+    ? "The body against the codomain, both under one fresh variable."
+    x = enter(st, n, dom, bi)
+    r = checkAgainst(x.st, List.prepend(dom, tenv), List.prepend(x.v, env), b, Next.Value.eval(List.prepend(x.v, cenv), b2))?
+    Result.Ok(NB(b = r.b, st = leave(r.st, st)))
+
+verify lamAgainstBody
+    resultBool(lamAgainstBody(sample(), [], [], Core.Names.anon(), Val.Sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default, [], Core.Exprs.sort(Level.Zero))) => true
 
 fn domainOk(st: NSt, tenv: List<Val>, env: List<Val>, d: Expr, only: Bool) -> Result<NV, Fail>
     ? "A binder's domain, which in checking mode must be a type; returns its sort's value."
@@ -424,9 +472,8 @@ verify letChecked
     letChecked(sample(), [], [], Core.Exprs.natLit(1), Core.Exprs.natLit(1), false) => Result.Err(Fail.Reject("type expected"))
 
 fn letValue(st: NSt, tenv: List<Val>, env: List<Val>, t: Expr, v: Expr) -> Result<NSt, Fail>
-    ? "The value's type equals the declared one."
-    vt = infer(st, tenv, env, v, false)?
-    eq = conv(vt.st, vt.v, Next.Value.eval(env, t))?
+    ? "The value checked against the declared type."
+    eq = checkAgainst(st, tenv, env, v, Next.Value.eval(env, t))?
     match eq.b
         true -> Result.Ok(eq.st)
         false -> Result.Err(bad("let value type mismatch"))
@@ -743,8 +790,23 @@ verify isProp
     resultBool(isProp(sample(), Val.Sort(Level.Zero))) => false
 
 fn whnf(st: NSt, v: Val) -> Result<NV, Fail>
-    ? "Weak head normal form, remembered: a variable is numbered once in the declaration, so a value means the same wherever it is met."
-    whnfHit(st, v, Next.VMap.find(st.whnfs, Next.Value.hashOf(v), v))
+    ? "Weak head normal form, remembered when work may be needed (a constant, a projection, a waiting term): a variable is numbered once in the declaration, so a value means the same wherever it is met. A variable application, a binder, a sort or a literal is its own normal form."
+    match mayReduce(v)
+        false -> Result.Ok(NV(v = v, st = st))
+        true -> whnfHit(st, v, Next.VMap.find(st.whnfs, Next.Value.hashOf(v), v))
+
+fn mayReduce(v: Val) -> Bool
+    ? "Whether whnf can change v: constants, projections, waiting terms and stuck applications."
+    match v
+        Val.Cst -> true
+        Val.Prj -> true
+        Val.Delay -> true
+        Val.Stuck -> true
+        _ -> false
+
+verify mayReduce
+    mayReduce(Val.Var(0, [Val.Nat(1)])) => false
+    mayReduce(Val.Delay([], Core.Exprs.natLit(1))) => true
 
 verify whnf
     resultVal(whnf(sample(), Val.Delay([], Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.natLit(1))))) => Val.Nat(1)
@@ -1280,7 +1342,9 @@ fn conv(st: NSt, t: Val, s: Val) -> Result<NB, Fail>
     q = quick(st, a, b)?
     match decided(q.i)
         true -> Result.Ok(NB(b = q.i == 1, st = q.st))
-        false -> convClosed(q.st, a, b, pairKey(a, b))
+        false -> match Bool.or(mayReduce(a), mayReduce(b))
+            true -> convClosed(q.st, a, b, pairKey(a, b))
+            false -> boolTrue(q.st, a, b)
 
 fn pairKey(a: Val, b: Val) -> Int
     ? "A key for a pair in either order."
