@@ -301,20 +301,20 @@ verify constLevels
     resultExpr(constLevels(Unit, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), []), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [])) => Core.Exprs.sort(Level.Zero)
 
 fn levelledType(st: St, e: Expr, h: Head, ls: List<Level>) -> RE
-    ? "The type of e, the constant of h at the levels ls, once its levels passed their checks. It depends on the levels as written, not on what their parameters mean in a declaration, so it is instantiated once and kept with the facts each worker carries across declarations."
+    ? "The type of e, the constant of h at the levels ls, once its levels passed their checks. It depends on the levels as written, not on what their parameters mean in a declaration, so it is instantiated once and kept, with the values instantiated at levels, from one declaration to the next."
     match ls
         [] -> RE(e = h.ty, st = st)
-        _ -> match Check.State.cacheGet(st.closed, e)
+        _ -> match Check.State.levelTypeGet(st.unfoldCache, e)
             Option.Some(t) -> RE(e = t, st = st)
             Option.None -> keptType(st, e, Core.Subst.instLevelParams(h.ty, h.params, ls))
 
 verify levelledType
     levelledType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), []), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), []).e => Core.Exprs.sort(Level.Zero)
-    Core.Cache.size(levelledType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [Level.Zero]), Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Param(Core.Names.anon()))), [Level.Zero]).st.closed) => 1
+    Core.Cache.size(levelledType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [Level.Zero]), Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Param(Core.Names.anon()))), [Level.Zero]).st.unfoldCache) => 1
 
 fn keptType(st: St, e: Expr, t: Expr) -> RE
     ? "The instantiated type, recorded for e."
-    RE(e = t, st = St.update(st, closed = Check.State.cachePut(st.closed, e, t)))
+    RE(e = t, st = St.update(st, unfoldCache = Check.State.levelTypePut(st.unfoldCache, e, t)))
 
 verify keptType
     keptType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(1)).e => Core.Exprs.bvar(1)

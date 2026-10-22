@@ -373,14 +373,14 @@ verify jobChecks
     jobChecks(Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => Result.Err(Fail.Reject("declaration type mismatch"))
 
 fn carried(st: St) -> OldFacts
-    ? "What the first core takes from a declaration to the next: the facts about closed terms, and the values instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration."
+    ? "What the first core takes from a declaration to the next: the facts about closed terms, and the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration."
     OldFacts(closed = st.closed, unfolds = bounded(st.unfoldCache))
 
 verify carried
     Core.Cache.size(carried(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).unfolds) => 0
 
 fn bounded(m: Map<Int, List<Tuple<Expr, Expr>>>) -> Map<Int, List<Tuple<Expr, Expr>>>
-    ? "The instantiated values, emptied once they pass 16384 hashes: kept for the whole run they once took mathlib past 14 GB, while most are asked for again within a few declarations. Limits of 1024, 4096 and 16384 gave 351.5, 349.7 and 343.8 G instructions on Init (one worker)."
+    ? "The values and constant types instantiated at levels, emptied once they pass 16384 hashes: kept for the whole run, values once took mathlib past 14 GB and constant types took it there again on one worker, while most are asked for again within a few declarations. Limits of 1024, 4096 and 16384 gave 351.5, 349.7 and 343.8 G instructions on Init (one worker)."
     match Core.Cache.size(m) > 16384
         true -> Core.Cache.empty()
         false -> m
