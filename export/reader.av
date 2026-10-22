@@ -5,7 +5,7 @@ module Reader
         "single key, and an item of the name, level or expression table"
         "when it carries an in, il or ie index."
     exposes [header, supported, readAll, readParallel, readLine]
-    depends [Json.Line, Json.Access, Core.Exprs, Export.Tables, Export.Items, Export.Declarations]
+    depends [Json.Line, Json.Escapes, Json.Access, Core.Exprs, Export.Tables, Export.Items, Export.Declarations]
     effects []
 
 fn header(line: String) -> Result<String, String>
@@ -57,19 +57,27 @@ verify readLine
 type Line
     App(Int, Int, Int)
     Bind(BinderIds)
+    NameStr(Int, Int, String)
+    NameNum(Int, Int, Int)
+    LevelSucc(Int, Int)
+    LevelParam(Int, Int)
+    LevelPair(Int, Int, Int, Bool)
+    BVar(Int, Int)
+    Sort(Int, Int)
+    Const(Int, Int, List<Int>)
     Obj(List<Tuple<String, J>>)
     Blank
     Bad(String)
 
 fn parseLine(line: String) -> Line
-    ? "One line parsed without the tables: an application or binder line in its canonical form by position, any other line through the JSON parser."
+    ? "One line parsed without the tables: an application, binder, name, level, constant, bound variable or sort line in its canonical form by position, any other line through the JSON parser."
     match line == ""
         true -> Line.Blank
         false -> match appLine(line)
             Option.Some(ids) -> Line.App(ids.ie, ids.fnIdx, ids.argIdx)
             Option.None -> match binderLine(line)
                 Option.Some(b) -> Line.Bind(b)
-                Option.None -> jsonParsed(Json.Line.parse(line))
+                Option.None -> otherLine(line)
 
 verify parseLine
     parseLine("") => Line.Blank
@@ -92,6 +100,14 @@ fn applyLine(t: Tables, l: Line) -> Result<Tables, String>
     match l
         Line.App(ie, f, a) -> Export.Items.appAt(t, ie, f, a)
         Line.Bind(b) -> Export.Items.binderAt(t, b.ie, b.nameIdx, b.typeIdx, b.bodyIdx, b.bi, b.isLam)
+        Line.NameStr(i, pre, text) -> Export.Items.nameStrAt(t, i, pre, text)
+        Line.NameNum(i, pre, k) -> Export.Items.nameNumAt(t, i, pre, k)
+        Line.LevelSucc(i, a) -> Export.Items.succAdded(t, i, a)
+        Line.LevelParam(i, n) -> Export.Items.paramAdded(t, i, n)
+        Line.LevelPair(i, a, b, isMax) -> Export.Items.levelsRead(t, i, a, b, isMax)
+        Line.BVar(ie, k) -> Export.Tables.addExpr(t, ie, Core.Exprs.bvar(k))
+        Line.Sort(ie, lv) -> Export.Items.sortAt(t, ie, lv)
+        Line.Const(ie, n, us) -> Export.Items.constAt(t, ie, n, us)
         Line.Obj(fs) -> dispatch(t, fs)
         Line.Blank -> Result.Ok(t)
         Line.Bad(e) -> Result.Err(e)
@@ -507,6 +523,238 @@ fn binderClose(line: String, bi: Binder, d: NumAt, n: NumAt, t: NumAt) -> Option
 
 verify binderClose
     binderClose("x1}}", Binder.Default, NumAt(value = 3, end = 0), NumAt(value = 2, end = 0), NumAt(value = 1, end = 2)) => Option.Some(BinderAt(bi = Binder.Default, body = 3, name = 2, typ = 1, end = 3))
+
+fn otherLine(line: String) -> Line
+    ? "A line that is neither an application nor a binder: by position when it is in one of the other common canonical forms, else through the JSON parser."
+    match quickLine(line)
+        Option.Some(l) -> l
+        Option.None -> jsonParsed(Json.Line.parse(line))
+
+verify otherLine
+    otherLine("{{\"bvar\":0,\"ie\":2}}") => Line.BVar(2, 0)
+    otherLine("{{\"bvar\" : 0,\"ie\":2}}") => Line.Obj([("bvar", J.JInt(0)), ("ie", J.JInt(2))])
+
+fn quickLine(line: String) -> Option<Line>
+    ? "Names, levels, constants, bound variables and sorts, each only in the exact form lean4export writes: keys in its order, numbers canonical, nothing after the last brace."
+    match String.startsWith(line, "{{\"in\":")
+        true -> nameAfter(line, canonAt(line, 6))
+        false -> match String.startsWith(line, "{{\"il\":")
+            true -> levelAfter(line, canonAt(line, 6))
+            false -> match String.startsWith(line, "{{\"const\":{{\"name\":")
+                true -> constAfter(line, canonAt(line, 17))
+                false -> match String.startsWith(line, "{{\"bvar\":")
+                    true -> bvarAfter(line, canonAt(line, 8))
+                    false -> match String.startsWith(line, "{{\"ie\":")
+                        true -> sortAfter(line, canonAt(line, 6))
+                        false -> Option.None
+
+verify quickLine
+    quickLine("{{\"in\":1,\"str\":{{\"pre\":0,\"str\":\"Add\"}}}}") => Option.Some(Line.NameStr(1, 0, "Add"))
+    quickLine("{{\"in\":3,\"str\":{{\"pre\":0,\"str\":\"α\"}}}}") => Option.Some(Line.NameStr(3, 0, "α"))
+    quickLine("{{\"in\":4,\"str\":{{\"pre\":1,\"str\":\"a\\\"b\"}}}}") => Option.Some(Line.NameStr(4, 1, "a\"b"))
+    quickLine("{{\"in\":10,\"num\":{{\"i\":0,\"pre\":9}}}}") => Option.Some(Line.NameNum(10, 9, 0))
+    quickLine("{{\"il\":1,\"param\":2}}") => Option.Some(Line.LevelParam(1, 2))
+    quickLine("{{\"il\":2,\"succ\":1}}") => Option.Some(Line.LevelSucc(2, 1))
+    quickLine("{{\"il\":9,\"max\":[2,6]}}") => Option.Some(Line.LevelPair(9, 2, 6, true))
+    quickLine("{{\"il\":9,\"imax\":[2,6]}}") => Option.Some(Line.LevelPair(9, 2, 6, false))
+    quickLine("{{\"const\":{{\"name\":1,\"us\":[1]}},\"ie\":7}}") => Option.Some(Line.Const(7, 1, [1]))
+    quickLine("{{\"const\":{{\"name\":5,\"us\":[]}},\"ie\":8}}") => Option.Some(Line.Const(8, 5, []))
+    quickLine("{{\"const\":{{\"name\":5,\"us\":[1,20,3]}},\"ie\":8}}") => Option.Some(Line.Const(8, 5, [1, 20, 3]))
+    quickLine("{{\"bvar\":3,\"ie\":14}}") => Option.Some(Line.BVar(14, 3))
+    quickLine("{{\"ie\":0,\"sort\":2}}") => Option.Some(Line.Sort(0, 2))
+    quickLine("{{\"ie\":0,\"sort\":02}}") => Option.None
+    quickLine("{{\"il\":9,\"max\":[2,6,7]}}") => Option.None
+    quickLine("{{\"const\":{{\"name\":5,\"us\":[1,]}},\"ie\":8}}") => Option.None
+    quickLine("{{\"in\":1,\"str\":{{\"pre\":0,\"str\":\"Add\"}}}} ") => Option.None
+    quickLine("{{\"ie\":0,\"natVal\":\"5\"}}") => Option.None
+
+fn nameAfter(line: String, i: NumAt) -> Option<Line>
+    ? "Name.str or Name.num after the index."
+    match textAt(line, i.end, ",\"str\":{{\"pre\":")
+        true -> nameStrAfter(line, i, canonAt(line, i.end + 14))
+        false -> match textAt(line, i.end, ",\"num\":{{\"i\":")
+            true -> nameNumAfter(line, i, canonAt(line, i.end + 12))
+            false -> Option.None
+
+verify nameAfter
+    nameAfter("x", NumAt(value = 0, end = -1)) => Option.None
+
+fn nameStrAfter(line: String, i: NumAt, pre: NumAt) -> Option<Line>
+    ? "The string component, read as the JSON parser reads strings."
+    match textAt(line, pre.end, ",\"str\":\"")
+        false -> Option.None
+        true -> nameStrEnd(line, i, pre, Json.Escapes.text(line, pre.end + 8))
+
+verify nameStrAfter
+    nameStrAfter("x", NumAt(value = 0, end = 0), NumAt(value = 0, end = -1)) => Option.None
+
+fn nameStrEnd(line: String, i: NumAt, pre: NumAt, r: Scan) -> Option<Line>
+    ? "The two closing braces after the string, and nothing after them."
+    match r
+        Scan.Done(text, at) -> match lastAt(line, at, "}}}}")
+            true -> Option.Some(Line.NameStr(i.value, pre.value, text))
+            false -> Option.None
+        Scan.Bad -> Option.None
+
+verify nameStrEnd
+    nameStrEnd("ab}}}}", NumAt(value = 1, end = 0), NumAt(value = 0, end = 0), Scan.Done("a", 2)) => Option.Some(Line.NameStr(1, 0, "a"))
+    nameStrEnd("ab}}", NumAt(value = 1, end = 0), NumAt(value = 0, end = 0), Scan.Done("a", 2)) => Option.None
+
+fn nameNumAfter(line: String, i: NumAt, k: NumAt) -> Option<Line>
+    ? "The prefix after the numeric component."
+    match textAt(line, k.end, ",\"pre\":")
+        false -> Option.None
+        true -> nameNumEnd(line, i, k, canonAt(line, k.end + 7))
+
+verify nameNumAfter
+    nameNumAfter("x", NumAt(value = 0, end = 0), NumAt(value = 0, end = -1)) => Option.None
+
+fn nameNumEnd(line: String, i: NumAt, k: NumAt, pre: NumAt) -> Option<Line>
+    ? "The two closing braces."
+    match lastAt(line, pre.end, "}}}}")
+        true -> Option.Some(Line.NameNum(i.value, pre.value, k.value))
+        false -> Option.None
+
+verify nameNumEnd
+    nameNumEnd("x9}}}}", NumAt(value = 1, end = 0), NumAt(value = 0, end = 0), NumAt(value = 9, end = 2)) => Option.Some(Line.NameNum(1, 9, 0))
+
+fn levelAfter(line: String, i: NumAt) -> Option<Line>
+    ? "succ, param, max or imax after the index, in the order lean4export sorts its keys."
+    match textAt(line, i.end, ",\"succ\":")
+        true -> levelOne(line, i, canonAt(line, i.end + 8), true)
+        false -> match textAt(line, i.end, ",\"param\":")
+            true -> levelOne(line, i, canonAt(line, i.end + 9), false)
+            false -> match textAt(line, i.end, ",\"max\":[")
+                true -> levelTwo(line, i, canonAt(line, i.end + 8), true)
+                false -> match textAt(line, i.end, ",\"imax\":[")
+                    true -> levelTwo(line, i, canonAt(line, i.end + 9), false)
+                    false -> Option.None
+
+verify levelAfter
+    levelAfter("x", NumAt(value = 0, end = -1)) => Option.None
+
+fn levelOne(line: String, i: NumAt, a: NumAt, isSucc: Bool) -> Option<Line>
+    ? "A successor or a parameter, then the closing brace."
+    match lastAt(line, a.end, "}}")
+        false -> Option.None
+        true -> match isSucc
+            true -> Option.Some(Line.LevelSucc(i.value, a.value))
+            false -> Option.Some(Line.LevelParam(i.value, a.value))
+
+verify levelOne
+    levelOne("x1}}", NumAt(value = 2, end = 0), NumAt(value = 1, end = 2), true) => Option.Some(Line.LevelSucc(2, 1))
+
+fn levelTwo(line: String, i: NumAt, a: NumAt, isMax: Bool) -> Option<Line>
+    ? "The second level of a max or imax."
+    match textAt(line, a.end, ",")
+        false -> Option.None
+        true -> levelTwoEnd(line, i, a, canonAt(line, a.end + 1), isMax)
+
+verify levelTwo
+    levelTwo("x", NumAt(value = 0, end = 0), NumAt(value = 0, end = -1), true) => Option.None
+
+fn levelTwoEnd(line: String, i: NumAt, a: NumAt, b: NumAt, isMax: Bool) -> Option<Line>
+    ? "The closing bracket and brace."
+    match lastAt(line, b.end, "]}}")
+        true -> Option.Some(Line.LevelPair(i.value, a.value, b.value, isMax))
+        false -> Option.None
+
+verify levelTwoEnd
+    levelTwoEnd("x6]}}", NumAt(value = 9, end = 0), NumAt(value = 2, end = 0), NumAt(value = 6, end = 2), true) => Option.Some(Line.LevelPair(9, 2, 6, true))
+
+record UsAt
+    us: List<Int>
+    end: Int
+
+fn constAfter(line: String, n: NumAt) -> Option<Line>
+    ? "The universe levels after the name."
+    match textAt(line, n.end, ",\"us\":[")
+        false -> Option.None
+        true -> constIe(line, n, usFirst(line, n.end + 7))
+
+verify constAfter
+    constAfter("x", NumAt(value = 0, end = -1)) => Option.None
+
+fn usFirst(s: String, j: Int) -> UsAt
+    ? "A list of level indices up to its closing bracket, possibly empty; its end is -1 when it is not in the canonical form."
+    match textAt(s, j, "]")
+        true -> UsAt(us = [], end = j + 1)
+        false -> usMore(s, canonAt(s, j), [])
+
+verify usFirst
+    usFirst("[]", 1) => UsAt(us = [], end = 2)
+    usFirst("[3,4]", 1) => UsAt(us = [3, 4], end = 5)
+    usFirst("[3,]", 1).end => -1
+
+fn usMore(s: String, u: NumAt, acc: List<Int>) -> UsAt
+    ? "One more index, then a comma and the next or the closing bracket."
+    match u.end < 0
+        true -> UsAt(us = [], end = -1)
+        false -> match textAt(s, u.end, ",")
+            true -> usMore(s, canonAt(s, u.end + 1), List.prepend(u.value, acc))
+            false -> match textAt(s, u.end, "]")
+                true -> UsAt(us = List.reverse(List.prepend(u.value, acc)), end = u.end + 1)
+                false -> UsAt(us = [], end = -1)
+
+verify usMore
+    usMore("7]", NumAt(value = 7, end = 1), []) => UsAt(us = [7], end = 2)
+    usMore("7x", NumAt(value = 7, end = 1), []).end => -1
+
+fn constIe(line: String, n: NumAt, us: UsAt) -> Option<Line>
+    ? "The line's index after the constant."
+    match us.end < 0
+        true -> Option.None
+        false -> match textAt(line, us.end, "}},\"ie\":")
+            false -> Option.None
+            true -> constEnd(line, n, us, canonAt(line, us.end + 7))
+
+verify constIe
+    constIe("x", NumAt(value = 0, end = 0), UsAt(us = [], end = -1)) => Option.None
+
+fn constEnd(line: String, n: NumAt, us: UsAt, i: NumAt) -> Option<Line>
+    ? "The closing brace."
+    match lastAt(line, i.end, "}}")
+        true -> Option.Some(Line.Const(i.value, n.value, us.us))
+        false -> Option.None
+
+verify constEnd
+    constEnd("x7}}", NumAt(value = 1, end = 0), UsAt(us = [1], end = 0), NumAt(value = 7, end = 2)) => Option.Some(Line.Const(7, 1, [1]))
+
+fn bvarAfter(line: String, b: NumAt) -> Option<Line>
+    ? "The line's index after the bound variable's."
+    match textAt(line, b.end, ",\"ie\":")
+        false -> Option.None
+        true -> bvarEnd(line, b, canonAt(line, b.end + 6))
+
+verify bvarAfter
+    bvarAfter("x", NumAt(value = 0, end = -1)) => Option.None
+
+fn bvarEnd(line: String, b: NumAt, i: NumAt) -> Option<Line>
+    ? "The closing brace."
+    match lastAt(line, i.end, "}}")
+        true -> Option.Some(Line.BVar(i.value, b.value))
+        false -> Option.None
+
+verify bvarEnd
+    bvarEnd("x2}}", NumAt(value = 0, end = 0), NumAt(value = 2, end = 2)) => Option.Some(Line.BVar(2, 0))
+
+fn sortAfter(line: String, i: NumAt) -> Option<Line>
+    ? "The sort's level after the line's index."
+    match textAt(line, i.end, ",\"sort\":")
+        false -> Option.None
+        true -> sortEnd(line, i, canonAt(line, i.end + 8))
+
+verify sortAfter
+    sortAfter("x", NumAt(value = 0, end = -1)) => Option.None
+
+fn sortEnd(line: String, i: NumAt, l: NumAt) -> Option<Line>
+    ? "The closing brace."
+    match lastAt(line, l.end, "}}")
+        true -> Option.Some(Line.Sort(i.value, l.value))
+        false -> Option.None
+
+verify sortEnd
+    sortEnd("x2}}", NumAt(value = 0, end = 0), NumAt(value = 2, end = 2)) => Option.Some(Line.Sort(0, 2))
 
 fn jsonLine(t: Tables, line: String) -> Result<Tables, String>
     ? "Reads one line through the JSON parser."

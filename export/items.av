@@ -5,7 +5,7 @@ module Items
         "value is built from values already in the tables and every shared"
         "subterm stays shared. mdata is transparent to the kernel and"
         "resolves to the expression it wraps."
-    exposes [nameLine, levelLine, exprLine, appAt, binderAt]
+    exposes [nameLine, levelLine, exprLine, appAt, binderAt, nameStrAt, nameNumAt, succAdded, paramAdded, levelsRead, sortAt, constAt]
     depends [Json.Line, Json.Access, Core.Names, Core.Levels, Core.Exprs, Export.Tables]
     effects []
 
@@ -36,19 +36,33 @@ verify nameLine
 
 fn nameStr(t: Tables, i: Int, o: List<Tuple<String, J>>) -> Result<Tables, String>
     ? "Name.str: a prefix and a string component."
-    pre = Export.Tables.name(t, Json.Access.int(o, "pre")?)?
-    Export.Tables.addName(t, i, Core.Names.str(pre, Json.Access.text(o, "str")?))
+    nameStrAt(t, i, Json.Access.int(o, "pre")?, Json.Access.text(o, "str")?)
 
 verify nameStr
     nameStr(Export.Tables.empty(), 1, [("pre", J.JInt(9)), ("str", J.JStr("x"))]) => Result.Err("unknown name index 9")
 
 fn nameNum(t: Tables, i: Int, o: List<Tuple<String, J>>) -> Result<Tables, String>
     ? "Name.num: a prefix and a numeric component."
-    pre = Export.Tables.name(t, Json.Access.int(o, "pre")?)?
-    Export.Tables.addName(t, i, Core.Names.num(pre, Json.Access.int(o, "i")?))
+    nameNumAt(t, i, Json.Access.int(o, "pre")?, Json.Access.int(o, "i")?)
 
 verify nameNum
     Result.withDefault(nameNum(Export.Tables.empty(), 1, [("pre", J.JInt(0)), ("i", J.JInt(4294455747))]), Export.Tables.empty()).nextName => 2
+
+fn nameStrAt(t: Tables, i: Int, pre: Int, text: String) -> Result<Tables, String>
+    ? "Defines name i as Name.str of name pre and text; the prefix is read before the tables are passed on."
+    p = Export.Tables.name(t, pre)?
+    Export.Tables.addName(t, i, Core.Names.str(p, text))
+
+verify nameStrAt
+    Result.withDefault(Export.Tables.name(Result.withDefault(nameStrAt(Export.Tables.empty(), 1, 0, "a"), Export.Tables.empty()), 1), Core.Names.anon()) => Core.Names.str(Core.Names.anon(), "a")
+
+fn nameNumAt(t: Tables, i: Int, pre: Int, k: Int) -> Result<Tables, String>
+    ? "Defines name i as Name.num of name pre and k."
+    p = Export.Tables.name(t, pre)?
+    Export.Tables.addName(t, i, Core.Names.num(p, k))
+
+verify nameNumAt
+    Result.withDefault(Export.Tables.name(Result.withDefault(nameNumAt(Export.Tables.empty(), 1, 0, 3), Export.Tables.empty()), 1), Core.Names.anon()) => Core.Names.num(Core.Names.anon(), 3)
 
 fn levelLine(t: Tables, fs: List<Tuple<String, J>>) -> Result<Tables, String>
     ? "A Level.succ, max, imax or param line."
@@ -165,6 +179,23 @@ fn constOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
 
 verify constOf
     constOf(Export.Tables.empty(), [("name", J.JInt(0)), ("us", J.JArr([]))]) => Result.Ok(Core.Exprs.cnst(Core.Names.anon(), []))
+
+fn sortAt(t: Tables, ie: Int, l: Int) -> Result<Tables, String>
+    ? "Defines expression ie as the sort of level l, as a sort line does."
+    e = Core.Exprs.sort(Export.Tables.level(t, l)?)
+    Export.Tables.addExpr(t, ie, e)
+
+verify sortAt
+    Result.withDefault(Export.Tables.expr(Result.withDefault(sortAt(Export.Tables.empty(), 0, 0), Export.Tables.empty()), 0), Core.Exprs.bvar(9)) => Core.Exprs.sort(Level.Zero)
+
+fn constAt(t: Tables, ie: Int, n: Int, us: List<Int>) -> Result<Tables, String>
+    ? "Defines expression ie as constant n at levels us, as a const line does."
+    name = Export.Tables.name(t, n)?
+    e = Core.Exprs.cnst(name, Export.Tables.levels(t, us, [])?)
+    Export.Tables.addExpr(t, ie, e)
+
+verify constAt
+    Result.withDefault(Export.Tables.expr(Result.withDefault(constAt(Export.Tables.empty(), 0, 0, []), Export.Tables.empty()), 0), Core.Exprs.bvar(9)) => Core.Exprs.cnst(Core.Names.anon(), [])
 
 fn appOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
     ? "An application of two earlier expressions."
