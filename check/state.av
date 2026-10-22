@@ -111,21 +111,13 @@ fn envFindBefore(bucket: List<Placed>, n: Name, upTo: Int) -> Option<Const>
     match bucket
         [] -> Option.None
         [p, ..rest] -> match p.name == n
-            true -> placedBefore(p, upTo)
+            true -> match p.at < upTo
+                true -> Option.Some(p.c)
+                false -> Option.None
             false -> envFindBefore(rest, n, upTo)
 
 verify envFindBefore
     envFindBefore([], Core.Names.anon(), 1) => Option.None
-
-fn placedBefore(p: Placed, upTo: Int) -> Option<Const>
-    ? "The constant, when its place is below upTo."
-    match p.at < upTo
-        true -> Option.Some(p.c)
-        false -> Option.None
-
-verify placedBefore
-    placedBefore(Placed(name = Core.Names.anon(), c = sampleConst(0), at = 4), 4) => Option.None
-    placedBefore(Placed(name = Core.Names.anon(), c = sampleConst(0), at = 3), 4) => Option.Some(sampleConst(0))
 
 fn envSize(env: Env) -> Int
     ? "Number of constants."
