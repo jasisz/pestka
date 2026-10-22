@@ -165,19 +165,20 @@ fn openKeyed(st: St, e: Expr, env: List<Expr>, used: List<Expr>, only: Bool) -> 
     ? "The cache key is e with the innermost variable of env."
     match used
         [] -> inferCore(st, e, env, only)
-        [x, .._] -> openCached(st, e, env, x, only)
+        _ -> openCached(st, e, env, only)
 
 verify openKeyed
     openKeyed(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [], [], true) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
 
-fn openCached(st: St, e: Expr, env: List<Expr>, x: Expr, only: Bool) -> Result<RE, Fail>
-    ? "An open term's type is cached under the term applied to x, the innermost variable of env. A variable heads an env only once, when its binder is opened, so x stands for the whole env; a term shared under the same binders, as a DAG shares it, is found again. The key keeps e's loose bound variables, so it is never a term that is checked."
-    match findOpen(Core.Cache.get(cacheFor(st, only, e), openHash(e, x)), e, x)
+fn openCached(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
+    ? "An open term's type is cached under the term applied to the variables of env its loose bound variables stand for, the innermost first. Those variables are all the term means, whatever env holds below them, so a term shared under the same binders, as a DAG shares it, is found again, in this declaration or a later one. The key keeps e's loose bound variables, so it is never a term that is checked."
+    used = List.take(env, Int.min(Core.Exprs.looseRange(e), List.len(env)))
+    match findOpen(Core.Cache.get(cacheFor(st, only, e), openHash(Core.Exprs.hashOf(e), used)), e, List.reverse(used))
         Option.Some(t) -> Result.Ok(RE(e = t, st = st))
-        Option.None -> Result.Ok(rememberOpen(inferCore(st, e, env, only)?, Core.Exprs.app(e, x), only))
+        Option.None -> Result.Ok(rememberOpen(inferCore(st, e, env, only)?, Core.Apps.mkApps(e, used), only))
 
 verify openCached
-    resultExpr(openCached(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.natLit(7), Option.None, Binder.Default).st, Core.Exprs.bvar(0), [Core.Exprs.fvar(0)], Core.Exprs.fvar(0), true)) => Core.Exprs.natLit(7)
+    resultExpr(openCached(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.natLit(7), Option.None, Binder.Default).st, Core.Exprs.bvar(0), [Core.Exprs.fvar(4294967296)], true)) => Core.Exprs.natLit(7)
 
 fn rememberOpen(r: RE, key: Expr, only: Bool) -> RE
     ? "Records an open term's type under its key, in the cache for the mode."
@@ -197,38 +198,43 @@ fn checkedKept(r: RE, key: Expr, e: Expr) -> RE
 verify checkedKept
     Core.Cache.size(checkedKept(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0)).st.checkCache) => 1
 
-fn openHash(e: Expr, x: Expr) -> Int
-    ? "The hash of the key app(e, x), without building it."
-    Core.Hash.mix(Core.Hash.mix(4, Core.Exprs.hashOf(e)), Core.Exprs.hashOf(x))
+fn openHash(h: Int, used: List<Expr>) -> Int
+    ? "The hash of the key, a term of hash h applied to used, without building it."
+    match used
+        [] -> h
+        [x, ..rest] -> openHash(Core.Hash.mix(Core.Hash.mix(4, h), Core.Exprs.hashOf(x)), rest)
 
 verify openHash law sameAsKey
     given i: Int = [0, 1, 3]
     given j: Int = [2, 9]
-    openHash(Core.Exprs.app(Core.Exprs.bvar(i), Core.Exprs.natLit(j)), Core.Exprs.fvar(j)) => Core.Exprs.hashOf(Core.Exprs.app(Core.Exprs.app(Core.Exprs.bvar(i), Core.Exprs.natLit(j)), Core.Exprs.fvar(j)))
+    openHash(Core.Exprs.hashOf(Core.Exprs.app(Core.Exprs.bvar(i), Core.Exprs.natLit(j))), [Core.Exprs.fvar(j), Core.Exprs.fvar(i)]) => Core.Exprs.hashOf(Core.Apps.mkApps(Core.Exprs.app(Core.Exprs.bvar(i), Core.Exprs.natLit(j)), [Core.Exprs.fvar(j), Core.Exprs.fvar(i)]))
 
-fn findOpen(bucket: List<Tuple<Expr, Expr>>, e: Expr, x: Expr) -> Option<Expr>
-    ? "The value stored under the key app(e, x)."
+fn findOpen(bucket: List<Tuple<Expr, Expr>>, e: Expr, revUsed: List<Expr>) -> Option<Expr>
+    ? "The value stored under the key e applied to the reverse of revUsed."
     match bucket
         [] -> Option.None
-        [(key, v), ..rest] -> match isOpenKey(key, e, x)
+        [(key, v), ..rest] -> match isOpenKey(key, e, revUsed)
             true -> Option.Some(v)
-            false -> findOpen(rest, e, x)
+            false -> findOpen(rest, e, revUsed)
 
 verify findOpen
-    findOpen([(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))], Core.Exprs.bvar(0), Core.Exprs.fvar(2)) => Option.Some(Core.Exprs.natLit(1))
-    findOpen([(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))], Core.Exprs.bvar(0), Core.Exprs.fvar(3)) => Option.None
+    findOpen([(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))], Core.Exprs.bvar(0), [Core.Exprs.fvar(2)]) => Option.Some(Core.Exprs.natLit(1))
+    findOpen([(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))], Core.Exprs.bvar(0), [Core.Exprs.fvar(3)]) => Option.None
 
-fn isOpenKey(key: Expr, e: Expr, x: Expr) -> Bool
-    ? "Whether key is app(e, x), compared without building it."
-    match key
-        Expr.App(_, f, a) -> match a == x
-            true -> f == e
-            false -> false
-        _ -> false
+fn isOpenKey(key: Expr, e: Expr, revUsed: List<Expr>) -> Bool
+    ? "Whether key is e applied to the reverse of revUsed, compared from the outermost argument in without building it."
+    match revUsed
+        [] -> key == e
+        [x, ..rest] -> match key
+            Expr.App(_, f, a) -> match a == x
+                true -> isOpenKey(f, e, rest)
+                false -> false
+            _ -> false
 
 verify isOpenKey
-    isOpenKey(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(1)), Core.Exprs.bvar(0), Core.Exprs.fvar(1)) => true
-    isOpenKey(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.fvar(1)) => false
+    isOpenKey(Core.Apps.mkApps(Core.Exprs.bvar(1), [Core.Exprs.fvar(1), Core.Exprs.fvar(2)]), Core.Exprs.bvar(1), [Core.Exprs.fvar(2), Core.Exprs.fvar(1)]) => true
+    isOpenKey(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(1)), Core.Exprs.bvar(0), [Core.Exprs.fvar(2)]) => false
+    isOpenKey(Core.Exprs.bvar(0), Core.Exprs.bvar(0), []) => true
 
 fn checkLevel(st: St, l: Level) -> Result<Unit, Fail>
     ? "Every universe parameter must be one of the declaration's."
@@ -380,7 +386,7 @@ verify lamLoop
 fn lamStep(st: St, n: Name, d: Expr, b: Expr, bi: Binder, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Checks the domain is a type, then declares the variable."
     st1 = domainChecked(st, d, only)?
-    loc = Check.State.namesAt(st1, n, d, Option.None, bi, scopeLevel(b, rev), firstVar(rev))
+    loc = Check.State.namesAt(st1, n, d, Option.None, bi, scopeLevel(b, rev))
     lamLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), only)
 
 verify lamStep
@@ -464,7 +470,7 @@ fn piStep(st: St, n: Name, d: Expr, b: Expr, bi: Binder, rev: List<Expr>, ids: L
     ? "The domain's sort, then a fresh variable for it."
     t = infer(st, d, only)?
     s = ensureSort(t.st, t.e)?
-    loc = Check.State.namesAt(s.st, n, d, Option.None, bi, scopeLevel(b, rev), firstVar(rev))
+    loc = Check.State.namesAt(s.st, n, d, Option.None, bi, scopeLevel(b, rev))
     piLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), List.prepend(sortLevel(s.e), us), only)
 
 verify piStep
@@ -611,7 +617,7 @@ verify letLoop
 fn letStep(st: St, n: Name, t: Expr, v: Expr, b: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Checks the let's type and value, then declares it."
     st1 = letChecked(st, t, v, only)?
-    loc = Check.State.namesAt(st1, n, t, Option.Some(v), Binder.Default, scopeLevel(b, rev), firstVar(rev))
+    loc = Check.State.namesAt(st1, n, t, Option.Some(v), Binder.Default, scopeLevel(b, rev))
     letLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), only)
 
 verify letStep
@@ -2484,7 +2490,7 @@ verify bindDomains
 fn bindVar(st: St, t: Expr, s: Expr, rev: List<Expr>, isLam: Bool, tyS: Option<Expr>) -> Result<RB, Fail>
     ? "A fresh variable only when a body uses it; otherwise a placeholder."
     match Bool.or(Core.Exprs.looseRange(bodyOf(t)) > 0, Core.Exprs.looseRange(bodyOf(s)) > 0)
-        true -> bindFresh(Check.State.namesAt(st, binderName(s), Option.withDefault(tyS, Core.Subst.instantiate(domainOf(s), rev)), Option.None, binderInfo(s), Int.max(scopeLevel(t, rev), Core.Exprs.fvLevel(s)), firstVar(rev)), t, s, rev, isLam)
+        true -> bindFresh(Check.State.namesAt(st, binderName(s), Option.withDefault(tyS, Core.Subst.instantiate(domainOf(s), rev)), Option.None, binderInfo(s), Int.max(scopeLevel(t, rev), Core.Exprs.fvLevel(s))), t, s, rev, isLam)
         false -> bindLoop(st, bodyOf(t), bodyOf(s), List.prepend(Core.Exprs.cnst(Check.Lits.dontcare, []), rev), isLam)
 
 verify bindVar
