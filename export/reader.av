@@ -236,10 +236,51 @@ record AppIds
     argIdx: Int
 
 fn appLine(line: String) -> Option<AppIds>
-    ? "Four lines in five of an export are applications, written exactly as {{\"app\":{{\"arg\":A,\"fn\":F}},\"ie\":I}} with plain decimal indices. Such a line is read by position, digit by digit, instead of by a JSON parse, and accepted only if the numbers rebuild it exactly; anything else, however close, gives None and goes to the parser."
+    ? "Four lines in five of an export are applications, written exactly as {{\"app\":{{\"arg\":A,\"fn\":F}},\"ie\":I}} with plain decimal indices. Such a line is read by position, digit by digit, instead of by a JSON parse, and accepted only in that form exactly: each number canonical, each separator where the form puts it, nothing after the last brace. Anything else, however close, gives None and goes to the parser."
     match String.startsWith(line, "{{\"app\":{{\"arg\":")
         false -> Option.None
-        true -> appScan(line, numberAt(line, 14, 0))
+        true -> appFn(line, canonAt(line, 14))
+
+verify appLine
+    appLine("{{\"app\":{{\"arg\":3,\"fn\":4}},\"ie\":12}}") => Option.Some(AppIds(ie = 12, fnIdx = 4, argIdx = 3))
+    appLine("{{\"app\":{{\"arg\":0,\"fn\":40}},\"ie\":105}}") => Option.Some(AppIds(ie = 105, fnIdx = 40, argIdx = 0))
+    appLine("{{\"app\":{{\"arg\":3,\"fn\":04}},\"ie\":12}}") => Option.None
+    appLine("{{\"app\":{{\"arg\":3,\"fn\":4}}}},\"ie\":12}}") => Option.None
+    appLine("{{\"app\":{{\"arg\":3, \"fn\":4}},\"ie\":12}}") => Option.None
+    appLine("{{\"app\":{{\"arg\":3,\"fn\":4}},\"ie\":12}} ") => Option.None
+    appLine("{{\"app\":{{\"arg\":3,\"fn\":4}},\"ie\":12") => Option.None
+    appLine("{{\"app\":{{\"arg\":,\"fn\":4}},\"ie\":12}}") => Option.None
+    appLine("{{\"ie\":1,\"bvar\":0}}") => Option.None
+
+fn appFn(line: String, a: NumAt) -> Option<AppIds>
+    ? "The function's index, after the argument's."
+    match textAt(line, a.end, ",\"fn\":")
+        false -> Option.None
+        true -> appIe(line, a, canonAt(line, a.end + 6))
+
+verify appFn
+    appFn("x1,\"fn\":2}},\"ie\":3}}", NumAt(value = 1, end = 2)) => Option.Some(AppIds(ie = 3, fnIdx = 2, argIdx = 1))
+    appFn("x1;\"fn\":2}},\"ie\":3}}", NumAt(value = 1, end = 2)) => Option.None
+
+fn appIe(line: String, a: NumAt, f: NumAt) -> Option<AppIds>
+    ? "The line's own index, after the function's."
+    match textAt(line, f.end, "}},\"ie\":")
+        false -> Option.None
+        true -> appEnd(line, a, f, canonAt(line, f.end + 7))
+
+verify appIe
+    appIe("x}},\"ie\":3}}", NumAt(value = 1, end = 0), NumAt(value = 2, end = 1)) => Option.Some(AppIds(ie = 3, fnIdx = 2, argIdx = 1))
+    appIe("x}},\"ie\":3}}", NumAt(value = 1, end = 0), NumAt(value = 2, end = -1)) => Option.None
+
+fn appEnd(line: String, a: NumAt, f: NumAt, i: NumAt) -> Option<AppIds>
+    ? "The closing brace, and nothing after it."
+    match lastAt(line, i.end, "}}")
+        true -> Option.Some(AppIds(ie = i.value, fnIdx = f.value, argIdx = a.value))
+        false -> Option.None
+
+verify appEnd
+    appEnd("x3}}", NumAt(value = 1, end = 0), NumAt(value = 2, end = 0), NumAt(value = 3, end = 2)) => Option.Some(AppIds(ie = 3, fnIdx = 2, argIdx = 1))
+    appEnd("x3}}}}", NumAt(value = 1, end = 0), NumAt(value = 2, end = 0), NumAt(value = 3, end = 2)) => Option.None
 
 record NumAt
     value: Int
@@ -277,49 +318,53 @@ verify numberAt
     numberAt("x12,", 1, 0) => NumAt(value = 12, end = 3)
     numberAt("x,", 1, 0) => NumAt(value = 0, end = 1)
 
-fn appScan(line: String, a: NumAt) -> Option<AppIds>
-    ? "After the argument, six characters to the function; after it, seven to the index. The rebuilt line must be the line itself."
-    f = numberAt(line, a.end + 6, 0)
-    i = numberAt(line, f.end + 7, 0)
-    match "{{\"app\":{{\"arg\":{a.value},\"fn\":{f.value}}},\"ie\":{i.value}}}" == line
-        true -> Option.Some(AppIds(ie = i.value, fnIdx = f.value, argIdx = a.value))
-        false -> Option.None
+fn canonAt(s: String, i: Int) -> NumAt
+    ? "The number at i in its canonical decimal form: digits with no leading zero, or 0 alone. Its end is -1 when there is none."
+    d = digitAt(s, i)
+    match d < 0
+        true -> NumAt(value = 0, end = -1)
+        false -> match d == 0
+            true -> zeroAt(s, i)
+            false -> numberAt(s, i + 1, d)
 
-verify appScan
-    appScan("{{\"app\":{{\"arg\":3,\"fn\":4}},\"ie\":12}}", NumAt(value = 3, end = 15)) => Option.Some(AppIds(ie = 12, fnIdx = 4, argIdx = 3))
+verify canonAt
+    canonAt("x12,", 1) => NumAt(value = 12, end = 3)
+    canonAt("x0,", 1) => NumAt(value = 0, end = 2)
+    canonAt("x012,", 1).end => -1
+    canonAt("x,", 1).end => -1
+    canonAt("x", -1).end => -1
 
-verify appLine
-    appLine("{{\"app\":{{\"arg\":3,\"fn\":4}},\"ie\":12}}") => Option.Some(AppIds(ie = 12, fnIdx = 4, argIdx = 3))
-    appLine("{{\"app\":{{\"arg\":3,\"fn\":04}},\"ie\":12}}") => Option.None
-    appLine("{{\"app\":{{\"arg\":3,\"fn\":4}}}},\"ie\":12}}") => Option.None
-    appLine("{{\"app\":{{\"arg\":3, \"fn\":4}},\"ie\":12}}") => Option.None
-    appLine("{{\"ie\":1,\"bvar\":0}}") => Option.None
+fn zeroAt(s: String, i: Int) -> NumAt
+    ? "A zero is a number only when no digit follows it."
+    match digitAt(s, i + 1) < 0
+        true -> NumAt(value = 0, end = i + 1)
+        false -> NumAt(value = 0, end = -1)
 
+verify zeroAt
+    zeroAt("0}}", 0) => NumAt(value = 0, end = 1)
+    zeroAt("07", 0).end => -1
 
-fn beforeSep(s: String, sep: String) -> String
-    ? "The part of s before the first sep."
-    match String.split(s, sep)
-        [x, .._] -> x
-        [] -> s
+fn textAt(s: String, i: Int, t: String) -> Bool
+    ? "Whether t stands in s at position i; never at a negative position, where a number that was not found leaves it."
+    match i < 0
+        true -> false
+        false -> String.slice(s, i, i + String.len(t)) == t
 
-verify beforeSep
-    beforeSep("12,x", ",") => "12"
+verify textAt
+    textAt("ab,cd", 2, ",c") => true
+    textAt("ab,cd", 3, ",c") => false
+    textAt("ab,cd", 4, "de") => false
+    textAt("ab,cd", -1, "ab") => false
 
-fn natural(s: String) -> Option<Int>
-    ? "A natural number in its canonical decimal form: digits only, no sign, no leading zero."
-    match Int.fromString(s)
-        Result.Ok(n) -> match Bool.and(n >= 0, String.fromInt(n) == s)
-            true -> Option.Some(n)
-            false -> Option.None
-        Result.Err -> Option.None
+fn lastAt(s: String, i: Int, t: String) -> Bool
+    ? "Whether s ends with t standing at position i."
+    match textAt(s, i, t)
+        false -> false
+        true -> i + String.len(t) == String.len(s)
 
-verify natural
-    natural("0") => Option.Some(0)
-    natural("07") => Option.None
-    natural("+7") => Option.None
-    natural("-7") => Option.None
-    natural("x") => Option.None
-
+verify lastAt
+    lastAt("ab}}", 2, "}}") => true
+    lastAt("ab}} ", 2, "}}") => false
 
 record BinderIds
     ie: Int
@@ -329,90 +374,139 @@ record BinderIds
     bi: Binder
     isLam: Bool
 
+record BinderAt
+    bi: Binder
+    body: Int
+    name: Int
+    typ: Int
+    end: Int
+
+record AnnAt
+    bi: Binder
+    end: Int
+
 fn binderLine(line: String) -> Option<BinderIds>
-    ? "Lambdas and pi types, the next most common lines, in their canonical forms: the lambda's index comes first, the pi's last. Read with splits and accepted only if the numbers and the binder annotation rebuild the line exactly."
+    ? "Lambdas and pi types, the next most common lines, in their canonical forms: the lambda's index comes first, the pi's last. Read by position as application lines are, and accepted only in those forms exactly."
     match String.startsWith(line, "{{\"ie\":")
-        true -> lamParts(String.split(line, ":"), line)
-        false -> match String.startsWith(line, "{{\"forallE\":{{\"binderInfo\":")
-            true -> piParts(String.split(line, ":"), line)
+        true -> lamAfterIe(line, canonAt(line, 6))
+        false -> match String.startsWith(line, "{{\"forallE\":")
+            true -> piAfter(line, binderAt(line, 11))
             false -> Option.None
 
 verify binderLine
     binderLine("{{\"ie\":7,\"lam\":{{\"binderInfo\":\"default\",\"body\":3,\"name\":2,\"type\":1}}}}") => Option.Some(BinderIds(ie = 7, nameIdx = 2, typeIdx = 1, bodyIdx = 3, bi = Binder.Default, isLam = true))
     binderLine("{{\"forallE\":{{\"binderInfo\":\"instImplicit\",\"body\":3,\"name\":2,\"type\":1}},\"ie\":7}}") => Option.Some(BinderIds(ie = 7, nameIdx = 2, typeIdx = 1, bodyIdx = 3, bi = Binder.InstImplicit, isLam = false))
+    binderLine("{{\"forallE\":{{\"binderInfo\":\"strictImplicit\",\"body\":30,\"name\":0,\"type\":12}},\"ie\":70}}") => Option.Some(BinderIds(ie = 70, nameIdx = 0, typeIdx = 12, bodyIdx = 30, bi = Binder.StrictImplicit, isLam = false))
+    binderLine("{{\"ie\":7,\"lam\":{{\"binderInfo\":\"implicit\",\"body\":3,\"name\":2,\"type\":1}}}}") => Option.Some(BinderIds(ie = 7, nameIdx = 2, typeIdx = 1, bodyIdx = 3, bi = Binder.Implicit, isLam = true))
     binderLine("{{\"forallE\":{{\"binderInfo\":\"other\",\"body\":3,\"name\":2,\"type\":1}},\"ie\":7}}") => Option.None
+    binderLine("{{\"ie\":7,\"lam\":{{\"binderInfo\":\"default\",\"body\":03,\"name\":2,\"type\":1}}}}") => Option.None
+    binderLine("{{\"ie\":7,\"lam\":{{\"binderInfo\":\"default\",\"body\":3,\"name\":2,\"type\":1}}}}}}") => Option.None
+    binderLine("{{\"forallE\":{{\"binderInfo\":\"default\",\"body\":3,\"name\":2,\"type\":1}},\"ie\":7}} ") => Option.None
     binderLine("{{\"ie\":7,\"bvar\":0}}") => Option.None
 
-fn lamParts(parts: List<String>, line: String) -> Option<BinderIds>
-    ? "Index, annotation, body, name and type of a lambda line, in the order the line gives them."
-    match parts
-        [_, i, _, b, d, n, ty] -> binderNumbers(natural(beforeSep(i, ",")), annotation(beforeSep(b, ",")), natural(beforeSep(d, ",")), natural(beforeSep(n, ",")), natural(beforeSep(ty, "}}")), true, line)
-        _ -> Option.None
+fn lamAfterIe(line: String, i: NumAt) -> Option<BinderIds>
+    ? "A lambda's binder after its index."
+    match textAt(line, i.end, ",\"lam\":")
+        false -> Option.None
+        true -> lamEnd(line, i, binderAt(line, i.end + 7))
 
-verify lamParts
-    lamParts(["x"], "x") => Option.None
+verify lamAfterIe
+    lamAfterIe("x", NumAt(value = 0, end = -1)) => Option.None
 
-fn piParts(parts: List<String>, line: String) -> Option<BinderIds>
-    ? "Annotation, body, name, type and index of a pi line, in the order the line gives them."
-    match parts
-        [_, _, b, d, n, ty, i] -> binderNumbers(natural(beforeSep(i, "}}")), annotation(beforeSep(b, ",")), natural(beforeSep(d, ",")), natural(beforeSep(n, ",")), natural(beforeSep(ty, "}}")), false, line)
-        _ -> Option.None
-
-verify piParts
-    piParts(["x"], "x") => Option.None
-
-fn annotation(quoted: String) -> Option<Binder>
-    ? "One of the four binder annotations, still in its quotes."
-    match quoted
-        "\"default\"" -> Option.Some(Binder.Default)
-        "\"implicit\"" -> Option.Some(Binder.Implicit)
-        "\"strictImplicit\"" -> Option.Some(Binder.StrictImplicit)
-        "\"instImplicit\"" -> Option.Some(Binder.InstImplicit)
-        _ -> Option.None
-
-verify annotation
-    annotation("\"implicit\"") => Option.Some(Binder.Implicit)
-    annotation("implicit") => Option.None
-
-fn binderText(bi: Binder) -> String
-    ? "The annotation as the export writes it."
-    match bi
-        Binder.Default -> "default"
-        Binder.Implicit -> "implicit"
-        Binder.StrictImplicit -> "strictImplicit"
-        Binder.InstImplicit -> "instImplicit"
-
-verify binderText
-    binderText(Binder.StrictImplicit) => "strictImplicit"
-
-fn binderNumbers(i: Option<Int>, b: Option<Binder>, d: Option<Int>, n: Option<Int>, ty: Option<Int>, isLam: Bool, line: String) -> Option<BinderIds>
-    ? "All parts present, and the line is exactly the canonical one they make."
-    match i
+fn lamEnd(line: String, i: NumAt, b: Option<BinderAt>) -> Option<BinderIds>
+    ? "The lambda line's closing brace, and nothing after it."
+    match b
         Option.None -> Option.None
-        Option.Some(ie) -> match b
-            Option.None -> Option.None
-            Option.Some(bi) -> match d
-                Option.None -> Option.None
-                Option.Some(body) -> match n
-                    Option.None -> Option.None
-                    Option.Some(name) -> match ty
-                        Option.None -> Option.None
-                        Option.Some(typ) -> match binderCanonical(ie, bi, body, name, typ, isLam) == line
-                            true -> Option.Some(BinderIds(ie = ie, nameIdx = name, typeIdx = typ, bodyIdx = body, bi = bi, isLam = isLam))
-                            false -> Option.None
+        Option.Some(x) -> match lastAt(line, x.end, "}}")
+            true -> Option.Some(BinderIds(ie = i.value, nameIdx = x.name, typeIdx = x.typ, bodyIdx = x.body, bi = x.bi, isLam = true))
+            false -> Option.None
 
-verify binderNumbers
-    binderNumbers(Option.Some(1), Option.Some(Binder.Default), Option.Some(1), Option.Some(1), Option.Some(1), true, "x") => Option.None
+verify lamEnd
+    lamEnd("x", NumAt(value = 0, end = 0), Option.None) => Option.None
 
-fn binderCanonical(ie: Int, bi: Binder, body: Int, name: Int, typ: Int, isLam: Bool) -> String
-    ? "The line lean4export writes for these parts."
-    inner = "{{\"binderInfo\":\"{binderText(bi)}\",\"body\":{body},\"name\":{name},\"type\":{typ}}}"
-    match isLam
-        true -> "{{\"ie\":{ie},\"lam\":{inner}}}"
-        false -> "{{\"forallE\":{inner},\"ie\":{ie}}}"
+fn piAfter(line: String, b: Option<BinderAt>) -> Option<BinderIds>
+    ? "A pi's index after its binder."
+    match b
+        Option.None -> Option.None
+        Option.Some(x) -> match textAt(line, x.end, ",\"ie\":")
+            false -> Option.None
+            true -> piEnd(line, x, canonAt(line, x.end + 6))
 
-verify binderCanonical
-    binderCanonical(7, Binder.Default, 3, 2, 1, true) => "{{\"ie\":7,\"lam\":{{\"binderInfo\":\"default\",\"body\":3,\"name\":2,\"type\":1}}}}"
+verify piAfter
+    piAfter("x", Option.None) => Option.None
+
+fn piEnd(line: String, x: BinderAt, i: NumAt) -> Option<BinderIds>
+    ? "The pi line's closing brace, and nothing after it."
+    match lastAt(line, i.end, "}}")
+        true -> Option.Some(BinderIds(ie = i.value, nameIdx = x.name, typeIdx = x.typ, bodyIdx = x.body, bi = x.bi, isLam = false))
+        false -> Option.None
+
+verify piEnd
+    piEnd("x7}}", BinderAt(bi = Binder.Default, body = 3, name = 2, typ = 1, end = 0), NumAt(value = 7, end = 2)) => Option.Some(BinderIds(ie = 7, nameIdx = 2, typeIdx = 1, bodyIdx = 3, bi = Binder.Default, isLam = false))
+
+fn binderAt(line: String, p: Int) -> Option<BinderAt>
+    ? "The object {{\"binderInfo\":\"B\",\"body\":D,\"name\":N,\"type\":T}} at p, in this form exactly; its end is just after its closing brace."
+    match textAt(line, p, "{{\"binderInfo\":\"")
+        false -> Option.None
+        true -> binderBody(line, annotationAt(line, p + 15))
+
+verify binderAt
+    binderAt("{{\"binderInfo\":\"default\",\"body\":3,\"name\":2,\"type\":1}}", 0) => Option.Some(BinderAt(bi = Binder.Default, body = 3, name = 2, typ = 1, end = 51))
+    binderAt("{{\"binderInfo\":\"default\",\"body\":3,\"type\":1}}", 0) => Option.None
+
+fn annotationAt(line: String, i: Int) -> Option<AnnAt>
+    ? "One of the four binder annotations at i, with its closing quote."
+    match textAt(line, i, "default\"")
+        true -> Option.Some(AnnAt(bi = Binder.Default, end = i + 8))
+        false -> match textAt(line, i, "implicit\"")
+            true -> Option.Some(AnnAt(bi = Binder.Implicit, end = i + 9))
+            false -> match textAt(line, i, "instImplicit\"")
+                true -> Option.Some(AnnAt(bi = Binder.InstImplicit, end = i + 13))
+                false -> match textAt(line, i, "strictImplicit\"")
+                    true -> Option.Some(AnnAt(bi = Binder.StrictImplicit, end = i + 15))
+                    false -> Option.None
+
+verify annotationAt
+    annotationAt("\"implicit\",", 1) => Option.Some(AnnAt(bi = Binder.Implicit, end = 10))
+    annotationAt("\"implicitly\",", 1) => Option.None
+
+fn binderBody(line: String, a: Option<AnnAt>) -> Option<BinderAt>
+    ? "The body's index after the annotation."
+    match a
+        Option.None -> Option.None
+        Option.Some(x) -> match textAt(line, x.end, ",\"body\":")
+            false -> Option.None
+            true -> binderName(line, x.bi, canonAt(line, x.end + 8))
+
+verify binderBody
+    binderBody("x", Option.None) => Option.None
+
+fn binderName(line: String, bi: Binder, d: NumAt) -> Option<BinderAt>
+    ? "The name's index after the body's."
+    match textAt(line, d.end, ",\"name\":")
+        false -> Option.None
+        true -> binderType(line, bi, d, canonAt(line, d.end + 8))
+
+verify binderName
+    binderName("x", Binder.Default, NumAt(value = 0, end = -1)) => Option.None
+
+fn binderType(line: String, bi: Binder, d: NumAt, n: NumAt) -> Option<BinderAt>
+    ? "The type's index after the name's."
+    match textAt(line, n.end, ",\"type\":")
+        false -> Option.None
+        true -> binderClose(line, bi, d, n, canonAt(line, n.end + 8))
+
+verify binderType
+    binderType("x", Binder.Default, NumAt(value = 0, end = 0), NumAt(value = 0, end = -1)) => Option.None
+
+fn binderClose(line: String, bi: Binder, d: NumAt, n: NumAt, t: NumAt) -> Option<BinderAt>
+    ? "The binder object's closing brace."
+    match textAt(line, t.end, "}}")
+        false -> Option.None
+        true -> Option.Some(BinderAt(bi = bi, body = d.value, name = n.value, typ = t.value, end = t.end + 1))
+
+verify binderClose
+    binderClose("x1}}", Binder.Default, NumAt(value = 3, end = 0), NumAt(value = 2, end = 0), NumAt(value = 1, end = 2)) => Option.Some(BinderAt(bi = Binder.Default, body = 3, name = 2, typ = 1, end = 3))
 
 fn jsonLine(t: Tables, line: String) -> Result<Tables, String>
     ? "Reads one line through the JSON parser."
