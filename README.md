@@ -22,7 +22,9 @@ On the small Lean Kernel Arena tests (all but `perf/` and the large corpora)
 Pestka answers 171 of 171 correctly, and every `perf/` test passes.
 
 The Arena's large tests, exported as the Arena exports them and checked on
-four workers (the Arena's setting) on an Apple M2 Pro:
+four workers on an Apple M2 Pro. These numbers are from before the free
+variables were named by what they are (see below) and are being measured
+again:
 
 | Test | Verdict | Time | Peak memory |
 |---|---|---|---|
@@ -34,10 +36,8 @@ four workers (the Arena's setting) on an Apple M2 Pro:
 | `mathlib` (702,040) | accepted | 951 s | 6.6 GB |
 | `cslib` | accepted | 484 s | 9.2 GB, with an earlier version |
 
-`navier-stokes-euler` pins Lean 4.34.0-rc2, whose `lake` crashes on this
-macOS, so it has not been exported here. `Init` takes about 57 s on one
-worker. Of `perf/`, `magma-list-deep-n36` takes 70 s (the
-Arena allows 390 s) and `app-lam` under a second.
+`navier-stokes-euler` is accepted as well. Of `perf/`, `magma-list-deep-n36`
+takes 70 s (the Arena allows 390 s) and `app-lam` under a second.
 
 ## What it does differently
 
@@ -54,9 +54,27 @@ The checker follows the reference kernel's algorithm. What is its own:
   environment is built in file order; the other declarations are then
   checked on several workers, each against the environment at its own place
   in the file, and the verdict is the first failure in file order.
-- **Facts about closed terms** (types, definitional equalities and
-  inequalities) are kept across declarations by each worker, which meets its
-  declarations in file order, so a fact found once holds in every later one.
+- **Free variables are named by what they are.** Where the checker opens a
+  binder it gives the variable a level: the first above every free variable
+  in the binder, in its type and value, and in its telescope so far, read off
+  the metadata every node carries. A variable of the same level, type, value
+  and binder info is the same variable. Two such variables never meet in one
+  term, since one would be free in the other's binder and so sit at a lower
+  level, and they have the same type and value, so whatever holds of a term
+  with one holds of it with the other. Lean only needs variables that meet to
+  be told apart; the checker no longer makes a fresh one for every opening,
+  so a binder opened again gets its variable again, and what was found about
+  the terms under it is found again. On slices of `mathlib` that and the
+  next point cut 18–20% of the instructions.
+- **What a worker finds is kept across declarations.** Each worker meets its
+  declarations in file order, so every constant a result rests on is still
+  there in the next one. It carries its variables and their context, and the
+  results of inference, checking, reduction and comparison, about closed
+  terms and, with variables named as above, open ones too; checking a term
+  with a universe parameter is kept only while the parameters stay the same.
+  A constant's type and a definition's value at universe levels depend only
+  on the levels as written, and are kept as well. Every cache has a limit and
+  is emptied past it.
 - **Failures are kept too.** Within a declaration, pairs found
   definitionally different are remembered as well as pairs found equal: its
   free variables each have one type and value, so the answer for a pair does
@@ -74,14 +92,11 @@ The checker follows the reference kernel's algorithm. What is its own:
 
 ## Next
 
-Substituting variables into bodies when a binder is opened is most of the
-time on proof-heavy files (62% on `con-leche`), and the expression tables
-are most of the memory on `mathlib`. The next step is a second core, next to
-the current one in this repository: values as terms with their environment
-and free variables as de Bruijn levels, so that entering a binder copies
-nothing, with cache keys under which the same subterm over the same
-variables is found again. It will be checked declaration by declaration
-against the current core on every corpus above before it replaces it.
+A second core lives in `next/`: values as terms with their environment and
+free variables as de Bruijn levels, so that entering a binder copies
+nothing. It answers as the first does, and `both` checks every deferred
+declaration with each and rejects at the first where their answers differ,
+but in Aver it is slower than the first core, which is the one used.
 
 ## Laws
 
@@ -215,7 +230,10 @@ Kernel Arena and `lake comparator` read:
   `Export.Declarations`, `Export.Tables`.
 - `tests/export/` — small exports: `wellformed/` from `tests/export/Small.lean`
   (`small.ndjson` is the whole module, `small_core.ndjson` the constants
-  without `String` and `Repr`), `malformed/` and `unsupported/` written by hand.
+  without `String` and `Repr`), `malformed/` and `unsupported/` written by hand,
+  and `illtyped/`: declarations the checker must reject, made by
+  `tests/export/mkbad.py` from the correct ones of `tests/export/PestkaBad.lean`
+  (`wellformed/levelled_*`), aimed at the naming of free variables.
 - `check/` — the type checker: `Check.State` (environment, local context,
   caches), `Check.Tc` (inference, weak head normal form, definitional
   equality), `Check.Decl` (adding declarations), `Check.Induct`,
