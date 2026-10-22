@@ -4,8 +4,9 @@ module Cache
         "(key, value) pairs whose keys have that hash. The key is"
         "compared structurally, so a shared hash only costs a longer"
         "bucket. The checker hands its state on rather than keeping it,"
-        "so a cache is updated in place."
-    exposes [empty, get, add, size, find]
+        "so a cache is updated in place. A bucket of one entry, nearly"
+        "every one, is the entry itself."
+    exposes [Bucket, empty, get, add, size, find]
     depends [Core.Exprs]
     effects []
 
@@ -25,37 +26,69 @@ decision MapCaches
     rejected = ["PersistentCaches"]
     impacts = [add, get]
 
-fn empty() -> Map<Int, List<Tuple<Expr, Expr>>>
+decision OneEntryBuckets
+    date = "2026-10-22"
+    reason =
+        "Nearly every bucket holds one entry. As a list it was a vector, a"
+        "shared pointer to it and a list node, three allocations for every"
+        "result kept and three frees when a cache was emptied, and reading"
+        "a missing hash built an empty list, two more. As a variant holding"
+        "the pair, a bucket of one sits in the map itself: keeping a result"
+        "allocates nothing, and emptying a cache drops two references per"
+        "entry. Instructions retired, one worker: Init 287.2 G to 277.5 G,"
+        "qb9 257.9 G to 250.1 G, etale 131.3 G to 127.4 G."
+    chosen = "OneEntryBuckets"
+    rejected = ["ListBuckets"]
+    impacts = [Bucket, get, add]
+
+type Bucket
+    NoEntry
+    OneEntry(Tuple<Expr, Expr>)
+    Entries(List<Tuple<Expr, Expr>>)
+
+fn empty() -> Map<Int, Bucket>
     ? "No entries."
     {}
 
 verify empty
     size(empty()) => 0
 
-fn size(m: Map<Int, List<Tuple<Expr, Expr>>>) -> Int
+fn size(m: Map<Int, Bucket>) -> Int
     ? "Number of hashes with an entry."
     Map.len(m)
 
 verify size
     size(add(add(empty(), 1, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 17, (Core.Exprs.bvar(2), Core.Exprs.bvar(3)))) => 2
 
-fn get(m: Map<Int, List<Tuple<Expr, Expr>>>, key: Int) -> List<Tuple<Expr, Expr>>
+fn get(m: Map<Int, Bucket>, key: Int) -> Bucket
     ? "The bucket stored under key, or an empty one."
-    Option.withDefault(Map.get(m, key), [])
+    match Map.get(m, key)
+        Option.Some(b) -> b
+        Option.None -> Bucket.NoEntry
 
 verify get
-    get(empty(), 3) => []
-    get(add(empty(), 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 3) => [(Core.Exprs.bvar(0), Core.Exprs.bvar(1))]
+    get(empty(), 3) => Bucket.NoEntry
+    get(add(empty(), 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 3) => Bucket.OneEntry((Core.Exprs.bvar(0), Core.Exprs.bvar(1)))
 
-fn add(m: Map<Int, List<Tuple<Expr, Expr>>>, key: Int, entry: Tuple<Expr, Expr>) -> Map<Int, List<Tuple<Expr, Expr>>>
+fn add(m: Map<Int, Bucket>, key: Int, entry: Tuple<Expr, Expr>) -> Map<Int, Bucket>
     ? "Prepends entry to key's bucket. The map is read first and then named once, so that the set changes it in place."
     b = get(m, key)
-    Map.set(m, key, List.prepend(entry, b))
+    Map.set(m, key, joined(entry, b))
 
 verify add
-    get(add(add(empty(), 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 3, (Core.Exprs.bvar(2), Core.Exprs.bvar(3))), 3) => [(Core.Exprs.bvar(2), Core.Exprs.bvar(3)), (Core.Exprs.bvar(0), Core.Exprs.bvar(1))]
+    get(add(add(empty(), 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 3, (Core.Exprs.bvar(2), Core.Exprs.bvar(3))), 3) => Bucket.Entries([(Core.Exprs.bvar(2), Core.Exprs.bvar(3)), (Core.Exprs.bvar(0), Core.Exprs.bvar(1))])
 
-fn find(m: Map<Int, List<Tuple<Expr, Expr>>>, key: Int, e: Expr) -> Option<Expr>
+fn joined(entry: Tuple<Expr, Expr>, b: Bucket) -> Bucket
+    ? "A bucket with entry in front."
+    match b
+        Bucket.NoEntry -> Bucket.OneEntry(entry)
+        Bucket.OneEntry(first) -> Bucket.Entries([entry, first])
+        Bucket.Entries(es) -> Bucket.Entries(List.prepend(entry, es))
+
+verify joined
+    joined((Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Bucket.NoEntry) => Bucket.OneEntry((Core.Exprs.bvar(0), Core.Exprs.bvar(1)))
+
+fn find(m: Map<Int, Bucket>, key: Int, e: Expr) -> Option<Expr>
     ? "The value paired with an expression equal to e in key's bucket."
     findIn(get(m, key), e)
 
@@ -63,13 +96,26 @@ verify find
     find(add(empty(), 4, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 4, Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
     find(add(empty(), 4, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 4, Core.Exprs.bvar(2)) => Option.None
 
-fn findIn(bucket: List<Tuple<Expr, Expr>>, e: Expr) -> Option<Expr>
-    ? "Linear search of a bucket."
+fn findIn(bucket: Bucket, e: Expr) -> Option<Expr>
+    ? "The value paired with an expression equal to e in a bucket."
     match bucket
+        Bucket.NoEntry -> Option.None
+        Bucket.OneEntry((k, v)) -> match k == e
+            true -> Option.Some(v)
+            false -> Option.None
+        Bucket.Entries(es) -> findInList(es, e)
+
+verify findIn
+    findIn(Bucket.NoEntry, Core.Exprs.bvar(0)) => Option.None
+    findIn(Bucket.OneEntry((Core.Exprs.bvar(0), Core.Exprs.bvar(1))), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
+
+fn findInList(es: List<Tuple<Expr, Expr>>, e: Expr) -> Option<Expr>
+    ? "Linear search of a bucket's entries."
+    match es
         [] -> Option.None
         [(k, v), ..rest] -> match k == e
             true -> Option.Some(v)
-            false -> findIn(rest, e)
+            false -> findInList(rest, e)
 
-verify findIn
-    findIn([], Core.Exprs.bvar(0)) => Option.None
+verify findInList
+    findInList([], Core.Exprs.bvar(0)) => Option.None

@@ -12,7 +12,7 @@ module Alpha
 
 record AR
     b: Bool
-    memo: Map<Int, List<Tuple<Expr, Expr>>>
+    memo: Map<Int, Bucket>
 
 fn alphaEq(a: Expr, b: Expr) -> Bool
     ? "a and b are the same term up to binder names and annotations."
@@ -37,7 +37,7 @@ verify alphaEqList
     alphaEqList([Core.Exprs.bvar(0)], [Core.Exprs.bvar(0)]) => true
     alphaEqList([], [Core.Exprs.bvar(0)]) => false
 
-fn aeq(a: Expr, b: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>) -> AR
+fn aeq(a: Expr, b: Expr, memo: Map<Int, Bucket>) -> AR
     ? "Identical terms, a hash mismatch, a remembered pair, or a structural comparison."
     match a == b
         true -> AR(b = true, memo = memo)
@@ -48,7 +48,7 @@ fn aeq(a: Expr, b: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>) -> AR
 verify aeq
     aeq(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Cache.empty()).b => true
 
-fn aeqSeen(a: Expr, b: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>, seen: Option<Expr>) -> AR
+fn aeqSeen(a: Expr, b: Expr, memo: Map<Int, Bucket>, seen: Option<Expr>) -> AR
     ? "A pair already found equal is equal again."
     match seen == Option.Some(b)
         true -> AR(b = true, memo = memo)
@@ -66,7 +66,7 @@ fn aeqStore(r: AR, a: Expr, b: Expr) -> AR
 verify aeqStore
     Core.Cache.size(aeqStore(AR(b = true, memo = Core.Cache.empty()), Core.Exprs.bvar(0), Core.Exprs.bvar(0)).memo) => 1
 
-fn aeqNode(a: Expr, b: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>) -> AR
+fn aeqNode(a: Expr, b: Expr, memo: Map<Int, Bucket>) -> AR
     ? "Same constructor, equal parts; binder names and annotations are not compared."
     match a
         Expr.App(_, f, x) -> match b
@@ -91,7 +91,7 @@ fn aeqNode(a: Expr, b: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>) -> AR
 verify aeqNode
     aeqNode(Core.Exprs.natLit(1), Core.Exprs.natLit(1), Core.Cache.empty()).b => true
 
-fn aeq2(a1: Expr, b1: Expr, a2: Expr, b2: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>) -> AR
+fn aeq2(a1: Expr, b1: Expr, a2: Expr, b2: Expr, memo: Map<Int, Bucket>) -> AR
     ? "Two pairs, the second only if the first is equal."
     r = aeq(a1, b1, memo)
     match r.b
@@ -101,7 +101,7 @@ fn aeq2(a1: Expr, b1: Expr, a2: Expr, b2: Expr, memo: Map<Int, List<Tuple<Expr, 
 verify aeq2
     aeq2(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Exprs.bvar(2), Core.Cache.empty()).b => false
 
-fn aeq3(a1: Expr, b1: Expr, a2: Expr, b2: Expr, a3: Expr, b3: Expr, memo: Map<Int, List<Tuple<Expr, Expr>>>) -> AR
+fn aeq3(a1: Expr, b1: Expr, a2: Expr, b2: Expr, a3: Expr, b3: Expr, memo: Map<Int, Bucket>) -> AR
     ? "Three pairs in order."
     r = aeq(a1, b1, memo)
     match r.b

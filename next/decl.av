@@ -12,7 +12,7 @@ module Decl
     effects []
 
 record Facts
-    closed: Map<Int, List<Tuple<Expr, Expr>>>
+    closed: Map<Int, Bucket>
 
 fn empty() -> Facts
     ? "No facts yet: what a worker starts with."

@@ -192,22 +192,22 @@ record St
     lctx: Locals
     next: Int
     topLevel: Int
-    vars: Map<Int, List<Tuple<Expr, Expr>>>
+    vars: Map<Int, Bucket>
     params: List<Name>
     checkParams: Bool
     safety: Safety
     eager: Bool
-    inferCache: Map<Int, List<Tuple<Expr, Expr>>>
-    checkCache: Map<Int, List<Tuple<Expr, Expr>>>
-    paramCache: Map<Int, List<Tuple<Expr, Expr>>>
-    whnfCache: Map<Int, List<Tuple<Expr, Expr>>>
-    coreCache: Map<Int, List<Tuple<Expr, Expr>>>
-    eqOk: Map<Int, List<Tuple<Expr, Expr>>>
-    eqFail: Map<Int, List<Tuple<Expr, Expr>>>
-    eqNo: Map<Int, List<Tuple<Expr, Expr>>>
-    unfoldCache: Map<Int, List<Tuple<Expr, Expr>>>
-    levelTypes: Map<Int, List<Tuple<Expr, Expr>>>
-    closed: Map<Int, List<Tuple<Expr, Expr>>>
+    inferCache: Map<Int, Bucket>
+    checkCache: Map<Int, Bucket>
+    paramCache: Map<Int, Bucket>
+    whnfCache: Map<Int, Bucket>
+    coreCache: Map<Int, Bucket>
+    eqOk: Map<Int, Bucket>
+    eqFail: Map<Int, Bucket>
+    eqNo: Map<Int, Bucket>
+    unfoldCache: Map<Int, Bucket>
+    levelTypes: Map<Int, Bucket>
+    closed: Map<Int, Bucket>
     open: Int
     opened: Expr
 
@@ -434,17 +434,29 @@ fn optHash(o: Option<Expr>) -> Int
 verify optHash
     optHash(Option.None) => 0
 
-fn varFind(bucket: List<Tuple<Expr, Expr>>, code: Int, ty: Expr, value: Option<Expr>) -> Option<Expr>
+fn varFind(bucket: Bucket, code: Int, ty: Expr, value: Option<Expr>) -> Option<Expr>
+    ? "The variable kept under these parts in a bucket."
+    match bucket
+        Bucket.NoEntry -> Option.None
+        Bucket.OneEntry((k, x)) -> match valueMatches(k, code, ty, value)
+            true -> Option.Some(x)
+            false -> Option.None
+        Bucket.Entries(es) -> varFindIn(es, code, ty, value)
+
+verify varFind
+    varFind(Bucket.NoEntry, 3, Core.Exprs.natLit(1), Option.None) => Option.None
+
+fn varFindIn(bucket: List<Tuple<Expr, Expr>>, code: Int, ty: Expr, value: Option<Expr>) -> Option<Expr>
     ? "The variable kept under these parts in a bucket."
     match bucket
         [] -> Option.None
         [(k, x), ..rest] -> match valueMatches(k, code, ty, value)
             true -> Option.Some(x)
-            false -> varFind(rest, code, ty, value)
+            false -> varFindIn(rest, code, ty, value)
 
-verify varFind
-    varFind([(varKey(3, Core.Exprs.natLit(1), Option.Some(Core.Exprs.fvar(2))), Core.Exprs.fvar(9))], 3, Core.Exprs.natLit(1), Option.Some(Core.Exprs.fvar(2))) => Option.Some(Core.Exprs.fvar(9))
-    varFind([(varKey(3, Core.Exprs.natLit(1), Option.Some(Core.Exprs.fvar(2))), Core.Exprs.fvar(9))], 3, Core.Exprs.natLit(1), Option.Some(Core.Exprs.fvar(4))) => Option.None
+verify varFindIn
+    varFindIn([(varKey(3, Core.Exprs.natLit(1), Option.Some(Core.Exprs.fvar(2))), Core.Exprs.fvar(9))], 3, Core.Exprs.natLit(1), Option.Some(Core.Exprs.fvar(2))) => Option.Some(Core.Exprs.fvar(9))
+    varFindIn([(varKey(3, Core.Exprs.natLit(1), Option.Some(Core.Exprs.fvar(2))), Core.Exprs.fvar(9))], 3, Core.Exprs.natLit(1), Option.Some(Core.Exprs.fvar(4))) => Option.None
 
 fn valueMatches(k: Expr, code: Int, ty: Expr, value: Option<Expr>) -> Bool
     ? "Whether the term k keeps exactly these parts; the code says whether a value is there, so the term's shape is fixed by it."
@@ -624,26 +636,15 @@ fn wrapLocal(l: Local, ty: Expr, before: List<Int>, r: Expr, isLam: Bool, dropDe
 verify wrapLocal
     wrapLocal(Local(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), value = Option.Some(Core.Exprs.sort(Level.Zero)), binder = Binder.Default), Core.Exprs.sort(Level.Zero), [], Core.Exprs.sort(Level.Zero), false, true) => Core.Exprs.sort(Level.Zero)
 
-fn cacheGet(cache: Map<Int, List<Tuple<Expr, Expr>>>, key: Expr) -> Option<Expr>
+fn cacheGet(cache: Map<Int, Bucket>, key: Expr) -> Option<Expr>
     ? "A cached result for key, found by hash and confirmed by equality."
-    findIn(Core.Cache.get(cache, Core.Exprs.hashOf(key)), key)
+    Core.Cache.find(cache, Core.Exprs.hashOf(key), key)
 
 verify cacheGet
     cacheGet(Core.Cache.empty(), Core.Exprs.bvar(0)) => Option.None
     cacheGet(cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
 
-fn findIn(bucket: List<Tuple<Expr, Expr>>, key: Expr) -> Option<Expr>
-    ? "The value stored under an equal key."
-    match bucket
-        [] -> Option.None
-        [(k, v), ..rest] -> match k == key
-            true -> Option.Some(v)
-            false -> findIn(rest, key)
-
-verify findIn
-    findIn([], Core.Exprs.bvar(0)) => Option.None
-
-fn cachePut(cache: Map<Int, List<Tuple<Expr, Expr>>>, key: Expr, v: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
+fn cachePut(cache: Map<Int, Bucket>, key: Expr, v: Expr) -> Map<Int, Bucket>
     ? "Stores a result under the key's hash."
     Core.Cache.add(cache, Core.Exprs.hashOf(key), (key, v))
 
@@ -659,7 +660,7 @@ fn pairKey(a: Expr, b: Expr) -> Int
 verify pairKey
     pairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) == pairKey(Core.Exprs.bvar(1), Core.Exprs.bvar(0)) => true
 
-fn pairGet(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Bool
+fn pairGet(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded."
     hasPair(Core.Cache.get(cache, pairKey(a, b)), a, b)
 
@@ -667,16 +668,26 @@ verify pairGet
     pairGet(pairPut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(1), Core.Exprs.bvar(0)) => true
     pairGet(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)) => false
 
-fn hasPair(bucket: List<Tuple<Expr, Expr>>, a: Expr, b: Expr) -> Bool
+fn hasPair(bucket: Bucket, a: Expr, b: Expr) -> Bool
+    ? "Membership in either order."
+    match bucket
+        Bucket.NoEntry -> false
+        Bucket.OneEntry((x, y)) -> Bool.or(Bool.and(alike(x, a), alike(y, b)), Bool.and(alike(x, b), alike(y, a)))
+        Bucket.Entries(es) -> hasPairIn(es, a, b)
+
+verify hasPair
+    hasPair(Bucket.NoEntry, Core.Exprs.bvar(0), Core.Exprs.bvar(0)) => false
+
+fn hasPairIn(bucket: List<Tuple<Expr, Expr>>, a: Expr, b: Expr) -> Bool
     ? "Membership in either order."
     match bucket
         [] -> false
         [(x, y), ..rest] -> match Bool.or(Bool.and(alike(x, a), alike(y, b)), Bool.and(alike(x, b), alike(y, a)))
             true -> true
-            false -> hasPair(rest, a, b)
+            false -> hasPairIn(rest, a, b)
 
-verify hasPair
-    hasPair([], Core.Exprs.bvar(0), Core.Exprs.bvar(0)) => false
+verify hasPairIn
+    hasPairIn([], Core.Exprs.bvar(0), Core.Exprs.bvar(0)) => false
 
 fn alike(x: Expr, a: Expr) -> Bool
     ? "The same term up to binder names and annotations, the identical case first."
@@ -687,7 +698,7 @@ fn alike(x: Expr, a: Expr) -> Bool
 verify alike
     alike(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.str(Core.Names.anon(), "x"), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)) => true
 
-fn pairPut(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
+fn pairPut(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Map<Int, Bucket>
     ? "Records the pair."
     Core.Cache.add(cache, pairKey(a, b), (a, b))
 
@@ -701,7 +712,7 @@ fn closedPairKey(a: Expr, b: Expr) -> Int
 verify closedPairKey
     closedPairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) > 1099511627775 => true
 
-fn closedPairGet(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Bool
+fn closedPairGet(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded in the cache kept across declarations."
     hasPair(Core.Cache.get(cache, closedPairKey(a, b)), a, b)
 
@@ -709,7 +720,7 @@ verify closedPairGet
     closedPairGet(closedPairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
     closedPairGet(pairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
 
-fn closedPairPut(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
+fn closedPairPut(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Map<Int, Bucket>
     ? "Records the pair in the cache kept across declarations."
     Core.Cache.add(cache, closedPairKey(a, b), (a, b))
 
@@ -723,7 +734,7 @@ fn closedFailKey(a: Expr, b: Expr) -> Int
 verify closedFailKey
     closedFailKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) > 2199023255551 => true
 
-fn closedFailGet(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Bool
+fn closedFailGet(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded as different in the cache kept across declarations."
     hasPair(Core.Cache.get(cache, closedFailKey(a, b)), a, b)
 
@@ -731,7 +742,7 @@ verify closedFailGet
     closedFailGet(closedFailPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
     closedFailGet(closedPairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
 
-fn closedFailPut(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
+fn closedFailPut(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Map<Int, Bucket>
     ? "Records the pair as different in the cache kept across declarations."
     Core.Cache.add(cache, closedFailKey(a, b), (a, b))
 

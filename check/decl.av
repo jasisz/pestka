@@ -17,7 +17,7 @@ module Decl
 
 record Run
     env: Env
-    closed: Map<Int, List<Tuple<Expr, Expr>>>
+    closed: Map<Int, Bucket>
     checked: Int
     trusted: Int
     skipped: Int
@@ -51,22 +51,22 @@ record Kept
     next: Facts
 
 record OldFacts
-    closed: Map<Int, List<Tuple<Expr, Expr>>>
-    unfolds: Map<Int, List<Tuple<Expr, Expr>>>
-    types: Map<Int, List<Tuple<Expr, Expr>>>
-    vars: Map<Int, List<Tuple<Expr, Expr>>>
+    closed: Map<Int, Bucket>
+    unfolds: Map<Int, Bucket>
+    types: Map<Int, Bucket>
+    vars: Map<Int, Bucket>
     lctx: Locals
     next: Int
     topLevel: Int
-    inferCache: Map<Int, List<Tuple<Expr, Expr>>>
-    checkCache: Map<Int, List<Tuple<Expr, Expr>>>
-    paramCache: Map<Int, List<Tuple<Expr, Expr>>>
+    inferCache: Map<Int, Bucket>
+    checkCache: Map<Int, Bucket>
+    paramCache: Map<Int, Bucket>
     paramsOf: List<Name>
-    whnfCache: Map<Int, List<Tuple<Expr, Expr>>>
-    coreCache: Map<Int, List<Tuple<Expr, Expr>>>
-    eqOk: Map<Int, List<Tuple<Expr, Expr>>>
-    eqFail: Map<Int, List<Tuple<Expr, Expr>>>
-    eqNo: Map<Int, List<Tuple<Expr, Expr>>>
+    whnfCache: Map<Int, Bucket>
+    coreCache: Map<Int, Bucket>
+    eqOk: Map<Int, Bucket>
+    eqFail: Map<Int, Bucket>
+    eqNo: Map<Int, Bucket>
 
 record Checked
     failure: Option<Fail>
@@ -391,7 +391,7 @@ fn carried(st: St) -> OldFacts
     full = Core.Cache.size(st.vars) > 65536
     OldFacts(closed = st.closed, unfolds = bounded(st.unfoldCache, 16384), types = bounded(st.levelTypes, 65536), vars = bounded(st.vars, 65536), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = openKept(st.inferCache, full), checkCache = openKept(st.checkCache, full), paramCache = openKept(st.paramCache, full), paramsOf = st.params, whnfCache = openKept(st.whnfCache, full), coreCache = openKept(st.coreCache, full), eqOk = openKept(st.eqOk, full), eqFail = openKept(st.eqFail, full), eqNo = openKept(st.eqNo, full))
 
-fn paramsKept(cache: Map<Int, List<Tuple<Expr, Expr>>>, before: List<Name>, now: List<Name>) -> Map<Int, List<Tuple<Expr, Expr>>>
+fn paramsKept(cache: Map<Int, Bucket>, before: List<Name>, now: List<Name>) -> Map<Int, Bucket>
     ? "The checked types of terms with universe parameters, kept for a declaration whose parameters are those of the one before."
     match before == now
         true -> cache
@@ -400,7 +400,7 @@ fn paramsKept(cache: Map<Int, List<Tuple<Expr, Expr>>>, before: List<Name>, now:
 verify paramsKept
     Core.Cache.size(paramsKept(Check.State.cachePut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(1)), [], [Core.Names.anon()])) => 0
 
-fn openKept(m: Map<Int, List<Tuple<Expr, Expr>>>, full: Bool) -> Map<Int, List<Tuple<Expr, Expr>>>
+fn openKept(m: Map<Int, Bucket>, full: Bool) -> Map<Int, Bucket>
     ? "A map that may hold free variables: emptied with the variables, else past its own limit."
     match full
         true -> Core.Cache.empty()
@@ -421,7 +421,7 @@ verify localsKept
 verify carried
     Core.Cache.size(carried(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).unfolds) => 0
 
-fn bounded(m: Map<Int, List<Tuple<Expr, Expr>>>, limit: Int) -> Map<Int, List<Tuple<Expr, Expr>>>
+fn bounded(m: Map<Int, Bucket>, limit: Int) -> Map<Int, Bucket>
     ? "A map carried across declarations, emptied once it passes limit hashes: kept for the whole run, values instantiated at levels once took mathlib past 14 GB and constant types took it there again on one worker, while most entries are asked for again within a few declarations."
     match Core.Cache.size(m) > limit
         true -> Core.Cache.empty()
