@@ -41,7 +41,7 @@ verify str
 
 fn num(pre: Name, i: Int) -> Name
     ? "Extends a name with a numeric component."
-    Name.Num(pre, i, Core.Hash.mix(Core.Hash.mix(hashOf(pre), 11), Int.mod(i, 1099511627689)))
+    Name.Num(pre, i, Core.Hash.mix(Core.Hash.mix(hashOf(pre), 11), Int.mod(i, 4294967291)))
 
 verify num
     hashOf(num(anon(), 1)) == hashOf(num(anon(), 2)) => false

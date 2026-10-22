@@ -341,13 +341,13 @@ fn hashIn(v: Val, depth: Int) -> Int
     match depth <= 0
         true -> kindOf(v)
         false -> match v
-            Val.Var(l, sp) -> spineHash(Core.Hash.mix(21, Int.mod(l + 1000, 1099511627689)), sp, depth - 1)
+            Val.Var(l, sp) -> spineHash(Core.Hash.mix(21, Int.mod(l + 1000, 4294967291)), sp, depth - 1)
             Val.Free(id, sp) -> spineHash(Core.Hash.mix(22, id), sp, depth - 1)
             Val.Cst(n, ls, sp) -> spineHash(Core.Hash.mix(23, levelsHash(ls, Core.Names.hashOf(n))), sp, depth - 1)
             Val.Lam(_, d, env, b, _) -> envHash(Core.Hash.mix(Core.Hash.mix(24, Core.Exprs.hashOf(b)), hashIn(d, depth - 1)), env, Core.Exprs.looseRange(b) - 1, depth - 1)
             Val.Pi(_, d, env, b, _) -> envHash(Core.Hash.mix(Core.Hash.mix(25, Core.Exprs.hashOf(b)), hashIn(d, depth - 1)), env, Core.Exprs.looseRange(b) - 1, depth - 1)
             Val.Sort(l) -> Core.Hash.mix(26, Core.Levels.hashOf(l))
-            Val.Nat(k) -> Core.Hash.mix(27, Int.mod(k, 1099511627689))
+            Val.Nat(k) -> Core.Hash.mix(27, Int.mod(k, 4294967291))
             Val.Str(s) -> Core.Hash.mix(28, String.len(s))
             Val.Prj(s, i, x, sp) -> spineHash(Core.Hash.mix(Core.Hash.mix(Core.Hash.mix(29, Core.Names.hashOf(s)), i), hashIn(x, depth - 1)), sp, depth - 1)
             Val.Stuck(x, sp) -> spineHash(Core.Hash.mix(30, hashIn(x, depth - 1)), sp, depth - 1)
