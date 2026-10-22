@@ -3,11 +3,13 @@
 # status with the one its directory expects:
 #   wellformed/   0 (accepted)
 #   malformed/    1 (rejected while reading)
+#   illtyped/     1 (rejected by the checker: made from tests/export/PestkaBad.lean
+#                    by mkbad.py, each a declaration the checker must not accept)
 #   unsupported/  2 (declined: format version)
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin="${PESTKA_BIN:-$root/.build/target/release/main}"
 fail=0
-for dir in wellformed:0 malformed:1 unsupported:2; do
+for dir in wellformed:0 malformed:1 illtyped:1 unsupported:2; do
   name=${dir%%:*}
   want=${dir##*:}
   for f in "$root"/tests/export/"$name"/*.ndjson; do

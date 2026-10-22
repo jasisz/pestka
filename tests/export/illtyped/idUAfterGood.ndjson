@@ -1,0 +1,17 @@
+{"meta": {"exporter": {"name": "lean4export", "version": "3.1.0"}, "format": {"version": "3.1.0"}, "lean": {"githash": "8c9756b28d64dab099da31a4c09229a9e6a2ef35", "version": "4.32.0"}}}
+{"in": 1, "str": {"pre": 0, "str": "PestkaBad"}}
+{"in": 2, "str": {"pre": 1, "str": "idU"}}
+{"in": 3, "str": {"pre": 0, "str": "u"}}
+{"il": 1, "param": 3}
+{"in": 4, "str": {"pre": 0, "str": "α"}}
+{"ie": 0, "sort": 1}
+{"in": 5, "str": {"pre": 0, "str": "a"}}
+{"bvar": 0, "ie": 1}
+{"bvar": 1, "ie": 2}
+{"forallE": {"binderInfo": "default", "body": 2, "name": 5, "type": 1}, "ie": 3}
+{"forallE": {"binderInfo": "default", "body": 3, "name": 4, "type": 0}, "ie": 4}
+{"ie": 5, "lam": {"binderInfo": "default", "body": 1, "name": 5, "type": 1}}
+{"ie": 6, "lam": {"binderInfo": "default", "body": 5, "name": 4, "type": 0}}
+{"def": {"all": [2], "hints": {"regular": 1}, "levelParams": [3], "name": 2, "safety": "safe", "type": 4, "value": 6}}
+{"in": 6, "str": {"pre": 1, "str": "idV"}}
+{"def": {"all": [6], "hints": {"regular": 1}, "levelParams": [], "name": 6, "safety": "safe", "type": 4, "value": 6}}
