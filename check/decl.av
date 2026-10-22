@@ -302,22 +302,16 @@ verify firstOf
     firstOf([], Option.None, 0, 5, admit([])) == Result.Err(Fail.Reject("x")) => false
 
 fn admitAll(run: Run, decls: List<Decl>) -> Admitted
-    ? "One declaration at a time; the first failure stops the building and is kept with its position."
+    ? "One declaration at a time; the first failure stops the building and is kept with its position. A declaration is checked against the environment, which it only reads, and added after: a failure leaves the run as it was without a copy of it kept, so the environment always has one owner and is added to in place."
     match decls
         [] -> Admitted(run = run, failure = Option.None, at = run.pos)
-        [d, ..rest] -> admitNext(run, named(addDecl(run, d), Core.Decls.nameOf(d)), rest)
+        [d, ..rest] -> match prepared(run.env, d)
+            Result.Ok(a) -> admitAll(applied(run, a), rest)
+            Result.Err(e) -> Admitted(run = run, failure = Option.Some(failNamed(e, Core.Decls.nameOf(d))), at = run.pos)
 
 verify admitAll
     admitAll(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), []).at => 0
-
-fn admitNext(run: Run, r: Result<Run, Fail>, rest: List<Decl>) -> Admitted
-    ? "Goes on with the next declaration, or stops at this one."
-    match r
-        Result.Ok(next) -> admitAll(next, rest)
-        Result.Err(e) -> Admitted(run = run, failure = Option.Some(e), at = run.pos)
-
-verify admitNext
-    admitNext(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Result.Err(Fail.Reject("x")), []).failure => Option.Some(Fail.Reject("x"))
+    admitAll(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), [Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false), Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)]).failure => Option.Some(Fail.Reject("[anonymous]: already declared"))
 
 fn checkJobs(jobs: List<Job>, env: Env, closed: Map<Int, List<Tuple<Expr, Expr>>>, limit: Int) -> Result<Map<Int, List<Tuple<Expr, Expr>>>, Fail>
     ? "The deferred declarations in file order, up to the position where the building failed."
@@ -370,13 +364,6 @@ verify jobChecks
 verify checkAll
     checkAll([]) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
 
-fn named(r: Result<Run, Fail>, n: Name) -> Result<Run, Fail>
-    ? "Puts the declaration's name in front of its failure."
-    match r
-        Result.Ok(x) -> Result.Ok(x)
-        Result.Err(Fail.Reject(m)) -> Result.Err(Fail.Reject("{Core.Names.render(n)}: {m}"))
-        Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline("{Core.Names.render(n)}: {m}"))
-
 fn failNamed(e: Fail, n: Name) -> Fail
     ? "Puts the declaration's name in front of a failure."
     match e
@@ -386,34 +373,41 @@ fn failNamed(e: Fail, n: Name) -> Fail
 verify failNamed
     failNamed(Fail.Decline("d"), Core.Names.str(Core.Names.anon(), "y")) => Fail.Decline("y: d")
 
-verify named
-    named(Result.Err(Fail.Reject("bad")), Core.Names.str(Core.Names.anon(), "x")) => Result.Err(Fail.Reject("x: bad"))
+type Addition
+    Skipped
+    Deferred(Head, Option<Expr>, Bool, Const)
+    Derived(Env)
+    Block(Map<Name, Const>)
+    Trusted(List<Const>)
 
-fn addDecl(run: Run, d: Decl) -> Result<Run, Fail>
-    ? "Dispatches on the kind of declaration."
+fn prepared(env: Env, d: Decl) -> Result<Addition, Fail>
+    ? "What a declaration adds, found by checking it against the environment, which it only reads."
     match d
         Decl.Axiom(h, unsafe) -> match unsafe
-            true -> skip(run)
-            false -> defer(run, h, Option.None, false, Const.CAxiom(h, false))
+            true -> Result.Ok(Addition.Skipped)
+            false -> deferred(env, h, Option.None, false, Const.CAxiom(h, false))
         Decl.Defn(h, v, hints, safety, _) -> match safety
-            Safety.Safe -> defer(run, h, Option.Some(v), false, Const.CDefn(h, v, hints, safety))
-            _ -> skip(run)
-        Decl.Thm(h, v, _) -> defer(run, h, Option.Some(v), true, Const.CThm(h, v))
+            Safety.Safe -> deferred(env, h, Option.Some(v), false, Const.CDefn(h, v, hints, safety))
+            _ -> Result.Ok(Addition.Skipped)
+        Decl.Thm(h, v, _) -> deferred(env, h, Option.Some(v), true, Const.CThm(h, v))
         Decl.Opaq(h, v, unsafe, _) -> match unsafe
-            true -> skip(run)
-            false -> defer(run, h, Option.Some(v), false, Const.COpaque(h, v, unsafe))
-        Decl.Quot(h, kind) -> derived(run, Check.IndAdd.addQuotDecl(run.env, h, kind)?)
+            true -> Result.Ok(Addition.Skipped)
+            false -> deferred(env, h, Option.Some(v), false, Const.COpaque(h, v, unsafe))
+        Decl.Quot(h, kind) -> Result.Ok(Addition.Derived(Check.IndAdd.addQuotDecl(env, h, kind)?))
         Decl.Induct(types, ctors, recs) -> match anyUnsafe(types)
-            true -> skip(run)
-            false -> inductive(run, Check.IndAdd.addInductive(run.env, types, ctors, recs), types, ctors, recs)
+            true -> Result.Ok(Addition.Skipped)
+            false -> inductive(env, Check.IndAdd.addInductive(env, types, ctors, recs), types, ctors, recs)
 
-fn defer(run: Run, h: Head, v: Option<Expr>, isThm: Bool, c: Const) -> Result<Run, Fail>
-    ? "A new name and distinct universe parameters now; the constant joins the environment, and its type and value are checked later against the environment before it."
-    ok = newHead(run.env, h)?
-    Result.Ok(Run.update(run, env = Check.State.envSet(run.env, h.name, c), jobs = List.prepend(Job(pos = run.pos, upTo = Check.State.envSize(run.env), head = h, value = v, isThm = isThm), run.jobs), pos = run.pos + 1))
+verify prepared
+    prepared(Check.State.envEmpty(), Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true)) => Result.Ok(Addition.Skipped)
 
-verify defer
-    Result.withDefault(defer(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Option.None, false, Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)), Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).pos => 1
+fn deferred(env: Env, h: Head, v: Option<Expr>, isThm: Bool, c: Const) -> Result<Addition, Fail>
+    ? "A new name and distinct universe parameters now; the type and value are checked later, against the environment before the constant."
+    ok = newHead(env, h)?
+    Result.Ok(Addition.Deferred(h, v, isThm, c))
+
+verify deferred
+    deferred(Check.State.envEmpty(), Head(name = Core.Names.anon(), params = [Core.Names.anon(), Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Option.None, false, Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)) => Result.Err(Fail.Reject("duplicate universe level parameter"))
 
 fn newHead(env: Env, h: Head) -> Result<Unit, Fail>
     ? "The name is not taken and the universe parameters are distinct."
@@ -426,32 +420,46 @@ fn newHead(env: Env, h: Head) -> Result<Unit, Fail>
 verify newHead
     newHead(Check.State.envEmpty(), Head(name = Core.Names.anon(), params = [Core.Names.anon(), Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero))) => Result.Err(Fail.Reject("duplicate universe level parameter"))
 
-verify addDecl
-    addDecl(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true)) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 1, jobs = [], pos = 1))
-
-fn derived(run: Run, env: Env) -> Result<Run, Fail>
-    ? "A block or quotient constant the checker derived and compared."
-    Result.Ok(Run.update(run, env = env, checked = run.checked + 1, pos = run.pos + 1))
-
-verify derived
-    Result.withDefault(derived(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Check.State.envEmpty()), Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).checked => 1
-
-fn inductive(run: Run, r: Result<Map<Name, Const>, Fail>, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> Result<Run, Fail>
+fn inductive(env: Env, r: Result<Map<Name, Const>, Fail>, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> Result<Addition, Fail>
     ? "A derived block, or one Pestka cannot derive yet admitted as stated."
     match r
-        Result.Ok(cs) -> blockAdded(run, cs)
-        Result.Err(Fail.Decline) -> trust(run, inductConsts(types, ctors, recs))
+        Result.Ok(cs) -> Result.Ok(Addition.Block(cs))
+        Result.Err(Fail.Decline) -> trusted(env, inductConsts(types, ctors, recs))
         Result.Err(e) -> Result.Err(e)
 
 verify inductive
-    inductive(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Result.Err(Fail.Reject("x")), [], [], []) => Result.Err(Fail.Reject("x"))
+    inductive(Check.State.envEmpty(), Result.Err(Fail.Reject("x")), [], [], []) => Result.Err(Fail.Reject("x"))
 
-fn blockAdded(run: Run, cs: Map<Name, Const>) -> Result<Run, Fail>
-    ? "The constants a block derived join the environment, which no checker state holds any more."
-    Result.Ok(Run.update(run, env = mergeConsts(run.env, Map.entries(cs)), checked = run.checked + 1, pos = run.pos + 1))
+fn trusted(env: Env, cs: List<Const>) -> Result<Addition, Fail>
+    ? "Constants admitted without checking; their names must still be new."
+    match anyDeclared(env, cs)
+        true -> Result.Err(Fail.Reject("already declared"))
+        false -> Result.Ok(Addition.Trusted(cs))
 
-verify blockAdded
-    Result.withDefault(blockAdded(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), {}), Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).checked => 1
+verify trusted
+    trusted(Check.State.envEmpty(), []) => Result.Ok(Addition.Trusted([]))
+
+fn applied(run: Run, a: Addition) -> Run
+    ? "Adds what a declaration was found to add; nothing here fails."
+    match a
+        Addition.Skipped -> Run.update(run, skipped = run.skipped + 1, pos = run.pos + 1)
+        Addition.Deferred(h, v, isThm, c) -> deferAdded(run, h, v, isThm, c)
+        Addition.Derived(env) -> Run.update(run, env = env, checked = run.checked + 1, pos = run.pos + 1)
+        Addition.Block(cs) -> Run.update(run, env = mergeConsts(run.env, Map.entries(cs)), checked = run.checked + 1, pos = run.pos + 1)
+        Addition.Trusted(cs) -> Run.update(run, env = addConsts(run.env, cs), trusted = run.trusted + 1, pos = run.pos + 1)
+
+verify applied
+    applied(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Addition.Skipped).skipped => 1
+    applied(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Addition.Block({})).checked => 1
+    applied(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Addition.Trusted([])).trusted => 1
+
+fn deferAdded(run: Run, h: Head, v: Option<Expr>, isThm: Bool, c: Const) -> Run
+    ? "The constant joins the environment, and its type and value wait to be checked against the environment before it. Its place is read before the environment is passed on, so that the add has it alone."
+    upTo = Check.State.envSize(run.env)
+    Run.update(run, env = Check.State.envSet(run.env, h.name, c), jobs = List.prepend(Job(pos = run.pos, upTo = upTo, head = h, value = v, isThm = isThm), run.jobs), pos = run.pos + 1)
+
+verify deferAdded
+    deferAdded(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Option.None, false, Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)).pos => 1
 
 fn mergeConsts(env: Env, cs: List<Tuple<Name, Const>>) -> Env
     ? "Adds each named constant."
@@ -461,13 +469,6 @@ fn mergeConsts(env: Env, cs: List<Tuple<Name, Const>>) -> Env
 
 verify mergeConsts
     Check.State.envHas(mergeConsts(Check.State.envEmpty(), [(Core.Names.anon(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false))]), Core.Names.anon()) => true
-
-fn skip(run: Run) -> Result<Run, Fail>
-    ? "An unsafe or partial declaration is left out."
-    Result.Ok(Run.update(run, skipped = run.skipped + 1, pos = run.pos + 1))
-
-verify skip
-    Result.withDefault(skip(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)), Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).skipped => 1
 
 fn anyUnsafe(types: List<IndType>) -> Bool
     ? "An unsafe inductive block."
@@ -523,15 +524,6 @@ fn propOrFail(p: RB) -> Result<St, Fail>
 
 verify propOrFail
     propOrFail(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("theorem type is not Prop"))
-
-fn trust(run: Run, cs: List<Const>) -> Result<Run, Fail>
-    ? "Records constants admitted without checking; their names must still be new."
-    match anyDeclared(run.env, cs)
-        true -> Result.Err(Fail.Reject("already declared"))
-        false -> Result.Ok(Run.update(run, env = addConsts(run.env, cs), trusted = run.trusted + 1, pos = run.pos + 1))
-
-verify trust
-    Result.withDefault(trust(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), []), Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).trusted => 1
 
 fn anyDeclared(env: Env, cs: List<Const>) -> Bool
     ? "Some name is already in the environment."
