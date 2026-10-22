@@ -14,4 +14,22 @@ theorem eqDeeper : ∀ (A : Type) (x : A) (p0 : Prop) (p1 : Prop) (p2 : Prop) (p
 
 def idU.{u} (α : Sort u) (a : α) : α := a
 
+theorem sib (n : Nat) : (fun (m : Nat) => m) = (fun (m : Nat) => m) := rfl
+
+theorem swapGood (x : Nat) : x = x := rfl
+
+theorem swap (y x : Nat) : x = x := rfl
+
+theorem beta (x y : Nat) : (fun (z : Nat) => z) x = x := rfl
+
+theorem letEq (a b : Nat) : (let z : Nat := a; z) = a := rfl
+
+theorem betaDeep : ∀ (A : Type) (x : A) (p0 : Prop) (p1 : Prop) (p2 : Prop) (p3 : Prop) (p4 : Prop) (p5 : Prop) (p6 : Prop) (p7 : Prop) (p8 : Prop) (p9 : Prop) (p10 : Prop) (p11 : Prop) (p12 : Prop) (p13 : Prop) (p14 : Prop) (p15 : Prop) (p16 : Prop) (p17 : Prop) (p18 : Prop) (p19 : Prop) (p20 : Prop) (p21 : Prop) (p22 : Prop) (p23 : Prop) (p24 : Prop) (p25 : Prop) (p26 : Prop) (p27 : Prop) (p28 : Prop) (p29 : Prop) (p30 : Prop) (p31 : Prop) (p32 : Prop) (p33 : Prop) (p34 : Prop) (p35 : Prop) (p36 : Prop) (p37 : Prop) (p38 : Prop) (p39 : Prop) (p40 : Prop) (p41 : Prop) (p42 : Prop) (p43 : Prop) (p44 : Prop) (p45 : Prop) (p46 : Prop) (p47 : Prop) (p48 : Prop) (p49 : Prop) (p50 : Prop) (p51 : Prop) (p52 : Prop) (p53 : Prop) (p54 : Prop) (p55 : Prop) (p56 : Prop) (p57 : Prop) (p58 : Prop) (p59 : Prop) (p60 : Prop) (p61 : Prop) (p62 : Prop) (p63 : Prop) (p64 : Prop) (p65 : Prop) (p66 : Prop) (p67 : Prop) (p68 : Prop) (p69 : Prop) (p70 : Prop) (p71 : Prop) (p72 : Prop) (p73 : Prop) (p74 : Prop) (p75 : Prop) (p76 : Prop) (p77 : Prop) (p78 : Prop) (p79 : Prop) (p80 : Prop) (p81 : Prop) (p82 : Prop) (p83 : Prop) (p84 : Prop) (p85 : Prop) (p86 : Prop) (p87 : Prop) (p88 : Prop) (p89 : Prop) (p90 : Prop) (p91 : Prop) (p92 : Prop) (p93 : Prop) (p94 : Prop) (p95 : Prop) (p96 : Prop) (p97 : Prop) (p98 : Prop) (p99 : Prop) (p100 : Prop) (p101 : Prop) (p102 : Prop) (p103 : Prop) (p104 : Prop) (p105 : Prop) (p106 : Prop) (p107 : Prop) (p108 : Prop) (p109 : Prop) (p110 : Prop) (p111 : Prop) (p112 : Prop) (p113 : Prop) (p114 : Prop) (p115 : Prop) (p116 : Prop) (p117 : Prop) (p118 : Prop) (p119 : Prop) (p120 : Prop) (p121 : Prop) (p122 : Prop) (p123 : Prop) (p124 : Prop) (p125 : Prop) (p126 : Prop) (p127 : Prop) (p128 : Prop) (p129 : Prop) (y : A), (fun (z : A) => z) x = x := fun _ x _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ => rfl
+
+def idTwo.{u, v} (α : Sort u) (β : Sort v) (a : α) : α := a
+
+theorem finGood (n : Nat) (x : Fin n) : x = x := rfl
+
+theorem fin (n : Nat) (y x : Fin n) : x = x := rfl
+
 end PestkaBad
