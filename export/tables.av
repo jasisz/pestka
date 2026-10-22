@@ -198,10 +198,8 @@ verify denseAdd
     Vector.len(denseAdd(Tables.update(empty(), dense = 65535), Core.Exprs.natLit(7)).chunks) => 1
 
 fn placed(v: Vector<Expr>, j: Int, e: Expr) -> Vector<Expr>
-    ? "v with e at j; j is always in range. The vector is used once, so the update happens in place."
-    match Vector.set(v, j, e)
-        Option.Some(w) -> w
-        Option.None -> freshChunk()
+    ? "v with e at j; j is always in range."
+    Option.withDefault(Vector.set(v, j, e), v)
 
 verify placed
     Vector.get(placed(freshChunk(), 3, Core.Exprs.natLit(1)), 3) => Option.Some(Core.Exprs.natLit(1))
