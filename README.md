@@ -19,25 +19,24 @@ written in Aver, by an AI agent under human guidance.
 ## Status
 
 On the small Lean Kernel Arena tests (all but `perf/` and the large corpora)
-Pestka answers 171 of 171 correctly, and every `perf/` test passes.
+Pestka answers 171 of 171 correctly.
 
-The Arena's large tests, exported as the Arena exports them and checked on
-four workers on an Apple M2 Pro. These numbers are from before the free
-variables were named by what they are (see below) and are being measured
-again:
+The Arena's large tests and its `perf/` tests, exported as the Arena exports
+them and checked on an Apple M2 Pro: on one worker, as the Arena runs Pestka,
+and on eight, the default. The instructions retired on one worker are what
+the Arena ranks checkers by.
 
-| Test | Verdict | Time | Peak memory |
-|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 23 s | 0.9 GB |
-| `std` (98,086) | accepted | 43 s | 1.0 GB |
-| `reachability` | accepted | 21 s | 0.4 GB |
-| `con-leche` | accepted | 76 s | 1.2 GB |
-| `cedar` | accepted | 56 s | 1.4 GB |
-| `mathlib` (702,040) | accepted | 951 s | 6.6 GB |
-| `cslib` | accepted | 484 s | 9.2 GB, with an earlier version |
-
-`navier-stokes-euler` is accepted as well. Of `perf/`, `magma-list-deep-n36`
-takes 70 s (the Arena allows 390 s) and `app-lam` under a second.
+| Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 8 workers | Peak, 8 workers |
+|---|---|---|---|---|---|---|
+| `init` (58,170 declarations) | accepted | 234.9 G | 22 s | 0.8 GB | 7.3 s | 1.4 GB |
+| `std` (98,086) | accepted | 418.3 G | 40 s | 1.2 GB | 12 s | 2.5 GB |
+| `reachability` | accepted | 104.9 G | 9.3 s | 0.4 GB | 7.5 s | 0.4 GB |
+| `con-leche` | accepted | 409.9 G | 42 s | 1.0 GB | 17 s | 2.0 GB |
+| `cedar` | accepted | 574.0 G | 56 s | 1.5 GB | 16 s | 2.6 GB |
+| `navier-stokes-euler` | accepted | 2.31 T | 222 s | 3.8 GB | 90 s | 8.2 GB |
+| `cslib` | accepted | 2.54 T | 276 s | 4.0 GB | 75 s | 6.7 GB |
+| `mathlib` (702,040) | accepted | 9.08 T | 1022 s | 8.8 GB | 234 s | 12.2 GB |
+| `perf/`, 28 tests (in brackets `magma-list-deep-n36`) | as expected | 436 G (299 G) | 38 s (26 s) | 1.0 GB | 34 s (26 s) | 1.0 GB |
 
 ## What it does differently
 
