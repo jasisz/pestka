@@ -11,7 +11,7 @@ module Telescope
 fn consume(e: Expr) -> Expr
     ? "Strips optParam, autoParam, outParam and semiOutParam around a type."
     match Core.Apps.fnOf(e)
-        Expr.Const(Name.Str(Name.Anon, g, _), _) -> consumeGadget(e, g, Core.Apps.argsOf(e))
+        Expr.Const(_, Name.Str(Name.Anon, g, _), _) -> consumeGadget(e, g, Core.Apps.argsOf(e))
         _ -> e
 
 verify consume
@@ -78,7 +78,7 @@ verify typeOfFVar
 fn mentions(e: Expr, ns: List<Name>) -> Bool
     ? "Whether a constant named in ns occurs in e."
     match e
-        Expr.Const(n, _) -> List.contains(ns, n)
+        Expr.Const(_, n, _) -> List.contains(ns, n)
         Expr.App(_, f, a) -> Bool.or(mentions(f, ns), mentions(a, ns))
         Expr.Lam(_, _, t, b, _) -> Bool.or(mentions(t, ns), mentions(b, ns))
         Expr.Pi(_, _, t, b, _) -> Bool.or(mentions(t, ns), mentions(b, ns))

@@ -2,7 +2,7 @@ module Exprs
     intent =
         "Lean expressions with de Bruijn indices for bound variables and"
         "numbered free variables for the local context. Every compound node"
-        "carries its metadata (structural hash, loose bound variable range,"
+        "and every constant carries its metadata (structural hash, loose bound variable range,"
         "whether free variables or universe parameters occur, and its size as"
         "a tree, capped, so that traversals know when memoizing pays), packed"
         "into one Int so that every node stays small, computed once"
@@ -52,7 +52,7 @@ type Expr
     BVar(Int)
     FVar(Int)
     Sort(Level)
-    Const(Name, List<Level>)
+    Const(Int, Name, List<Level>)
     App(Int, Expr, Expr)
     Lam(Int, Name, Expr, Expr, Binder)
     Pi(Int, Name, Expr, Expr, Binder)
@@ -83,8 +83,8 @@ verify sort
     looseRange(sort(Level.Zero)) => 0
 
 fn cnst(n: Name, us: List<Level>) -> Expr
-    ? "A constant applied to universe levels."
-    Expr.Const(n, us)
+    ? "A constant applied to universe levels. Its metadata is packed in, as a compound node's is: an application meets constants at its head, and walking the levels there again every time cost more than the word."
+    Expr.Const(pack(Meta(hash = Core.Hash.mix(Core.Hash.mix(3, Core.Names.hashOf(n)), levelsHash(us, 0)), range = 0, fvars = false, params = anyParam(us), size = 1)), n, us)
 
 verify cnst
     hasParam(cnst(Core.Names.anon(), [Level.Param(Core.Names.anon())])) => true
@@ -163,7 +163,7 @@ fn metaOf(e: Expr) -> Meta
         Expr.BVar(i) -> Meta(hash = Core.Hash.mix(1, i), range = i + 1, fvars = false, params = false, size = 1)
         Expr.FVar(i) -> Meta(hash = Core.Hash.mix(11, i), range = 0, fvars = true, params = false, size = 1)
         Expr.Sort(l) -> Meta(hash = Core.Hash.mix(2, Core.Levels.hashOf(l)), range = 0, fvars = false, params = Core.Levels.hasParam(l), size = 1)
-        Expr.Const(n, us) -> Meta(hash = Core.Hash.mix(Core.Hash.mix(3, Core.Names.hashOf(n)), levelsHash(us, 0)), range = 0, fvars = false, params = anyParam(us), size = 1)
+        Expr.Const(m, _, _) -> unpack(m)
         Expr.App(m, _, _) -> unpack(m)
         Expr.Lam(m, _, _, _, _) -> unpack(m)
         Expr.Pi(m, _, _, _, _) -> unpack(m)
@@ -199,8 +199,9 @@ verify anyParam
     anyParam([Level.Zero, Level.Param(Core.Names.anon())]) => true
 
 fn packedOf(e: Expr) -> Int
-    ? "The packed metadata of a compound node, or -1 for a leaf, whose metadata is computed on the spot."
+    ? "The packed metadata of a compound node or a constant, or -1 for another leaf, whose metadata is computed on the spot."
     match e
+        Expr.Const(m, _, _) -> m
         Expr.App(m, _, _) -> m
         Expr.Lam(m, _, _, _, _) -> m
         Expr.Pi(m, _, _, _, _) -> m
@@ -254,7 +255,6 @@ fn hasParam(e: Expr) -> Bool
     ? "Whether a universe parameter occurs."
     match e
         Expr.Sort(l) -> Core.Levels.hasParam(l)
-        Expr.Const(_, us) -> anyParam(us)
         _ -> Int.mod(flagsIn(packedOf(e)), 2) == 1
 
 verify hasParam

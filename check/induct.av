@@ -77,7 +77,7 @@ verify uniformCtors
 fn uniformIn(blk: Blk, e: Expr, offset: Int) -> Bool
     ? "Visits e at binder depth offset; an occurrence with at most as many arguments as parameters is judged and not entered."
     match Core.Apps.fnOf(e)
-        Expr.Const(n, ls) -> match List.contains(blk.names, n)
+        Expr.Const(_, n, ls) -> match List.contains(blk.names, n)
             true -> match List.len(Core.Apps.argsOf(e)) > blk.nparams
                 true -> uniformChildren(blk, e, offset)
                 false -> uniformOcc(blk, ls, Core.Apps.argsOf(e), offset)

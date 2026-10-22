@@ -38,7 +38,7 @@ fn eval(env: List<Val>, e: Expr) -> Val
         Expr.BVar(i) -> force(nth(env, i))
         Expr.FVar(id) -> Val.Free(id, [])
         Expr.Sort(l) -> Val.Sort(l)
-        Expr.Const(n, ls) -> Val.Cst(n, ls, [])
+        Expr.Const(_, n, ls) -> Val.Cst(n, ls, [])
         Expr.App(_, f, a) -> apply(eval(env, f), delay(env, a))
         Expr.Lam(_, n, d, b, bi) -> Val.Lam(n, delay(env, d), env, b, bi)
         Expr.Pi(_, n, d, b, bi) -> Val.Pi(n, delay(env, d), env, b, bi)
@@ -65,7 +65,7 @@ fn delay(env: List<Val>, a: Expr) -> Val
     match a
         Expr.BVar(i) -> nth(env, i)
         Expr.Sort(l) -> Val.Sort(l)
-        Expr.Const(n, ls) -> Val.Cst(n, ls, [])
+        Expr.Const(_, n, ls) -> Val.Cst(n, ls, [])
         Expr.NatLit(k) -> Val.Nat(k)
         Expr.StrLit(s) -> Val.Str(s)
         Expr.FVar(id) -> Val.Free(id, [])

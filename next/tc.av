@@ -132,7 +132,7 @@ fn inferCore(st: NSt, tenv: List<Val>, env: List<Val>, e: Expr, only: Bool) -> R
         Expr.BVar(i) -> boundType(st, tenv, i)
         Expr.FVar -> Result.Err(bad("the second core met a free variable"))
         Expr.Sort(l) -> inferSort(st, l, only)
-        Expr.Const(n, ls) -> inferConst(st, n, ls, only)
+        Expr.Const(_, n, ls) -> inferConst(st, n, ls, only)
         Expr.App -> inferApp(st, tenv, env, e, only)
         Expr.Lam -> lamLoop(st, st, tenv, env, e, [], only)
         Expr.Pi -> piLoop(st, st, tenv, env, e, [], only)

@@ -152,7 +152,7 @@ verify ctorsReserved
 fn reservedIn(e: Expr) -> Bool
     ? "A constant or projection whose name starts with _nested."
     match e
-        Expr.Const(n, _) -> rootIs(n, "_nested")
+        Expr.Const(_, n, _) -> rootIs(n, "_nested")
         Expr.Proj(_, s, _, x) -> Bool.or(rootIs(s, "_nested"), reservedIn(x))
         Expr.App(_, f, a) -> Bool.or(reservedIn(f), reservedIn(a))
         Expr.Lam(_, _, t, b, _) -> Bool.or(reservedIn(t), reservedIn(b))
@@ -211,7 +211,7 @@ verify nestedIn
 fn nestedHere(env: Env, names: List<Name>, e: Expr) -> Bool
     ? "e is I As ... with I an earlier inductive type and a block type in As."
     match Core.Apps.fnOf(e)
-        Expr.Const(n, _) -> match Check.State.envGet(env, n)
+        Expr.Const(_, n, _) -> match Check.State.envGet(env, n)
             Option.Some(Const.CInduct(iv)) -> paramsMention(List.take(Core.Apps.argsOf(e), iv.numParams), names)
             _ -> false
         _ -> false

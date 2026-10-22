@@ -343,7 +343,7 @@ fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Int, Tuple<Expr, Expr
         false -> SR(e = e, memo = memo)
         true -> match e
             Expr.Sort(l) -> SR(e = Core.Exprs.sort(Core.Univ.instantiate(l, ps, us)), memo = memo)
-            Expr.Const(n, ls) -> SR(e = Core.Exprs.cnst(n, levelsOf(ls, ps, us, [])), memo = memo)
+            Expr.Const(_, n, ls) -> SR(e = Core.Exprs.cnst(n, levelsOf(ls, ps, us, [])), memo = memo)
             _ -> match Core.Exprs.treeSize(e) < 32
                 true -> levelNode(e, ps, us, memo)
                 false -> lmemoed(e, ps, us, memo, Core.Exprs.hashOf(e))

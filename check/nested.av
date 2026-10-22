@@ -118,7 +118,7 @@ fn nestedInd(env: Env, names: List<Name>, e: Expr) -> Option<IndType>
     match Core.Apps.isApp(e)
         false -> Option.None
         true -> match Core.Apps.fnOf(e)
-            Expr.Const(n, _) -> match Check.State.envGet(env, n)
+            Expr.Const(_, n, _) -> match Check.State.envGet(env, n)
                 Option.Some(Const.CInduct(iv)) -> match Bool.and(iv.numParams <= Core.Apps.numArgs(e), anyMentions(List.take(Core.Apps.argsOf(e), iv.numParams), names))
                     true -> Option.Some(iv)
                     false -> Option.None
@@ -364,7 +364,7 @@ verify uniqueName
 fn levelsOf(fn0: Expr) -> List<Level>
     ? "Universe levels of the nested type's head."
     match fn0
-        Expr.Const(_, ls) -> ls
+        Expr.Const(_, _, ls) -> ls
         _ -> []
 
 verify levelsOf
@@ -620,7 +620,7 @@ fn ruleCtor(auxEnv: Map<Name, Const>, ns: NS, c: Name, renamed: Bool) -> Result<
         false -> Result.Ok(c)
         true -> match auxCtorOf(auxEnv, ns, c)
             Option.Some((nested, auxI)) -> match Core.Apps.fnOf(nested)
-                Expr.Const(i, _) -> Result.Ok(replacePrefix(c, auxI, i))
+                Expr.Const(_, i, _) -> Result.Ok(replacePrefix(c, auxI, i))
                 _ -> Result.Err(reject("failed to restore nested inductive types, nested occurrence is not an inductive type application"))
             Option.None -> Result.Err(reject("failed to restore nested inductive types, '{Core.Names.render(c)}' is not a constructor of an auxiliary type"))
 
@@ -652,7 +652,7 @@ verify restoreExpr
 fn restoreBody(auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, as: List<Expr>, t: Expr) -> Result<Expr, Fail>
     ? "Renamed recursors, auxiliary types and auxiliary constructors become what they stand for; elsewhere the children."
     match t
-        Expr.Const(n, ls) -> match lookupName(recMap, n)
+        Expr.Const(_, n, ls) -> match lookupName(recMap, n)
             Option.Some(n2) -> Result.Ok(Core.Exprs.cnst(n2, ls))
             Option.None -> restoreHead(auxEnv, ns, recMap, as, t)
         _ -> restoreHead(auxEnv, ns, recMap, as, t)
@@ -663,7 +663,7 @@ verify restoreBody
 fn restoreHead(auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, as: List<Expr>, t: Expr) -> Result<Expr, Fail>
     ? "An application headed by an auxiliary type or constructor."
     match Core.Apps.fnOf(t)
-        Expr.Const(f, _) -> match lookupNested(ns.aux, f)
+        Expr.Const(_, f, _) -> match lookupNested(ns.aux, f)
             Option.Some(nested) -> auxTypeApp(ns, as, nested, Core.Apps.argsOf(t))
             Option.None -> match auxCtorOf(auxEnv, ns, f)
                 Option.Some((nested, auxI)) -> auxCtorApp(ns, as, nested, auxI, f, Core.Apps.argsOf(t))
@@ -694,7 +694,7 @@ fn auxCtorApp(ns: NS, as: List<Expr>, nested: Expr, auxI: Name, f: Name, args: L
     match List.len(args) < ns.nparams
         true -> Result.Err(reject("failed to restore nested inductive types, auxiliary constructor is not applied to all parameters"))
         false -> match Core.Apps.fnOf(inAs(ns, as, nested))
-            Expr.Const(i, ils) -> Result.Ok(Core.Apps.mkApps(Core.Apps.mkApps(Core.Exprs.cnst(replacePrefix(f, auxI, i), ils), Core.Apps.argsOf(inAs(ns, as, nested))), List.drop(args, ns.nparams)))
+            Expr.Const(_, i, ils) -> Result.Ok(Core.Apps.mkApps(Core.Apps.mkApps(Core.Exprs.cnst(replacePrefix(f, auxI, i), ils), Core.Apps.argsOf(inAs(ns, as, nested))), List.drop(args, ns.nparams)))
             _ -> Result.Err(reject("failed to restore nested inductive types, nested occurrence is not an inductive type application"))
 
 verify auxCtorApp

@@ -117,7 +117,7 @@ fn remember(r: RE, e: Expr, only: Bool) -> RE
 fn levelled(e: Expr) -> Bool
     ? "A constant at some universe levels."
     match e
-        Expr.Const(_, ls) -> List.len(ls) > 0
+        Expr.Const(_, _, ls) -> List.len(ls) > 0
         _ -> false
 
 verify levelled
@@ -144,7 +144,7 @@ fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
         Expr.BVar(i) -> boundType(st, List.drop(env, i))
         Expr.FVar(id) -> Result.Ok(RE(e = Check.State.localType(st.lctx, id)?, st = st))
         Expr.Sort(l) -> inferSort(st, l, only)
-        Expr.Const(n, ls) -> inferConst(st, n, ls, only)
+        Expr.Const(_, n, ls) -> inferConst(st, n, ls, only)
         Expr.App(_, f, a) -> inferApp(st, e, f, a, env, only)
         Expr.Lam -> lamLoop(st, e, env, [], only)
         Expr.Pi -> piLoop(st, e, env, [], [], only)
@@ -719,7 +719,7 @@ verify inferProj
 fn projFrom(st: St, s: Name, idx: Int, x: Expr, ty: Expr, head: Expr, args: List<Expr>) -> Result<RE, Fail>
     ? "The type's head must be the projection's structure."
     match head
-        Expr.Const(n, ls) -> match n == s
+        Expr.Const(_, n, ls) -> match n == s
             true -> projInduct(st, idx, x, ty, ls, args, Check.State.lookup(st, n))
             false -> Result.Err(badProj())
         _ -> Result.Err(badProj())
@@ -854,7 +854,7 @@ verify whnfCore
 fn rigidHead(st: St, f: Expr) -> Bool
     ? "A head under which whnfCore can do nothing: a constant that is neither a recursor nor part of the quotient package, a free variable without a let value, a sort, a pi or a literal. An application with such a head is its own whnfCore, so it skips the cache."
     match f
-        Expr.Const(n, _) -> match Check.State.lookup(st, n)
+        Expr.Const(_, n, _) -> match Check.State.lookup(st, n)
             Option.Some(Const.CRec) -> false
             Option.Some(Const.CQuot) -> false
             _ -> true
@@ -982,7 +982,7 @@ verify whnfMaybe
 fn projCore(st: St, c: Expr, s: Name, i: Int) -> Option<Expr>
     ? "Field i of a constructor application of structure s."
     match Core.Apps.fnOf(c)
-        Expr.Const(n, _) -> projOfCtor(Check.State.lookup(st, n), Core.Apps.argsOf(c), s, i)
+        Expr.Const(_, n, _) -> projOfCtor(Check.State.lookup(st, n), Core.Apps.argsOf(c), s, i)
         _ -> Option.None
 
 verify projCore
@@ -1023,8 +1023,8 @@ fn quotReduce(st: St, e: Expr) -> Result<RO, Fail>
     match quotReady(st)
         false -> Result.Ok(RO(o = Option.None, st = st))
         true -> match Core.Apps.fnOf(e)
-            Expr.Const(Name.Str(Name.Str(Name.Anon, "Quot", _), "lift", _), _) -> quotApply(st, Core.Apps.argsOf(e), 5)
-            Expr.Const(Name.Str(Name.Str(Name.Anon, "Quot", _), "ind", _), _) -> quotApply(st, Core.Apps.argsOf(e), 4)
+            Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Quot", _), "lift", _), _) -> quotApply(st, Core.Apps.argsOf(e), 5)
+            Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Quot", _), "ind", _), _) -> quotApply(st, Core.Apps.argsOf(e), 4)
             _ -> Result.Ok(RO(o = Option.None, st = st))
 
 verify quotReduce
@@ -1060,7 +1060,7 @@ verify lastArg
 fn inductiveReduce(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RO, Fail>
     ? "Iota: a recursor applied to a constructor reduces by that constructor's rule."
     match Core.Apps.fnOf(e)
-        Expr.Const(n, ls) -> recOf(st, e, ls, Check.State.lookup(st, n), cheapRec, cheapProj)
+        Expr.Const(_, n, ls) -> recOf(st, e, ls, Check.State.lookup(st, n), cheapRec, cheapProj)
         _ -> Result.Ok(RO(o = Option.None, st = st))
 
 verify inductiveReduce
@@ -1213,7 +1213,7 @@ verify firstCtor
 fn nullaryCtor(st: St, ty: Expr, nparams: Int) -> Option<Expr>
     ? "The type's first constructor applied to its parameters."
     match Core.Apps.fnOf(ty)
-        Expr.Const(n, ls) -> nullaryOf(firstCtor(st, n), ls, List.take(Core.Apps.argsOf(ty), nparams))
+        Expr.Const(_, n, ls) -> nullaryOf(firstCtor(st, n), ls, List.take(Core.Apps.argsOf(ty), nparams))
         _ -> Option.None
 
 verify nullaryCtor
@@ -1240,7 +1240,7 @@ verify isNonRecStructure
 fn isCtorApp(st: St, e: Expr) -> Bool
     ? "Headed by a constructor."
     match Core.Apps.fnOf(e)
-        Expr.Const(n, _) -> match Check.State.lookup(st, n)
+        Expr.Const(_, n, _) -> match Check.State.lookup(st, n)
             Option.Some(Const.CCtor) -> true
             _ -> false
         _ -> false
@@ -1285,7 +1285,7 @@ verify structExpand
 fn expandEtaStruct(st: St, ty: Expr, e: Expr) -> Expr
     ? "mk params e.0 ... e.(n-1)."
     match Core.Apps.fnOf(ty)
-        Expr.Const(n, ls) -> etaWith(st, n, ls, Core.Apps.argsOf(ty), e, firstCtor(st, n))
+        Expr.Const(_, n, ls) -> etaWith(st, n, ls, Core.Apps.argsOf(ty), e, firstCtor(st, n))
         _ -> e
 
 verify expandEtaStruct
@@ -1416,7 +1416,7 @@ verify whnfRun
 fn deltaRigid(st: St, f: Expr) -> Bool
     ? "A head under which whnf can do nothing: a constructor other than Nat.succ, an inductive type, an axiom, an opaque constant, a free variable without a let value, a sort, a pi or a literal."
     match f
-        Expr.Const(n, _) -> match Core.Apps.isConst(f, Check.Lits.natSuccName())
+        Expr.Const(_, n, _) -> match Core.Apps.isConst(f, Check.Lits.natSuccName())
             true -> false
             false -> match Check.State.lookup(st, n)
                 Option.Some(Const.CInduct) -> true
@@ -1467,7 +1467,7 @@ fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool,
         Expr.BVar(i) -> lclo(st, nthClo(env, i), stack, ms, delta, cheapRec, cheapProj)
         Expr.Let(_, _, _, v, body) -> lcore(st, body, List.prepend(closure(v, env, ms.next), env), stack, MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
         Expr.FVar(id) -> lvar(st, t, Check.State.localValue(st.lctx, id), stack, ms, delta, cheapRec, cheapProj)
-        Expr.Const(n, ls) -> lconst(st, t, ls, Check.State.lookup(st, n), stack, ms, delta, cheapRec, cheapProj)
+        Expr.Const(_, n, ls) -> lconst(st, t, ls, Check.State.lookup(st, n), stack, ms, delta, cheapRec, cheapProj)
         Expr.Proj(_, s, i, x) -> lproject(st, s, i, matTerm(x, env, ms), stack, delta, cheapRec, cheapProj)
         _ -> Result.Ok(RE(e = lstuck(matTerm(t, env, ms), stack), st = st))
 
@@ -1569,7 +1569,7 @@ verify lnat
 fn natArity(f: Expr, n: Int) -> Int
     ? "How many arguments reduceNat takes for this head and this many arguments: 1 for Nat.succ, 2 for a binary Nat operation, 0 when it does not apply."
     match f
-        Expr.Const(Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []) -> match Bool.and(op == "succ", n == 1)
+        Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []) -> match Bool.and(op == "succ", n == 1)
             true -> 1
             false -> match Bool.and(Check.Lits.isNatOp(op), n == 2)
                 true -> 2
@@ -1888,7 +1888,7 @@ verify unfoldDefinition
 fn unfoldConst(st: St, f: Expr) -> RO
     ? "The instantiated value of a constant. A value at universe levels is remembered for the rest of the declaration, since instantiating the levels walks the whole value each time."
     match f
-        Expr.Const(n, ls) -> match ls
+        Expr.Const(_, n, ls) -> match ls
             [] -> RO(o = unfoldValue(Check.State.lookup(st, n), ls), st = st)
             _ -> unfoldCached(st, f, n, ls, Check.State.cacheGet(st.unfoldCache, f))
         _ -> RO(o = Option.None, st = st)
@@ -1938,7 +1938,7 @@ verify valueAt
 fn isDelta(st: St, e: Expr) -> Option<Const>
     ? "The head's definition, when delta reduction can unfold it."
     match Core.Apps.fnOf(e)
-        Expr.Const(n, ls) -> deltaConst(Check.State.lookup(st, n), ls)
+        Expr.Const(_, n, ls) -> deltaConst(Check.State.lookup(st, n), ls)
         _ -> Option.None
 
 verify isDelta
@@ -1960,8 +1960,8 @@ verify deltaConst
 fn reduceNat(st: St, e: Expr) -> Result<RO, Fail>
     ? "Nat.succ and the binary Nat functions on literal arguments."
     match e
-        Expr.App(_, Expr.Const(Name.Str(Name.Str(Name.Anon, "Nat", _), "succ", _), []), a) -> natSucc(whnf(st, a)?)
-        Expr.App(_, Expr.App(_, Expr.Const(Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []), a), b) -> natBin(st, op, a, b)
+        Expr.App(_, Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), "succ", _), []), a) -> natSucc(whnf(st, a)?)
+        Expr.App(_, Expr.App(_, Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []), a), b) -> natBin(st, op, a, b)
         _ -> Result.Ok(RO(o = Option.None, st = st))
 
 verify reduceNat
@@ -2213,8 +2213,8 @@ verify eqAfterDelta
 fn sameConst(t: Expr, s: Expr) -> Bool
     ? "The same constant at equivalent levels."
     match t
-        Expr.Const(a, la) -> match s
-            Expr.Const(b, lb) -> Bool.and(a == b, Core.Univ.isEquivList(la, lb))
+        Expr.Const(_, a, la) -> match s
+            Expr.Const(_, b, lb) -> Bool.and(a == b, Core.Univ.isEquivList(la, lb))
             _ -> false
         _ -> false
 
@@ -2743,7 +2743,7 @@ verify sameHead
 fn headLevels(e: Expr) -> List<Level>
     ? "Universe levels of the head constant."
     match Core.Apps.fnOf(e)
-        Expr.Const(_, ls) -> ls
+        Expr.Const(_, _, ls) -> ls
         _ -> []
 
 verify headLevels
@@ -3003,7 +3003,7 @@ verify etaStruct
 fn etaStructCore(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
     ? "s must be a full constructor application of a non-recursive structure."
     match Core.Apps.fnOf(s)
-        Expr.Const(n, _) -> match Check.State.lookup(st, n)
+        Expr.Const(_, n, _) -> match Check.State.lookup(st, n)
             Option.Some(Const.CCtor(k)) -> match Bool.and(Core.Apps.numArgs(s) == k.numParams + k.numFields, isNonRecStructure(st, k.induct))
                 true -> etaStructTypes(st, t, s, k)
                 false -> no(st)
@@ -3078,7 +3078,7 @@ fn unitLike(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
     tt = inferType(st, t)?
     w = whnf(tt.st, tt.e)?
     match Core.Apps.fnOf(w.e)
-        Expr.Const(n, _) -> match Bool.and(isNonRecStructure(w.st, n), noFields(w.st, firstCtor(w.st, n)))
+        Expr.Const(_, n, _) -> match Bool.and(isNonRecStructure(w.st, n), noFields(w.st, firstCtor(w.st, n)))
             true -> unitTypes(w.st, w.e, s)
             false -> no(w.st)
         _ -> no(w.st)

@@ -63,7 +63,7 @@ verify isApp
 fn isConst(e: Expr, n: Name) -> Bool
     ? "A constant with this name, at any levels."
     match e
-        Expr.Const(m, _) -> m == n
+        Expr.Const(_, m, _) -> m == n
         _ -> false
 
 verify isConst
@@ -73,7 +73,7 @@ verify isConst
 fn constName(e: Expr) -> Option<Name>
     ? "The name of a constant."
     match e
-        Expr.Const(n, _) -> Option.Some(n)
+        Expr.Const(_, n, _) -> Option.Some(n)
         _ -> Option.None
 
 verify constName
