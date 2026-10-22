@@ -109,34 +109,15 @@ verify inferCached
     resultExpr(inferCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), true, Option.Some(Core.Exprs.bvar(1)))) => Core.Exprs.bvar(1)
 
 fn remember(r: RE, e: Expr, only: Bool) -> RE
-    ? "Records the inferred type, when the term is worth an entry: a large one, or a constant at universe levels, whose type is instantiated at them each time."
-    match Bool.or(worthKeeping(e), levelled(e))
-        false -> r
-        true -> rememberAs(r, e, only)
-
-fn levelled(e: Expr) -> Bool
-    ? "A constant at some universe levels."
-    match e
-        Expr.Const(_, _, ls) -> List.len(ls) > 0
-        _ -> false
-
-verify levelled
-    levelled(Core.Exprs.cnst(Core.Names.anon(), [Level.Zero])) => true
-    levelled(Core.Exprs.cnst(Core.Names.anon(), [])) => false
-
-fn rememberAs(r: RE, e: Expr, only: Bool) -> RE
-    ? "Into the cache for the mode, or the shared one for closed terms."
+    ? "Records the inferred type: into the cache for the mode, or the shared one for closed terms. Every term gets an entry: a cache is a map changed in place, and an entry costs less than finding even a small term's type again."
     match only
         true -> RE(e = r.e, st = St.update(r.st, inferCache = Check.State.cachePut(r.st.inferCache, e, r.e)))
         false -> match shared(e)
             true -> RE(e = r.e, st = St.update(r.st, closed = Check.State.cachePut(r.st.closed, e, r.e)))
             false -> RE(e = r.e, st = St.update(r.st, checkCache = Check.State.cachePut(r.st.checkCache, e, r.e)))
 
-
-verify rememberAs
-    Core.Cache.size(rememberAs(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 1
 verify remember
-    Core.Cache.size(remember(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 0
+    Core.Cache.size(remember(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 1
 
 fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "One inference step by the shape of e, whose loose bound variables stand for the free variables in env, the innermost first."
@@ -172,9 +153,7 @@ fn inferIn(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
         true -> infer(st, e, only)
         false -> match only
             true -> infer(st, minst(e, env), only)
-            false -> match worthKeeping(e)
-                false -> inferCore(st, e, env, only)
-                true -> openKeyed(st, e, env, env, only)
+            false -> openKeyed(st, e, env, env, only)
 
 verify inferIn
     resultExpr(inferIn(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default), [Core.Exprs.fvar(0)], false)) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.fvar(0), Core.Exprs.fvar(0), Binder.Default)
@@ -1867,14 +1846,6 @@ verify mcached
 
 
 
-fn worthKeeping(e: Expr) -> Bool
-    ? "A term large enough that remembering a result about it costs less than finding the result again: a cache entry copies a path of the trie."
-    Core.Exprs.treeSize(e) >= 4
-
-verify worthKeeping
-    worthKeeping(Core.Exprs.bvar(0)) => false
-    worthKeeping(Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.fvar(2))) => true
-
 fn minst(t: Expr, env: List<Expr>) -> Expr
     ? "t with the machine's values put in for its loose bound variables."
     match env
@@ -1886,13 +1857,11 @@ verify minst
     minst(Core.Exprs.bvar(0), []) => Core.Exprs.bvar(0)
 
 fn whnfStore(st: St, orig: Expr, r: Expr) -> RE
-    ? "Caches a whnf result, when the term is worth an entry."
-    match worthKeeping(orig)
-        true -> RE(e = r, st = St.update(st, whnfCache = Check.State.cachePut(st.whnfCache, orig, r)))
-        false -> RE(e = r, st = st)
+    ? "Caches a whnf result."
+    RE(e = r, st = St.update(st, whnfCache = Check.State.cachePut(st.whnfCache, orig, r)))
 
 verify whnfStore
-    Core.Cache.size(whnfStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1)).st.whnfCache) => 0
+    Core.Cache.size(whnfStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1)).st.whnfCache) => 1
 
 fn unfoldDefinition(st: St, e: Expr) -> RO
     ? "Unfolds the head constant if it is a definition or theorem at the right number of levels."
@@ -2096,17 +2065,15 @@ verify remembered
     resultBool(remembered(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => false
 
 fn keptNo(fails: Map<Int, List<Tuple<Expr, Expr>>>, t: Expr, s: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
-    ? "Failures of this declaration. Its free variables are its own, each with one type and value, so a pair that was different stays different; terms with loose bound variables are left out, as are pairs too small to be worth an entry."
+    ? "Failures of this declaration. Its free variables are its own, each with one type and value, so a pair that was different stays different; terms with loose bound variables are left out."
     match Bool.and(Core.Exprs.looseRange(t) == 0, Core.Exprs.looseRange(s) == 0)
         false -> fails
-        true -> match Bool.or(worthKeeping(t), worthKeeping(s))
-            true -> Check.State.pairPut(fails, t, s)
-            false -> fails
+        true -> Check.State.pairPut(fails, t, s)
 
 verify keptNo
     Core.Cache.size(keptNo(Core.Cache.empty(), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.fvar(3))) => 1
     Core.Cache.size(keptNo(Core.Cache.empty(), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.fvar(3))) => 0
-    Core.Cache.size(keptNo(Core.Cache.empty(), Core.Exprs.fvar(0), Core.Exprs.fvar(3))) => 0
+    Core.Cache.size(keptNo(Core.Cache.empty(), Core.Exprs.fvar(0), Core.Exprs.fvar(3))) => 1
 
 verify isDefEq
     resultBool(isDefEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Max(Level.Zero, Level.Zero)), Core.Exprs.bvar(0), Binder.Implicit))) => true
