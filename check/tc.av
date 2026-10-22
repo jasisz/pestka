@@ -178,7 +178,7 @@ fn openCached(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
         Option.None -> Result.Ok(rememberOpen(inferCore(st, e, env, only)?, Core.Apps.mkApps(e, used), only))
 
 verify openCached
-    resultExpr(openCached(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.natLit(7), Option.None, Binder.Default).st, Core.Exprs.bvar(0), [Core.Exprs.fvar(4294967296)], true)) => Core.Exprs.natLit(7)
+    resultExpr(openCached(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.natLit(7), Option.None, Binder.Default).st, Core.Exprs.bvar(0), [Core.Exprs.fvar(1)], true)) => Core.Exprs.natLit(7)
 
 fn rememberOpen(r: RE, key: Expr, only: Bool) -> RE
     ? "Records an open term's type under its key, in the cache for the mode."
@@ -399,8 +399,8 @@ fn scopeLevel(b: Expr, rev: List<Expr>) -> Int
         Option.Some(x) -> Int.max(Core.Exprs.fvLevel(b), Core.Exprs.fvLevel(x))
 
 verify scopeLevel
-    scopeLevel(Core.Exprs.bvar(0), [Core.Exprs.fvar(3 * 4294967296)]) => 4
-    scopeLevel(Core.Exprs.bvar(0), [Core.Exprs.natLit(0), Core.Exprs.fvar(3 * 4294967296)]) => 4
+    scopeLevel(Core.Exprs.bvar(0), [Core.Exprs.fvar(3)]) => 4
+    scopeLevel(Core.Exprs.bvar(0), [Core.Exprs.natLit(0), Core.Exprs.fvar(3)]) => 4
     scopeLevel(Core.Exprs.fvar(0), []) => 1
 
 fn firstVar(rev: List<Expr>) -> Option<Expr>

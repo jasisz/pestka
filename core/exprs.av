@@ -176,8 +176,9 @@ fn metaOf(e: Expr) -> Meta
 verify metaOf
     metaOf(bvar(0)).range => 1
     metaOf(fvar(3)).fvars => true
-    metaOf(fvar(3)).level => 1
-    metaOf(fvar(2 * 4294967296 + 3)).level => 3
+    metaOf(fvar(3 * 1024)).level => 1
+    metaOf(fvar(3 * 1024 + 2)).level => 3
+    metaOf(fvar(5 * 1024 + 1023)).level => 1023
     metaOf(sort(Level.Param(Core.Names.anon()))).params => true
     metaOf(strLit("x")).range => 0
 
@@ -357,12 +358,12 @@ verify treeSize
     treeSize(app(bvar(0), app(bvar(1), bvar(2)))) => 5
 
 fn levelOfId(i: Int) -> Int
-    ? "The level a free variable's number carries: the number is the level times 2^32 plus a serial number."
-    Int.div(i, 4294967296)
+    ? "The level a free variable's number carries: the number is a serial number times 1024 plus the level, 1023 standing for any level from 1023 up."
+    Int.mod(i, 1024)
 
 verify levelOfId
-    levelOfId(3) => 0
-    levelOfId(5 * 4294967296 + 7) => 5
+    levelOfId(3 * 1024) => 0
+    levelOfId(7 * 1024 + 5) => 5
 
 fn fvLevel(e: Expr) -> Int
     ? "One more than the highest level of a free variable occurring in e; 0 when none does. Saturated at 1023, which means: at least that."
@@ -372,7 +373,7 @@ fn fvLevel(e: Expr) -> Int
 
 verify fvLevel
     fvLevel(bvar(0)) => 0
-    fvLevel(app(fvar(3), fvar(2 * 4294967296))) => 3
+    fvLevel(app(fvar(3 * 1024), fvar(2))) => 3
 
 fn levelIn(p: Int) -> Int
     ? "The free variable level in a packed word; a leaf other than a free variable has none."

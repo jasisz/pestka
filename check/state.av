@@ -332,7 +332,7 @@ verify localValue
 decision LevelledVariables
     date = "2026-10-22"
     reason =
-        "A free variable's number is its level times 2^32 plus a serial number."
+        "A free variable's number is a serial number times 1024 plus its level."
         "Where the checker opens a binder it knows the binder's scope, and the"
         "variable's level is the first above every free variable in the"
         "binder, in its type and value, and in the binders of its telescope"
@@ -340,30 +340,36 @@ decision LevelledVariables
         "and binder info is the same variable: two such variables never meet"
         "in one term, since a variable's level is above every variable its"
         "binder holds, and they have the same type and value, so whatever"
-        "holds of a term with one holds of it with the other. So a binder"
+        "holds of a term with one holds of it with the other: in it, in the"
+        "type found for it, in the values of let variables, in a pair"
+        "compared, since each of those holds only variables of its scope and"
+        "of their types and values, all at lower levels. Within a telescope"
+        "the levels rise, so the variables a telescope binds are distinct and"
+        "abstracting them out of a body is unambiguous. So a binder"
         "opened again gets its variable again, and the results kept about"
         "terms holding it are found again, where a fresh number each time made"
         "every opening new. Elsewhere a variable is fresh, above every level"
-        "used so far."
+        "used so far; past level 1022 it is fresh too, its level read as"
+        "1023 or more. The serial number has no bound, so numbers never wrap."
     chosen = "LevelledVariables"
     rejected = ["FreshNumbers"]
     impacts = [names, namesAt]
 
 fn serialOf(id: Int) -> Int
     ? "The serial number of a free variable, which keys the local context."
-    Int.mod(id, 4294967296)
+    Int.div(id, 1024)
 
 verify serialOf
-    serialOf(3 * 4294967296 + 5) => 5
+    serialOf(5 * 1024 + 3) => 5
 
 fn names(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder) -> RE
     ? "Declares a fresh free variable above every level used so far, where the scope it reaches is not known, and returns it."
     level = st.topLevel + 1
     serial = st.next
-    RE(e = Core.Exprs.fvar(level * 4294967296 + serial), st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), next = serial + 1, topLevel = level))
+    RE(e = Core.Exprs.fvar(serial * 1024 + Int.min(level, 1023)), st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), next = serial + 1, topLevel = level))
 
 verify names
-    names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).e => Core.Exprs.fvar(4294967296)
+    names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).e => Core.Exprs.fvar(1)
     names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).st.next => 1
 
 fn namesAt(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, scope: Int) -> RE
@@ -376,7 +382,7 @@ fn namesAt(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, scope: In
 verify namesAt
     namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).e => Core.Exprs.fvar(0)
     namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).e => Core.Exprs.fvar(0)
-    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 1).e => Core.Exprs.fvar(4294967296 + 1)
+    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 1).e => Core.Exprs.fvar(1024 + 1)
 
 fn namesKeyed(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, level: Int, code: Int) -> RE
     ? "The variable kept for these parts, or a new one at level kept for them. The parts are compared where they are; the term that keeps them is built only for a new variable."
@@ -386,13 +392,13 @@ fn namesKeyed(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, level:
         Option.None -> namesNew(st, n, ty, value, bi, level, code, h)
 
 verify namesKeyed
-    namesKeyed(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 2, 32).e => Core.Exprs.fvar(2 * 4294967296)
+    namesKeyed(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 2, 32).e => Core.Exprs.fvar(2)
 
 fn namesNew(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, level: Int, code: Int, h: Int) -> RE
     ? "A new variable at level, kept under its parts."
     serial = st.next
     top = Int.max(st.topLevel, level)
-    x = Core.Exprs.fvar(level * 4294967296 + serial)
+    x = Core.Exprs.fvar(serial * 1024 + level)
     RE(e = x, st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), vars = Core.Cache.add(st.vars, h, (varKey(code, ty, value), x)), next = serial + 1, topLevel = top))
 
 verify namesNew
@@ -578,7 +584,7 @@ fn mkBinding(lctx: Locals, ids: List<Int>, body: Expr, isLam: Bool, dropDeadLet:
     wrap(lctx, List.reverse(ids), ids, Core.Subst.abstractFVars(body, ids), isLam, dropDeadLet)
 
 verify mkBinding
-    mkBinding(names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st.lctx, [4294967296], Core.Exprs.fvar(4294967296), false, false) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
+    mkBinding(names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st.lctx, [1], Core.Exprs.fvar(1), false, false) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
 
 fn wrap(lctx: Locals, revIds: List<Int>, ids: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
     ? "Adds the binders from the innermost out; the type of variable i is abstracted over the variables before it."

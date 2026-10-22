@@ -161,7 +161,7 @@ fn shapeField(r: RIx, blk: Blk, t: Expr, b: Expr, i: Int, fieldsRev: List<Expr>,
         Option.None -> ctorShape(loc.st, blk, Core.Subst.instantiate1(b, loc.e), i + 1, List.prepend(loc.e, fieldsRev), recsRev)
 
 verify shapeField
-    shapeField(RIx(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.Blk.start([], 0, [], 0), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default), Core.Exprs.sort(Level.Zero), 0, [], []) => Result.Ok(CF(st = Check.Telescope.localFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default)).st, t = Core.Exprs.sort(Level.Zero), fields = [Core.Exprs.fvar(4294967296)], recs = []))
+    shapeField(RIx(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.Blk.start([], 0, [], 0), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default), Core.Exprs.sort(Level.Zero), 0, [], []) => Result.Ok(CF(st = Check.Telescope.localFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default)).st, t = Core.Exprs.sort(Level.Zero), fields = [Core.Exprs.fvar(1)], recs = []))
 
 fn motiveApp(blk: Blk, infos: List<RInfo>, target: Expr, value: Expr) -> Result<Expr, Fail>
     ? "The motive of target's type applied to target's indices and the value."
