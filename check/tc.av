@@ -69,7 +69,7 @@ fn cachedType(st: St, e: Expr, only: Bool) -> Option<Expr>
     ? "A known type of e: from the cache of closed terms checked in earlier declarations, else from this declaration's cache for the mode."
     match shared(e)
         true -> orCached(Check.State.cacheGet(st.closed, e), st, e, only)
-        false -> Check.State.cacheGet(cacheFor(st, only), e)
+        false -> Check.State.cacheGet(cacheFor(st, only, e), e)
 
 verify cachedType
     cachedType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), true) => Option.None
@@ -78,7 +78,7 @@ fn orCached(hit: Option<Expr>, st: St, e: Expr, only: Bool) -> Option<Expr>
     ? "The shared answer, or this declaration's."
     match hit
         Option.Some -> hit
-        Option.None -> Check.State.cacheGet(cacheFor(st, only), e)
+        Option.None -> Check.State.cacheGet(cacheFor(st, only, e), e)
 
 verify orCached
     orCached(Option.Some(Core.Exprs.natLit(1)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2), true) => Option.Some(Core.Exprs.natLit(1))
@@ -90,14 +90,16 @@ fn shared(e: Expr) -> Bool
 verify shared
     shared(Core.Exprs.natLit(1)) => false
 
-fn cacheFor(st: St, only: Bool) -> Map<Int, List<Tuple<Expr, Expr>>>
-    ? "Inference and checking keep separate caches."
+fn cacheFor(st: St, only: Bool, e: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
+    ? "Inference and checking keep separate caches, and checking a term with a universe parameter one of its declaration's own: checking asks whether the parameter is the declaration's, while the other caches are carried to the next declaration."
     match only
         true -> st.inferCache
-        false -> st.checkCache
+        false -> match Core.Exprs.hasParam(e)
+            true -> st.paramCache
+            false -> st.checkCache
 
 verify cacheFor
-    Core.Cache.size(cacheFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), true)) => 0
+    Core.Cache.size(cacheFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), true, Core.Exprs.natLit(0))) => 0
 
 fn inferCached(st: St, e: Expr, only: Bool, hit: Option<Expr>) -> Result<RE, Fail>
     ? "Uses a cached type or infers and records one."
@@ -114,7 +116,7 @@ fn remember(r: RE, e: Expr, only: Bool) -> RE
         true -> RE(e = r.e, st = St.update(r.st, inferCache = Check.State.cachePut(r.st.inferCache, e, r.e)))
         false -> match shared(e)
             true -> RE(e = r.e, st = St.update(r.st, closed = Check.State.cachePut(r.st.closed, e, r.e)))
-            false -> RE(e = r.e, st = St.update(r.st, checkCache = Check.State.cachePut(r.st.checkCache, e, r.e)))
+            false -> checkedKept(r, e, e)
 
 verify remember
     Core.Cache.size(remember(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 1
@@ -170,7 +172,7 @@ verify openKeyed
 
 fn openCached(st: St, e: Expr, env: List<Expr>, x: Expr, only: Bool) -> Result<RE, Fail>
     ? "An open term's type is cached under the term applied to x, the innermost variable of env. A variable heads an env only once, when its binder is opened, so x stands for the whole env; a term shared under the same binders, as a DAG shares it, is found again. The key keeps e's loose bound variables, so it is never a term that is checked."
-    match findOpen(Core.Cache.get(cacheFor(st, only), openHash(e, x)), e, x)
+    match findOpen(Core.Cache.get(cacheFor(st, only, e), openHash(e, x)), e, x)
         Option.Some(t) -> Result.Ok(RE(e = t, st = st))
         Option.None -> Result.Ok(rememberOpen(inferCore(st, e, env, only)?, Core.Exprs.app(e, x), only))
 
@@ -181,10 +183,19 @@ fn rememberOpen(r: RE, key: Expr, only: Bool) -> RE
     ? "Records an open term's type under its key, in the cache for the mode."
     match only
         true -> RE(e = r.e, st = St.update(r.st, inferCache = Check.State.cachePut(r.st.inferCache, key, r.e)))
-        false -> RE(e = r.e, st = St.update(r.st, checkCache = Check.State.cachePut(r.st.checkCache, key, r.e)))
+        false -> checkedKept(r, key, key)
 
 verify rememberOpen
     Core.Cache.size(rememberOpen(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), false).st.checkCache) => 1
+
+fn checkedKept(r: RE, key: Expr, e: Expr) -> RE
+    ? "Records a checked type under key, in the cache of its declaration when e has a universe parameter (see cacheFor)."
+    match Core.Exprs.hasParam(e)
+        true -> RE(e = r.e, st = St.update(r.st, paramCache = Check.State.cachePut(r.st.paramCache, key, r.e)))
+        false -> RE(e = r.e, st = St.update(r.st, checkCache = Check.State.cachePut(r.st.checkCache, key, r.e)))
+
+verify checkedKept
+    Core.Cache.size(checkedKept(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0)).st.checkCache) => 1
 
 fn openHash(e: Expr, x: Expr) -> Int
     ? "The hash of the key app(e, x), without building it."
@@ -369,7 +380,7 @@ verify lamLoop
 fn lamStep(st: St, n: Name, d: Expr, b: Expr, bi: Binder, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Checks the domain is a type, then declares the variable."
     st1 = domainChecked(st, d, only)?
-    loc = Check.State.namesAt(st1, n, d, Option.None, bi, scopeLevel(b, rev))
+    loc = Check.State.namesAt(st1, n, d, Option.None, bi, scopeLevel(b, rev), firstVar(rev))
     lamLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), only)
 
 verify lamStep
@@ -377,13 +388,26 @@ verify lamStep
 
 fn scopeLevel(b: Expr, rev: List<Expr>) -> Int
     ? "The level a variable opened over b must be above: that of the free variables in b, and of the variables of its telescope opened before it, which b still holds as bound ones. Each of those was opened above the one before it, so the latest is the highest."
-    match rev
-        [] -> Core.Exprs.fvLevel(b)
-        [x, .._] -> Int.max(Core.Exprs.fvLevel(b), Core.Exprs.fvLevel(x))
+    match firstVar(rev)
+        Option.None -> Core.Exprs.fvLevel(b)
+        Option.Some(x) -> Int.max(Core.Exprs.fvLevel(b), Core.Exprs.fvLevel(x))
 
 verify scopeLevel
     scopeLevel(Core.Exprs.bvar(0), [Core.Exprs.fvar(3 * 4294967296)]) => 4
+    scopeLevel(Core.Exprs.bvar(0), [Core.Exprs.natLit(0), Core.Exprs.fvar(3 * 4294967296)]) => 4
     scopeLevel(Core.Exprs.fvar(0), []) => 1
+
+fn firstVar(rev: List<Expr>) -> Option<Expr>
+    ? "The latest variable opened in a telescope or a comparison of binders, past the placeholders a comparison puts for variables a body does not use."
+    match rev
+        [] -> Option.None
+        [x, ..rest] -> match x
+            Expr.FVar -> Option.Some(x)
+            _ -> firstVar(rest)
+
+verify firstVar
+    firstVar([Core.Exprs.natLit(0), Core.Exprs.fvar(2)]) => Option.Some(Core.Exprs.fvar(2))
+    firstVar([]) => Option.None
 
 fn domainChecked(st: St, d: Expr, only: Bool) -> Result<St, Fail>
     ? "In checking mode the domain must be a type."
@@ -440,7 +464,7 @@ fn piStep(st: St, n: Name, d: Expr, b: Expr, bi: Binder, rev: List<Expr>, ids: L
     ? "The domain's sort, then a fresh variable for it."
     t = infer(st, d, only)?
     s = ensureSort(t.st, t.e)?
-    loc = Check.State.namesAt(s.st, n, d, Option.None, bi, scopeLevel(b, rev))
+    loc = Check.State.namesAt(s.st, n, d, Option.None, bi, scopeLevel(b, rev), firstVar(rev))
     piLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), List.prepend(sortLevel(s.e), us), only)
 
 verify piStep
@@ -587,7 +611,7 @@ verify letLoop
 fn letStep(st: St, n: Name, t: Expr, v: Expr, b: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Checks the let's type and value, then declares it."
     st1 = letChecked(st, t, v, only)?
-    loc = Check.State.namesAt(st1, n, t, Option.Some(v), Binder.Default, scopeLevel(b, rev))
+    loc = Check.State.namesAt(st1, n, t, Option.Some(v), Binder.Default, scopeLevel(b, rev), firstVar(rev))
     letLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), only)
 
 verify letStep
@@ -2460,7 +2484,7 @@ verify bindDomains
 fn bindVar(st: St, t: Expr, s: Expr, rev: List<Expr>, isLam: Bool, tyS: Option<Expr>) -> Result<RB, Fail>
     ? "A fresh variable only when a body uses it; otherwise a placeholder."
     match Bool.or(Core.Exprs.looseRange(bodyOf(t)) > 0, Core.Exprs.looseRange(bodyOf(s)) > 0)
-        true -> bindFresh(Check.State.namesAt(st, binderName(s), Option.withDefault(tyS, Core.Subst.instantiate(domainOf(s), rev)), Option.None, binderInfo(s), Int.max(scopeLevel(t, rev), Core.Exprs.fvLevel(s))), t, s, rev, isLam)
+        true -> bindFresh(Check.State.namesAt(st, binderName(s), Option.withDefault(tyS, Core.Subst.instantiate(domainOf(s), rev)), Option.None, binderInfo(s), Int.max(scopeLevel(t, rev), Core.Exprs.fvLevel(s)), firstVar(rev)), t, s, rev, isLam)
         false -> bindLoop(st, bodyOf(t), bodyOf(s), List.prepend(Core.Exprs.cnst(Check.Lits.dontcare, []), rev), isLam)
 
 verify bindVar

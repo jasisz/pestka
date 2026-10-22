@@ -199,6 +199,7 @@ record St
     eager: Bool
     inferCache: Map<Int, List<Tuple<Expr, Expr>>>
     checkCache: Map<Int, List<Tuple<Expr, Expr>>>
+    paramCache: Map<Int, List<Tuple<Expr, Expr>>>
     whnfCache: Map<Int, List<Tuple<Expr, Expr>>>
     coreCache: Map<Int, List<Tuple<Expr, Expr>>>
     eqOk: Map<Int, List<Tuple<Expr, Expr>>>
@@ -223,7 +224,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), paramCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0
@@ -339,7 +340,10 @@ decision LevelledVariables
         "and binder info is the same variable: two such variables never meet"
         "in one term, since a variable's level is above every variable its"
         "binder holds, and they have the same type and value, so whatever"
-        "holds of a term with one holds of it with the other. So a binder"
+        "holds of a term with one holds of it with the other. The variable"
+        "opened just before it in its telescope is part of it too, so that"
+        "the latest variable of a telescope stands for all of it, as the"
+        "cache of terms inferred under their binders needs. So a binder"
         "opened again gets its variable again, and the results kept about"
         "terms holding it are found again, where a fresh number each time made"
         "every opening new. Elsewhere a variable is fresh, above every level"
@@ -365,36 +369,111 @@ verify names
     names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).e => Core.Exprs.fvar(4294967296)
     names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).st.next => 1
 
-fn namesAt(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, scope: Int) -> RE
-    ? "The free variable of a binder whose scope holds free variables below level scope, as LevelledVariables decides: the one already made for its level, type, value and binder info, else a new one. Past level 1022 a fresh one."
-    level = Int.max(scope, Int.max(Core.Exprs.fvLevel(ty), valueLevel(value)))
+fn namesAt(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, scope: Int, parent: Option<Expr>) -> RE
+    ? "The free variable of a binder whose scope holds free variables below level scope, opened after parent in its telescope, as LevelledVariables decides: the one already made for its level, type, value, binder info and parent, else a new one. Past level 1022 a fresh one."
+    level = Int.max(Int.max(scope, valueLevel(parent)), Int.max(Core.Exprs.fvLevel(ty), valueLevel(value)))
     match level >= 1023
         true -> names(st, n, ty, value, bi)
-        false -> namesKeyed(st, n, ty, value, bi, level, varKey(level, ty, value, bi))
+        false -> namesKeyed(st, n, ty, value, bi, parent, level, varCode(level, bi, value, parent))
 
 verify namesAt
-    namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).e => Core.Exprs.fvar(0)
-    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).e => Core.Exprs.fvar(0)
-    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 1).e => Core.Exprs.fvar(4294967296 + 1)
+    namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0, Option.None).e => Core.Exprs.fvar(0)
+    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0, Option.None).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0, Option.None).e => Core.Exprs.fvar(0)
+    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0, Option.None).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 1, Option.None).e => Core.Exprs.fvar(4294967296 + 1)
+    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0, Option.None).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 1, Option.Some(Core.Exprs.fvar(7))).e => Core.Exprs.fvar(4294967296 + 1)
+    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 1, Option.Some(Core.Exprs.fvar(6))).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 1, Option.Some(Core.Exprs.fvar(7))).e => Core.Exprs.fvar(4294967296 + 1)
 
-fn namesKeyed(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, level: Int, key: Expr) -> RE
-    ? "The variable kept under key, or a new one at level kept there."
-    match cacheGet(st.vars, key)
+fn namesKeyed(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, parent: Option<Expr>, level: Int, code: Int) -> RE
+    ? "The variable kept for these parts, or a new one at level kept for them. The parts are compared where they are; the term that keeps them is built only for a new variable."
+    h = varHash(code, ty, value, parent)
+    match varFind(Core.Cache.get(st.vars, h), code, ty, value, parent)
         Option.Some(x) -> RE(e = x, st = st)
-        Option.None -> namesNew(st, n, ty, value, bi, level, key)
+        Option.None -> namesNew(st, n, ty, value, bi, parent, level, code, h)
 
 verify namesKeyed
-    namesKeyed(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 2, Core.Exprs.natLit(0)).e => Core.Exprs.fvar(2 * 4294967296)
+    namesKeyed(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, Option.None, 2, 64).e => Core.Exprs.fvar(2 * 4294967296)
 
-fn namesNew(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, level: Int, key: Expr) -> RE
-    ? "A new variable at level, kept under key."
+fn namesNew(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, parent: Option<Expr>, level: Int, code: Int, h: Int) -> RE
+    ? "A new variable at level, kept under its parts."
     serial = st.next
     top = Int.max(st.topLevel, level)
     x = Core.Exprs.fvar(level * 4294967296 + serial)
-    RE(e = x, st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), vars = cachePut(st.vars, key, x), next = serial + 1, topLevel = top))
+    RE(e = x, st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), vars = Core.Cache.add(st.vars, h, (varKey(code, ty, value, parent), x)), next = serial + 1, topLevel = top))
 
 verify namesNew
-    namesNew(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0, Core.Exprs.natLit(0)).st.next => 1
+    namesNew(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, Option.None, 0, 0, 0).st.next => 1
+
+fn varCode(level: Int, bi: Binder, value: Option<Expr>, parent: Option<Expr>) -> Int
+    ? "A variable's level, binder info, and whether it has a value and a parent, as one number."
+    level * 32 + binderTag(bi) * 4 + hasValue(value) * 2 + hasValue(parent)
+
+verify varCode
+    varCode(1, Binder.Default, Option.None, Option.None) == varCode(1, Binder.Implicit, Option.None, Option.None) => false
+
+fn varHash(code: Int, ty: Expr, value: Option<Expr>, parent: Option<Expr>) -> Int
+    ? "The hash a variable is kept under, from its parts."
+    Core.Hash.mix(Core.Hash.mix(Core.Hash.mix(code, Core.Exprs.hashOf(ty)), optHash(value)), optHash(parent))
+
+verify varHash
+    varHash(0, Core.Exprs.natLit(1), Option.None, Option.None) == varHash(1, Core.Exprs.natLit(1), Option.None, Option.None) => false
+
+fn optHash(o: Option<Expr>) -> Int
+    ? "The hash of an optional term, 0 for none."
+    match o
+        Option.Some(x) -> Core.Exprs.hashOf(x)
+        Option.None -> 0
+
+verify optHash
+    optHash(Option.None) => 0
+
+fn varFind(bucket: List<Tuple<Expr, Expr>>, code: Int, ty: Expr, value: Option<Expr>, parent: Option<Expr>) -> Option<Expr>
+    ? "The variable kept under these parts in a bucket."
+    match bucket
+        [] -> Option.None
+        [(k, x), ..rest] -> match keyMatches(k, code, ty, value, parent)
+            true -> Option.Some(x)
+            false -> varFind(rest, code, ty, value, parent)
+
+verify varFind
+    varFind([(varKey(3, Core.Exprs.natLit(1), Option.None, Option.Some(Core.Exprs.fvar(2))), Core.Exprs.fvar(9))], 3, Core.Exprs.natLit(1), Option.None, Option.Some(Core.Exprs.fvar(2))) => Option.Some(Core.Exprs.fvar(9))
+    varFind([(varKey(3, Core.Exprs.natLit(1), Option.None, Option.Some(Core.Exprs.fvar(2))), Core.Exprs.fvar(9))], 3, Core.Exprs.natLit(1), Option.None, Option.Some(Core.Exprs.fvar(4))) => Option.None
+
+fn keyMatches(k: Expr, code: Int, ty: Expr, value: Option<Expr>, parent: Option<Expr>) -> Bool
+    ? "Whether the term k keeps exactly these parts; the code says which of value and parent are there, so the term's shape is fixed by it."
+    match parent
+        Option.Some(p) -> match k
+            Expr.App(_, k1, p1) -> match p1 == p
+                true -> valueMatches(k1, code, ty, value)
+                false -> false
+            _ -> false
+        Option.None -> valueMatches(k, code, ty, value)
+
+verify keyMatches
+    keyMatches(varKey(5, Core.Exprs.natLit(1), Option.None, Option.None), 5, Core.Exprs.natLit(1), Option.None, Option.None) => true
+
+fn valueMatches(k: Expr, code: Int, ty: Expr, value: Option<Expr>) -> Bool
+    ? "keyMatches below the parent."
+    match value
+        Option.Some(v) -> match k
+            Expr.App(_, k1, v1) -> match v1 == v
+                true -> headMatches(k1, code, ty)
+                false -> false
+            _ -> false
+        Option.None -> headMatches(k, code, ty)
+
+verify valueMatches
+    valueMatches(Core.Exprs.natLit(0), 0, Core.Exprs.natLit(0), Option.Some(Core.Exprs.natLit(0))) => false
+
+fn headMatches(k: Expr, code: Int, ty: Expr) -> Bool
+    ? "keyMatches below the value: the code and the type."
+    match k
+        Expr.App(_, Expr.NatLit(c), t1) -> match c == code
+            true -> t1 == ty
+            false -> false
+        _ -> false
+
+verify headMatches
+    headMatches(Core.Exprs.app(Core.Exprs.natLit(3), Core.Exprs.natLit(1)), 3, Core.Exprs.natLit(1)) => true
 
 fn valueLevel(value: Option<Expr>) -> Int
     ? "The free variable level of a let value, 0 for none."
@@ -405,15 +484,30 @@ fn valueLevel(value: Option<Expr>) -> Int
 verify valueLevel
     valueLevel(Option.None) => 0
 
-fn varKey(level: Int, ty: Expr, value: Option<Expr>, bi: Binder) -> Expr
-    ? "What a variable is made of, as a term: its level, binder info and whether it has a value, then its type, then its value."
-    head = Core.Exprs.app(Core.Exprs.natLit(level * 16 + binderTag(bi) * 2 + hasValue(value)), ty)
-    match value
-        Option.Some(v) -> Core.Exprs.app(head, v)
-        Option.None -> head
+fn varKey(code: Int, ty: Expr, value: Option<Expr>, parent: Option<Expr>) -> Expr
+    ? "What a variable is made of, as a term: its code (level, binder info, and whether it has a value and a parent), then its type, its value and its parent."
+    withParent(withValue(Core.Exprs.app(Core.Exprs.natLit(code), ty), value), parent)
 
 verify varKey
-    varKey(1, Core.Exprs.natLit(0), Option.None, Binder.Default) == varKey(1, Core.Exprs.natLit(0), Option.None, Binder.Implicit) => false
+    varKey(3, Core.Exprs.natLit(0), Option.Some(Core.Exprs.fvar(1)), Option.None) == varKey(3, Core.Exprs.natLit(0), Option.None, Option.Some(Core.Exprs.fvar(1))) => true
+
+fn withValue(k: Expr, value: Option<Expr>) -> Expr
+    ? "The key applied to the value, if any."
+    match value
+        Option.Some(v) -> Core.Exprs.app(k, v)
+        Option.None -> k
+
+verify withValue
+    withValue(Core.Exprs.natLit(0), Option.None) => Core.Exprs.natLit(0)
+
+fn withParent(k: Expr, parent: Option<Expr>) -> Expr
+    ? "The key applied to the parent, if any."
+    match parent
+        Option.Some(p) -> Core.Exprs.app(k, p)
+        Option.None -> k
+
+verify withParent
+    withParent(Core.Exprs.natLit(0), Option.None) => Core.Exprs.natLit(0)
 
 fn binderTag(bi: Binder) -> Int
     ? "A binder info as a number."

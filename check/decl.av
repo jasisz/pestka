@@ -59,6 +59,7 @@ record OldFacts
     next: Int
     topLevel: Int
     inferCache: Map<Int, List<Tuple<Expr, Expr>>>
+    checkCache: Map<Int, List<Tuple<Expr, Expr>>>
     whnfCache: Map<Int, List<Tuple<Expr, Expr>>>
     coreCache: Map<Int, List<Tuple<Expr, Expr>>>
     eqOk: Map<Int, List<Tuple<Expr, Expr>>>
@@ -194,7 +195,7 @@ verify keptEmpty
 
 fn oldEmpty() -> OldFacts
     ? "No facts in the first core."
-    OldFacts(closed = Core.Cache.empty(), unfolds = Core.Cache.empty(), types = Core.Cache.empty(), vars = Core.Cache.empty(), lctx = Locals.NoLocals, next = 0, topLevel = 0, inferCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty())
+    OldFacts(closed = Core.Cache.empty(), unfolds = Core.Cache.empty(), types = Core.Cache.empty(), vars = Core.Cache.empty(), lctx = Locals.NoLocals, next = 0, topLevel = 0, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty())
 
 verify oldEmpty
     Core.Cache.size(oldEmpty().unfolds) => 0
@@ -236,9 +237,9 @@ verify chunkNext
 fn jobFor(core: Core, j: Job, env: Env, kept: Kept) -> Result<Kept, Fail>
     ? "A deferred declaration checked by the first core, the second, or both; with both, any difference in their answers is a failure that says what each answered."
     match core
-        Core.Old -> oldKept(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old.closed, unfoldCache = kept.old.unfolds, levelTypes = kept.old.types, vars = kept.old.vars, lctx = kept.old.lctx, next = kept.old.next, topLevel = kept.old.topLevel, inferCache = kept.old.inferCache, whnfCache = kept.old.whnfCache, coreCache = kept.old.coreCache, eqOk = kept.old.eqOk, eqFail = kept.old.eqFail, eqNo = kept.old.eqNo)), kept.next)
+        Core.Old -> oldKept(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old.closed, unfoldCache = kept.old.unfolds, levelTypes = kept.old.types, vars = kept.old.vars, lctx = kept.old.lctx, next = kept.old.next, topLevel = kept.old.topLevel, inferCache = kept.old.inferCache, checkCache = kept.old.checkCache, whnfCache = kept.old.whnfCache, coreCache = kept.old.coreCache, eqOk = kept.old.eqOk, eqFail = kept.old.eqFail, eqNo = kept.old.eqNo)), kept.next)
         Core.Next -> nextKept(Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next), kept.old)
-        Core.Both -> agree(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old.closed, unfoldCache = kept.old.unfolds, levelTypes = kept.old.types, vars = kept.old.vars, lctx = kept.old.lctx, next = kept.old.next, topLevel = kept.old.topLevel, inferCache = kept.old.inferCache, whnfCache = kept.old.whnfCache, coreCache = kept.old.coreCache, eqOk = kept.old.eqOk, eqFail = kept.old.eqFail, eqNo = kept.old.eqNo)), Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next))
+        Core.Both -> agree(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old.closed, unfoldCache = kept.old.unfolds, levelTypes = kept.old.types, vars = kept.old.vars, lctx = kept.old.lctx, next = kept.old.next, topLevel = kept.old.topLevel, inferCache = kept.old.inferCache, checkCache = kept.old.checkCache, whnfCache = kept.old.whnfCache, coreCache = kept.old.coreCache, eqOk = kept.old.eqOk, eqFail = kept.old.eqFail, eqNo = kept.old.eqNo)), Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next))
 
 verify jobFor
     jobFor(Core.Both, Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.envEmpty(), keptEmpty()) => Result.Err(Fail.Reject("declaration type mismatch"))
@@ -341,7 +342,7 @@ fn checkJobs(jobs: List<Job>, env: Env, facts: OldFacts, limit: Int) -> Result<O
         [] -> Result.Ok(facts)
         [j, ..rest] -> match j.pos < limit
             false -> Result.Ok(facts)
-            true -> jobDone(jobChecks(j, St.update(checkerFor(env, j), closed = facts.closed, unfoldCache = facts.unfolds, levelTypes = facts.types, vars = facts.vars, lctx = facts.lctx, next = facts.next, topLevel = facts.topLevel, inferCache = facts.inferCache, whnfCache = facts.whnfCache, coreCache = facts.coreCache, eqOk = facts.eqOk, eqFail = facts.eqFail, eqNo = facts.eqNo)), j, env, rest, limit)
+            true -> jobDone(jobChecks(j, St.update(checkerFor(env, j), closed = facts.closed, unfoldCache = facts.unfolds, levelTypes = facts.types, vars = facts.vars, lctx = facts.lctx, next = facts.next, topLevel = facts.topLevel, inferCache = facts.inferCache, checkCache = facts.checkCache, whnfCache = facts.whnfCache, coreCache = facts.coreCache, eqOk = facts.eqOk, eqFail = facts.eqFail, eqNo = facts.eqNo)), j, env, rest, limit)
 
 verify checkJobs
     checkJobs([], Check.State.envEmpty(), oldEmpty(), 0) => Result.Ok(oldEmpty())
@@ -384,9 +385,9 @@ verify jobChecks
     jobChecks(Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => Result.Err(Fail.Reject("declaration type mismatch"))
 
 fn carried(st: St) -> OldFacts
-    ? "What the first core takes from a declaration to the next: the facts about closed terms; the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration; and, since a free variable is made of its level, type, value and binder info (LevelledVariables), the variables made so far with their context, and what was found by inference, reduction and comparison about terms holding them, which holds wherever the same variables appear. Only checking is kept within its declaration: it asks whether a universe parameter is the declaration's own. Each map is emptied past its limit; the variables and their context together."
+    ? "What the first core takes from a declaration to the next: the facts about closed terms; the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration; and, since a free variable is made of its level, type, value and binder info (LevelledVariables), the variables made so far with their context, and what was found by inference, checking, reduction and comparison about terms holding them, which holds wherever the same variables appear. Only the checking of terms with a universe parameter is kept within its declaration: it asks whether the parameter is the declaration's own. Each map is emptied past its limit; the variables and their context together."
     full = Core.Cache.size(st.vars) > 65536
-    OldFacts(closed = st.closed, unfolds = bounded(st.unfoldCache, 16384), types = bounded(st.levelTypes, 65536), vars = bounded(st.vars, 65536), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = bounded(st.inferCache, 65536), whnfCache = bounded(st.whnfCache, 65536), coreCache = bounded(st.coreCache, 65536), eqOk = bounded(st.eqOk, 65536), eqFail = bounded(st.eqFail, 65536), eqNo = bounded(st.eqNo, 65536))
+    OldFacts(closed = st.closed, unfolds = bounded(st.unfoldCache, 16384), types = bounded(st.levelTypes, 65536), vars = bounded(st.vars, 65536), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = bounded(st.inferCache, 65536), checkCache = bounded(st.checkCache, 65536), whnfCache = bounded(st.whnfCache, 65536), coreCache = bounded(st.coreCache, 65536), eqOk = bounded(st.eqOk, 65536), eqFail = bounded(st.eqFail, 65536), eqNo = bounded(st.eqNo, 65536))
 
 fn localsKept(lctx: Locals, full: Bool) -> Locals
     ? "The context of the variables kept, or none once the variables were let go."
