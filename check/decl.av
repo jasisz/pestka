@@ -47,8 +47,12 @@ type Core
     Both
 
 record Kept
-    old: Map<Int, List<Tuple<Expr, Expr>>>
+    old: OldFacts
     next: Facts
+
+record OldFacts
+    closed: Map<Int, List<Tuple<Expr, Expr>>>
+    unfolds: Map<Int, List<Tuple<Expr, Expr>>>
 
 record Checked
     failure: Option<Fail>
@@ -58,7 +62,7 @@ record Checked
 fn checkAll(decls: List<Decl>) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations before the first failure the building met, one after another."
     a = admit(decls)
-    finish(a, checkJobs(List.reverse(a.run.jobs), a.run.env, a.run.closed, a.at))
+    finish(a, checkJobs(List.reverse(a.run.jobs), a.run.env, OldFacts(closed = a.run.closed, unfolds = Core.Cache.empty()), a.at))
 
 fn admit(decls: List<Decl>) -> Admitted
     ? "Builds the environment from nothing; the deferred declarations wait in the result."
@@ -172,10 +176,17 @@ verify checkGroup
 
 fn keptEmpty() -> Kept
     ? "No facts in either core."
-    Kept(old = Core.Cache.empty(), next = Next.Decl.empty())
+    Kept(old = oldEmpty(), next = Next.Decl.empty())
 
 verify keptEmpty
-    Core.Cache.size(keptEmpty().old) => 0
+    Core.Cache.size(keptEmpty().old.closed) => 0
+
+fn oldEmpty() -> OldFacts
+    ? "No facts in the first core."
+    OldFacts(closed = Core.Cache.empty(), unfolds = Core.Cache.empty())
+
+verify oldEmpty
+    Core.Cache.size(oldEmpty().unfolds) => 0
 
 fn groupLoop(g: List<Chunk>, kept: Kept, count: Int) -> Checked
     ? "Run after run."
@@ -214,15 +225,15 @@ verify chunkNext
 fn jobFor(core: Core, j: Job, env: Env, kept: Kept) -> Result<Kept, Fail>
     ? "A deferred declaration checked by the first core, the second, or both; with both, any difference in their answers is a failure that says what each answered."
     match core
-        Core.Old -> oldKept(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old)), kept.next)
+        Core.Old -> oldKept(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old.closed, unfoldCache = kept.old.unfolds)), kept.next)
         Core.Next -> nextKept(Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next), kept.old)
-        Core.Both -> agree(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old)), Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next))
+        Core.Both -> agree(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old.closed, unfoldCache = kept.old.unfolds)), Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next))
 
 verify jobFor
     jobFor(Core.Both, Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.envEmpty(), keptEmpty()) => Result.Err(Fail.Reject("declaration type mismatch"))
     jobFor(Core.Next, Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Check.State.envEmpty(), keptEmpty()) == Result.Ok(keptEmpty()) => true
 
-fn oldKept(r: Result<Map<Int, List<Tuple<Expr, Expr>>>, Fail>, next: Facts) -> Result<Kept, Fail>
+fn oldKept(r: Result<OldFacts, Fail>, next: Facts) -> Result<Kept, Fail>
     ? "The first core's facts after a declaration, with the second core's as they were. The two are passed apart, each once, so that the first core's cache reaches the next declaration with one owner."
     match r
         Result.Ok(closed) -> Result.Ok(Kept(old = closed, next = next))
@@ -231,16 +242,16 @@ fn oldKept(r: Result<Map<Int, List<Tuple<Expr, Expr>>>, Fail>, next: Facts) -> R
 verify oldKept
     oldKept(Result.Err(Fail.Reject("x")), Next.Decl.empty()) => Result.Err(Fail.Reject("x"))
 
-fn nextKept(r: Result<Facts, Fail>, old: Map<Int, List<Tuple<Expr, Expr>>>) -> Result<Kept, Fail>
+fn nextKept(r: Result<Facts, Fail>, old: OldFacts) -> Result<Kept, Fail>
     ? "The second core's facts after a declaration, with the first core's as they were."
     match r
         Result.Ok(f) -> Result.Ok(Kept(old = old, next = f))
         Result.Err(e) -> Result.Err(e)
 
 verify nextKept
-    nextKept(Result.Err(Fail.Decline("x")), Core.Cache.empty()) => Result.Err(Fail.Decline("x"))
+    nextKept(Result.Err(Fail.Decline("x")), oldEmpty()) => Result.Err(Fail.Decline("x"))
 
-fn agree(a: Result<Map<Int, List<Tuple<Expr, Expr>>>, Fail>, b: Result<Facts, Fail>) -> Result<Kept, Fail>
+fn agree(a: Result<OldFacts, Fail>, b: Result<Facts, Fail>) -> Result<Kept, Fail>
     ? "Both cores accepted, or both failed the same way; otherwise a rejection that tells the two answers apart."
     match a
         Result.Ok(closed) -> match b
@@ -253,7 +264,7 @@ fn agree(a: Result<Map<Int, List<Tuple<Expr, Expr>>>, Fail>, b: Result<Facts, Fa
                 false -> Result.Err(Fail.Reject("the cores disagree: the first says {failText(e)}, the second says {failText(f)}"))
 
 verify agree
-    agree(Result.Ok(Core.Cache.empty()), Result.Err(Fail.Reject("m"))) => Result.Err(Fail.Reject("the cores disagree: the first accepts, the second says rejected: m"))
+    agree(Result.Ok(oldEmpty()), Result.Err(Fail.Reject("m"))) => Result.Err(Fail.Reject("the cores disagree: the first accepts, the second says rejected: m"))
     agree(Result.Err(Fail.Reject("m")), Result.Err(Fail.Reject("n"))) => Result.Err(Fail.Reject("m"))
     agree(Result.Err(Fail.Reject("m")), Result.Err(Fail.Decline("n"))) => Result.Err(Fail.Reject("the cores disagree: the first says rejected: m, the second says declined: n"))
 
@@ -313,33 +324,33 @@ verify admitAll
     admitAll(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), []).at => 0
     admitAll(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), [Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false), Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)]).failure => Option.Some(Fail.Reject("[anonymous]: already declared"))
 
-fn checkJobs(jobs: List<Job>, env: Env, closed: Map<Int, List<Tuple<Expr, Expr>>>, limit: Int) -> Result<Map<Int, List<Tuple<Expr, Expr>>>, Fail>
+fn checkJobs(jobs: List<Job>, env: Env, facts: OldFacts, limit: Int) -> Result<OldFacts, Fail>
     ? "The deferred declarations in file order, up to the position where the building failed."
     match jobs
-        [] -> Result.Ok(closed)
+        [] -> Result.Ok(facts)
         [j, ..rest] -> match j.pos < limit
-            false -> Result.Ok(closed)
-            true -> jobDone(jobChecks(j, St.update(checkerFor(env, j), closed = closed)), j, env, rest, limit)
+            false -> Result.Ok(facts)
+            true -> jobDone(jobChecks(j, St.update(checkerFor(env, j), closed = facts.closed, unfoldCache = facts.unfolds)), j, env, rest, limit)
 
 verify checkJobs
-    checkJobs([], Check.State.envEmpty(), Core.Cache.empty(), 0) => Result.Ok(Core.Cache.empty())
+    checkJobs([], Check.State.envEmpty(), oldEmpty(), 0) => Result.Ok(oldEmpty())
 
-fn jobDone(r: Result<Map<Int, List<Tuple<Expr, Expr>>>, Fail>, j: Job, env: Env, rest: List<Job>, limit: Int) -> Result<Map<Int, List<Tuple<Expr, Expr>>>, Fail>
+fn jobDone(r: Result<OldFacts, Fail>, j: Job, env: Env, rest: List<Job>, limit: Int) -> Result<OldFacts, Fail>
     ? "Goes on, or names the declaration that failed."
     match r
-        Result.Ok(closed) -> checkJobs(rest, env, closed, limit)
+        Result.Ok(facts) -> checkJobs(rest, env, facts, limit)
         Result.Err(e) -> Result.Err(failNamed(e, j.head.name))
 
 verify jobDone
     jobDone(Result.Err(Fail.Reject("bad")), Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), Check.State.envEmpty(), [], 1) => Result.Err(Fail.Reject("x: bad"))
 
-fn finish(a: Admitted, b: Result<Map<Int, List<Tuple<Expr, Expr>>>, Fail>) -> Result<Run, Fail>
+fn finish(a: Admitted, b: Result<OldFacts, Fail>) -> Result<Run, Fail>
     ? "A deferred failure comes first in the file; then the building's own; else everything passed."
     match b
         Result.Err(e) -> Result.Err(e)
-        Result.Ok(closed) -> match a.failure
+        Result.Ok(facts) -> match a.failure
             Option.Some(e) -> Result.Err(e)
-            Option.None -> Result.Ok(Run.update(a.run, closed = closed, checked = a.run.checked + List.len(a.run.jobs), jobs = []))
+            Option.None -> Result.Ok(Run.update(a.run, closed = facts.closed, checked = a.run.checked + List.len(a.run.jobs), jobs = []))
 
 verify finish
     finish(Admitted(run = Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), failure = Option.Some(Fail.Reject("late")), at = 3), Result.Err(Fail.Reject("early"))) => Result.Err(Fail.Reject("early"))
@@ -351,15 +362,31 @@ fn checkerFor(env: Env, j: Job) -> St
 verify checkerFor
     checkerFor(Check.State.envEmpty(), Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)).upTo => 0
 
-fn jobChecks(j: Job, st0: St) -> Result<Map<Int, List<Tuple<Expr, Expr>>>, Fail>
+fn jobChecks(j: Job, st0: St) -> Result<OldFacts, Fail>
     ? "A deferred declaration, from st0, its checker carrying the cache of checked closed terms: the type is a type, a theorem's type a proposition, and the value's type equal to the declared one. Returns the cache. The caller puts the cache into the checker itself, where it moves, so that the cache reaches the checker with one owner and is updated in place."
     st = typeIsSort(Check.Tc.check(st0, j.head.ty)?)?
     match j.value
-        Option.None -> Result.Ok(st.closed)
+        Option.None -> Result.Ok(carried(st))
         Option.Some(v) -> valueChecks(st, j.head.ty, v, j.isThm)
 
 verify jobChecks
     jobChecks(Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => Result.Err(Fail.Reject("declaration type mismatch"))
+
+fn carried(st: St) -> OldFacts
+    ? "What the first core takes from a declaration to the next: the facts about closed terms, and the values instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration."
+    OldFacts(closed = st.closed, unfolds = bounded(st.unfoldCache))
+
+verify carried
+    Core.Cache.size(carried(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).unfolds) => 0
+
+fn bounded(m: Map<Int, List<Tuple<Expr, Expr>>>) -> Map<Int, List<Tuple<Expr, Expr>>>
+    ? "The instantiated values, emptied once they pass 16384 hashes: kept for the whole run they once took mathlib past 14 GB, while most are asked for again within a few declarations. Limits of 1024, 4096 and 16384 gave 351.5, 349.7 and 343.8 G instructions on Init (one worker)."
+    match Core.Cache.size(m) > 16384
+        true -> Core.Cache.empty()
+        false -> m
+
+verify bounded
+    Core.Cache.size(bounded(Core.Cache.empty())) => 0
 
 verify checkAll
     checkAll([]) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
@@ -495,13 +522,13 @@ fn hasDup(ps: List<Name>) -> Bool
 verify hasDup
     hasDup([Core.Names.anon()]) => false
 
-fn valueChecks(st: St, ty: Expr, v: Expr, isThm: Bool) -> Result<Map<Int, List<Tuple<Expr, Expr>>>, Fail>
+fn valueChecks(st: St, ty: Expr, v: Expr, isThm: Bool) -> Result<OldFacts, Fail>
     ? "A theorem's type a proposition, and the value's type equal to the declared one; returns the shared cache of checked closed terms."
     st2 = thmProp(st, ty, isThm)?
     vt = Check.Tc.check(st2, v)?
     eq = Check.Tc.isDefEq(vt.st, vt.e, ty)?
     match eq.b
-        true -> Result.Ok(eq.st.closed)
+        true -> Result.Ok(carried(eq.st))
         false -> Result.Err(Fail.Reject("declaration type mismatch"))
 
 verify valueChecks
