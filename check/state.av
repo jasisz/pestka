@@ -209,6 +209,7 @@ record St
     levelTypes: Map<Int, List<Tuple<Expr, Expr>>>
     closed: Map<Int, List<Tuple<Expr, Expr>>>
     open: Int
+    opened: Expr
 
 record RE
     e: Expr
@@ -224,7 +225,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), paramCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), paramCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Core.Exprs.sort(Level.Zero))
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0

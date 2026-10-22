@@ -155,27 +155,27 @@ fn inferIn(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
         true -> infer(st, e, only)
         false -> match only
             true -> infer(st, minst(e, env), only)
-            false -> openKeyed(st, e, env, env, only)
+            false -> openKeyed(st, e, env, only)
 
 verify inferIn
     resultExpr(inferIn(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default), [Core.Exprs.fvar(0)], false)) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.fvar(0), Core.Exprs.fvar(0), Binder.Default)
     inferIn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), [], true) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
 
-fn openKeyed(st: St, e: Expr, env: List<Expr>, used: List<Expr>, only: Bool) -> Result<RE, Fail>
-    ? "The cache key is e with the innermost variable of env."
-    match used
+fn openKeyed(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
+    ? "With no variables around, nothing to key on."
+    match env
         [] -> inferCore(st, e, env, only)
         _ -> openCached(st, e, env, only)
 
 verify openKeyed
-    openKeyed(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [], [], true) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
+    openKeyed(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [], true) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
 
 fn openCached(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
-    ? "An open term's type is cached under the term applied to the variables of env its loose bound variables stand for, the innermost first. Those variables are all the term means, whatever env holds below them, so a term shared under the same binders, as a DAG shares it, is found again, in this declaration or a later one. The key keeps e's loose bound variables, so it is never a term that is checked."
-    used = List.take(env, Int.min(Core.Exprs.looseRange(e), List.len(env)))
-    match findOpen(Core.Cache.get(cacheFor(st, only, e), openHash(Core.Exprs.hashOf(e), used)), e, List.reverse(used))
+    ? "An open term's type is cached under the term applied to st.opened, the variables of the binders open around it past the depth where bodies stop being copied, as one application spine (see deepBody). env is its innermost part, so the spine fixes what every loose bound variable of e stands for, and the key is found by its hash and compared from the pointer in: a lookup costs the same however many binders are open. A term shared under the same binders, as a DAG shares it, is found again. The key keeps e's loose bound variables, so it is never a term that is checked."
+    around = st.opened
+    match findOpen(Core.Cache.get(cacheFor(st, only, e), Core.Hash.mix(Core.Hash.mix(4, Core.Exprs.hashOf(e)), Core.Exprs.hashOf(around))), e, around)
         Option.Some(t) -> Result.Ok(RE(e = t, st = st))
-        Option.None -> Result.Ok(rememberOpen(inferCore(st, e, env, only)?, Core.Apps.mkApps(e, used), only))
+        Option.None -> Result.Ok(rememberOpen(inferCore(st, e, env, only)?, Core.Exprs.app(e, around), only))
 
 verify openCached
     resultExpr(openCached(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.natLit(7), Option.None, Binder.Default).st, Core.Exprs.bvar(0), [Core.Exprs.fvar(1)], true)) => Core.Exprs.natLit(7)
@@ -198,43 +198,22 @@ fn checkedKept(r: RE, key: Expr, e: Expr) -> RE
 verify checkedKept
     Core.Cache.size(checkedKept(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0)).st.checkCache) => 1
 
-fn openHash(h: Int, used: List<Expr>) -> Int
-    ? "The hash of the key, a term of hash h applied to used, without building it."
-    match used
-        [] -> h
-        [x, ..rest] -> openHash(Core.Hash.mix(Core.Hash.mix(4, h), Core.Exprs.hashOf(x)), rest)
-
-verify openHash law sameAsKey
-    given i: Int = [0, 1, 3]
-    given j: Int = [2, 9]
-    openHash(Core.Exprs.hashOf(Core.Exprs.app(Core.Exprs.bvar(i), Core.Exprs.natLit(j))), [Core.Exprs.fvar(j), Core.Exprs.fvar(i)]) => Core.Exprs.hashOf(Core.Apps.mkApps(Core.Exprs.app(Core.Exprs.bvar(i), Core.Exprs.natLit(j)), [Core.Exprs.fvar(j), Core.Exprs.fvar(i)]))
-
-fn findOpen(bucket: List<Tuple<Expr, Expr>>, e: Expr, revUsed: List<Expr>) -> Option<Expr>
-    ? "The value stored under the key e applied to the reverse of revUsed."
+fn findOpen(bucket: List<Tuple<Expr, Expr>>, e: Expr, around: Expr) -> Option<Expr>
+    ? "The value stored under e applied to around, compared without building it, the spine first: the spines of one stretch of binders are one node."
     match bucket
         [] -> Option.None
-        [(key, v), ..rest] -> match isOpenKey(key, e, revUsed)
-            true -> Option.Some(v)
-            false -> findOpen(rest, e, revUsed)
+        [(key, v), ..rest] -> match key
+            Expr.App(_, f, a) -> match a == around
+                true -> match f == e
+                    true -> Option.Some(v)
+                    false -> findOpen(rest, e, around)
+                false -> findOpen(rest, e, around)
+            _ -> findOpen(rest, e, around)
 
 verify findOpen
-    findOpen([(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))], Core.Exprs.bvar(0), [Core.Exprs.fvar(2)]) => Option.Some(Core.Exprs.natLit(1))
-    findOpen([(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))], Core.Exprs.bvar(0), [Core.Exprs.fvar(3)]) => Option.None
-
-fn isOpenKey(key: Expr, e: Expr, revUsed: List<Expr>) -> Bool
-    ? "Whether key is e applied to the reverse of revUsed, compared from the outermost argument in without building it."
-    match revUsed
-        [] -> key == e
-        [x, ..rest] -> match key
-            Expr.App(_, f, a) -> match a == x
-                true -> isOpenKey(f, e, rest)
-                false -> false
-            _ -> false
-
-verify isOpenKey
-    isOpenKey(Core.Apps.mkApps(Core.Exprs.bvar(1), [Core.Exprs.fvar(1), Core.Exprs.fvar(2)]), Core.Exprs.bvar(1), [Core.Exprs.fvar(2), Core.Exprs.fvar(1)]) => true
-    isOpenKey(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(1)), Core.Exprs.bvar(0), [Core.Exprs.fvar(2)]) => false
-    isOpenKey(Core.Exprs.bvar(0), Core.Exprs.bvar(0), []) => true
+    findOpen([(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))], Core.Exprs.bvar(0), Core.Exprs.fvar(2)) => Option.Some(Core.Exprs.natLit(1))
+    findOpen([(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))], Core.Exprs.bvar(0), Core.Exprs.fvar(3)) => Option.None
+    findOpen([(Core.Exprs.bvar(0), Core.Exprs.natLit(1))], Core.Exprs.bvar(0), Core.Exprs.fvar(3)) => Option.None
 
 fn checkLevel(st: St, l: Level) -> Result<Unit, Fail>
     ? "Every universe parameter must be one of the declaration's."
@@ -444,11 +423,21 @@ fn bodyType(st: St, e: Expr, rev: List<Expr>, k: Int, only: Bool) -> Result<RE, 
     ? "The type of a body under k binders just opened. While at most 128 binders are open around it, the body is copied with its variables put in and inferred as usual. Deeper than that it is inferred under its variables as it is: a body nested that deep would be copied once for every binder above it, and the copies of the levels above stay alive while the levels below are checked."
     was = st.open
     match was + k > 128
-        true -> openAgain(inferIn(St.update(st, open = was + k), e, rev, only)?, was)
+        true -> deepBody(st, e, rev, k, only)
         false -> openAgain(infer(St.update(st, open = was + k), minst(e, rev), only)?, was)
 
 verify bodyType
     resultExpr(bodyType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), [], 1, true)) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
+
+fn deepBody(st: St, e: Expr, rev: List<Expr>, k: Int, only: Bool) -> Result<RE, Fail>
+    ? "A body inferred under its variables as it is. st.opened gets the k variables just opened, the outermost first, as arguments, one node each, and is put back after: around the first body this deep it holds no variable, so it always holds the variables of rev, the innermost last, after those of any closed term this stretch went into, which only make a key narrower. The open-term cache keys on it."
+    was = st.open
+    around = st.opened
+    r = inferIn(St.update(st, open = was + k, opened = Core.Apps.mkApps(around, List.reverse(List.take(rev, k)))), e, rev, only)?
+    Result.Ok(RE(e = r.e, st = St.update(r.st, open = was, opened = around)))
+
+verify deepBody
+    resultExpr(deepBody(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.natLit(7), Option.None, Binder.Default).st, Core.Exprs.bvar(0), [Core.Exprs.fvar(1)], 1, false)) => Core.Exprs.natLit(7)
 
 fn openAgain(r: RE, open: Int) -> Result<RE, Fail>
     ? "The count of open binders as it was before the body."
