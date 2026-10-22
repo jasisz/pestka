@@ -73,7 +73,7 @@ fn local(st: St, n: String, ty: Expr, bi: Binder) -> RE
     Check.State.names(st, Core.Names.str(Core.Names.anon(), n), ty, Option.None, bi)
 
 verify local
-    local(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), "a", prop(), Binder.Default).e => Core.Exprs.fvar(0)
+    local(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), "a", prop(), Binder.Default).e => Core.Exprs.fvar(4294967296)
 
 fn eqShapes(env: Env, iv: IndType, u: Name, refl: Option<Const>) -> Result<Env, Fail>
     ? "Eq takes an implicit type and two of its values into Prop; its constructor relates a value to itself."

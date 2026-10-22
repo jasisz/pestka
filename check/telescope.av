@@ -57,7 +57,7 @@ fn localFor(st: St, t: Expr) -> RE
         _ -> Check.State.names(st, Core.Names.anon(), t, Option.None, Binder.Default)
 
 verify localFor
-    localFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.fvar(5), Core.Exprs.bvar(0), Binder.Default)).e => Core.Exprs.fvar(0)
+    localFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.fvar(5), Core.Exprs.bvar(0), Binder.Default)).e => Core.Exprs.fvar(4294967296)
 
 fn fvarId(e: Expr) -> Int
     ? "The number of a free variable, or -1."

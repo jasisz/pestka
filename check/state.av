@@ -5,7 +5,7 @@ module State
         "counter, the universe parameters in scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache, Core.Alpha]
     effects []
 
@@ -191,6 +191,8 @@ record St
     block: Map<Name, Const>
     lctx: Locals
     next: Int
+    topLevel: Int
+    vars: Map<Int, List<Tuple<Expr, Expr>>>
     params: List<Name>
     checkParams: Bool
     safety: Safety
@@ -221,7 +223,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0
@@ -310,7 +312,7 @@ verify declared
 
 fn localType(lctx: Locals, id: Int) -> Result<Expr, Fail>
     ? "The type of a free variable."
-    match localGet(lctx, id, id)
+    match localGet(lctx, serialOf(id), serialOf(id))
         Option.Some(l) -> Result.Ok(l.ty)
         Option.None -> Result.Err(Fail.Reject("unknown free variable"))
 
@@ -319,21 +321,119 @@ verify localType
 
 fn localValue(lctx: Locals, id: Int) -> Option<Expr>
     ? "The value of a let-bound free variable."
-    match localGet(lctx, id, id)
+    match localGet(lctx, serialOf(id), serialOf(id))
         Option.Some(l) -> l.value
         Option.None -> Option.None
 
 verify localValue
     localValue(Locals.NoLocals, 3) => Option.None
 
+decision LevelledVariables
+    date = "2026-10-22"
+    reason =
+        "A free variable's number is its level times 2^32 plus a serial number."
+        "Where the checker opens a binder it knows the binder's scope, and the"
+        "variable's level is the first above every free variable in the"
+        "binder, in its type and value, and in the binders of its telescope"
+        "opened before it. A variable of that level with the same type, value"
+        "and binder info is the same variable: two such variables never meet"
+        "in one term, since a variable's level is above every variable its"
+        "binder holds, and they have the same type and value, so whatever"
+        "holds of a term with one holds of it with the other. So a binder"
+        "opened again gets its variable again, and the results kept about"
+        "terms holding it are found again, where a fresh number each time made"
+        "every opening new. Elsewhere a variable is fresh, above every level"
+        "used so far."
+    chosen = "LevelledVariables"
+    rejected = ["FreshNumbers"]
+    impacts = [names, namesAt]
+
+fn serialOf(id: Int) -> Int
+    ? "The serial number of a free variable, which keys the local context."
+    Int.mod(id, 4294967296)
+
+verify serialOf
+    serialOf(3 * 4294967296 + 5) => 5
+
 fn names(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder) -> RE
-    ? "Declares a fresh free variable and returns it."
-    id = st.next
-    RE(e = Core.Exprs.fvar(id), st = St.update(st, lctx = localPut(st.lctx, id, id, Local(name = n, ty = ty, value = value, binder = bi)), next = id + 1))
+    ? "Declares a fresh free variable above every level used so far, where the scope it reaches is not known, and returns it."
+    level = st.topLevel + 1
+    serial = st.next
+    RE(e = Core.Exprs.fvar(level * 4294967296 + serial), st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), next = serial + 1, topLevel = level))
 
 verify names
-    names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).e => Core.Exprs.fvar(0)
+    names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).e => Core.Exprs.fvar(4294967296)
     names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).st.next => 1
+
+fn namesAt(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, scope: Int) -> RE
+    ? "The free variable of a binder whose scope holds free variables below level scope, as LevelledVariables decides: the one already made for its level, type, value and binder info, else a new one. Past level 1022 a fresh one."
+    level = Int.max(scope, Int.max(Core.Exprs.fvLevel(ty), valueLevel(value)))
+    match level >= 1023
+        true -> names(st, n, ty, value, bi)
+        false -> namesKeyed(st, n, ty, value, bi, level, varKey(level, ty, value, bi))
+
+verify namesAt
+    namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).e => Core.Exprs.fvar(0)
+    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).e => Core.Exprs.fvar(0)
+    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 1).e => Core.Exprs.fvar(4294967296 + 1)
+
+fn namesKeyed(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, level: Int, key: Expr) -> RE
+    ? "The variable kept under key, or a new one at level kept there."
+    match cacheGet(st.vars, key)
+        Option.Some(x) -> RE(e = x, st = st)
+        Option.None -> namesNew(st, n, ty, value, bi, level, key)
+
+verify namesKeyed
+    namesKeyed(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 2, Core.Exprs.natLit(0)).e => Core.Exprs.fvar(2 * 4294967296)
+
+fn namesNew(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, level: Int, key: Expr) -> RE
+    ? "A new variable at level, kept under key."
+    serial = st.next
+    top = Int.max(st.topLevel, level)
+    x = Core.Exprs.fvar(level * 4294967296 + serial)
+    RE(e = x, st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), vars = cachePut(st.vars, key, x), next = serial + 1, topLevel = top))
+
+verify namesNew
+    namesNew(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0, Core.Exprs.natLit(0)).st.next => 1
+
+fn valueLevel(value: Option<Expr>) -> Int
+    ? "The free variable level of a let value, 0 for none."
+    match value
+        Option.Some(v) -> Core.Exprs.fvLevel(v)
+        Option.None -> 0
+
+verify valueLevel
+    valueLevel(Option.None) => 0
+
+fn varKey(level: Int, ty: Expr, value: Option<Expr>, bi: Binder) -> Expr
+    ? "What a variable is made of, as a term: its level, binder info and whether it has a value, then its type, then its value."
+    head = Core.Exprs.app(Core.Exprs.natLit(level * 16 + binderTag(bi) * 2 + hasValue(value)), ty)
+    match value
+        Option.Some(v) -> Core.Exprs.app(head, v)
+        Option.None -> head
+
+verify varKey
+    varKey(1, Core.Exprs.natLit(0), Option.None, Binder.Default) == varKey(1, Core.Exprs.natLit(0), Option.None, Binder.Implicit) => false
+
+fn binderTag(bi: Binder) -> Int
+    ? "A binder info as a number."
+    match bi
+        Binder.Default -> 0
+        Binder.Implicit -> 1
+        Binder.StrictImplicit -> 2
+        Binder.InstImplicit -> 3
+
+verify binderTag
+    binderTag(Binder.InstImplicit) => 3
+
+fn hasValue(value: Option<Expr>) -> Int
+    ? "1 for a let value, 0 for none."
+    match value
+        Option.Some -> 1
+        Option.None -> 0
+
+verify hasValue
+    hasValue(Option.None) => 0
 
 fn localGet(m: Locals, id: Int, rest: Int) -> Option<Local>
     ? "The local of free variable id. The context is a persistent trie on the id's hexadecimal digits, lowest first; rest is the id with the digits above this node taken off. A state holding it can be shared, and declaring a variable copies one short path, where a Map whose owner was shared would be copied whole."
@@ -418,7 +518,7 @@ fn mkBinding(lctx: Locals, ids: List<Int>, body: Expr, isLam: Bool, dropDeadLet:
     wrap(lctx, List.reverse(ids), ids, Core.Subst.abstractFVars(body, ids), isLam, dropDeadLet)
 
 verify mkBinding
-    mkBinding(names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st.lctx, [0], Core.Exprs.fvar(0), false, false) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
+    mkBinding(names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st.lctx, [4294967296], Core.Exprs.fvar(4294967296), false, false) => Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
 
 fn wrap(lctx: Locals, revIds: List<Int>, ids: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
     ? "Adds the binders from the innermost out; the type of variable i is abstracted over the variables before it."
@@ -431,7 +531,7 @@ verify wrap
 
 fn wrapOne(lctx: Locals, id: Int, before: List<Int>, r: Expr, isLam: Bool, dropDeadLet: Bool) -> Expr
     ? "One binder around r."
-    match localGet(lctx, id, id)
+    match localGet(lctx, serialOf(id), serialOf(id))
         Option.None -> r
         Option.Some(l) -> wrapLocal(l, Core.Subst.abstractFVars(l.ty, before), before, r, isLam, dropDeadLet)
 

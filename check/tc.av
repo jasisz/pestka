@@ -369,11 +369,21 @@ verify lamLoop
 fn lamStep(st: St, n: Name, d: Expr, b: Expr, bi: Binder, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Checks the domain is a type, then declares the variable."
     st1 = domainChecked(st, d, only)?
-    loc = Check.State.names(st1, n, d, Option.None, bi)
+    loc = Check.State.namesAt(st1, n, d, Option.None, bi, scopeLevel(b, rev))
     lamLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), only)
 
 verify lamStep
     lamStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default, [], [], false) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
+
+fn scopeLevel(b: Expr, rev: List<Expr>) -> Int
+    ? "The level a variable opened over b must be above: that of the free variables in b, and of the variables of its telescope opened before it, which b still holds as bound ones. Each of those was opened above the one before it, so the latest is the highest."
+    match rev
+        [] -> Core.Exprs.fvLevel(b)
+        [x, .._] -> Int.max(Core.Exprs.fvLevel(b), Core.Exprs.fvLevel(x))
+
+verify scopeLevel
+    scopeLevel(Core.Exprs.bvar(0), [Core.Exprs.fvar(3 * 4294967296)]) => 4
+    scopeLevel(Core.Exprs.fvar(0), []) => 1
 
 fn domainChecked(st: St, d: Expr, only: Bool) -> Result<St, Fail>
     ? "In checking mode the domain must be a type."
@@ -430,7 +440,7 @@ fn piStep(st: St, n: Name, d: Expr, b: Expr, bi: Binder, rev: List<Expr>, ids: L
     ? "The domain's sort, then a fresh variable for it."
     t = infer(st, d, only)?
     s = ensureSort(t.st, t.e)?
-    loc = Check.State.names(s.st, n, d, Option.None, bi)
+    loc = Check.State.namesAt(s.st, n, d, Option.None, bi, scopeLevel(b, rev))
     piLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), List.prepend(sortLevel(s.e), us), only)
 
 verify piStep
@@ -577,7 +587,7 @@ verify letLoop
 fn letStep(st: St, n: Name, t: Expr, v: Expr, b: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Checks the let's type and value, then declares it."
     st1 = letChecked(st, t, v, only)?
-    loc = Check.State.names(st1, n, t, Option.Some(v), Binder.Default)
+    loc = Check.State.namesAt(st1, n, t, Option.Some(v), Binder.Default, scopeLevel(b, rev))
     letLoop(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids), only)
 
 verify letStep
@@ -2450,7 +2460,7 @@ verify bindDomains
 fn bindVar(st: St, t: Expr, s: Expr, rev: List<Expr>, isLam: Bool, tyS: Option<Expr>) -> Result<RB, Fail>
     ? "A fresh variable only when a body uses it; otherwise a placeholder."
     match Bool.or(Core.Exprs.looseRange(bodyOf(t)) > 0, Core.Exprs.looseRange(bodyOf(s)) > 0)
-        true -> bindFresh(Check.State.names(st, binderName(s), Option.withDefault(tyS, Core.Subst.instantiate(domainOf(s), rev)), Option.None, binderInfo(s)), t, s, rev, isLam)
+        true -> bindFresh(Check.State.namesAt(st, binderName(s), Option.withDefault(tyS, Core.Subst.instantiate(domainOf(s), rev)), Option.None, binderInfo(s), Int.max(scopeLevel(t, rev), Core.Exprs.fvLevel(s))), t, s, rev, isLam)
         false -> bindLoop(st, bodyOf(t), bodyOf(s), List.prepend(Core.Exprs.cnst(Check.Lits.dontcare, []), rev), isLam)
 
 verify bindVar
