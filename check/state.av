@@ -5,7 +5,7 @@ module State
         "counter, the universe parameters in scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, levelTypeGet, levelTypePut, names]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache, Core.Alpha]
     effects []
 
@@ -203,6 +203,7 @@ record St
     eqFail: Map<Int, List<Tuple<Expr, Expr>>>
     eqNo: Map<Int, List<Tuple<Expr, Expr>>>
     unfoldCache: Map<Int, List<Tuple<Expr, Expr>>>
+    levelTypes: Map<Int, List<Tuple<Expr, Expr>>>
     closed: Map<Int, List<Tuple<Expr, Expr>>>
     open: Int
 
@@ -220,7 +221,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0
@@ -519,28 +520,6 @@ fn pairPut(cache: Map<Int, List<Tuple<Expr, Expr>>>, a: Expr, b: Expr) -> Map<In
 
 verify pairPut
     Core.Cache.size(pairPut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => 1
-
-fn levelTypeKey(e: Expr) -> Int
-    ? "The key of a constant's type at universe levels in the cache of instantiated values: above every term hash, so that it never meets the constant's value there."
-    Core.Exprs.hashOf(e) + 1099511627776
-
-verify levelTypeKey
-    levelTypeKey(Core.Exprs.bvar(0)) > 1099511627775 => true
-
-fn levelTypeGet(cache: Map<Int, List<Tuple<Expr, Expr>>>, e: Expr) -> Option<Expr>
-    ? "The type kept for the constant e at its levels."
-    findIn(Core.Cache.get(cache, levelTypeKey(e)), e)
-
-verify levelTypeGet
-    levelTypeGet(levelTypePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
-    levelTypeGet(cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(0)) => Option.None
-
-fn levelTypePut(cache: Map<Int, List<Tuple<Expr, Expr>>>, e: Expr, t: Expr) -> Map<Int, List<Tuple<Expr, Expr>>>
-    ? "Keeps the type of the constant e at its levels."
-    Core.Cache.add(cache, levelTypeKey(e), (e, t))
-
-verify levelTypePut
-    Core.Cache.size(levelTypePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => 1
 
 fn closedPairKey(a: Expr, b: Expr) -> Int
     ? "The key of a pair in the cache kept across declarations: above every term hash, so that it never meets an entry for a type there."

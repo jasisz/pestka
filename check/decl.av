@@ -53,6 +53,7 @@ record Kept
 record OldFacts
     closed: Map<Int, List<Tuple<Expr, Expr>>>
     unfolds: Map<Int, List<Tuple<Expr, Expr>>>
+    types: Map<Int, List<Tuple<Expr, Expr>>>
 
 record Checked
     failure: Option<Fail>
@@ -62,7 +63,7 @@ record Checked
 fn checkAll(decls: List<Decl>) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations before the first failure the building met, one after another."
     a = admit(decls)
-    finish(a, checkJobs(List.reverse(a.run.jobs), a.run.env, OldFacts(closed = a.run.closed, unfolds = Core.Cache.empty()), a.at))
+    finish(a, checkJobs(List.reverse(a.run.jobs), a.run.env, OldFacts(closed = a.run.closed, unfolds = Core.Cache.empty(), types = Core.Cache.empty()), a.at))
 
 fn admit(decls: List<Decl>) -> Admitted
     ? "Builds the environment from nothing; the deferred declarations wait in the result."
@@ -183,7 +184,7 @@ verify keptEmpty
 
 fn oldEmpty() -> OldFacts
     ? "No facts in the first core."
-    OldFacts(closed = Core.Cache.empty(), unfolds = Core.Cache.empty())
+    OldFacts(closed = Core.Cache.empty(), unfolds = Core.Cache.empty(), types = Core.Cache.empty())
 
 verify oldEmpty
     Core.Cache.size(oldEmpty().unfolds) => 0
@@ -225,9 +226,9 @@ verify chunkNext
 fn jobFor(core: Core, j: Job, env: Env, kept: Kept) -> Result<Kept, Fail>
     ? "A deferred declaration checked by the first core, the second, or both; with both, any difference in their answers is a failure that says what each answered."
     match core
-        Core.Old -> oldKept(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old.closed, unfoldCache = kept.old.unfolds)), kept.next)
+        Core.Old -> oldKept(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old.closed, unfoldCache = kept.old.unfolds, levelTypes = kept.old.types)), kept.next)
         Core.Next -> nextKept(Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next), kept.old)
-        Core.Both -> agree(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old.closed, unfoldCache = kept.old.unfolds)), Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next))
+        Core.Both -> agree(jobChecks(j, St.update(checkerFor(env, j), closed = kept.old.closed, unfoldCache = kept.old.unfolds, levelTypes = kept.old.types)), Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next))
 
 verify jobFor
     jobFor(Core.Both, Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.envEmpty(), keptEmpty()) => Result.Err(Fail.Reject("declaration type mismatch"))
@@ -330,7 +331,7 @@ fn checkJobs(jobs: List<Job>, env: Env, facts: OldFacts, limit: Int) -> Result<O
         [] -> Result.Ok(facts)
         [j, ..rest] -> match j.pos < limit
             false -> Result.Ok(facts)
-            true -> jobDone(jobChecks(j, St.update(checkerFor(env, j), closed = facts.closed, unfoldCache = facts.unfolds)), j, env, rest, limit)
+            true -> jobDone(jobChecks(j, St.update(checkerFor(env, j), closed = facts.closed, unfoldCache = facts.unfolds, levelTypes = facts.types)), j, env, rest, limit)
 
 verify checkJobs
     checkJobs([], Check.State.envEmpty(), oldEmpty(), 0) => Result.Ok(oldEmpty())
@@ -373,20 +374,20 @@ verify jobChecks
     jobChecks(Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => Result.Err(Fail.Reject("declaration type mismatch"))
 
 fn carried(st: St) -> OldFacts
-    ? "What the first core takes from a declaration to the next: the facts about closed terms, and the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration."
-    OldFacts(closed = st.closed, unfolds = bounded(st.unfoldCache))
+    ? "What the first core takes from a declaration to the next: the facts about closed terms, and the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration. Values are large and constant types small, so each has a limit of its own."
+    OldFacts(closed = st.closed, unfolds = bounded(st.unfoldCache, 16384), types = bounded(st.levelTypes, 65536))
 
 verify carried
     Core.Cache.size(carried(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).unfolds) => 0
 
-fn bounded(m: Map<Int, List<Tuple<Expr, Expr>>>) -> Map<Int, List<Tuple<Expr, Expr>>>
-    ? "The values and constant types instantiated at levels, emptied once they pass 16384 hashes: kept for the whole run, values once took mathlib past 14 GB and constant types took it there again on one worker, while most are asked for again within a few declarations. Limits of 1024, 4096 and 16384 gave 351.5, 349.7 and 343.8 G instructions on Init (one worker)."
-    match Core.Cache.size(m) > 16384
+fn bounded(m: Map<Int, List<Tuple<Expr, Expr>>>, limit: Int) -> Map<Int, List<Tuple<Expr, Expr>>>
+    ? "Values or constant types instantiated at levels, emptied once they pass limit hashes: kept for the whole run, values once took mathlib past 14 GB and constant types took it there again on one worker, while most are asked for again within a few declarations."
+    match Core.Cache.size(m) > limit
         true -> Core.Cache.empty()
         false -> m
 
 verify bounded
-    Core.Cache.size(bounded(Core.Cache.empty())) => 0
+    Core.Cache.size(bounded(Core.Cache.empty(), 1)) => 0
 
 verify checkAll
     checkAll([]) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
