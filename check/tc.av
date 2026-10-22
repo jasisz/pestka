@@ -1162,17 +1162,10 @@ fn etaTyped(w: RE, rv: Rec, induct: Name, e: Expr) -> Result<RE, Fail>
     ? "Only when the type really is the structure; a proof only under large elimination."
     match Core.Apps.isConst(Core.Apps.fnOf(w.e), induct)
         false -> Result.Ok(RE(e = e, st = w.st))
-        true -> etaOfType(w.st, w.e, rv, induct, e)
+        true -> etaUnlessSmallProof(largeElim(w.st, rv, induct), w.e, e, isProp(w.st, w.e)?)
 
 verify etaTyped
     resultExpr(etaTyped(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon(), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
-
-fn etaOfType(st: St, ty: Expr, rv: Rec, induct: Name, e: Expr) -> Result<RE, Fail>
-    ? "The structure's type in hand: whether its recursor eliminates into any sort is read first, so that the state is handed on to the proof test rather than copied while it adds to the caches."
-    etaUnlessSmallProof(largeElim(st, rv, induct), ty, e, isProp(st, ty)?)
-
-verify etaOfType
-    resultExpr(etaOfType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon(), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
 
 fn etaUnlessSmallProof(large: Bool, ty: Expr, e: Expr, p: RB) -> Result<RE, Fail>
     ? "Expands a value, or a proof whose recursor eliminates into any sort."
@@ -1228,26 +1221,19 @@ fn toCtorWhenK(st: St, rv: Rec, e: Expr) -> Result<RE, Fail>
     w = whnf(t.st, t.e)?
     match Core.Apps.isConst(Core.Apps.fnOf(w.e), majorInduct(rv))
         false -> Result.Ok(RE(e = e, st = w.st))
-        true -> kOfType(w.st, w.e, rv, e)
+        true -> kCandidate(w.st, w.e, e, nullaryCtor(w.st, w.e, rv.numParams))
 
 verify toCtorWhenK
     resultExpr(toCtorWhenK(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = true, isUnsafe = false), Core.Exprs.sort(Level.Zero))) => Core.Exprs.sort(Level.Zero)
 
-fn kOfType(st: St, ty: Expr, rv: Rec, e: Expr) -> Result<RE, Fail>
-    ? "The K-like type in hand: its constructor is found first, so that the state is handed on rather than copied while it adds to the caches."
-    kCandidate(nullaryCtor(st, ty, rv.numParams), st, ty, e)
-
-verify kOfType
-    resultExpr(kOfType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
-
-fn kCandidate(cand: Option<Expr>, st: St, appType: Expr, e: Expr) -> Result<RE, Fail>
+fn kCandidate(st: St, appType: Expr, e: Expr, cand: Option<Expr>) -> Result<RE, Fail>
     ? "Uses the constructor only when its type equals e's."
     match cand
         Option.None -> Result.Ok(RE(e = e, st = st))
         Option.Some(c) -> kCheck(appType, e, c, inferType(st, c)?)
 
 verify kCandidate
-    resultExpr(kCandidate(Option.None, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
+    resultExpr(kCandidate(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.fvar(1), Option.None)) => Core.Exprs.fvar(1)
 
 fn kCheck(appType: Expr, e: Expr, c: Expr, ct: RE) -> Result<RE, Fail>
     ? "The equality test of toCtorWhenK."
@@ -1526,8 +1512,8 @@ fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool,
             [] -> Result.Ok(RE(e = matTerm(t, env, ms).e, st = st))
         Expr.BVar(i) -> lclo(st, nthClo(env, i), stack, ms, delta, cheapRec, cheapProj)
         Expr.Let(_, _, _, v, body) -> lcore(st, body, List.prepend(closure(v, env, ms.next), env), stack, MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
-        Expr.FVar(id) -> lvar(Check.State.localValue(st.lctx, id), st, t, stack, ms, delta, cheapRec, cheapProj)
-        Expr.Const(_, n, ls) -> lconst(Check.State.lookup(st, n), st, t, ls, stack, ms, delta, cheapRec, cheapProj)
+        Expr.FVar(id) -> lvar(st, t, Check.State.localValue(st.lctx, id), stack, ms, delta, cheapRec, cheapProj)
+        Expr.Const(_, n, ls) -> lconst(st, t, ls, Check.State.lookup(st, n), stack, ms, delta, cheapRec, cheapProj)
         Expr.Proj(_, s, i, x) -> lproject(st, s, i, matTerm(x, env, ms), stack, delta, cheapRec, cheapProj)
         _ -> Result.Ok(RE(e = lstuck(matTerm(t, env, ms), stack), st = st))
 
@@ -1543,16 +1529,16 @@ fn lclo(st: St, c: Clo, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, c
 verify lclo
     resultExpr(lclo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Clo.Clo(-1, Core.Exprs.natLit(2), []), [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.natLit(2)
 
-fn lvar(v: Option<Expr>, st: St, t: Expr, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+fn lvar(st: St, t: Expr, v: Option<Expr>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A let-bound free variable goes on as its value; any other is stuck."
     match v
         Option.Some(x) -> lcore(st, x, [], stack, ms, delta, cheapRec, cheapProj)
         Option.None -> Result.Ok(RE(e = lstuck(MX(e = t, ms = ms), stack), st = st))
 
 verify lvar
-    resultExpr(lvar(Option.None, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.fvar(0)
+    resultExpr(lvar(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Option.None, [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.fvar(0)
 
-fn lconst(c: Option<Const>, st: St, f: Expr, ls: List<Level>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+fn lconst(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A constant head: a recursor's rule, a quotient rule, or, with delta, Nat arithmetic and unfolding."
     match c
         Option.Some(Const.CRec(rv)) -> lrec(st, f, ls, rv, stack, ms, delta, cheapRec, cheapProj)
@@ -1560,7 +1546,7 @@ fn lconst(c: Option<Const>, st: St, f: Expr, ls: List<Level>, stack: List<Clo>, 
         _ -> lnat(st, f, stack, ms, delta, cheapRec, cheapProj)
 
 verify lconst
-    resultExpr(lconst(Option.None, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+    resultExpr(lconst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
 
 fn lrec(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A recursor reduces only with its major premise present; the major premise is built and brought to constructor form, the other arguments stay closures."
@@ -1892,7 +1878,7 @@ fn whnfCoreM(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fai
             false -> mcached(st, e, cheapRec, cheapProj)
         Expr.Let -> mcached(st, e, cheapRec, cheapProj)
         Expr.Proj -> mcached(st, e, cheapRec, cheapProj)
-        Expr.FVar(id) -> lvar(Check.State.localValue(st.lctx, id), st, e, [], MS(next = 0, forced = {}), false, cheapRec, cheapProj)
+        Expr.FVar(id) -> lvar(st, e, Check.State.localValue(st.lctx, id), [], MS(next = 0, forced = {}), false, cheapRec, cheapProj)
         _ -> Result.Ok(RE(e = e, st = st))
 
 verify whnfCoreM
