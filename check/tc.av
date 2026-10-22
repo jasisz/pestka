@@ -130,8 +130,8 @@ fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
         Expr.Lam -> lamLoop(st, e, env, [], only)
         Expr.Pi -> piLoop(st, e, env, [], [], only)
         Expr.Let -> letLoop(st, e, env, [], only)
-        Expr.NatLit -> Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.natName(), []), st = st))
-        Expr.StrLit -> Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.stringName(), []), st = st))
+        Expr.NatLit -> Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.nat, []), st = st))
+        Expr.StrLit -> Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.string, []), st = st))
         Expr.Proj(_, s, i, x) -> inferProj(st, s, i, x, env, only)
 
 verify inferCore
@@ -488,7 +488,7 @@ verify argInto
 
 fn isEagerReduce(a: Expr) -> Bool
     ? "An argument of the form eagerReduce _ _."
-    Bool.and(Core.Apps.isConst(Core.Apps.fnOf(a), Check.Lits.eagerReduceName()), Core.Apps.numArgs(a) == 2)
+    Bool.and(Core.Apps.isConst(Core.Apps.fnOf(a), Check.Lits.eagerReduce), Core.Apps.numArgs(a) == 2)
 
 verify isEagerReduce
     isEagerReduce(Core.Exprs.bvar(0)) => false
@@ -1009,7 +1009,7 @@ verify reduceRecursor
 
 fn quotReady(st: St) -> Bool
     ? "The quotient package has been added."
-    match Check.State.lookup(st, Check.Lits.quotName())
+    match Check.State.lookup(st, Check.Lits.quot)
         Option.Some(Const.CQuot) -> true
         _ -> false
 
@@ -1039,7 +1039,7 @@ verify quotApply
 
 fn quotMk(mk: RE, args: List<Expr>, mkPos: Int) -> Result<RO, Fail>
     ? "Fires only on Quot.mk with its three arguments."
-    match Bool.and(Core.Apps.isConst(Core.Apps.fnOf(mk.e), Check.Lits.quotMkName()), Core.Apps.numArgs(mk.e) == 3)
+    match Bool.and(Core.Apps.isConst(Core.Apps.fnOf(mk.e), Check.Lits.quotMk), Core.Apps.numArgs(mk.e) == 3)
         true -> Result.Ok(RO(o = Option.Some(Core.Apps.mkApps(Core.Exprs.app(nth(args, 3), lastArg(mk.e)), List.drop(args, mkPos + 1))), st = mk.st))
         false -> Result.Ok(RO(o = Option.None, st = mk.st))
 
@@ -1414,7 +1414,7 @@ verify whnfRun
 fn deltaRigid(st: St, f: Expr) -> Bool
     ? "A head under which whnf can do nothing: a constructor other than Nat.succ, an inductive type, an axiom, an opaque constant, a free variable without a let value, a sort, a pi or a literal."
     match f
-        Expr.Const(_, n, _) -> match Core.Apps.isConst(f, Check.Lits.natSuccName())
+        Expr.Const(_, n, _) -> match Core.Apps.isConst(f, Check.Lits.natSucc)
             true -> false
             false -> match Check.State.lookup(st, n)
                 Option.Some(Const.CInduct) -> true
@@ -2129,7 +2129,7 @@ verify defEqCore
 
 fn eqBoolTrue(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
     ? "Proof by reflection: a closed term against Bool.true is evaluated."
-    match Bool.and(Bool.or(Bool.not(Core.Exprs.hasFVar(t)), st.eager), Core.Apps.isConst(s, Check.Lits.boolTrueName()))
+    match Bool.and(Bool.or(Bool.not(Core.Exprs.hasFVar(t)), st.eager), Core.Apps.isConst(s, Check.Lits.boolTrue))
         true -> eqBoolTrueWhnf(whnf(st, t)?, t, s)
         false -> eqCoreWhnf(st, t, s)
 
@@ -2138,7 +2138,7 @@ verify eqBoolTrue
 
 fn eqBoolTrueWhnf(w: RE, t: Expr, s: Expr) -> Result<RB, Fail>
     ? "Equal if it evaluated to Bool.true; otherwise the general path."
-    match Core.Apps.isConst(w.e, Check.Lits.boolTrueName())
+    match Core.Apps.isConst(w.e, Check.Lits.boolTrue)
         true -> yes(w.st)
         false -> eqCoreWhnf(w.st, t, s)
 
@@ -2451,7 +2451,7 @@ fn bindVar(st: St, t: Expr, s: Expr, rev: List<Expr>, isLam: Bool, tyS: Option<E
     ? "A fresh variable only when a body uses it; otherwise a placeholder."
     match Bool.or(Core.Exprs.looseRange(bodyOf(t)) > 0, Core.Exprs.looseRange(bodyOf(s)) > 0)
         true -> bindFresh(Check.State.names(st, binderName(s), Option.withDefault(tyS, Core.Subst.instantiate(domainOf(s), rev)), Option.None, binderInfo(s)), t, s, rev, isLam)
-        false -> bindLoop(st, bodyOf(t), bodyOf(s), List.prepend(Core.Exprs.cnst(Check.Lits.dontcareName(), []), rev), isLam)
+        false -> bindLoop(st, bodyOf(t), bodyOf(s), List.prepend(Core.Exprs.cnst(Check.Lits.dontcare, []), rev), isLam)
 
 verify bindVar
     resultBool(bindVar(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), [], true, Option.None)) => true
@@ -2516,7 +2516,7 @@ fn natPred(e: Expr) -> Option<Expr>
         Expr.NatLit(n) -> match n > 0
             true -> Option.Some(Core.Exprs.natLit(n - 1))
             false -> Option.None
-        Expr.App(_, f, a) -> match Core.Apps.isConst(f, Check.Lits.natSuccName())
+        Expr.App(_, f, a) -> match Core.Apps.isConst(f, Check.Lits.natSucc)
             true -> Option.Some(a)
             false -> Option.None
         _ -> Option.None
@@ -3043,7 +3043,7 @@ fn stringCore(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
     ? "One direction of the expansion."
     match t
         Expr.StrLit(x) -> match s
-            Expr.App(_, f, _) -> match f == Core.Exprs.cnst(Check.Lits.stringOfListName(), [])
+            Expr.App(_, f, _) -> match f == Core.Exprs.cnst(Check.Lits.stringOfList, [])
                 true -> stringExpanded(whnf(st, Check.Lits.strToCtor(x))?, s)
                 false -> Result.Ok(RI(i = 0, st = st))
             _ -> Result.Ok(RI(i = 0, st = st))
