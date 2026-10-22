@@ -3,7 +3,7 @@ module Lits
         "Names the kernel knows by heart, the expansion of Nat and String"
         "literals into constructor applications, and the Nat operations the"
         "reference kernel computes on literals instead of unfolding."
-    exposes [name1, name2, natLitToCtor, strToCtor, natValue, natOp, isNatOp, boolExpr]
+    exposes [natName, stringName, natZeroName, natSuccName, boolTrueName, boolFalseName, stringOfListName, quotName, quotMkName, eagerReduceName, dontcareName, name1, name2, natLitToCtor, strToCtor, natValue, natOp, isNatOp, boolExpr]
     depends [Core.Names, Core.Levels, Core.Exprs, Check.State]
     effects []
 
@@ -21,11 +21,124 @@ fn name2(a: String, b: String) -> Name
 verify name2
     Core.Names.render(name2("Nat", "succ")) => "Nat.succ"
 
+decision KnownNamesOnce
+    date = "2026-10-22"
+    reason =
+        "Building a name hashes its text, a list of one-character strings,"
+        "so a check against Nat.succ or eagerReduce that built the name on"
+        "each call cost more than the check. Every application checked asked"
+        "whether its argument was an eagerReduce. Each name below is a"
+        "module binding, built once per thread. Init: 479.1 G instructions"
+        "retired to 445.5 G on four workers, 440.1 G to 408.5 G on one,"
+        "nearly all of it from eagerReduce and Nat.succ."
+    chosen = "KnownNamesOnce"
+    rejected = ["NamesBuiltAtUse"]
+    impacts = [natSuccName, eagerReduceName]
+
+nat: Name = name1("Nat")
+
+string: Name = name1("String")
+
+natZero: Name = name2("Nat", "zero")
+
+natSucc: Name = name2("Nat", "succ")
+
+boolTrue: Name = name2("Bool", "true")
+
+boolFalse: Name = name2("Bool", "false")
+
+stringOfList: Name = name2("String", "ofList")
+
+quot: Name = name1("Quot")
+
+quotMk: Name = name2("Quot", "mk")
+
+eagerReduce: Name = name1("eagerReduce")
+
+dontcare: Name = name1("dontcare")
+
+fn natName() -> Name
+    ? "Nat, built once."
+    nat
+
+verify natName
+    natName() => name1("Nat")
+
+fn stringName() -> Name
+    ? "String, built once."
+    string
+
+verify stringName
+    stringName() => name1("String")
+
+fn natZeroName() -> Name
+    ? "Nat.zero, built once."
+    natZero
+
+verify natZeroName
+    natZeroName() => name2("Nat", "zero")
+
+fn natSuccName() -> Name
+    ? "Nat.succ, built once."
+    natSucc
+
+verify natSuccName
+    natSuccName() => name2("Nat", "succ")
+
+fn boolTrueName() -> Name
+    ? "Bool.true, built once."
+    boolTrue
+
+verify boolTrueName
+    boolTrueName() => name2("Bool", "true")
+
+fn boolFalseName() -> Name
+    ? "Bool.false, built once."
+    boolFalse
+
+verify boolFalseName
+    boolFalseName() => name2("Bool", "false")
+
+fn stringOfListName() -> Name
+    ? "String.ofList, built once."
+    stringOfList
+
+verify stringOfListName
+    stringOfListName() => name2("String", "ofList")
+
+fn quotName() -> Name
+    ? "Quot, built once."
+    quot
+
+verify quotName
+    quotName() => name1("Quot")
+
+fn quotMkName() -> Name
+    ? "Quot.mk, built once."
+    quotMk
+
+verify quotMkName
+    quotMkName() => name2("Quot", "mk")
+
+fn eagerReduceName() -> Name
+    ? "eagerReduce, built once."
+    eagerReduce
+
+verify eagerReduceName
+    eagerReduceName() => name1("eagerReduce")
+
+fn dontcareName() -> Name
+    ? "dontcare, built once."
+    dontcare
+
+verify dontcareName
+    dontcareName() => name1("dontcare")
+
 fn natLitToCtor(n: Int) -> Expr
     ? "0 is Nat.zero; n+1 is Nat.succ applied to the literal n."
     match n == 0
-        true -> Core.Exprs.cnst(name2("Nat", "zero"), [])
-        false -> Core.Exprs.app(Core.Exprs.cnst(name2("Nat", "succ"), []), Core.Exprs.natLit(n - 1))
+        true -> Core.Exprs.cnst(natZero, [])
+        false -> Core.Exprs.app(Core.Exprs.cnst(natSucc, []), Core.Exprs.natLit(n - 1))
 
 verify natLitToCtor
     natLitToCtor(0) => Core.Exprs.cnst(name2("Nat", "zero"), [])
@@ -33,7 +146,7 @@ verify natLitToCtor
 
 fn strToCtor(s: String) -> Expr
     ? "String.ofList of the characters, each Char.ofNat of its code point."
-    Core.Exprs.app(Core.Exprs.cnst(name2("String", "ofList"), []), charList(List.reverse(String.chars(s)), listOfChar("nil")))
+    Core.Exprs.app(Core.Exprs.cnst(stringOfList, []), charList(List.reverse(String.chars(s)), listOfChar("nil")))
 
 verify strToCtor
     strToCtor("") => Core.Exprs.app(Core.Exprs.cnst(name2("String", "ofList"), []), listOfChar("nil"))
@@ -58,7 +171,7 @@ fn natValue(e: Expr) -> Option<Int>
     ? "A literal or Nat.zero as a number."
     match e
         Expr.NatLit(n) -> Option.Some(n)
-        Expr.Const(n, []) -> match n == name2("Nat", "zero")
+        Expr.Const(n, []) -> match n == natZero
             true -> Option.Some(0)
             false -> Option.None
         _ -> Option.None
@@ -79,8 +192,8 @@ verify isNatOp
 fn boolExpr(b: Bool) -> Expr
     ? "Bool.true or Bool.false."
     match b
-        true -> Core.Exprs.cnst(name2("Bool", "true"), [])
-        false -> Core.Exprs.cnst(name2("Bool", "false"), [])
+        true -> Core.Exprs.cnst(boolTrue, [])
+        false -> Core.Exprs.cnst(boolFalse, [])
 
 verify boolExpr
     boolExpr(true) => Core.Exprs.cnst(name2("Bool", "true"), [])
