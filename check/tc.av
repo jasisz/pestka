@@ -144,7 +144,7 @@ fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
         Expr.BVar(i) -> boundType(st, List.drop(env, i))
         Expr.FVar(id) -> Result.Ok(RE(e = Check.State.localType(st.lctx, id)?, st = st))
         Expr.Sort(l) -> inferSort(st, l, only)
-        Expr.Const(_, n, ls) -> inferConst(st, n, ls, only)
+        Expr.Const(_, n, ls) -> inferConst(st, e, n, ls, only)
         Expr.App(_, f, a) -> inferApp(st, e, f, a, env, only)
         Expr.Lam -> lamLoop(st, e, env, [], only)
         Expr.Pi -> piLoop(st, e, env, [], [], only)
@@ -283,43 +283,62 @@ fn sortChecked(u: Unit, st: St, l: Level) -> Result<RE, Fail>
 verify sortChecked
     resultExpr(sortChecked(Unit, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Level.Zero)) => Core.Exprs.sort(Level.Succ(Level.Zero))
 
-fn inferConst(st: St, n: Name, ls: List<Level>, only: Bool) -> Result<RE, Fail>
-    ? "The constant's type at the given levels."
+fn inferConst(st: St, e: Expr, n: Name, ls: List<Level>, only: Bool) -> Result<RE, Fail>
+    ? "The type of e, the constant n at the levels ls."
     match Check.State.lookup(st, n)
         Option.None -> Result.Err(bad("unknown constant '{Core.Names.render(n)}'"))
-        Option.Some(c) -> constType(st, c, Check.State.headOf(c), ls, only)
+        Option.Some(c) -> constType(st, e, c, Check.State.headOf(c), ls, only)
 
 verify inferConst
-    inferConst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.str(Core.Names.anon(), "x"), [], true) => Result.Err(Fail.Reject("unknown constant 'x'"))
+    inferConst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), []), Core.Names.str(Core.Names.anon(), "x"), [], true) => Result.Err(Fail.Reject("unknown constant 'x'"))
 
-fn constType(st: St, c: Const, h: Head, ls: List<Level>, only: Bool) -> Result<RE, Fail>
+fn constType(st: St, e: Expr, c: Const, h: Head, ls: List<Level>, only: Bool) -> Result<RE, Fail>
     ? "Checks the level count, and in checking mode safety and levels."
     match List.len(h.params) == List.len(ls)
         false -> Result.Err(bad("incorrect number of universe levels for '{Core.Names.render(h.name)}'"))
         true -> match only
-            true -> Result.Ok(RE(e = Core.Subst.instLevelParams(h.ty, h.params, ls), st = st))
-            false -> constSafety(st, c, h, ls)
+            true -> Result.Ok(levelledType(st, e, h, ls))
+            false -> constSafety(st, e, c, h, ls)
 
 verify constType
-    constType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [Level.Zero], true) => Result.Err(Fail.Reject("incorrect number of universe levels for '[anonymous]'"))
+    constType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [Level.Zero]), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [Level.Zero], true) => Result.Err(Fail.Reject("incorrect number of universe levels for '[anonymous]'"))
 
-fn constSafety(st: St, c: Const, h: Head, ls: List<Level>) -> Result<RE, Fail>
+fn constSafety(st: St, e: Expr, c: Const, h: Head, ls: List<Level>) -> Result<RE, Fail>
     ? "A safe declaration may use neither unsafe nor partial constants."
     match Bool.and(Check.State.isUnsafe(c), st.safety != Safety.Unsafe)
         true -> Result.Err(bad("invalid declaration, it uses unsafe declaration '{Core.Names.render(h.name)}'"))
         false -> match Bool.and(Check.State.isPartial(c), st.safety == Safety.Safe)
             true -> Result.Err(bad("invalid declaration, safe declaration must not contain partial declaration '{Core.Names.render(h.name)}'"))
-            false -> constLevels(checkLevels(st, ls)?, st, h, ls)
+            false -> constLevels(checkLevels(st, ls)?, st, e, h, ls)
 
 verify constSafety
-    constSafety(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), []) => Result.Err(Fail.Reject("invalid declaration, it uses unsafe declaration '[anonymous]'"))
+    constSafety(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), []), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), []) => Result.Err(Fail.Reject("invalid declaration, it uses unsafe declaration '[anonymous]'"))
 
-fn constLevels(u: Unit, st: St, h: Head, ls: List<Level>) -> Result<RE, Fail>
+fn constLevels(u: Unit, st: St, e: Expr, h: Head, ls: List<Level>) -> Result<RE, Fail>
     ? "The instantiated type once the levels passed."
-    Result.Ok(RE(e = Core.Subst.instLevelParams(h.ty, h.params, ls), st = st))
+    Result.Ok(levelledType(st, e, h, ls))
 
 verify constLevels
-    resultExpr(constLevels(Unit, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [])) => Core.Exprs.sort(Level.Zero)
+    resultExpr(constLevels(Unit, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), []), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [])) => Core.Exprs.sort(Level.Zero)
+
+fn levelledType(st: St, e: Expr, h: Head, ls: List<Level>) -> RE
+    ? "The type of e, the constant of h at the levels ls, once its levels passed their checks. It depends on the levels as written, not on what their parameters mean in a declaration, so it is instantiated once and kept with the facts each worker carries across declarations."
+    match ls
+        [] -> RE(e = h.ty, st = st)
+        _ -> match Check.State.cacheGet(st.closed, e)
+            Option.Some(t) -> RE(e = t, st = st)
+            Option.None -> keptType(st, e, Core.Subst.instLevelParams(h.ty, h.params, ls))
+
+verify levelledType
+    levelledType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), []), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), []).e => Core.Exprs.sort(Level.Zero)
+    Core.Cache.size(levelledType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [Level.Zero]), Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Param(Core.Names.anon()))), [Level.Zero]).st.closed) => 1
+
+fn keptType(st: St, e: Expr, t: Expr) -> RE
+    ? "The instantiated type, recorded for e."
+    RE(e = t, st = St.update(st, closed = Check.State.cachePut(st.closed, e, t)))
+
+verify keptType
+    keptType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(1)).e => Core.Exprs.bvar(1)
 
 fn fvarId(e: Expr) -> Int
     ? "The number of a free variable."
