@@ -351,6 +351,12 @@ decision LevelledVariables
         "every opening new. Elsewhere a variable is fresh, above every level"
         "used so far; past level 1022 it is fresh too, its level read as"
         "1023 or more. The serial number has no bound, so numbers never wrap."
+        "Whoever opens a binder passes the variables of its telescope opened"
+        "before it, the latest first, and their levels rise, so the latest"
+        "is the highest; and fresh variables are made only by the checking"
+        "of a declaration being added (inductive types, recursors, the"
+        "quotient), on states of its own, so the levels of deferred"
+        "declarations stay low."
     chosen = "LevelledVariables"
     rejected = ["FreshNumbers"]
     impacts = [names, namesAt]

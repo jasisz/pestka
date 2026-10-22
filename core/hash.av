@@ -1,7 +1,7 @@
 module Hash
     intent =
         "Structural hashes for names, levels and expressions."
-        "Every value stays below a prime just under 2^32, and the multiplier"
+        "Every value stays below the prime 2^31 - 1, and the multiplier"
         "is below 2^20, so one mixing step never leaves a machine word."
         "A hash only narrows a comparison; equality is still decided"
         "structurally."
@@ -10,12 +10,12 @@ module Hash
 
 fn mix(a: Int, b: Int) -> Int
     ? "Combines a hash with one more ingredient below the modulus."
-    Int.mod(a * 1000003 + b, 4294967291)
+    Int.mod(a * 1000003 + b, 2147483647)
 
 verify mix
     mix(0, 5) => 5
     mix(1, 0) => 1000003
-    mix(4294967290, 4294967290) => Int.mod(4294967290 * 1000004, 4294967291)
+    mix(2147483646, 2147483646) => Int.mod(2147483646 * 1000004, 2147483647)
 
 fn ofText(s: String) -> Int
     ? "Hash of a string, over its code points."
