@@ -66,13 +66,25 @@ verify infer
     resultExpr(infer(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(3), true)) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
 
 fn cachedType(st: St, e: Expr, only: Bool) -> Option<Expr>
-    ? "A known type of e: from the cache of closed terms checked in earlier declarations, else from this declaration's cache for the mode."
+    ? "A known type of e: from the cache of closed terms checked in earlier declarations, else from this declaration's cache for the mode; inference also takes the type found by checking e, which is a type of e."
     match shared(e)
         true -> orCached(Check.State.cacheGet(st.closed, e), st, e, only)
-        false -> Check.State.cacheGet(cacheFor(st, only, e), e)
+        false -> orChecked(Check.State.cacheGet(cacheFor(st, only, e), e), st, e, only)
 
 verify cachedType
     cachedType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), true) => Option.None
+
+fn orChecked(hit: Option<Expr>, st: St, e: Expr, only: Bool) -> Option<Expr>
+    ? "The answer for the mode, or for inference the one checking found."
+    match hit
+        Option.Some -> hit
+        Option.None -> match only
+            true -> Check.State.cacheGet(cacheFor(st, false, e), e)
+            false -> Option.None
+
+verify orChecked
+    orChecked(Option.None, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), checkCache = Check.State.cachePut(Core.Cache.empty(), Core.Exprs.natLit(2), Core.Exprs.natLit(3))), Core.Exprs.natLit(2), true) => Option.Some(Core.Exprs.natLit(3))
+    orChecked(Option.None, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), inferCache = Check.State.cachePut(Core.Cache.empty(), Core.Exprs.natLit(2), Core.Exprs.natLit(3))), Core.Exprs.natLit(2), false) => Option.None
 
 fn orCached(hit: Option<Expr>, st: St, e: Expr, only: Bool) -> Option<Expr>
     ? "The shared answer, or this declaration's."
