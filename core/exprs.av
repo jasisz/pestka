@@ -35,6 +35,24 @@ decision MetaFirst
     rejected = ["MetaLast", "HashGuardAtCallers"]
     impacts = [Expr]
 
+decision BindersUnnamed
+    date = "2026-10-24"
+    reason =
+        "Typing never reads a binder's name or annotation, and Lean's own"
+        "equality of expressions ignores both, as the reference replay does"
+        "when it compares what it generates with an export. Pestka's equality"
+        "is the derived one, which compared them: a term met again with"
+        "another name for a bound variable was a new key in every cache, and"
+        "the quick path of definitional equality fell back to comparing up"
+        "to names. Now the constructors put in the anonymous name and the"
+        "default annotation, so terms that differ only there are one term."
+        "The node keeps the two fields, which now always hold the same."
+        "One worker: qb9 135.7 G to 132.0 G instructions, etale 71.3 G to"
+        "70.8 G, Init 161.6 G to 158.0 G."
+    chosen = "BindersUnnamed"
+    rejected = ["BindersNamed"]
+    impacts = [lam, pi, letE]
+
 type Binder
     Default
     Implicit
@@ -111,29 +129,32 @@ verify binderMeta
     binderMeta(5, bvar(1), bvar(2)).range => 2
 
 fn lam(n: Name, t: Expr, b: Expr, bi: Binder) -> Expr
-    ? "Lambda abstraction; b refers to the bound variable as index 0."
-    Expr.Lam(pack(binderMeta(5, t, b)), n, t, b, bi)
+    ? "Lambda abstraction; b refers to the bound variable as index 0. The binder's name and annotation are not kept (BindersUnnamed)."
+    Expr.Lam(pack(binderMeta(5, t, b)), Core.Names.anon(), t, b, Binder.Default)
 
 verify lam
     looseRange(lam(Core.Names.anon(), sort(Level.Zero), bvar(0), Binder.Default)) => 0
     looseRange(lam(Core.Names.anon(), sort(Level.Zero), bvar(1), Binder.Default)) => 1
+    lam(Core.Names.str(Core.Names.anon(), "x"), sort(Level.Zero), bvar(0), Binder.Implicit) == lam(Core.Names.anon(), sort(Level.Zero), bvar(0), Binder.Default) => true
 
 fn pi(n: Name, t: Expr, b: Expr, bi: Binder) -> Expr
-    ? "Dependent function type."
-    Expr.Pi(pack(binderMeta(6, t, b)), n, t, b, bi)
+    ? "Dependent function type. The binder's name and annotation are not kept (BindersUnnamed)."
+    Expr.Pi(pack(binderMeta(6, t, b)), Core.Names.anon(), t, b, Binder.Default)
 
 verify pi
     hashOf(pi(Core.Names.anon(), bvar(0), bvar(0), Binder.Default)) == hashOf(lam(Core.Names.anon(), bvar(0), bvar(0), Binder.Default)) => false
+    pi(Core.Names.str(Core.Names.anon(), "x"), sort(Level.Zero), bvar(0), Binder.InstImplicit) == pi(Core.Names.anon(), sort(Level.Zero), bvar(0), Binder.Default) => true
 
 fn letE(n: Name, t: Expr, v: Expr, b: Expr) -> Expr
-    ? "Local definition; b refers to it as index 0."
+    ? "Local definition; b refers to it as index 0. The name is not kept (BindersUnnamed)."
     mt = metaOf(t)
     mv = metaOf(v)
     mb = metaOf(b)
-    Expr.Let(pack(Meta(hash = Core.Hash.mix(Core.Hash.mix(Core.Hash.mix(7, mt.hash), mv.hash), mb.hash), range = Int.max(Int.max(mt.range, mv.range), Int.max(mb.range - 1, 0)), level = Int.max(mt.level, Int.max(mv.level, mb.level)), params = Bool.or(mt.params, Bool.or(mv.params, mb.params)), size = sized(mt.size + mv.size + mb.size))), n, t, v, b)
+    Expr.Let(pack(Meta(hash = Core.Hash.mix(Core.Hash.mix(Core.Hash.mix(7, mt.hash), mv.hash), mb.hash), range = Int.max(Int.max(mt.range, mv.range), Int.max(mb.range - 1, 0)), level = Int.max(mt.level, Int.max(mv.level, mb.level)), params = Bool.or(mt.params, Bool.or(mv.params, mb.params)), size = sized(mt.size + mv.size + mb.size))), Core.Names.anon(), t, v, b)
 
 verify letE
     looseRange(letE(Core.Names.anon(), bvar(0), bvar(4), bvar(0))) => 5
+    letE(Core.Names.str(Core.Names.anon(), "x"), bvar(0), bvar(4), bvar(0)) == letE(Core.Names.anon(), bvar(0), bvar(4), bvar(0)) => true
 
 fn natLit(n: Int) -> Expr
     ? "Natural number literal."
