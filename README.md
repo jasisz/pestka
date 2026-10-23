@@ -72,7 +72,8 @@ The checker follows the reference kernel's algorithm. What is its own:
   there in the next one. It carries its variables and their context, and the
   results of inference, checking, reduction and comparison, about closed
   terms and, with variables named as above, open ones too; checking a term
-  with a universe parameter is kept only while the parameters stay the same.
+  with a universe parameter is kept for the same parameters, and the last
+  four lists of parameters keep theirs.
   A constant's type and a definition's value at universe levels depend only
   on the levels as written, and are kept as well. Every cache has a limit and
   is emptied past it.

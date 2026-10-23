@@ -6,7 +6,7 @@ module State
         "scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars]
+    exposes [Fail, Const, Env, Placed, ParamGen, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache, Core.Alpha]
     effects []
 
@@ -23,6 +23,10 @@ type Const
     CInduct(IndType)
     CCtor(Ctor)
     CRec(Rec)
+
+record ParamGen
+    params: List<Name>
+    cache: Map<Int, Bucket>
 
 record Placed
     name: Name
@@ -205,6 +209,8 @@ record St
     opened: Expr
     keep: Int
     kinds: List<Int>
+    gens: List<ParamGen>
+    paramsBefore: List<Name>
 
 record RE
     e: Expr
@@ -220,7 +226,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), paramCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Core.Exprs.sort(Level.Zero), keep = 65536, kinds = [])
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), paramCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Core.Exprs.sort(Level.Zero), keep = 65536, kinds = [], gens = [], paramsBefore = params)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0
