@@ -7,7 +7,7 @@ module IndAdd
         "the derived constants enter the environment. A block with nested"
         "occurrences goes through Check.Nested first."
     exposes [addInductive, addQuotDecl]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Core.Decls, Core.Alpha, Check.State, Check.Telescope, Check.Blk, Check.Induct, Check.Recursor, Check.Quot, Check.Nested]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Core.Decls, Check.State, Check.Telescope, Check.Blk, Check.Induct, Check.Recursor, Check.Quot, Check.Nested]
     effects []
 
 fn reject(msg: String) -> Fail
@@ -269,7 +269,7 @@ verify badType
 fn sameType(g: Option<Const>, t: IndType) -> Bool
     ? "Every field equal, the type up to binder names."
     match g
-        Option.Some(Const.CInduct(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == t.head.params, Core.Alpha.alphaEq(d.head.ty, t.head.ty)), Bool.and(d.numParams == t.numParams, d.numIndices == t.numIndices)), Bool.and(Bool.and(d.all == t.all, d.ctors == t.ctors), Bool.and(Bool.and(d.numNested == t.numNested, d.isRec == t.isRec), Bool.and(d.isUnsafe == t.isUnsafe, d.isReflexive == t.isReflexive))))
+        Option.Some(Const.CInduct(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == t.head.params, d.head.ty == t.head.ty), Bool.and(d.numParams == t.numParams, d.numIndices == t.numIndices)), Bool.and(Bool.and(d.all == t.all, d.ctors == t.ctors), Bool.and(Bool.and(d.numNested == t.numNested, d.isRec == t.isRec), Bool.and(d.isUnsafe == t.isUnsafe, d.isReflexive == t.isReflexive))))
         _ -> false
 
 verify sameType
@@ -296,7 +296,7 @@ verify badCtor
 fn sameCtor(g: Option<Const>, c: Ctor) -> Bool
     ? "Every field equal, the type up to binder names."
     match g
-        Option.Some(Const.CCtor(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == c.head.params, Core.Alpha.alphaEq(d.head.ty, c.head.ty)), Bool.and(d.induct == c.induct, d.cidx == c.cidx)), Bool.and(Bool.and(d.numParams == c.numParams, d.numFields == c.numFields), d.isUnsafe == c.isUnsafe))
+        Option.Some(Const.CCtor(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == c.head.params, d.head.ty == c.head.ty), Bool.and(d.induct == c.induct, d.cidx == c.cidx)), Bool.and(Bool.and(d.numParams == c.numParams, d.numFields == c.numFields), d.isUnsafe == c.isUnsafe))
         _ -> false
 
 verify sameCtor
@@ -316,7 +316,7 @@ verify recsMatch
 fn sameRec(g: Option<Const>, r: Rec) -> Bool
     ? "Every field and rule equal, terms up to binder names."
     match g
-        Option.Some(Const.CRec(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == r.head.params, Core.Alpha.alphaEq(d.head.ty, r.head.ty)), Bool.and(d.all == r.all, d.numParams == r.numParams)), Bool.and(Bool.and(Bool.and(d.numIndices == r.numIndices, d.numMotives == r.numMotives), Bool.and(d.numMinors == r.numMinors, d.k == r.k)), Bool.and(d.isUnsafe == r.isUnsafe, sameRules(d.rules, r.rules))))
+        Option.Some(Const.CRec(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == r.head.params, d.head.ty == r.head.ty), Bool.and(d.all == r.all, d.numParams == r.numParams)), Bool.and(Bool.and(Bool.and(d.numIndices == r.numIndices, d.numMotives == r.numMotives), Bool.and(d.numMinors == r.numMinors, d.k == r.k)), Bool.and(d.isUnsafe == r.isUnsafe, sameRules(d.rules, r.rules))))
         _ -> false
 
 verify sameRec
@@ -330,7 +330,7 @@ fn sameRules(as: List<RecRule>, bs: List<RecRule>) -> Bool
             _ -> false
         [a, ..arest] -> match bs
             [] -> false
-            [b, ..brest] -> Bool.and(Bool.and(a.ctor == b.ctor, a.nfields == b.nfields), Bool.and(Core.Alpha.alphaEq(a.rhs, b.rhs), sameRules(arest, brest)))
+            [b, ..brest] -> Bool.and(Bool.and(a.ctor == b.ctor, a.nfields == b.nfields), Bool.and(a.rhs == b.rhs, sameRules(arest, brest)))
 
 verify sameRules
     sameRules([], []) => true
@@ -339,7 +339,7 @@ fn addQuotDecl(env: Env, h: Head, kind: QuotKind) -> Result<Env, Fail>
     ? "Adds the quotient package if needed, then compares the stated constant with the built one."
     env2 = Check.Quot.addQuot(env)?
     match Check.State.envGet(env2, h.name)
-        Option.Some(Const.CQuot(g, k)) -> match Bool.and(Bool.and(k == kind, g.params == h.params), Core.Alpha.alphaEq(g.ty, h.ty))
+        Option.Some(Const.CQuot(g, k)) -> match Bool.and(Bool.and(k == kind, g.params == h.params), g.ty == h.ty)
             true -> Result.Ok(env2)
             false -> Result.Err(reject("quotient constant mismatch on '{nm(h.name)}'"))
         _ -> Result.Err(reject("'{nm(h.name)}' is not a quotient constant"))

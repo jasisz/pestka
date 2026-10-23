@@ -5,7 +5,7 @@ module Quot
         "with the shape it expects. Pestka does the same and then compares"
         "every quotient constant the export states with the one it built."
     exposes [addQuot, kindOf]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Core.Decls, Core.Alpha, Check.State, Check.Telescope, Check.Lits]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Core.Decls, Check.State, Check.Telescope, Check.Lits]
     effects []
 
 record QB
@@ -80,7 +80,7 @@ fn eqShapes(env: Env, iv: IndType, u: Name, refl: Option<Const>) -> Result<Env, 
     st0 = Check.State.fresh(env, [], Safety.Safe)
     alpha = local(st0, "α", Core.Exprs.sort(Level.Param(u)), Binder.Implicit)
     eqTy = Check.Telescope.piBinding(alpha.st, [alpha.e], arrow(alpha.e, arrow(alpha.e, prop())))
-    match Core.Alpha.alphaEq(eqTy, iv.head.ty)
+    match eqTy == iv.head.ty
         false -> Result.Err(reject("failed to initialize quot module, 'Eq' has an unexpected type"))
         true -> reflShape(env, refl)
 
@@ -104,7 +104,7 @@ fn reflType(env: Env, ty: Expr, v: Name) -> Result<Env, Fail>
     alpha = local(st0, "α", Core.Exprs.sort(Level.Param(v)), Binder.Implicit)
     a = local(alpha.st, "a", alpha.e, Binder.Default)
     expected = Check.Telescope.piBinding(a.st, [alpha.e, a.e], Core.Apps.mkApps(Core.Exprs.cnst(Check.Lits.name1("Eq"), [Level.Param(v)]), [alpha.e, a.e, a.e]))
-    match Core.Alpha.alphaEq(expected, ty)
+    match expected == ty
         false -> Result.Err(reject("failed to initialize quot module, unexpected type for 'Eq' type constructor"))
         true -> declareAll(env)
 

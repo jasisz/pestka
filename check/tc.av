@@ -6,7 +6,7 @@ module Tc
         "structures, equality normalizes, inference checks equality), so"
         "they live in one module. Every function threads the checker state."
     exposes [RI, LD, inferType, check, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Cache, Core.Alpha, Check.State, Check.Lits, Core.Hash]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Cache, Check.State, Check.Lits, Core.Hash]
     effects []
 
 decision CongruenceAfterSteps
@@ -2539,12 +2539,8 @@ verify knownDifferent
     knownDifferent(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
 
 fn sameTerm(t: Expr, s: Expr) -> Bool
-    ? "Identical, or equal hashes (which ignore binder names and annotations) and equal up to them."
-    match t == s
-        true -> true
-        false -> match Core.Exprs.hashOf(t) == Core.Exprs.hashOf(s)
-            true -> Core.Alpha.alphaEq(t, s)
-            false -> false
+    ? "Identical. Terms keep no binder names or annotations (BindersUnnamed), so identical is equal up to them."
+    t == s
 
 verify sameTerm
     sameTerm(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.str(Core.Names.anon(), "x"), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Implicit)) => true

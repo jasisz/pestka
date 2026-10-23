@@ -7,7 +7,7 @@ module State
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
     exposes [Fail, Const, Env, Placed, ParamGen, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars]
-    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache, Core.Alpha]
+    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache]
     effects []
 
 type Fail
@@ -743,10 +743,8 @@ verify hasPairIn
     hasPairIn([], Core.Exprs.bvar(0), Core.Exprs.bvar(0)) => false
 
 fn alike(x: Expr, a: Expr) -> Bool
-    ? "The same term up to binder names and annotations, the identical case first."
-    match x == a
-        true -> true
-        false -> Core.Alpha.alphaEq(x, a)
+    ? "The same term up to binder names and annotations, which terms do not keep (BindersUnnamed): the same term."
+    x == a
 
 verify alike
     alike(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.str(Core.Names.anon(), "x"), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)) => true
