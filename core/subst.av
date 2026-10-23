@@ -343,12 +343,31 @@ verify sampleOp
     sampleOp(2) => Op.Lift(1, 2)
 
 fn instLevelParams(e: Expr, ps: List<Name>, us: List<Level>) -> Expr
-    ? "Replaces universe parameters ps by us everywhere in e."
-    lgo(e, ps, us, {}).e
+    ? "Replaces universe parameters ps by us everywhere in e. Each parameter put in for itself, as a constant used at its own parameters is, changes nothing, and e is returned as it is."
+    match sameParams(ps, us)
+        true -> e
+        false -> lgo(e, ps, us, {}).e
 
 verify instLevelParams
     instLevelParams(Core.Exprs.sort(Level.Param(Core.Names.anon())), [Core.Names.anon()], [Level.Zero]) => Core.Exprs.sort(Level.Zero)
     instLevelParams(Core.Exprs.cnst(Core.Names.anon(), [Level.Succ(Level.Param(Core.Names.anon()))]), [Core.Names.anon()], [Level.Zero]) => Core.Exprs.cnst(Core.Names.anon(), [Level.Succ(Level.Zero)])
+    instLevelParams(Core.Exprs.sort(Level.Param(Core.Names.anon())), [Core.Names.anon()], [Level.Param(Core.Names.anon())]) => Core.Exprs.sort(Level.Param(Core.Names.anon()))
+
+fn sameParams(ps: List<Name>, us: List<Level>) -> Bool
+    ? "Whether us are the parameters ps themselves, in order."
+    match ps
+        [] -> List.len(us) == 0
+        [p, ..prest] -> match us
+            [u, ..urest] -> match u == Level.Param(p)
+                true -> sameParams(prest, urest)
+                false -> false
+            [] -> false
+
+verify sameParams
+    sameParams([Core.Names.anon()], [Level.Param(Core.Names.anon())]) => true
+    sameParams([Core.Names.anon()], [Level.Zero]) => false
+    sameParams([], []) => true
+    sameParams([Core.Names.anon()], []) => false
 
 fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
     ? "Skips terms without parameters; compound nodes go through the memo."
