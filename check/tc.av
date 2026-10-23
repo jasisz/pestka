@@ -499,9 +499,11 @@ verify imaxFold
     imaxFold([Level.Succ(Level.Zero)], Level.Zero) => Level.Zero
 
 fn inferApp(st: St, e: Expr, f: Expr, a: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
-    ? "Checking mode checks one application; inference walks the whole spine."
+    ? "Inference walks the whole spine; so does checking, unless the term's bound variables stand for variables around it, where it checks one application at a time."
     match only
-        false -> appChecked(st, f, a, env)
+        false -> match env
+            [] -> spineChecked(st, e)
+            _ -> appChecked(st, f, a, env)
         true -> appSpine(st, e, env)
 
 verify inferApp
@@ -519,6 +521,134 @@ fn appChecked(st: St, f: Expr, a: Expr, env: List<Expr>) -> Result<RE, Fail>
 
 verify appChecked
     appChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), []) => Result.Err(Fail.Reject("function expected"))
+
+decision DomainsNotBuilt
+    date = "2026-10-23"
+    reason =
+        "Checking an application one argument at a time put each argument"
+        "into the whole rest of the function's type, to read the next domain"
+        "off it: on qb9, 97% of the nodes argInto built were such rests, a"
+        "quarter of all the nodes the checker built. Putting the arguments"
+        "into each domain instead built as much. Now the spine is checked from"
+        "its head: each argument's type is compared with its domain as the"
+        "earlier arguments would make it, without building it (fitsUnder), and"
+        "only a domain that is not met so is built and compared in full; the"
+        "type of the whole application is built once. Nine comparisons in ten"
+        "find the types the same."
+    chosen = "DomainsNotBuilt"
+    rejected = ["OneApplicationAtATime", "DomainsBuilt"]
+    impacts = [spineChecked, argsChecked, fitsUnder]
+
+fn spineChecked(st: St, e: Expr) -> Result<RE, Fail>
+    ? "A closed application checked as a whole spine: the head, then each argument against its domain."
+    ft = infer(st, Core.Apps.fnOf(e), false)?
+    argsChecked(ft.st, ft.e, Core.Apps.argsOf(e), [])
+
+verify spineChecked
+    spineChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => Result.Err(Fail.Reject("function expected"))
+
+fn argsChecked(st: St, ft: Expr, args: List<Expr>, pending: List<Expr>) -> Result<RE, Fail>
+    ? "pending holds the arguments checked and not yet put into ft, newest first. A type that is not syntactically a pi gets them first and is then normalized."
+    match args
+        [] -> Result.Ok(RE(e = argsInto(ft, pending, []), st = st))
+        [x, ..rest] -> match ft
+            Expr.Pi(_, _, d, b, _) -> argChecked(st, x, d, b, rest, pending)
+            _ -> argsAfterWhnf(ensurePi(st, argsInto(ft, pending, []))?, args)
+
+verify argsChecked
+    resultExpr(argsChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [], [Core.Exprs.natLit(7)])) => Core.Exprs.natLit(7)
+
+fn argChecked(st: St, x: Expr, d: Expr, b: Expr, rest: List<Expr>, pending: List<Expr>) -> Result<RE, Fail>
+    ? "The argument's type must equal the domain with the arguments before it put in."
+    at = infer(st, x, false)?
+    ok = argFits(at.st, at.e, d, pending, x)?
+    match ok.b
+        true -> argsChecked(ok.st, b, rest, List.prepend(x, pending))
+        false -> Result.Err(bad("application type mismatch"))
+
+verify argChecked
+    argChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), [], []) => Result.Err(Fail.Reject("application type mismatch"))
+    resultExpr(argChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Succ(Level.Zero)), Core.Exprs.bvar(0), [], [])) => Core.Exprs.sort(Level.Zero)
+
+fn argFits(st: St, at: Expr, d: Expr, pending: List<Expr>, x: Expr) -> Result<RB, Fail>
+    ? "The argument's type against the domain: the same term as the domain would be with the arguments put in, found without building it; otherwise the domain is built and compared in full, eagerly for an eagerReduce argument."
+    eager = isEagerReduce(x)
+    match Bool.and(Bool.not(eager), fitsUnder(at, d, pending, 0))
+        true -> Result.Ok(RB(b = true, st = st))
+        false -> defEqMaybeEager(st, at, argsInto(d, pending, []), eager)
+
+verify argFits
+    resultBool(argFits(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.bvar(0), [Core.Exprs.natLit(1)], Core.Exprs.natLit(0))) => true
+
+fn fitsUnder(t: Expr, d: Expr, subst: List<Expr>, off: Int) -> Bool
+    ? "Whether t is d under off binders with its loose bound variables put in as argsInto puts closed arguments in (subst newest first, at index off and up), binder names and annotations aside. Parts of d the substitution does not reach are compared as they are. Small domains only: a large one, which may share parts, is left to be built."
+    match Core.Exprs.looseRange(d) <= off
+        true -> sameTerm(t, d)
+        false -> match Core.Exprs.treeSize(d) < 63
+            false -> false
+            true -> fitsNode(t, d, subst, off)
+
+verify fitsUnder
+    fitsUnder(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.bvar(0)), [Core.Exprs.natLit(2)], 0) => true
+    fitsUnder(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(3)), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.bvar(0)), [Core.Exprs.natLit(2)], 0) => false
+    fitsUnder(Core.Exprs.natLit(5), Core.Exprs.bvar(1), [Core.Exprs.natLit(4), Core.Exprs.natLit(5)], 0) => true
+    fitsUnder(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.natLit(2), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default), [Core.Exprs.natLit(2)], 0) => true
+
+verify fitsUnder law sameAsBuilt
+    given i: Int = [0, 1, 2]
+    given j: Int = [0, 1, 2]
+    fitsUnder(Core.Subst.instantiate(fitSample(i), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)]), fitSample(j), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)], 0) => Core.Subst.instantiate(fitSample(i), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)]) == Core.Subst.instantiate(fitSample(j), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)])
+
+fn fitSample(k: Int) -> Expr
+    ? "Domains for the law: bound variables in head, argument and binder position."
+    match k
+        0 -> Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1))
+        1 -> Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(0))
+        _ -> Core.Exprs.pi(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(2)), Binder.Default)
+
+verify fitSample
+    fitSample(0) == fitSample(1) => false
+
+fn fitsNode(t: Expr, d: Expr, subst: List<Expr>, off: Int) -> Bool
+    ? "fitsUnder one node of d down: a bound variable takes its argument or drops by the substitution's length, a compound node compares its parts."
+    match d
+        Expr.BVar(i) -> fitsVar(t, i, subst, off)
+        Expr.App(_, f, a) -> match t
+            Expr.App(_, g, b) -> Bool.and(fitsUnder(g, f, subst, off), fitsUnder(b, a, subst, off))
+            _ -> false
+        Expr.Lam(_, _, dt, db, _) -> match t
+            Expr.Lam(_, _, tt, tb, _) -> Bool.and(fitsUnder(tt, dt, subst, off), fitsUnder(tb, db, subst, off + 1))
+            _ -> false
+        Expr.Pi(_, _, dt, db, _) -> match t
+            Expr.Pi(_, _, tt, tb, _) -> Bool.and(fitsUnder(tt, dt, subst, off), fitsUnder(tb, db, subst, off + 1))
+            _ -> false
+        Expr.Let(_, _, dt, dv, db) -> match t
+            Expr.Let(_, _, tt, tv, tb) -> Bool.and(Bool.and(fitsUnder(tt, dt, subst, off), fitsUnder(tv, dv, subst, off)), fitsUnder(tb, db, subst, off + 1))
+            _ -> false
+        Expr.Proj(_, s, i, dx) -> match t
+            Expr.Proj(_, s2, i2, tx) -> Bool.and(Bool.and(s == s2, i == i2), fitsUnder(tx, dx, subst, off))
+            _ -> false
+        _ -> false
+
+verify fitsNode
+    fitsNode(Core.Exprs.natLit(1), Core.Exprs.natLit(1), [], 0) => false
+
+fn fitsVar(t: Expr, i: Int, subst: List<Expr>, off: Int) -> Bool
+    ? "A bound variable of d past off: an argument, closed, so it needs no lifting; past the arguments it drops by their number."
+    match i - off < List.len(subst)
+        true -> sameTerm(t, nth(subst, i - off))
+        false -> t == Core.Exprs.bvar(i - List.len(subst))
+
+verify fitsVar
+    fitsVar(Core.Exprs.natLit(4), 0, [Core.Exprs.natLit(4)], 0) => true
+    fitsVar(Core.Exprs.bvar(1), 2, [Core.Exprs.natLit(4)], 0) => true
+
+fn argsAfterWhnf(p: RE, args: List<Expr>) -> Result<RE, Fail>
+    ? "Goes on with the normalized pi; every argument before is in it."
+    argsChecked(p.st, p.e, args, [])
+
+verify argsAfterWhnf
+    resultExpr(argsAfterWhnf(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [])) => Core.Exprs.natLit(1)
 
 fn argInto(body: Expr, a: Expr, env: List<Expr>) -> Expr
     ? "The pi's body with the argument put in. Only then, when the body uses it, does the argument get its own variables put in."
