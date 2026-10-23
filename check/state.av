@@ -373,11 +373,37 @@ fn serialOf(id: Int) -> Int
 verify serialOf
     serialOf(5 * 1024 + 3) => 5
 
+fn numbered(serial: Int) -> Int
+    ? "The number of the variable with this serial number: the serial number times 1024 plus one of ten bits, taken in turn, which the terms holding it carry (Core.Exprs.varsOf), so that abstracting it skips every term with none of its bits."
+    serial * 1024 + bitOf(Int.mod(serial, 10))
+
+verify numbered
+    numbered(0) => 1
+    numbered(13) => 13 * 1024 + 8
+
+fn bitOf(k: Int) -> Int
+    ? "Two to the power k, for k from 0 to 9."
+    match k
+        0 -> 1
+        1 -> 2
+        2 -> 4
+        3 -> 8
+        4 -> 16
+        5 -> 32
+        6 -> 64
+        7 -> 128
+        8 -> 256
+        _ -> 512
+
+verify bitOf
+    bitOf(0) => 1
+    bitOf(9) => 512
+
 fn names(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder) -> RE
     ? "Declares a fresh free variable, one that namesAt never gives, at a level above every level used so far, and returns it."
     level = st.topLevel + 1
     serial = st.next
-    RE(e = Core.Exprs.fvar(serial * 1024 + Int.min(level, 1023)), st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), next = serial + 1, topLevel = level))
+    RE(e = Core.Exprs.fvar(numbered(serial)), st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), next = serial + 1, topLevel = level))
 
 verify names
     names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).e => Core.Exprs.fvar(1)
@@ -392,10 +418,10 @@ fn namesAt(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder) -> RE
     RE(e = r.e, st = St.update(r.st, kinds = ks))
 
 verify namesAt
-    namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).e => Core.Exprs.fvar(0)
-    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Implicit).e => Core.Exprs.fvar(1024)
-    namesAt(closeVars(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, 1), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Implicit).e => Core.Exprs.fvar(0)
-    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, Core.Names.anon(), Core.Exprs.natLit(0), Option.None, Binder.Default).e => Core.Exprs.fvar(1024)
+    namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).e => Core.Exprs.fvar(1)
+    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Implicit).e => Core.Exprs.fvar(1026)
+    namesAt(closeVars(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, 1), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Implicit).e => Core.Exprs.fvar(1)
+    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, Core.Names.anon(), Core.Exprs.natLit(0), Option.None, Binder.Default).e => Core.Exprs.fvar(1026)
 
 fn namesCounted(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, count: Int) -> RE
     ? "The variable for count variables of its kind open, or a fresh one when there were too many open to count."
@@ -404,7 +430,7 @@ fn namesCounted(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, coun
         false -> namesKeyed(st, n, ty, value, bi, varCode(count, value))
 
 verify namesCounted
-    namesCounted(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).e => Core.Exprs.fvar(0)
+    namesCounted(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).e => Core.Exprs.fvar(1)
     namesCounted(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, -1).e => Core.Exprs.fvar(1)
 
 fn namesKeyed(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, code: Int) -> RE
@@ -415,12 +441,12 @@ fn namesKeyed(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, code: 
         Option.None -> namesNew(st, n, ty, value, bi, code, h)
 
 verify namesKeyed
-    namesKeyed(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 32).e => Core.Exprs.fvar(0)
+    namesKeyed(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 32).e => Core.Exprs.fvar(1)
 
 fn namesNew(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, code: Int, h: Int) -> RE
-    ? "A new variable, kept under its parts. Its level is 0: a variable is told apart by its parts, and the level only says that a free variable occurs."
+    ? "A new variable, kept under its parts."
     serial = st.next
-    x = Core.Exprs.fvar(serial * 1024)
+    x = Core.Exprs.fvar(numbered(serial))
     RE(e = x, st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), vars = Core.Cache.add(st.vars, h, (varKey(code, ty, value), x)), next = serial + 1))
 
 verify namesNew

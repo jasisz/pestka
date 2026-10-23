@@ -4,7 +4,9 @@ module Subst
         "variables (instantiate), shifting them (lift, lower), turning free"
         "variables back into bound ones (abstract), and replacing universe"
         "parameters. One traversal serves every operation; a subterm whose"
-        "metadata shows the operation cannot touch it is returned as it is,"
+        "metadata shows the operation cannot touch it is returned as it is"
+        "(for abstraction, one whose free variables' bits share none with"
+        "those abstracted),"
         "and every rebuilt node of 32 or more tree nodes is remembered by hash"
         "and binder depth, so a subterm shared many times in a DAG is rebuilt"
         "once per depth, not once per path to it. Smaller nodes are cheaper"
@@ -18,7 +20,7 @@ type Op
     InstRev(List<Expr>, Int)
     Lift(Int, Int)
     Lower(Int, Int)
-    Abstract(List<Int>, Int)
+    Abstract(List<Int>, Int, Int)
 
 fn instantiate(e: Expr, subst: List<Expr>) -> Expr
     ? "Bound variable i becomes subst[i]; higher ones drop by the length of subst."
@@ -65,14 +67,25 @@ verify lower
 
 fn abstractFVars(e: Expr, ids: List<Int>) -> Expr
     ? "Free variable ids[j] becomes the bound variable n - 1 - j, counted from the binders around it."
-    match Core.Exprs.hasFVar(e)
-        false -> e
-        true -> apply(Op.Abstract(ids, List.len(ids)), e, 0)
+    bits = idsBits(ids, 0)
+    match Bits.and(Core.Exprs.varsOf(e), bits) == 0
+        true -> e
+        false -> apply(Op.Abstract(ids, List.len(ids), bits), e, 0)
 
 verify abstractFVars
     abstractFVars(Core.Exprs.app(Core.Exprs.fvar(5), Core.Exprs.fvar(6)), [5, 6]) => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(0))
     abstractFVars(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.fvar(5), Core.Exprs.fvar(5), Binder.Default), [5]) => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Binder.Default)
     abstractFVars(Core.Exprs.fvar(9), [5]) => Core.Exprs.fvar(9)
+
+fn idsBits(ids: List<Int>, acc: Int) -> Int
+    ? "The free variables' bits of ids, or-ed together."
+    match ids
+        [] -> acc
+        [id, ..rest] -> idsBits(rest, Bits.or(acc, Core.Exprs.varsOfId(id)))
+
+verify idsBits
+    idsBits([1025, 2050], 0) => 3
+    idsBits([], 0) => 0
 
 fn untouched(op: Op, e: Expr, offset: Int) -> Bool
     ? "Whether the operation cannot change e at this depth."
@@ -81,7 +94,7 @@ fn untouched(op: Op, e: Expr, offset: Int) -> Bool
         Op.InstRev -> Core.Exprs.looseRange(e) <= offset
         Op.Lift(s, _) -> Core.Exprs.looseRange(e) <= s + offset
         Op.Lower(s, _) -> Core.Exprs.looseRange(e) <= s + offset
-        Op.Abstract -> Bool.not(Core.Exprs.hasFVar(e))
+        Op.Abstract(_, _, bits) -> Bits.and(Core.Exprs.varsOf(e), bits) == 0
 
 verify untouched
     untouched(Op.Lift(0, 1), Core.Exprs.sort(Level.Zero), 0) => true
@@ -117,7 +130,7 @@ fn visit(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
             false -> memoed(op, e, offset, memo, Core.Hash.mix(Core.Exprs.hashOf(e), offset))
 
 verify visit
-    visit(Op.Abstract([3], 1), Core.Exprs.fvar(3), 0, {}).e => Core.Exprs.bvar(0)
+    visit(Op.Abstract([3], 1, 3), Core.Exprs.fvar(3), 0, {}).e => Core.Exprs.bvar(0)
 
 fn memoed(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>, key: Int) -> SR
     ? "A node already rebuilt at this depth is reused."
@@ -239,11 +252,11 @@ verify nth
 fn fvarCase(op: Op, id: Int, offset: Int) -> Expr
     ? "Abstraction turns a listed free variable into a bound one."
     match op
-        Op.Abstract(ids, n) -> abstracted(position(ids, id, 0), n, offset, id)
+        Op.Abstract(ids, n, _) -> abstracted(position(ids, id, 0), n, offset, id)
         _ -> Core.Exprs.fvar(id)
 
 verify fvarCase
-    fvarCase(Op.Abstract([4], 1), 4, 2) => Core.Exprs.bvar(2)
+    fvarCase(Op.Abstract([4], 1, 4), 4, 2) => Core.Exprs.bvar(2)
 
 fn abstracted(j: Int, n: Int, offset: Int, id: Int) -> Expr
     ? "Position j of n becomes bound variable offset + n - j - 1."
@@ -324,7 +337,7 @@ fn sampleOp(k: Int) -> Op
         1 -> Op.InstRev([Core.Exprs.fvar(5), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(6))], 2)
         2 -> Op.Lift(1, 2)
         3 -> Op.Lower(2, 1)
-        _ -> Op.Abstract([7, 8], 2)
+        _ -> Op.Abstract([7, 8], 2, idsBits([7, 8], 0))
 
 verify sampleOp
     sampleOp(2) => Op.Lift(1, 2)
