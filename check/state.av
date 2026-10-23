@@ -2,10 +2,11 @@ module State
     intent =
         "What the type checker carries while it checks one declaration: the"
         "environment, the local context of free variables with their fresh"
-        "counter, the universe parameters in scope, and the caches. Aver has"
+        "counter and the kinds of those open, the universe parameters in"
+        "scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache, Core.Alpha]
     effects []
 
@@ -203,6 +204,7 @@ record St
     open: Int
     opened: Expr
     keep: Int
+    kinds: List<Int>
 
 record RE
     e: Expr
@@ -218,7 +220,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), paramCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Core.Exprs.sort(Level.Zero), keep = 65536)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), paramCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Core.Exprs.sort(Level.Zero), keep = 65536, kinds = [])
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0
@@ -323,37 +325,40 @@ fn localValue(lctx: Locals, id: Int) -> Option<Expr>
 verify localValue
     localValue(Locals.NoLocals, 3) => Option.None
 
-decision LevelledVariables
-    date = "2026-10-22"
+decision CountedVariables
+    date = "2026-10-23"
     reason =
-        "A free variable's number is a serial number times 1024 plus its level."
-        "Where the checker opens a binder it knows the binder's scope, and the"
-        "variable's level is the first above every free variable in the"
-        "binder, in its type and value, and in the binders of its telescope"
-        "opened before it. A variable of that level with the same type, value"
-        "and binder info is the same variable: two such variables never meet"
-        "in one term, since a variable's level is above every variable its"
-        "binder holds, and they have the same type and value, so whatever"
-        "holds of a term with one holds of it with the other: in it, in the"
-        "type found for it, in the values of let variables, in a pair"
-        "compared, since each of those holds only variables of its scope and"
-        "of their types and values, all at lower levels. Within a telescope"
-        "the levels rise, so the variables a telescope binds are distinct and"
-        "abstracting them out of a body is unambiguous. So a binder"
-        "opened again gets its variable again, and the results kept about"
-        "terms holding it are found again, where a fresh number each time made"
-        "every opening new. Elsewhere a variable is fresh, above every level"
-        "used so far; past level 1022 it is fresh too, its level read as"
-        "1023 or more. The serial number has no bound, so numbers never wrap."
-        "Whoever opens a binder passes the variables of its telescope opened"
-        "before it, the latest first, and their levels rise, so the latest"
-        "is the highest; and fresh variables are made only by the checking"
-        "of a declaration being added (inductive types, recursors, the"
-        "quotient), on states of its own, so the levels of deferred"
-        "declarations stay low."
-    chosen = "LevelledVariables"
-    rejected = ["FreshNumbers"]
-    impacts = [names, namesAt]
+        "A free variable is its type and value, and how many variables of the"
+        "same type and value are open where it is made: opened by the"
+        "checker for a binder and not yet closed. Two binders open at once"
+        "with the same type and value get different counts, so they are"
+        "different variables, and binders of different types or values are"
+        "different anyway; so the variables of a telescope are distinct and"
+        "abstracting them out of a body is unambiguous. Two binders that get"
+        "the same variable are never open at once, so the variable never"
+        "stands for both in one term, and they have the same type and value,"
+        "so whatever holds of a term with one holds of it with the other: in"
+        "it, in the type found for it, in a pair compared, since each of"
+        "those holds only variables open where it was found and those of"
+        "their types and values. Typing never reads a binder's name or"
+        "binder info, so neither tells variables apart. Before this a"
+        "variable had a level, the first above the variables in its scope"
+        "and its telescope so far: the same binder opened again got its"
+        "variable again, but a type and its instance that were the third"
+        "binders of one theorem and the seventh of the next were other"
+        "variables there, and the instance diamonds between them were"
+        "compared again in every theorem. On qb9 single comparisons cost up"
+        "to 225 M instructions, and one worker went from 194.4 G to 184.7 G;"
+        "etale 100.1 G to 96.1 G, Init 208.9 G to 204.6 G, navier-stokes-euler"
+        "2.22 T to 2.14 T, cslib 2.35 T to 2.27 T. A variable opened"
+        "with more than 1023 open around it is fresh, never found again, so"
+        "that counting stays short in deep nests; fresh variables are made"
+        "otherwise only by the checking of a declaration being added"
+        "(inductive types, recursors, the quotient), on states of their own."
+        "The serial number has no bound, so numbers never wrap."
+    chosen = "CountedVariables"
+    rejected = ["LevelledVariables", "FreshNumbers"]
+    impacts = [names, namesAt, closeVars]
 
 fn serialOf(id: Int) -> Int
     ? "The serial number of a free variable, which keys the local context."
@@ -363,7 +368,7 @@ verify serialOf
     serialOf(5 * 1024 + 3) => 5
 
 fn names(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder) -> RE
-    ? "Declares a fresh free variable above every level used so far, where the scope it reaches is not known, and returns it."
+    ? "Declares a fresh free variable, one that namesAt never gives, at a level above every level used so far, and returns it."
     level = st.topLevel + 1
     serial = st.next
     RE(e = Core.Exprs.fvar(serial * 1024 + Int.min(level, 1023)), st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), next = serial + 1, topLevel = level))
@@ -372,44 +377,87 @@ verify names
     names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).e => Core.Exprs.fvar(1)
     names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).st.next => 1
 
-fn namesAt(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, scope: Int) -> RE
-    ? "The free variable of a binder whose scope holds free variables below level scope, as LevelledVariables decides: the one already made for its level, type, value and binder info, else a new one. Past level 1022 a fresh one."
-    level = Int.max(scope, Int.max(Core.Exprs.fvLevel(ty), valueLevel(value)))
-    match level >= 1023
-        true -> names(st, n, ty, value, bi)
-        false -> namesKeyed(st, n, ty, value, bi, level, varCode(level, bi, value))
+fn namesAt(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder) -> RE
+    ? "The free variable of a binder opened now, as CountedVariables decides: the one already made for its type and value with as many variables of the same kind open, else a new one; with more than 1023 variables open, a fresh one, so that counting stays short in deep nests. It counts as open until closeVars closes it. The kinds open are read before the state is passed on, so that the maps it holds keep one owner."
+    kind = kindOf(ty, value)
+    ks = List.prepend(kind, st.kinds)
+    count = countKind(st.kinds, kind, 0, 1023)
+    r = namesCounted(st, n, ty, value, bi, count)
+    RE(e = r.e, st = St.update(r.st, kinds = ks))
 
 verify namesAt
-    namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).e => Core.Exprs.fvar(0)
-    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).e => Core.Exprs.fvar(0)
-    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 1).e => Core.Exprs.fvar(1024 + 1)
+    namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).e => Core.Exprs.fvar(0)
+    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Implicit).e => Core.Exprs.fvar(1024)
+    namesAt(closeVars(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, 1), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Implicit).e => Core.Exprs.fvar(0)
+    namesAt(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, Core.Names.anon(), Core.Exprs.natLit(0), Option.None, Binder.Default).e => Core.Exprs.fvar(1024)
 
-fn namesKeyed(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, level: Int, code: Int) -> RE
-    ? "The variable kept for these parts, or a new one at level kept for them. The parts are compared where they are; the term that keeps them is built only for a new variable."
+fn namesCounted(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, count: Int) -> RE
+    ? "The variable for count variables of its kind open, or a fresh one when there were too many open to count."
+    match count < 0
+        true -> names(st, n, ty, value, bi)
+        false -> namesKeyed(st, n, ty, value, bi, varCode(count, value))
+
+verify namesCounted
+    namesCounted(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0).e => Core.Exprs.fvar(0)
+    namesCounted(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, -1).e => Core.Exprs.fvar(1)
+
+fn namesKeyed(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, code: Int) -> RE
+    ? "The variable kept for these parts, or a new one kept for them. The parts are compared where they are; the term that keeps them is built only for a new variable."
     h = varHash(code, ty, value)
     match varFind(Core.Cache.get(st.vars, h), code, ty, value)
         Option.Some(x) -> RE(e = x, st = st)
-        Option.None -> namesNew(st, n, ty, value, bi, level, code, h)
+        Option.None -> namesNew(st, n, ty, value, bi, code, h)
 
 verify namesKeyed
-    namesKeyed(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 2, 32).e => Core.Exprs.fvar(2)
+    namesKeyed(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 32).e => Core.Exprs.fvar(0)
 
-fn namesNew(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, level: Int, code: Int, h: Int) -> RE
-    ? "A new variable at level, kept under its parts."
+fn namesNew(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, code: Int, h: Int) -> RE
+    ? "A new variable, kept under its parts. Its level is 0: a variable is told apart by its parts, and the level only says that a free variable occurs."
     serial = st.next
-    top = Int.max(st.topLevel, level)
-    x = Core.Exprs.fvar(serial * 1024 + level)
-    RE(e = x, st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), vars = Core.Cache.add(st.vars, h, (varKey(code, ty, value), x)), next = serial + 1, topLevel = top))
+    x = Core.Exprs.fvar(serial * 1024)
+    RE(e = x, st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), vars = Core.Cache.add(st.vars, h, (varKey(code, ty, value), x)), next = serial + 1))
 
 verify namesNew
-    namesNew(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0, 0, 0).st.next => 1
+    namesNew(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0, 0).st.next => 1
 
-fn varCode(level: Int, bi: Binder, value: Option<Expr>) -> Int
-    ? "A variable's level, binder info, and whether it has a value, as one number."
-    level * 16 + binderTag(bi) * 2 + hasValue(value)
+fn varCode(count: Int, value: Option<Expr>) -> Int
+    ? "How many variables of the same kind are open, and whether the variable has a value, as one number."
+    count * 2 + hasValue(value)
 
 verify varCode
-    varCode(1, Binder.Default, Option.None) == varCode(1, Binder.Implicit, Option.None) => false
+    varCode(1, Option.None) == varCode(0, Option.None) => false
+    varCode(0, Option.None) == varCode(0, Option.Some(Core.Exprs.natLit(1))) => false
+
+fn kindOf(ty: Expr, value: Option<Expr>) -> Int
+    ? "A variable's type and value as one hash; variables of one kind open at once are told apart by their count."
+    Core.Hash.mix(Core.Hash.mix(hasValue(value), Core.Exprs.hashOf(ty)), optHash(value))
+
+verify kindOf
+    kindOf(Core.Exprs.natLit(1), Option.None) == kindOf(Core.Exprs.natLit(1), Option.Some(Core.Exprs.natLit(1))) => false
+    kindOf(Core.Exprs.natLit(1), Option.None) == kindOf(Core.Exprs.natLit(2), Option.None) => false
+
+fn countKind(ks: List<Int>, kind: Int, acc: Int, budget: Int) -> Int
+    ? "How many of the open variables are of this kind, or -1 when more than budget are open. Two kinds may share a hash, which only counts more."
+    match ks
+        [] -> acc
+        [k, ..rest] -> match budget <= 0
+            true -> -1
+            false -> match k == kind
+                true -> countKind(rest, kind, acc + 1, budget - 1)
+                false -> countKind(rest, kind, acc, budget - 1)
+
+verify countKind
+    countKind([3, 5, 3], 3, 0, 10) => 2
+    countKind([], 3, 0, 10) => 0
+    countKind([3, 5, 3], 3, 0, 2) => -1
+
+fn closeVars(st: St, n: Int) -> St
+    ? "Closes the n variables opened last. The kinds are read before the state is updated, so that the maps it holds keep one owner."
+    ks = List.drop(st.kinds, n)
+    St.update(st, kinds = ks)
+
+verify closeVars
+    closeVars(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, 1).kinds => []
 
 fn varHash(code: Int, ty: Expr, value: Option<Expr>) -> Int
     ? "The hash a variable is kept under, from its parts."
@@ -475,15 +523,6 @@ fn headMatches(k: Expr, code: Int, ty: Expr) -> Bool
 verify headMatches
     headMatches(Core.Exprs.app(Core.Exprs.natLit(3), Core.Exprs.natLit(1)), 3, Core.Exprs.natLit(1)) => true
 
-fn valueLevel(value: Option<Expr>) -> Int
-    ? "The free variable level of a let value, 0 for none."
-    match value
-        Option.Some(v) -> Core.Exprs.fvLevel(v)
-        Option.None -> 0
-
-verify valueLevel
-    valueLevel(Option.None) => 0
-
 fn varKey(code: Int, ty: Expr, value: Option<Expr>) -> Expr
     ? "What a variable is made of, as a term: its code (level, binder info, and whether it has a value), then its type and its value."
     match value
@@ -492,17 +531,6 @@ fn varKey(code: Int, ty: Expr, value: Option<Expr>) -> Expr
 
 verify varKey
     varKey(2, Core.Exprs.natLit(0), Option.None) == varKey(3, Core.Exprs.natLit(0), Option.None) => false
-
-fn binderTag(bi: Binder) -> Int
-    ? "A binder info as a number."
-    match bi
-        Binder.Default -> 0
-        Binder.Implicit -> 1
-        Binder.StrictImplicit -> 2
-        Binder.InstImplicit -> 3
-
-verify binderTag
-    binderTag(Binder.InstImplicit) => 3
 
 fn hasValue(value: Option<Expr>) -> Int
     ? "1 for a let value, 0 for none."

@@ -53,18 +53,20 @@ The checker follows the reference kernel's algorithm. What is its own:
   environment is built in file order; the other declarations are then
   checked on several workers, each against the environment at its own place
   in the file, and the verdict is the first failure in file order.
-- **Free variables are named by what they are.** Where the checker opens a
-  binder it gives the variable a level: the first above every free variable
-  in the binder, in its type and value, and in its telescope so far, read off
-  the metadata every node carries. A variable of the same level, type, value
-  and binder info is the same variable. Two such variables never meet in one
-  term, since one would be free in the other's binder and so sit at a lower
-  level, and they have the same type and value, so whatever holds of a term
-  with one holds of it with the other. Lean only needs variables that meet to
-  be told apart; the checker no longer makes a fresh one for every opening,
-  so a binder opened again gets its variable again, and what was found about
-  the terms under it is found again. On slices of `mathlib` that and the
-  next point cut 18–20% of the instructions.
+- **Free variables are named by what they are.** A variable is its type and
+  value, and how many variables of that same type and value are open where
+  its binder is opened. Two binders open at once with the same type and value
+  get different counts, and Lean only needs variables that meet to be told
+  apart; two binders that get the same variable are never open at once, and
+  they have the same type and value, so whatever holds of a term with one
+  holds of it with the other. The checker no longer makes a fresh variable
+  for every opening, nor another for every place in a telescope: a binder
+  opened again gets its variable again, and so does a type or an instance
+  that is the third binder of one theorem and the seventh of the next, so
+  what was found about the terms under it, instance diamonds included, is
+  found again. On slices of `mathlib` naming variables by their place in the
+  telescope and the next point cut 18–20% of the instructions; naming them
+  by their kind instead cut 4–5% more.
 - **What a worker finds is kept across declarations.** Each worker meets its
   declarations in file order, so every constant a result rests on is still
   there in the next one. It carries its variables and their context, and the
