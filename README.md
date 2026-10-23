@@ -28,15 +28,15 @@ the Arena ranks checkers by.
 
 | Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 8 workers | Peak, 8 workers |
 |---|---|---|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 208.5 G | 20 s | 0.8 GB | 6.9 s | 1.4 GB |
-| `std` (98,086) | accepted | 369.4 G | 37 s | 1.2 GB | 11 s | 2.5 GB |
-| `reachability` | accepted | 103.0 G | 9.0 s | 0.4 GB | 7.3 s | 0.4 GB |
-| `con-leche` | accepted | 366.0 G | 40 s | 1.0 GB | 17 s | 1.9 GB |
-| `cedar` | accepted | 495.2 G | 51 s | 1.5 GB | 16 s | 2.6 GB |
-| `navier-stokes-euler` | accepted | 2.22 T | 217 s | 3.8 GB | 90 s | 8.2 GB |
-| `cslib` | accepted | 2.35 T | 269 s | 3.9 GB | 67 s | 6.6 GB |
-| `mathlib` (702,040) | accepted | 8.67 T | 991 s | 8.7 GB | 229 s | 12.1 GB |
-| `perf/`, 28 tests (in brackets `magma-list-deep-n36`) | as expected | 434 G (299 G) | 38 s (26 s) | 1.0 GB | 38 s (26 s) | 1.0 GB |
+| `init` (58,170 declarations) | accepted | 172.0 G | 18 s | 1.0 GB | 7.6 s | 1.4 GB |
+| `std` (98,086) | accepted | 292.7 G | 31 s | 1.3 GB | 12 s | 2.5 GB |
+| `reachability` | accepted | 91.5 G | 8.4 s | 0.4 GB | 7.4 s | 0.5 GB |
+| `con-leche` | accepted | 321.3 G | 39 s | 1.2 GB | 17 s | 2.0 GB |
+| `cedar` | accepted | 406.8 G | 45 s | 1.6 GB | 17 s | 2.6 GB |
+| `navier-stokes-euler` | accepted | 1.76 T | 182 s | 3.8 GB | 90 s | 8.7 GB |
+| `cslib` | accepted | 1.77 T | 227 s | 3.9 GB | 74 s | 7.0 GB |
+| `mathlib` (702,040) | accepted | 6.35 T | 823 s | 7.1 GB | 250 s | 10.9 GB |
+| `perf/`, 28 tests (in brackets `magma-list-deep-n36`) | as expected | 391 G (273 G) | 33 s (26 s) | 1.0 GB | 33 s (26 s) | 1.0 GB |
 
 ## What it does differently
 
