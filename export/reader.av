@@ -360,27 +360,56 @@ verify zeroAt
     zeroAt("0}}", 0) => NumAt(value = 0, end = 1)
     zeroAt("07", 0).end => -1
 
+decision LengthsUncounted
+    date = "2026-10-24"
+    reason =
+        "textAt took the length of the text it looks for with String.len,"
+        "which counts characters, and lastAt counted every character of the"
+        "line to see that the text ends it: a count for every separator of"
+        "a line read by position, and one of the whole line at its end."
+        "Every text the reader looks for is ASCII, so its"
+        "byte length, read in one step, is its length; and the text ends"
+        "the line when no character stands after it, which one indexed read"
+        "tells. Instructions retired, one worker, reading only: Init 27.15 G"
+        "to 25.87 G; checked in full, etale 58.5 G to 58.1 G, qb9 107.3 G"
+        "to 107.0 G, Init 129.3 G to 128.1 G."
+    chosen = "LengthsUncounted"
+    rejected = ["LengthsCounted"]
+    impacts = [textAt, lastAt, endAt]
+
 fn textAt(s: String, i: Int, t: String) -> Bool
-    ? "Whether t stands in s at position i; never at a negative position, where a number that was not found leaves it."
+    ? "Whether t stands in s at position i; never at a negative position, where a number that was not found leaves it. Every t the reader looks for is ASCII, so its length in characters is its length in bytes, which is read without counting."
     match i < 0
         true -> false
-        false -> String.slice(s, i, i + String.len(t)) == t
+        false -> String.slice(s, i, i + String.byteLength(t)) == t
 
 verify textAt
     textAt("ab,cd", 2, ",c") => true
     textAt("ab,cd", 3, ",c") => false
     textAt("ab,cd", 4, "de") => false
     textAt("ab,cd", -1, "ab") => false
+    textAt("αb,cd", 2, ",c") => true
 
 fn lastAt(s: String, i: Int, t: String) -> Bool
-    ? "Whether s ends with t standing at position i."
+    ? "Whether s ends with t standing at position i: t stands there and no character follows it, which needs no count of the characters of s."
     match textAt(s, i, t)
         false -> false
-        true -> i + String.len(t) == String.len(s)
+        true -> endAt(s, i + String.byteLength(t))
 
 verify lastAt
     lastAt("ab}}", 2, "}}") => true
     lastAt("ab}} ", 2, "}}") => false
+    lastAt("αb}}", 2, "}}") => true
+
+fn endAt(s: String, i: Int) -> Bool
+    ? "Whether no character of s stands at position i, for an i the caller keeps at or below the length of s: then i is the length."
+    match String.charAt(s, i)
+        Option.None -> true
+        Option.Some -> false
+
+verify endAt
+    endAt("ab", 2) => true
+    endAt("ab", 1) => false
 
 record BinderIds
     ie: Int
