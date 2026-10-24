@@ -5,7 +5,7 @@ module Telescope
         "stripped from binder types as the reference kernel does, and an"
         "expression's occurrences of a set of constants can be searched."
     exposes [consume, localFor, fvarId, typeOfFVar, mentions, countPis, piBinding, lamBinding, ids]
-    depends [Core.Names, Core.Exprs, Core.Apps, Core.Decls, Check.State, Check.Lits]
+    depends [Core.Names, Core.Exprs, Core.Apps, Core.Decls, Core.Cache, Check.State, Check.Lits]
     effects []
 
 fn consume(e: Expr) -> Expr
@@ -75,16 +75,51 @@ fn typeOfFVar(st: St, e: Expr) -> Expr
 verify typeOfFVar
     typeOfFVar(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.fvar(9), Option.None, Binder.Default).st, Core.Exprs.fvar(0)) => Core.Exprs.fvar(9)
 
+decision MentionsSeenOnce
+    date = "2026-10-24"
+    reason =
+        "Whether a constructor type mentions a type of the block being added"
+        "(for recursion, reflexivity and nesting) was found by walking the type"
+        "as a tree, a shared subterm once for every path to it, and looking"
+        "each constant up in the block's names. The walk now keeps the"
+        "subterms it has seen, as NestedSeenOnce does. Instructions retired,"
+        "one worker, on Aver 58a0c12f: navier 1035.9 G to 927.2 G; etale, qb9"
+        "and Init unchanged."
+    chosen = "MentionsSeenOnce"
+    rejected = ["TreeWalk"]
+    impacts = [mentions, mentionWalk, mentionNode]
+
 fn mentions(e: Expr, ns: List<Name>) -> Bool
-    ? "Whether a constant named in ns occurs in e."
+    ? "Whether a constant named in ns occurs in e. Each subterm is looked at once, however many paths reach it (MentionsSeenOnce, as NestedSeenOnce)."
+    mentionWalk([e], ns, Core.Cache.empty())
+
+fn mentionWalk(todo: List<Expr>, ns: List<Name>, seen: Map<Int, Bucket>) -> Bool
+    ? "The terms still to look at, and those already looked at."
+    match todo
+        [] -> false
+        [e, ..rest] -> match Check.State.cacheGet(seen, e)
+            Option.Some -> mentionWalk(rest, ns, seen)
+            Option.None -> mentionNode(e, rest, ns, Check.State.cachePut(seen, e, e))
+
+verify mentionWalk
+    mentionWalk([Core.Exprs.fvar(0), Core.Exprs.fvar(0)], [Check.Lits.name1("I")], Core.Cache.empty()) => false
+
+fn mentionNode(e: Expr, rest: List<Expr>, ns: List<Name>, seen: Map<Int, Bucket>) -> Bool
+    ? "One term: a constant is judged, a compound term's parts wait their turn."
     match e
-        Expr.Const(_, n, _) -> List.contains(ns, n)
-        Expr.App(_, f, a) -> Bool.or(mentions(f, ns), mentions(a, ns))
-        Expr.Lam(_, t, b) -> Bool.or(mentions(t, ns), mentions(b, ns))
-        Expr.Pi(_, t, b) -> Bool.or(mentions(t, ns), mentions(b, ns))
-        Expr.Let(_, t, v, b) -> Bool.or(mentions(t, ns), Bool.or(mentions(v, ns), mentions(b, ns)))
-        Expr.Proj(_, _, _, x) -> mentions(x, ns)
-        _ -> false
+        Expr.Const(_, n, _) -> match List.contains(ns, n)
+            true -> true
+            false -> mentionWalk(rest, ns, seen)
+        Expr.App(_, f, a) -> mentionWalk(List.prepend(f, List.prepend(a, rest)), ns, seen)
+        Expr.Lam(_, t, b) -> mentionWalk(List.prepend(t, List.prepend(b, rest)), ns, seen)
+        Expr.Pi(_, t, b) -> mentionWalk(List.prepend(t, List.prepend(b, rest)), ns, seen)
+        Expr.Let(_, t, v, b) -> mentionWalk(List.prepend(t, List.prepend(v, List.prepend(b, rest))), ns, seen)
+        Expr.Proj(_, _, _, x) -> mentionWalk(List.prepend(x, rest), ns, seen)
+        _ -> mentionWalk(rest, ns, seen)
+
+verify mentionNode
+    mentionNode(Core.Exprs.cnst(Check.Lits.name1("I"), []), [], [Check.Lits.name1("I")], Core.Cache.empty()) => true
+    mentionNode(Core.Exprs.fvar(0), [], [Check.Lits.name1("I")], Core.Cache.empty()) => false
 
 verify mentions
     mentions(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("I"), []), Core.Exprs.fvar(0)), [Check.Lits.name1("I")]) => true
