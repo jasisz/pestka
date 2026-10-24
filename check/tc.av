@@ -1854,7 +1854,7 @@ fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, 
         Expr.BVar(i) -> lbvar(List.drop(env, i - off), i, env, ms, memo)
         _ -> match Core.Exprs.treeSize(e) < 32
             true -> lbuild(e, off, env, ms, memo)
-            false -> lmemoed(e, off, env, ms, memo, Core.Hash.mix(Core.Exprs.hashOf(e), off))
+            false -> lmemoed(e, off, env, ms, memo, off * 2147483648 + Core.Exprs.hashOf(e))
 
 verify lvisit
     lvisit(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}).e => Core.Exprs.natLit(2)
