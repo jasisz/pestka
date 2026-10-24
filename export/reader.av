@@ -290,7 +290,7 @@ verify appIe
 
 fn appEnd(line: String, a: NumAt, f: NumAt, i: NumAt) -> Option<AppIds>
     ? "The closing brace, and nothing after it."
-    match lastAt(line, i.end, "}}")
+    match closedAt(line, i.end)
         true -> Option.Some(AppIds(ie = i.value, fnIdx = f.value, argIdx = a.value))
         false -> Option.None
 
@@ -435,6 +435,45 @@ verify endAt
     endAt("ab", 2) => true
     endAt("ab", 1) => false
 
+decision BracesRead
+    date = "2026-10-24"
+    reason =
+        "Every line read by position ends with one closing brace or two,"
+        "and each was a text looked for with textAt or lastAt: a slice of"
+        "the line, a string of its own when two braces were looked for at"
+        "once, compared with the text. A brace is now one indexed read of"
+        "the code point at its position. Instructions retired, one worker,"
+        "reading only: Init 22.31 G to 21.82 G; checked in full, etale"
+        "57.02 G to 56.74 G, qb9 104.04 G to 103.52 G, Init 124.92 G to"
+        "124.11 G (medians)."
+    chosen = "BracesRead"
+    rejected = ["BracesSliced"]
+    impacts = [braceAt, closedAt, appEnd, lamEnd, piEnd, binderClose, nameStrEnd, nameNumEnd, levelOne, constEnd, bvarEnd, sortEnd]
+
+fn braceAt(s: String, i: Int) -> Bool
+    ? "Whether a closing brace stands at position i, read as the code point there (BracesRead)."
+    match String.charAt(s, i)
+        Option.Some("}}") -> true
+        _ -> false
+
+verify braceAt
+    braceAt("a}}", 1) => true
+    braceAt("a}}", 0) => false
+    braceAt("a}}", 2) => false
+    braceAt("a}}", -1) => false
+
+fn closedAt(s: String, i: Int) -> Bool
+    ? "Whether a closing brace stands at position i and nothing after it (BracesRead)."
+    match braceAt(s, i)
+        true -> endAt(s, i + 1)
+        false -> false
+
+verify closedAt
+    closedAt("a}}", 1) => true
+    closedAt("a}}}}", 1) => false
+    closedAt("a}}", 0) => false
+    closedAt("é}}", 1) => true
+
 record BinderIds
     ie: Int
     nameIdx: Int
@@ -505,7 +544,7 @@ fn lamEnd(line: String, i: NumAt, b: Option<BinderAt>) -> Option<BinderIds>
     ? "The lambda line's closing brace, and nothing after it."
     match b
         Option.None -> Option.None
-        Option.Some(x) -> match lastAt(line, x.end, "}}")
+        Option.Some(x) -> match closedAt(line, x.end)
             true -> Option.Some(BinderIds(ie = i.value, nameIdx = x.name, typeIdx = x.typ, bodyIdx = x.body, bi = x.bi, isLam = true))
             false -> Option.None
 
@@ -525,7 +564,7 @@ verify piAfter
 
 fn piEnd(line: String, x: BinderAt, i: NumAt) -> Option<BinderIds>
     ? "The pi line's closing brace, and nothing after it."
-    match lastAt(line, i.end, "}}")
+    match closedAt(line, i.end)
         true -> Option.Some(BinderIds(ie = i.value, nameIdx = x.name, typeIdx = x.typ, bodyIdx = x.body, bi = x.bi, isLam = false))
         false -> Option.None
 
@@ -598,7 +637,7 @@ verify binderType
 
 fn binderClose(line: String, bi: Binder, d: NumAt, n: NumAt, t: NumAt) -> Option<BinderAt>
     ? "The binder object's closing brace."
-    match textAt(line, t.end, "}}")
+    match braceAt(line, t.end)
         false -> Option.None
         true -> Option.Some(BinderAt(bi = bi, body = d.value, name = n.value, typ = t.value, end = t.end + 1))
 
@@ -672,7 +711,7 @@ verify nameStrAfter
 fn nameStrEnd(line: String, i: NumAt, pre: NumAt, r: Scan) -> Option<Line>
     ? "The two closing braces after the string, and nothing after them."
     match r
-        Scan.Done(text, at) -> match lastAt(line, at, "}}}}")
+        Scan.Done(text, at) -> match Bool.and(braceAt(line, at), closedAt(line, at + 1))
             true -> Option.Some(Line.NameStr(i.value, pre.value, text))
             false -> Option.None
         Scan.Bad -> Option.None
@@ -692,7 +731,7 @@ verify nameNumAfter
 
 fn nameNumEnd(line: String, i: NumAt, k: NumAt, pre: NumAt) -> Option<Line>
     ? "The two closing braces."
-    match lastAt(line, pre.end, "}}}}")
+    match Bool.and(braceAt(line, pre.end), closedAt(line, pre.end + 1))
         true -> Option.Some(Line.NameNum(i.value, pre.value, k.value))
         false -> Option.None
 
@@ -716,7 +755,7 @@ verify levelAfter
 
 fn levelOne(line: String, i: NumAt, a: NumAt, isSucc: Bool) -> Option<Line>
     ? "A successor or a parameter, then the closing brace."
-    match lastAt(line, a.end, "}}")
+    match closedAt(line, a.end)
         false -> Option.None
         true -> match isSucc
             true -> Option.Some(Line.LevelSucc(i.value, a.value))
@@ -794,7 +833,7 @@ verify constIe
 
 fn constEnd(line: String, n: NumAt, us: UsAt, i: NumAt) -> Option<Line>
     ? "The closing brace."
-    match lastAt(line, i.end, "}}")
+    match closedAt(line, i.end)
         true -> Option.Some(Line.Const(i.value, n.value, us.us))
         false -> Option.None
 
@@ -812,7 +851,7 @@ verify bvarAfter
 
 fn bvarEnd(line: String, b: NumAt, i: NumAt) -> Option<Line>
     ? "The closing brace."
-    match lastAt(line, i.end, "}}")
+    match closedAt(line, i.end)
         true -> Option.Some(Line.BVar(i.value, b.value))
         false -> Option.None
 
@@ -830,7 +869,7 @@ verify sortAfter
 
 fn sortEnd(line: String, i: NumAt, l: NumAt) -> Option<Line>
     ? "The closing brace."
-    match lastAt(line, l.end, "}}")
+    match closedAt(line, l.end)
         true -> Option.Some(Line.Sort(i.value, l.value))
         false -> Option.None
 
