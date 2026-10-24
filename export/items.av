@@ -5,7 +5,7 @@ module Items
         "value is built from values already in the tables and every shared"
         "subterm stays shared. mdata is transparent to the kernel and"
         "resolves to the expression it wraps."
-    exposes [nameLine, levelLine, exprLine, appAt, binderAt, nameStrAt, nameNumAt, succAdded, paramAdded, levelsRead, sortAt, constAt]
+    exposes [nameLine, levelLine, exprLine, appAt, binderAt, nameStrAt, nameNumAt, succAdded, paramAdded, levelsRead, sortAt, constAt, letAt]
     depends [Json.Line, Json.Access, Core.Names, Core.Levels, Core.Exprs, Export.Tables]
     effects []
 
@@ -280,6 +280,19 @@ fn letOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
 
 verify letOf
     letOf(Export.Tables.empty(), [("name", J.JInt(0)), ("type", J.JInt(0))]) => Result.Err("unknown expression index 0")
+
+fn letAt(t: Tables, ie: Int, name: Int, ty: Int, value: Int, body: Int) -> Result<Tables, String>
+    ? "Defines expression ie as a let, as a letE line does, its parts looked up in the order letOf looks them up."
+    n = Export.Tables.name(t, name)?
+    tt = Export.Tables.expr(t, ty)?
+    v = Export.Tables.expr(t, value)?
+    e = Core.Exprs.letE(n, tt, v, Export.Tables.expr(t, body)?)
+    Export.Tables.addExpr(t, ie, e)
+
+verify letAt
+    letAt(Export.Tables.empty(), 1, 0, 0, 0, 0) => Result.Err("unknown expression index 0")
+    letAt(Export.Tables.empty(), 1, 4, 0, 0, 0) => Result.Err("unknown name index 4")
+    Result.withDefault(letAt(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.bvar(0)), Export.Tables.empty()), 1, 0, 0, 0, 0), Export.Tables.empty()).nextExpr => 2
 
 fn projOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
     ? "A projection out of a structure."
