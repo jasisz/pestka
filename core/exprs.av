@@ -7,7 +7,7 @@ module Exprs
         "a tree, capped, so that traversals know when memoizing pays), packed"
         "into one Int so that every node stays small, computed once"
         "by the constructors here and never by callers."
-    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, hashOf, looseRange, hasFVar, hasParam, treeSize, varsOf, varsOfId]
+    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, looseRange, hasFVar, hasParam, treeSize, varsOf, varsOfId]
     depends [Core.Hash, Core.Names, Core.Levels]
     effects []
 
@@ -89,6 +89,19 @@ decision WordsFromWords
     chosen = "WordsFromWords"
     rejected = ["RecordsBetween"]
     impacts = [app, binderWord, letE, proj, cnst, wordOf, joined]
+
+decision ReadersByWord
+    date = "2026-10-24"
+    reason =
+        "Every reader of a node's metadata (wordOf, looseRange, varsOf,"
+        "hasFVar, hasParam, treeSize, hashOf) reads the word a compound node"
+        "or a constant carries first, through packedOf, and looks at the"
+        "node's shape only when it is a leaf without one. A node whose word"
+        "is known before it is built is then read without being built, and"
+        "a compound node takes one match instead of two."
+    chosen = "ReadersByWord"
+    rejected = ["LeafFirst"]
+    impacts = [wordOf, looseRange, varsOf, hasFVar, hasParam]
 
 type Binder
     Default
@@ -271,7 +284,19 @@ verify anyParam
     anyParam([Level.Zero, Level.Param(Core.Names.anon())]) => true
 
 fn wordOf(e: Expr) -> Int
-    ? "The packed metadata of any node: the word a compound node or a constant carries, or a leaf's, made on the spot."
+    ? "The packed metadata of any node: the word a compound node or a constant carries, or a leaf's, made on the spot. The carried word is read first (ReadersByWord)."
+    p = packedOf(e)
+    match p < 0
+        true -> leafWordOf(e)
+        false -> p
+
+verify wordOf
+    unpack(wordOf(bvar(2))).range => 3
+    unpack(wordOf(fvar(3 * 1024 + 4))).vars => 4
+    wordOf(app(bvar(0), bvar(1))) == pack(metaOf(app(bvar(0), bvar(1)))) => true
+
+fn leafWordOf(e: Expr) -> Int
+    ? "A leaf's word, made on the spot; a node that carries its word gives that."
     match e
         Expr.BVar(i) -> leafWord(Core.Hash.mix(1, i), Int.min(i + 1, 16383), 0, 0)
         Expr.FVar(i) -> leafWord(Core.Hash.mix(11, i), 0, varsOfId(i), 0)
@@ -285,10 +310,8 @@ fn wordOf(e: Expr) -> Int
         Expr.StrLit(s) -> leafWord(Core.Hash.mix(9, Core.Hash.ofText(s)), 0, 0, 0)
         Expr.Proj(m, _, _, _) -> m
 
-verify wordOf
-    unpack(wordOf(bvar(2))).range => 3
-    unpack(wordOf(fvar(3 * 1024 + 4))).vars => 4
-    wordOf(app(bvar(0), bvar(1))) == pack(metaOf(app(bvar(0), bvar(1)))) => true
+verify leafWordOf
+    unpack(leafWordOf(bvar(2))).range => 3
 
 fn leafWord(hash: Int, range: Int, vars: Int, params: Int) -> Int
     ? "The word of a node of tree size 1, from its parts as pack lays them out."
@@ -388,38 +411,50 @@ verify hashOf
     hashOf(bvar(0)) == hashOf(bvar(0)) => true
 
 fn looseRange(e: Expr) -> Int
-    ? "One more than the largest loose bound variable index; 0 when closed. Read on every node a substitution visits, so it is one remainder for a compound node and needs no hash of a leaf."
-    match e
-        Expr.BVar(i) -> i + 1
-        _ -> rangeIn(packedOf(e))
+    ? "One more than the largest loose bound variable index; 0 when closed. Read on every node a substitution visits, so it is one mask for a compound node and needs no hash of a leaf."
+    p = packedOf(e)
+    match p < 0
+        true -> leafRange(e)
+        false -> rangeOf(Bits.and(p, 16383))
 
 verify looseRange
     looseRange(bvar(4)) => 5
     looseRange(lam(Core.Names.anon(), bvar(2), bvar(5), Binder.Default)) => 5
 
-fn rangeIn(p: Int) -> Int
-    ? "The loose range in a packed word; a leaf other than a bound variable has none."
-    match p < 0
-        true -> 0
-        false -> rangeOf(Bits.and(p, 16383))
+fn leafRange(e: Expr) -> Int
+    ? "A leaf's loose range: a bound variable's index and one, nothing for another leaf."
+    match e
+        Expr.BVar(i) -> i + 1
+        _ -> 0
 
-verify rangeIn
-    rangeIn(-1) => 0
+verify leafRange
+    leafRange(bvar(3)) => 4
+    leafRange(natLit(3)) => 0
+
 
 fn hasFVar(e: Expr) -> Bool
     ? "Whether a free variable occurs."
-    match e
-        Expr.FVar -> true
-        _ -> varsIn(packedOf(e)) > 0
+    varsOf(e) > 0
 
 verify hasFVar
     hasFVar(bvar(0)) => false
 
 fn hasParam(e: Expr) -> Bool
     ? "Whether a universe parameter occurs."
+    p = packedOf(e)
+    match p < 0
+        true -> leafParam(e)
+        false -> paramsIn(p) == 1
+
+verify leafParam
+    leafParam(sort(Level.Param(Core.Names.anon()))) => true
+    leafParam(bvar(0)) => false
+
+fn leafParam(e: Expr) -> Bool
+    ? "Whether a leaf holds a universe parameter: only a sort can."
     match e
         Expr.Sort(l) -> Core.Levels.hasParam(l)
-        _ -> paramsIn(packedOf(e)) == 1
+        _ -> false
 
 verify hasParam
     hasParam(app(cnst(Core.Names.anon(), [Level.Param(Core.Names.anon())]), bvar(0))) => true
@@ -467,6 +502,7 @@ verify pack law rangeNeverShrinks
 
 verify pack law varsKept
     given vars: Int = [0, 1, 512, 1022, 1023]
+    when Bool.and(vars >= 0, vars <= 1023)
     unpack(pack(Meta(hash = 0, range = 0, vars = vars, params = false, size = 1))).vars => vars
 
 verify pack law fitsSixtyTwoBits
@@ -527,19 +563,22 @@ verify varsOfId
 
 fn varsOf(e: Expr) -> Int
     ? "The bits of every free variable occurring in e, or-ed together; 0 when none does. Two terms whose bits share none hold no free variable in common."
+    p = packedOf(e)
+    match p < 0
+        true -> leafVars(e)
+        false -> Bits.and(Int.div(p, 16384), 1023)
+
+fn leafVars(e: Expr) -> Int
+    ? "A leaf's variable bits: a free variable's own, none for another leaf."
     match e
         Expr.FVar(i) -> varsOfId(i)
-        _ -> varsIn(packedOf(e))
+        _ -> 0
+
+verify leafVars
+    leafVars(fvar(5 * 1024 + 2)) => 2
+    leafVars(bvar(0)) => 0
 
 verify varsOf
     varsOf(bvar(0)) => 0
     varsOf(app(fvar(3 * 1024 + 1), fvar(2))) => 3
 
-fn varsIn(p: Int) -> Int
-    ? "The free variables' bits in a packed word; a leaf other than a free variable has none."
-    match p < 0
-        true -> 0
-        false -> Bits.and(Int.div(p, 16384), 1023)
-
-verify varsIn
-    varsIn(-1) => 0
