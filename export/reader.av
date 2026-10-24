@@ -323,12 +323,36 @@ verify digitAt
     digitAt("a7", 0) => -1
     digitAt("a7", 2) => -1
 
+decision DigitsInTheLoop
+    date = "2026-10-24"
+    reason =
+        "Most of what a line read by position costs is its digits, a step of"
+        "numberAt each. The step called digitAt, which the Rust backend"
+        "keeps a function of its own, and compared the digit it gave with"
+        "zero. numberAt now matches the character itself, so each step is"
+        "one indexed read of the character's code point and the arm for"
+        "its digit. Instructions retired, one worker, reading only: Init"
+        "25.87 G to 24.28 G; checked in full, etale 58.10 G to 57.53 G, qb9"
+        "107.03 G to 105.66 G, Init 128.14 G to 126.45 G."
+    chosen = "DigitsInTheLoop"
+    rejected = ["DigitCalled"]
+    impacts = [numberAt]
+
 fn numberAt(s: String, i: Int, acc: Int) -> NumAt
-    ? "The digits from position i on as a number, and where they stop."
-    d = digitAt(s, i)
-    match d < 0
-        true -> NumAt(value = acc, end = i)
-        false -> numberAt(s, i + 1, acc * 10 + d)
+    ? "The digits from position i on as a number, and where they stop. The digit of each step is matched here rather than read with digitAt (DigitsInTheLoop)."
+    match String.charAt(s, i)
+        Option.Some("0") -> numberAt(s, i + 1, acc * 10)
+        Option.Some("1") -> numberAt(s, i + 1, acc * 10 + 1)
+        Option.Some("2") -> numberAt(s, i + 1, acc * 10 + 2)
+        Option.Some("3") -> numberAt(s, i + 1, acc * 10 + 3)
+        Option.Some("4") -> numberAt(s, i + 1, acc * 10 + 4)
+        Option.Some("5") -> numberAt(s, i + 1, acc * 10 + 5)
+        Option.Some("6") -> numberAt(s, i + 1, acc * 10 + 6)
+        Option.Some("7") -> numberAt(s, i + 1, acc * 10 + 7)
+        Option.Some("8") -> numberAt(s, i + 1, acc * 10 + 8)
+        Option.Some("9") -> numberAt(s, i + 1, acc * 10 + 9)
+        Option.Some -> NumAt(value = acc, end = i)
+        Option.None -> NumAt(value = acc, end = i)
 
 verify numberAt
     numberAt("x12,", 1, 0) => NumAt(value = 12, end = 3)
