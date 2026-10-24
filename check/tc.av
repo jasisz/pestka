@@ -1900,14 +1900,104 @@ verify lnatTry
     resultExpr(lnatTry(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), [], MXs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], ms = MS(next = 0, forced = {})), false, false)) => Core.Exprs.natLit(3)
 
 fn lunfold(st: St, f: Expr, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "A definition's value takes the waiting arguments as they are; anything else is stuck."
+    ? "A definition's value takes the waiting arguments as they are; anything else is stuck. At universe levels, the lambdas the arguments meet come off the value as written, and only what is under them gets the levels (DomainsDropped)."
+    match f
+        Expr.Const(_, n, ls) -> match List.len(ls) > 0
+            true -> lunfoldAt(st, f, ls, Check.State.lookup(st, n), stack, ms, cheapRec, cheapProj)
+            false -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+        _ -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+
+verify lunfold
+    resultExpr(lunfold(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+
+decision DomainsDropped
+    date = "2026-10-25"
+    reason =
+        "Unfolding a constant at universe levels instantiated the levels in"
+        "its whole value, the domains of its leading lambdas too, and the"
+        "machine then met those lambdas with the waiting arguments: beta"
+        "never reads a domain, so they were built to be dropped. On etale"
+        "the domains were 37% of what instantiating values cost, 1.33 G of"
+        "46 G. Now, with k arguments waiting, the value as written loses"
+        "its first k lambdas, the body under them gets the levels, and the"
+        "machine starts on it with the k arguments as the body's"
+        "environment, as k steps of beta would leave it. The body is kept"
+        "in the unfolding cache under the constant applied to k; the lazy"
+        "delta step unfolds the same way. Instructions retired, one worker:"
+        "etale 46.0 G to 44.6 G, rep14 5.7 G to 5.4 G, contdiff 32.3 G to"
+        "32.1 G, Init 117.3 G to 116.9 G."
+    chosen = "DomainsDropped"
+    rejected = ["ValueInstantiated"]
+    impacts = [lunfold, lunfoldAt, lunfoldPeeled, unfoldStep, stepPeeled]
+
+fn lunfoldAt(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A constant at levels: a definition or theorem with a value has the lambdas its arguments meet taken off first."
+    match c
+        Option.Some(k) -> match Check.State.valueOf(k)
+            Option.Some(v) -> lunfoldPeeled(st, f, Check.State.headOf(k), v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms, cheapRec, cheapProj)
+            Option.None -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+        Option.None -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+
+verify lunfoldAt
+    resultExpr(lunfoldAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), [Level.Zero], Option.None, [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero])
+
+fn lunfoldPeeled(st: St, f: Expr, h: Head, v: Expr, k: Int, ls: List<Level>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "With k lambdas met, the body under them at the levels, run with the first k arguments as its environment; with none, or levels of the wrong count, the whole value as before."
+    match Bool.and(k > 0, List.len(h.params) == List.len(ls))
+        false -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+        true -> lbodyRun(peeledBody(st, Core.Exprs.app(f, Core.Exprs.natLit(k)), h, v, k, ls), k, stack, ms, cheapRec, cheapProj)
+
+verify lunfoldPeeled
+    resultExpr(lunfoldPeeled(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 1, [Level.Zero], [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {}), false, false)) => Core.Exprs.natLit(4)
+
+fn peeledBody(st: St, key: Expr, h: Head, v: Expr, k: Int, ls: List<Level>) -> RE
+    ? "The value under its first k lambdas at the levels, from the unfolding cache or instantiated now and kept there under the constant applied to k."
+    match Check.State.cacheGet(st.unfoldCache, key)
+        Option.Some(b) -> RE(e = b, st = st)
+        Option.None -> ruleStore(st, key, Core.Subst.instLevelParams(peelLams(v, k), h.params, ls))
+
+verify peeledBody
+    peeledBody(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.bvar(0), 0, []).e => Core.Exprs.bvar(0)
+
+fn lbodyRun(b: RE, k: Int, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The machine on a body whose k lambdas met the first k arguments: those in its environment, the innermost first, as beta pushes them."
+    lcore(b.st, b.e, List.reverse(List.take(stack, k)), List.drop(stack, k), ms, true, cheapRec, cheapProj)
+
+verify lbodyRun
+    resultExpr(lbodyRun(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 1, [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {}), false, false)) => Core.Exprs.natLit(4)
+
+fn lamsUpTo(e: Expr, n: Int, k: Int) -> Int
+    ? "How many leading lambdas e has past the k counted, up to n."
+    match k >= n
+        true -> k
+        false -> match e
+            Expr.Lam(_, _, b) -> lamsUpTo(b, n, k + 1)
+            _ -> k
+
+verify lamsUpTo
+    lamsUpTo(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 3, 0) => 1
+    lamsUpTo(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 0, 0) => 0
+
+fn peelLams(e: Expr, k: Int) -> Expr
+    ? "e under its first k lambdas."
+    match k <= 0
+        true -> e
+        false -> match e
+            Expr.Lam(_, _, b) -> peelLams(b, k - 1)
+            _ -> e
+
+verify peelLams
+    peelLams(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 1) => Core.Exprs.bvar(0)
+
+fn lunfoldWhole(st: St, f: Expr, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The whole value at its levels takes the waiting arguments; anything else is stuck."
     u = unfoldConst(st, f)
     match u.o
         Option.Some(v) -> lcore(u.st, v, [], stack, ms, true, cheapRec, cheapProj)
         Option.None -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = u.st))
 
-verify lunfold
-    resultExpr(lunfold(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+verify lunfoldWhole
+    resultExpr(lunfoldWhole(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
 
 fn lproject(st: St, s: Name, i: Int, x: MX, stack: List<Clo>, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A projection of a built structure; the field takes the waiting arguments as they are."
@@ -3221,11 +3311,50 @@ fn unfoldWhnf(st: St, e: Expr) -> Result<RE, Fail>
         Option.None -> stepStored(unfoldStep(st, e)?, e)
 
 fn unfoldStep(st: St, e: Expr) -> Result<RE, Fail>
-    ? "One unfolding step and the cheap whnfCore after it."
+    ? "One unfolding step and the cheap whnfCore after it. A head at universe levels has the lambdas its arguments meet taken off before the levels are put in, as the machine unfolds (DomainsDropped)."
+    match Core.Apps.fnOf(e)
+        Expr.Const(_, n, ls) -> match List.len(ls) > 0
+            true -> stepAt(st, e, Core.Apps.fnOf(e), ls, Check.State.lookup(st, n))
+            false -> unfoldStepWhole(st, e)
+        _ -> unfoldStepWhole(st, e)
+
+fn stepAt(st: St, e: Expr, f: Expr, ls: List<Level>, c: Option<Const>) -> Result<RE, Fail>
+    ? "The step for a head at levels with a value."
+    match c
+        Option.Some(k) -> match Check.State.valueOf(k)
+            Option.Some(v) -> stepPeeled(st, e, f, Check.State.headOf(k), v, Core.Apps.argsOf(e), ls)
+            Option.None -> unfoldStepWhole(st, e)
+        Option.None -> unfoldStepWhole(st, e)
+
+verify stepAt
+    resultExpr(stepAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), [], Option.None)) => Core.Exprs.fvar(1)
+
+fn stepPeeled(st: St, e: Expr, f: Expr, h: Head, v: Expr, args: List<Expr>, ls: List<Level>) -> Result<RE, Fail>
+    ? "The body under the lambdas the arguments meet, at the levels, run by whnfCore's machine with those arguments as its environment."
+    k = lamsUpTo(v, List.len(args), 0)
+    match Bool.and(k > 0, List.len(h.params) == List.len(ls))
+        false -> unfoldStepWhole(st, e)
+        true -> stepRun(peeledBody(st, Core.Exprs.app(f, Core.Exprs.natLit(k)), h, v, k, ls), k, closedAll(args, []))
+
+verify stepPeeled
+    resultExpr(stepPeeled(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), [], [])) => Core.Exprs.fvar(1)
+
+fn stepRun(b: RE, k: Int, stack: List<Clo>) -> Result<RE, Fail>
+    ? "whnfCore's machine on the body, as unfoldStep runs it after unfolding: no delta, recursors on cheap terms not reduced, projections cheap."
+    lcore(b.st, b.e, List.reverse(List.take(stack, k)), List.drop(stack, k), MS(next = 0, forced = {}), false, false, true)
+
+verify stepRun
+    resultExpr(stepRun(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 1, [Clo.Clo(-1, Core.Exprs.natLit(4), [])])) => Core.Exprs.natLit(4)
+
+fn unfoldStepWhole(st: St, e: Expr) -> Result<RE, Fail>
+    ? "One unfolding of the whole value and the cheap whnfCore after it."
     u = unfoldDefinition(st, e)
     match u.o
         Option.Some(x) -> whnfCoreM(u.st, x, false, true)
         Option.None -> Result.Ok(RE(e = e, st = u.st))
+
+verify unfoldStepWhole
+    resultExpr(unfoldStepWhole(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
 
 verify unfoldStep
     resultExpr(unfoldStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
