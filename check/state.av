@@ -580,7 +580,7 @@ fn localGet(m: Locals, id: Int, rest: Int) -> Option<Local>
         Locals.OneLocal(k, _, l) -> match k == id
             true -> Option.Some(l)
             false -> Option.None
-        Locals.SomeLocals(v) -> localGet(Option.withDefault(Vector.get(v, Int.mod(rest, 16)), Locals.NoLocals), id, Int.div(rest, 16))
+        Locals.SomeLocals(v) -> localGet(Option.withDefault(Vector.get(v, Bits.and(rest, 15)), Locals.NoLocals), id, Int.div(rest, 16))
 
 verify localGet
     localGet(localPut(localPut(Locals.NoLocals, 1, 1, sampleLocal(0)), 17, 17, sampleLocal(1)), 17, 17) => Option.Some(sampleLocal(1))
@@ -593,8 +593,8 @@ fn localPut(m: Locals, id: Int, rest: Int, l: Local) -> Locals
         Locals.NoLocals -> Locals.OneLocal(id, rest, l)
         Locals.OneLocal(k, krest, old) -> match k == id
             true -> Locals.OneLocal(id, rest, l)
-            false -> localPut(Locals.SomeLocals(setLocals(Vector.new(16, Locals.NoLocals), Int.mod(krest, 16), Locals.OneLocal(k, Int.div(krest, 16), old))), id, rest, l)
-        Locals.SomeLocals(v) -> Locals.SomeLocals(setLocals(v, Int.mod(rest, 16), localPut(Option.withDefault(Vector.get(v, Int.mod(rest, 16)), Locals.NoLocals), id, Int.div(rest, 16), l)))
+            false -> localPut(Locals.SomeLocals(setLocals(Vector.new(16, Locals.NoLocals), Bits.and(krest, 15), Locals.OneLocal(k, Int.div(krest, 16), old))), id, rest, l)
+        Locals.SomeLocals(v) -> Locals.SomeLocals(setLocals(v, Bits.and(rest, 15), localPut(Option.withDefault(Vector.get(v, Bits.and(rest, 15)), Locals.NoLocals), id, Int.div(rest, 16), l)))
 
 verify localPut
     localGet(localPut(localPut(Locals.NoLocals, 0, 0, sampleLocal(0)), 0, 0, sampleLocal(2)), 0, 0) => Option.Some(sampleLocal(2))

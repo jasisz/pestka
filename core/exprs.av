@@ -517,7 +517,7 @@ verify treeSize
 
 fn varsOfId(i: Int) -> Int
     ? "The bits a free variable's number carries: the number is a serial number times 1024 plus its bits, one bit of ten for the variables the checker makes. A number with none stands for all ten, so that a term holding it is never skipped."
-    match Int.mod(i, 1024)
+    match Bits.and(i, 1023)
         0 -> 1023
         b -> b
 
