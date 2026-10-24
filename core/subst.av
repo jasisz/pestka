@@ -105,8 +105,17 @@ record SR
     memo: Map<Int, Tuple<Expr, Expr>>
 
 fn apply(op: Op, e: Expr, offset: Int) -> Expr
-    ? "Applies op to e under offset binders."
-    go(op, e, offset, {}).e
+    ? "Applies op to e under offset binders; a term too small for the memo goes without one. small is called as the argument of done, not in tail position, so that it does not join a cycle of tail calls through lift."
+    match Core.Exprs.treeSize(e) < 32
+        true -> done(small(op, e, offset))
+        false -> go(op, e, offset, {}).e
+
+fn done(e: Expr) -> Expr
+    ? "The term as it is."
+    e
+
+verify done
+    done(Core.Exprs.bvar(0)) => Core.Exprs.bvar(0)
 
 verify apply
     apply(Op.Lift(0, 1), Core.Exprs.bvar(0), 1) => Core.Exprs.bvar(0)
@@ -126,11 +135,29 @@ fn visit(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
         Expr.BVar(i) -> SR(e = bvarCase(op, i, offset), memo = memo)
         Expr.FVar(id) -> SR(e = fvarCase(op, id, offset), memo = memo)
         _ -> match Core.Exprs.treeSize(e) < 32
-            true -> build(op, e, offset, memo)
+            true -> SR(e = small(op, e, offset), memo = memo)
             false -> memoed(op, e, offset, memo, Core.Hash.mix(Core.Exprs.hashOf(e), offset))
 
 verify visit
     visit(Op.Abstract([3], 1, 3), Core.Exprs.fvar(3), 0, {}).e => Core.Exprs.bvar(0)
+
+fn small(op: Op, e: Expr, offset: Int) -> Expr
+    ? "op on a term of fewer than 32 tree nodes, whose parts are all smaller: plain recursion that skips what op cannot touch, with no memo to carry, since only nodes of 32 or more are remembered."
+    match untouched(op, e, offset)
+        true -> e
+        false -> match e
+            Expr.BVar(i) -> bvarCase(op, i, offset)
+            Expr.FVar(id) -> fvarCase(op, id, offset)
+            Expr.App(_, f, a) -> Core.Exprs.app(small(op, f, offset), small(op, a, offset))
+            Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), small(op, t, offset), small(op, b, offset + 1), Binder.Default)
+            Expr.Pi(_, t, b) -> Core.Exprs.pi(Core.Names.anon(), small(op, t, offset), small(op, b, offset + 1), Binder.Default)
+            Expr.Let(_, t, v, b) -> Core.Exprs.letE(Core.Names.anon(), small(op, t, offset), small(op, v, offset), small(op, b, offset + 1))
+            Expr.Proj(_, s, i, x) -> Core.Exprs.proj(s, i, small(op, x, offset))
+            _ -> e
+
+verify small
+    small(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.sort(Level.Zero)), 0) => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.sort(Level.Zero))
+    small(Op.Inst([Core.Exprs.fvar(5)], 1), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Binder.Default), 0) => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.fvar(5), Core.Exprs.fvar(5), Binder.Default)
 
 fn memoed(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>, key: Int) -> SR
     ? "A node already rebuilt at this depth is reused."
