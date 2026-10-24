@@ -7,7 +7,7 @@ module IndAdd
         "the derived constants enter the environment. A block with nested"
         "occurrences goes through Check.Nested first."
     exposes [addInductive, addQuotDecl]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Core.Decls, Check.State, Check.Telescope, Check.Blk, Check.Induct, Check.Recursor, Check.Quot, Check.Nested]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Core.Decls, Core.Cache, Check.State, Check.Telescope, Check.Blk, Check.Induct, Check.Recursor, Check.Quot, Check.Nested]
     effects []
 
 fn reject(msg: String) -> Fail
@@ -193,20 +193,55 @@ fn nestedCtors(env: Env, names: List<Name>, cs: List<CtorIn>) -> Bool
 verify nestedCtors
     nestedCtors(Check.State.envEmpty(), [], []) => false
 
+decision NestedSeenOnce
+    date = "2026-10-24"
+    reason =
+        "Whether an inductive block is nested was found by walking each"
+        "constructor type as a tree: a subterm shared by many paths was walked"
+        "once for every path, and every prefix of an application asked again"
+        "whether its head is an earlier inductive type applied to a block type."
+        "On navier, with its large structures, that was about 17% of the run."
+        "The walk now keeps the subterms it has seen and reads an application"
+        "once from its head: the full application's parameters include those"
+        "of every prefix, so the answer is the same. Instructions retired,"
+        "one worker, on Aver 58a0c12f: navier 1325.5 G to 1035.9 G; etale,"
+        "qb9 and Init unchanged."
+    chosen = "NestedSeenOnce"
+    rejected = ["TreeWalk"]
+    impacts = [nestedIn, nestedWalk, nestedNode]
+
 fn nestedIn(env: Env, names: List<Name>, e: Expr) -> Bool
-    ? "A nested occurrence anywhere in e."
-    match nestedHere(env, names, e)
-        true -> true
-        false -> match e
-            Expr.App(_, f, a) -> Bool.or(nestedIn(env, names, f), nestedIn(env, names, a))
-            Expr.Lam(_, t, b) -> Bool.or(nestedIn(env, names, t), nestedIn(env, names, b))
-            Expr.Pi(_, t, b) -> Bool.or(nestedIn(env, names, t), nestedIn(env, names, b))
-            Expr.Let(_, t, v, b) -> Bool.or(nestedIn(env, names, t), Bool.or(nestedIn(env, names, v), nestedIn(env, names, b)))
-            Expr.Proj(_, _, _, x) -> nestedIn(env, names, x)
-            _ -> false
+    ? "A nested occurrence anywhere in e, each subterm looked at once (NestedSeenOnce)."
+    nestedWalk(env, names, [e], Core.Cache.empty())
 
 verify nestedIn
     nestedIn(Check.State.envEmpty(), [], Core.Exprs.fvar(0)) => false
+
+fn nestedWalk(env: Env, names: List<Name>, todo: List<Expr>, seen: Map<Int, Bucket>) -> Bool
+    ? "The terms still to look at, and those already looked at."
+    match todo
+        [] -> false
+        [e, ..rest] -> match Check.State.cacheGet(seen, e)
+            Option.Some -> nestedWalk(env, names, rest, seen)
+            Option.None -> nestedNode(env, names, e, rest, Check.State.cachePut(seen, e, e))
+
+verify nestedWalk
+    nestedWalk(Check.State.envEmpty(), [], [Core.Exprs.fvar(0), Core.Exprs.fvar(0)], Core.Cache.empty()) => false
+
+fn nestedNode(env: Env, names: List<Name>, e: Expr, rest: List<Expr>, seen: Map<Int, Bucket>) -> Bool
+    ? "One term: an application is judged whole, then its head and arguments wait their turn; a binder's parts likewise."
+    match e
+        Expr.App -> match nestedHere(env, names, e)
+            true -> true
+            false -> nestedWalk(env, names, List.prepend(Core.Apps.fnOf(e), List.concat(Core.Apps.argsOf(e), rest)), seen)
+        Expr.Lam(_, t, b) -> nestedWalk(env, names, List.prepend(t, List.prepend(b, rest)), seen)
+        Expr.Pi(_, t, b) -> nestedWalk(env, names, List.prepend(t, List.prepend(b, rest)), seen)
+        Expr.Let(_, t, v, b) -> nestedWalk(env, names, List.prepend(t, List.prepend(v, List.prepend(b, rest))), seen)
+        Expr.Proj(_, _, _, x) -> nestedWalk(env, names, List.prepend(x, rest), seen)
+        _ -> nestedWalk(env, names, rest, seen)
+
+verify nestedNode
+    nestedNode(Check.State.envEmpty(), [], Core.Exprs.fvar(0), [], Core.Cache.empty()) => false
 
 fn nestedHere(env: Env, names: List<Name>, e: Expr) -> Bool
     ? "e is I As ... with I an earlier inductive type and a block type in As."
