@@ -8,7 +8,7 @@ module Induct
         "strict positivity, return type) and declared; finally the universe"
         "the recursor may eliminate into and whether K-like reduction applies."
     exposes [RIx, checkUniform, checkTypes, declareTypes, checkCtors, declareCtors, elimAndK, isRecArg]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Check.State, Check.Tc, Check.Telescope, Check.Blk]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Cache, Core.Hash, Check.State, Check.Tc, Check.Telescope, Check.Blk]
     effects []
 
 record WT
@@ -74,31 +74,68 @@ fn uniformCtors(blk: Blk, cs: List<CtorIn>) -> Result<Unit, Fail>
 verify uniformCtors
     uniformCtors(Check.Blk.start([], 0, [], 0), []) => Result.Ok(Unit)
 
+decision UniformSeenOnce
+    date = "2026-10-24"
+    reason =
+        "Checking that the block's types occur in constructor types only"
+        "applied to the block's parameters walked each type as a tree: a"
+        "shared subterm once for every path, and on to the end even past an"
+        "occurrence already found wrong, since Bool.and takes both sides. The"
+        "walk now goes through a list of subterms with their binder depths,"
+        "keeps those it has seen at a depth, and stops at the first wrong"
+        "occurrence. Instructions retired, one worker, on Aver 58a0c12f:"
+        "navier 927.2 G to 844.4 G; qb9 94.3 G to 94.6 G, etale and Init"
+        "unchanged."
+    chosen = "UniformSeenOnce"
+    rejected = ["TreeWalk"]
+    impacts = [uniformIn, uniformWalk, uniformNode]
+
 fn uniformIn(blk: Blk, e: Expr, offset: Int) -> Bool
-    ? "Visits e at binder depth offset; an occurrence with at most as many arguments as parameters is judged and not entered."
-    match Core.Apps.fnOf(e)
-        Expr.Const(_, n, ls) -> match List.contains(blk.names, n)
-            true -> match List.len(Core.Apps.argsOf(e)) > blk.nparams
-                true -> uniformChildren(blk, e, offset)
-                false -> uniformOcc(blk, ls, Core.Apps.argsOf(e), offset)
-            false -> uniformChildren(blk, e, offset)
-        _ -> uniformChildren(blk, e, offset)
+    ? "Visits e at binder depth offset; an occurrence with at most as many arguments as parameters is judged and not entered. Each subterm is looked at once at each depth (UniformSeenOnce)."
+    uniformWalk(blk, [(e, offset)], Core.Cache.empty())
 
 verify uniformIn
     uniformIn(Check.Blk.start([], 0, [], 0), Core.Exprs.fvar(0), 0) => true
 
-fn uniformChildren(blk: Blk, e: Expr, offset: Int) -> Bool
-    ? "The children of a node."
+fn uniformWalk(blk: Blk, todo: List<Tuple<Expr, Int>>, seen: Map<Int, Bucket>) -> Bool
+    ? "The subterms still to look at with their depths, and those already looked at: a subterm at a depth is kept under its hash mixed with the depth, beside the depth as a literal."
+    match todo
+        [] -> true
+        [(e, k), ..rest] -> match Core.Cache.find(seen, Core.Hash.mix(Core.Exprs.hashOf(e), k), e) == Option.Some(Core.Exprs.natLit(k))
+            true -> uniformWalk(blk, rest, seen)
+            false -> uniformNode(blk, e, k, rest, Core.Cache.add(seen, Core.Hash.mix(Core.Exprs.hashOf(e), k), (e, Core.Exprs.natLit(k))))
+
+verify uniformWalk
+    uniformWalk(Check.Blk.start([], 0, [], 0), [(Core.Exprs.fvar(0), 0), (Core.Exprs.fvar(0), 0)], Core.Cache.empty()) => true
+
+fn uniformNode(blk: Blk, e: Expr, offset: Int, rest: List<Tuple<Expr, Int>>, seen: Map<Int, Bucket>) -> Bool
+    ? "One subterm: an occurrence of a block type is judged, and entered only with more arguments than parameters; any other node's children wait their turn."
+    match Core.Apps.fnOf(e)
+        Expr.Const(_, n, ls) -> match List.contains(blk.names, n)
+            true -> match List.len(Core.Apps.argsOf(e)) > blk.nparams
+                true -> uniformWalk(blk, uniformChildren(e, offset, rest), seen)
+                false -> match uniformOcc(blk, ls, Core.Apps.argsOf(e), offset)
+                    true -> uniformWalk(blk, rest, seen)
+                    false -> false
+            false -> uniformWalk(blk, uniformChildren(e, offset, rest), seen)
+        _ -> uniformWalk(blk, uniformChildren(e, offset, rest), seen)
+
+verify uniformNode
+    uniformNode(Check.Blk.start([], 0, [], 0), Core.Exprs.fvar(0), 0, [], Core.Cache.empty()) => true
+
+fn uniformChildren(e: Expr, offset: Int, rest: List<Tuple<Expr, Int>>) -> List<Tuple<Expr, Int>>
+    ? "The children of a node with their depths, before the rest."
     match e
-        Expr.App(_, f, a) -> Bool.and(uniformIn(blk, f, offset), uniformIn(blk, a, offset))
-        Expr.Lam(_, t, b) -> Bool.and(uniformIn(blk, t, offset), uniformIn(blk, b, offset + 1))
-        Expr.Pi(_, t, b) -> Bool.and(uniformIn(blk, t, offset), uniformIn(blk, b, offset + 1))
-        Expr.Let(_, t, v, b) -> Bool.and(uniformIn(blk, t, offset), Bool.and(uniformIn(blk, v, offset), uniformIn(blk, b, offset + 1)))
-        Expr.Proj(_, _, _, x) -> uniformIn(blk, x, offset)
-        _ -> true
+        Expr.App(_, f, a) -> List.prepend((f, offset), List.prepend((a, offset), rest))
+        Expr.Lam(_, t, b) -> List.prepend((t, offset), List.prepend((b, offset + 1), rest))
+        Expr.Pi(_, t, b) -> List.prepend((t, offset), List.prepend((b, offset + 1), rest))
+        Expr.Let(_, t, v, b) -> List.prepend((t, offset), List.prepend((v, offset), List.prepend((b, offset + 1), rest)))
+        Expr.Proj(_, _, _, x) -> List.prepend((x, offset), rest)
+        _ -> rest
 
 verify uniformChildren
-    uniformChildren(Check.Blk.start([], 0, [], 0), Core.Exprs.bvar(0), 0) => true
+    uniformChildren(Core.Exprs.bvar(0), 0, []) => []
+    List.len(uniformChildren(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1)), 0, [])) => 2
 
 fn uniformOcc(blk: Blk, ls: List<Level>, args: List<Expr>, offset: Int) -> Bool
     ? "Exactly the parameters, as the bound variables of the parameter binders, at the block's levels."
