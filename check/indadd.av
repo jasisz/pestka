@@ -206,6 +206,10 @@ decision NestedSeenOnce
         "of every prefix, so the answer is the same. Instructions retired,"
         "one worker, on Aver 58a0c12f: navier 1325.5 G to 1035.9 G; etale,"
         "qb9 and Init unchanged."
+        "Only subterms of 32 nodes or more are kept: smaller ones cannot be"
+        "shared enough to matter and keeping them cost more than walking them"
+        "(navier 844.4 G to 842.7 G, Init 126.6 G to 126.2 G, etale 49.3 G to"
+        "49.1 G, qb9 94.2 G to 94.0 G)."
     chosen = "NestedSeenOnce"
     rejected = ["TreeWalk"]
     impacts = [nestedIn, nestedWalk, nestedNode]
@@ -221,9 +225,11 @@ fn nestedWalk(env: Env, names: List<Name>, todo: List<Expr>, seen: Map<Int, Buck
     ? "The terms still to look at, and those already looked at."
     match todo
         [] -> false
-        [e, ..rest] -> match Check.State.cacheGet(seen, e)
-            Option.Some -> nestedWalk(env, names, rest, seen)
-            Option.None -> nestedNode(env, names, e, rest, Check.State.cachePut(seen, e, e))
+        [e, ..rest] -> match Core.Exprs.treeSize(e) < 32
+            true -> nestedNode(env, names, e, rest, seen)
+            false -> match Check.State.cacheGet(seen, e)
+                Option.Some -> nestedWalk(env, names, rest, seen)
+                Option.None -> nestedNode(env, names, e, rest, Check.State.cachePut(seen, e, e))
 
 verify nestedWalk
     nestedWalk(Check.State.envEmpty(), [], [Core.Exprs.fvar(0), Core.Exprs.fvar(0)], Core.Cache.empty()) => false

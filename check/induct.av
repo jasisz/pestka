@@ -86,6 +86,10 @@ decision UniformSeenOnce
         "occurrence. Instructions retired, one worker, on Aver 58a0c12f:"
         "navier 927.2 G to 844.4 G; qb9 94.3 G to 94.6 G, etale and Init"
         "unchanged."
+        "Only subterms of 32 nodes or more are kept: smaller ones cannot be"
+        "shared enough to matter and keeping them cost more than walking them"
+        "(navier 844.4 G to 842.7 G, Init 126.6 G to 126.2 G, etale 49.3 G to"
+        "49.1 G, qb9 94.2 G to 94.0 G)."
     chosen = "UniformSeenOnce"
     rejected = ["TreeWalk"]
     impacts = [uniformIn, uniformWalk, uniformNode]
@@ -101,9 +105,11 @@ fn uniformWalk(blk: Blk, todo: List<Tuple<Expr, Int>>, seen: Map<Int, Bucket>) -
     ? "The subterms still to look at with their depths, and those already looked at: a subterm at a depth is kept under its hash mixed with the depth, beside the depth as a literal."
     match todo
         [] -> true
-        [(e, k), ..rest] -> match Core.Cache.find(seen, Core.Hash.mix(Core.Exprs.hashOf(e), k), e) == Option.Some(Core.Exprs.natLit(k))
-            true -> uniformWalk(blk, rest, seen)
-            false -> uniformNode(blk, e, k, rest, Core.Cache.add(seen, Core.Hash.mix(Core.Exprs.hashOf(e), k), (e, Core.Exprs.natLit(k))))
+        [(e, k), ..rest] -> match Core.Exprs.treeSize(e) < 32
+            true -> uniformNode(blk, e, k, rest, seen)
+            false -> match Core.Cache.find(seen, Core.Hash.mix(Core.Exprs.hashOf(e), k), e) == Option.Some(Core.Exprs.natLit(k))
+                true -> uniformWalk(blk, rest, seen)
+                false -> uniformNode(blk, e, k, rest, Core.Cache.add(seen, Core.Hash.mix(Core.Exprs.hashOf(e), k), (e, Core.Exprs.natLit(k))))
 
 verify uniformWalk
     uniformWalk(Check.Blk.start([], 0, [], 0), [(Core.Exprs.fvar(0), 0), (Core.Exprs.fvar(0), 0)], Core.Cache.empty()) => true

@@ -85,6 +85,10 @@ decision MentionsSeenOnce
         "subterms it has seen, as NestedSeenOnce does. Instructions retired,"
         "one worker, on Aver 58a0c12f: navier 1035.9 G to 927.2 G; etale, qb9"
         "and Init unchanged."
+        "Only subterms of 32 nodes or more are kept: smaller ones cannot be"
+        "shared enough to matter and keeping them cost more than walking them"
+        "(navier 844.4 G to 842.7 G, Init 126.6 G to 126.2 G, etale 49.3 G to"
+        "49.1 G, qb9 94.2 G to 94.0 G)."
     chosen = "MentionsSeenOnce"
     rejected = ["TreeWalk"]
     impacts = [mentions, mentionWalk, mentionNode]
@@ -97,9 +101,11 @@ fn mentionWalk(todo: List<Expr>, ns: List<Name>, seen: Map<Int, Bucket>) -> Bool
     ? "The terms still to look at, and those already looked at."
     match todo
         [] -> false
-        [e, ..rest] -> match Check.State.cacheGet(seen, e)
-            Option.Some -> mentionWalk(rest, ns, seen)
-            Option.None -> mentionNode(e, rest, ns, Check.State.cachePut(seen, e, e))
+        [e, ..rest] -> match Core.Exprs.treeSize(e) < 32
+            true -> mentionNode(e, rest, ns, seen)
+            false -> match Check.State.cacheGet(seen, e)
+                Option.Some -> mentionWalk(rest, ns, seen)
+                Option.None -> mentionNode(e, rest, ns, Check.State.cachePut(seen, e, e))
 
 verify mentionWalk
     mentionWalk([Core.Exprs.fvar(0), Core.Exprs.fvar(0)], [Check.Lits.name1("I")], Core.Cache.empty()) => false
