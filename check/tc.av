@@ -466,6 +466,24 @@ record Opened
     ids: List<Int>
     st: St
 
+decision DomainsCheckedWithType
+    date = "2026-10-25"
+    reason =
+        "lamOpen runs only when every lambda of a declaration's value has, as"
+        "written, the domain of the declared type's pi at its place"
+        "(TelescopeOnce), and the declared type is checked before the value:"
+        "each of its domains was found to be a type under the variables of the"
+        "domains before it. The lambdas' variables are those very variables,"
+        "since counted variables of equal domains are equal, so each lambda's"
+        "domain, put in as the pi's was, is a term already found to be a type."
+        "Checking it again found the same cached answer, after comparing the"
+        "domain built again with the one built for the type. Instructions"
+        "retired, one worker: etale 44.5 G to 44.3 G, contdiff 32.0 G to"
+        "31.9 G, Init 116.6 G to 116.3 G."
+    chosen = "DomainsCheckedWithType"
+    rejected = ["DomainsCheckedAgain"]
+    impacts = [lamOpenStep]
+
 fn lamOpen(st: St, e: Expr, rev: List<Expr>, ids: List<Int>) -> Result<Opened, Fail>
     ? "lamLoop in checking mode, left open: the lambdas' variables declared and the body's type inferred under them, not closed into a pi."
     match e
@@ -476,13 +494,13 @@ verify lamOpen
     lamOpen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [], []) == Result.Err(Fail.Reject("the type checker met a loose bound variable")) => true
 
 fn lamOpenStep(st: St, d: Expr, b: Expr, rev: List<Expr>, ids: List<Int>) -> Result<Opened, Fail>
-    ? "Checks the domain is a type, then declares the variable, as lamStep."
-    st1 = domainChecked(st, d, false)?
-    loc = Check.State.namesAt(st1, Core.Names.anon(), d, Option.None, Binder.Default)
+    ? "Declares the variable, as lamStep, without checking the domain is a type: it is the declared type's domain as written, under the same variables, and checking the type found it one (DomainsCheckedWithType)."
+    loc = Check.State.namesAt(st, Core.Names.anon(), d, Option.None, Binder.Default)
     lamOpen(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids))
 
 verify lamOpenStep
-    lamOpenStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(0), [], []) == Result.Err(Fail.Reject("the type checker met a loose bound variable")) => true
+    lamOpenStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.natLit(1), [], []) == Result.Err(Fail.Reject("the type checker met a loose bound variable")) => false
+    lamOpenStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(1), [], []) == Result.Err(Fail.Reject("the type checker met a loose bound variable")) => true
 
 fn openedEnd(r: RE, rev: List<Expr>, ids: List<Int>) -> Result<Opened, Fail>
     ? "The body's type with the variables still open."
@@ -491,13 +509,43 @@ fn openedEnd(r: RE, rev: List<Expr>, ids: List<Int>) -> Result<Opened, Fail>
 verify openedEnd
     openedEnd(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], []) == Result.Ok(Opened(t = Core.Exprs.sort(Level.Zero), rev = [], ids = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => true
 
+decision DeclaredBodyUnbuilt
+    date = "2026-10-25"
+    reason =
+        "openedFits built the declared body with the lambdas' variables put"
+        "in, a second copy of it after the one checking the type had built,"
+        "only to find it the same term as the body's type, as it nearly"
+        "always is. fitsUnder tells that without building, but only for"
+        "terms under 63 nodes, and a theorem's statement is rarely that"
+        "small. fitsWithin compares the same way with a budget of nodes"
+        "visited instead, so that a body sharing parts cannot make the walk"
+        "long; the body is built and compared in full only when the walk"
+        "finds a difference or the budget runs out. Instructions retired,"
+        "one worker: etale 46.0 G to 45.8 G, contdiff 32.3 G to 32.2 G, Init"
+        "117.3 G to 117.0 G. The same budget in place of the size limit in"
+        "argFits gained nothing (etale 45.8 G, Init 117.3 G) and is not"
+        "used there."
+    chosen = "DeclaredBodyUnbuilt"
+    rejected = ["DeclaredBodyBuilt", "ArgumentsWithinBudget"]
+    impacts = [openedFits, fitsWithin]
+
 fn openedFits(o: Opened, rest: Expr) -> Result<RB, Fail>
-    ? "The body's type against the declared body under the same variables, which are then closed."
-    r = isDefEq(o.st, o.t, Core.Subst.instantiate(rest, o.rev))?
-    Result.Ok(RB(b = r.b, st = Check.State.closeVars(r.st, List.len(o.ids))))
+    ? "The body's type against the declared body under the same variables, which are then closed; found the same term without building the declared body when it is (DeclaredBodyUnbuilt)."
+    match fitsWithin(o.t, rest, o.rev, 0, 4096) >= 0
+        true -> Result.Ok(RB(b = true, st = Check.State.closeVars(o.st, List.len(o.ids))))
+        false -> openedBuilt(o, rest)
 
 verify openedFits
     resultBool(openedFits(Opened(t = Core.Exprs.sort(Level.Zero), rev = [], ids = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero))) => true
+
+fn openedBuilt(o: Opened, rest: Expr) -> Result<RB, Fail>
+    ? "The declared body built under the variables and compared in full."
+    r = isDefEq(o.st, o.t, Core.Subst.instantiate(rest, o.rev))?
+    Result.Ok(RB(b = r.b, st = Check.State.closeVars(r.st, List.len(o.ids))))
+
+verify openedBuilt
+    resultBool(openedBuilt(Opened(t = Core.Exprs.sort(Level.Zero), rev = [], ids = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero))) => true
+    resultBool(openedBuilt(Opened(t = Core.Exprs.sort(Level.Zero), rev = [], ids = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Succ(Level.Zero)))) => false
 
 fn lamLoop(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Opens nested lambdas with their variables, then infers the body and closes it as a pi."
@@ -706,6 +754,49 @@ verify fitsUnder law sameAsBuilt
     given i: Int = [0, 1, 2]
     given j: Int = [0, 1, 2]
     fitsUnder(Core.Subst.instantiate(fitSample(i), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)]), fitSample(j), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)], 0) => Core.Subst.instantiate(fitSample(i), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)]) == Core.Subst.instantiate(fitSample(j), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)])
+
+fn fitsWithin(t: Expr, d: Expr, subst: List<Expr>, off: Int, left: Int) -> Int
+    ? "fitsUnder with a budget of nodes of d visited instead of a limit on d's size: what is left of the budget when t is d with subst put in, or -1 when it is not or the budget runs out, as it may on a domain that shares parts."
+    match left <= 0
+        true -> -1
+        false -> match Core.Exprs.looseRange(d) <= off
+            true -> match sameTerm(t, d)
+                true -> left - 1
+                false -> -1
+            false -> fitsWithinNode(t, d, subst, off, left - 1)
+
+verify fitsWithin
+    fitsWithin(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.bvar(0)), [Core.Exprs.natLit(2)], 0, 10) >= 0 => true
+    fitsWithin(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(3)), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.bvar(0)), [Core.Exprs.natLit(2)], 0, 10) => -1
+    fitsWithin(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.bvar(0)), [Core.Exprs.natLit(2)], 0, 1) => -1
+
+fn fitsWithinNode(t: Expr, d: Expr, subst: List<Expr>, off: Int, left: Int) -> Int
+    ? "fitsWithin one node of d down, as fitsNode, the budget passed from part to part."
+    match d
+        Expr.BVar(i) -> match fitsVar(t, i, subst, off)
+            true -> left
+            false -> -1
+        Expr.App(_, f, a) -> match t
+            Expr.App(_, g, b) -> fitsWithin(b, a, subst, off, fitsWithin(g, f, subst, off, left))
+            _ -> -1
+        Expr.Lam(_, dt, db) -> match t
+            Expr.Lam(_, tt, tb) -> fitsWithin(tb, db, subst, off + 1, fitsWithin(tt, dt, subst, off, left))
+            _ -> -1
+        Expr.Pi(_, dt, db) -> match t
+            Expr.Pi(_, tt, tb) -> fitsWithin(tb, db, subst, off + 1, fitsWithin(tt, dt, subst, off, left))
+            _ -> -1
+        Expr.Let(_, dt, dv, db) -> match t
+            Expr.Let(_, tt, tv, tb) -> fitsWithin(tb, db, subst, off + 1, fitsWithin(tv, dv, subst, off, fitsWithin(tt, dt, subst, off, left)))
+            _ -> -1
+        Expr.Proj(_, s, i, dx) -> match t
+            Expr.Proj(_, s2, i2, tx) -> match Bool.and(s == s2, i == i2)
+                true -> fitsWithin(tx, dx, subst, off, left)
+                false -> -1
+            _ -> -1
+        _ -> -1
+
+verify fitsWithinNode
+    fitsWithinNode(Core.Exprs.natLit(1), Core.Exprs.natLit(1), [], 0, 5) => -1
 
 fn fitSample(k: Int) -> Expr
     ? "Domains for the law: bound variables in head, argument and binder position."
@@ -1900,14 +1991,104 @@ verify lnatTry
     resultExpr(lnatTry(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), [], MXs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], ms = MS(next = 0, forced = {})), false, false)) => Core.Exprs.natLit(3)
 
 fn lunfold(st: St, f: Expr, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "A definition's value takes the waiting arguments as they are; anything else is stuck."
+    ? "A definition's value takes the waiting arguments as they are; anything else is stuck. At universe levels, the lambdas the arguments meet come off the value as written, and only what is under them gets the levels (DomainsDropped)."
+    match f
+        Expr.Const(_, n, ls) -> match List.len(ls) > 0
+            true -> lunfoldAt(st, f, ls, Check.State.lookup(st, n), stack, ms, cheapRec, cheapProj)
+            false -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+        _ -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+
+verify lunfold
+    resultExpr(lunfold(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+
+decision DomainsDropped
+    date = "2026-10-25"
+    reason =
+        "Unfolding a constant at universe levels instantiated the levels in"
+        "its whole value, the domains of its leading lambdas too, and the"
+        "machine then met those lambdas with the waiting arguments: beta"
+        "never reads a domain, so they were built to be dropped. On etale"
+        "the domains were 37% of what instantiating values cost, 1.33 G of"
+        "46 G. Now, with k arguments waiting, the value as written loses"
+        "its first k lambdas, the body under them gets the levels, and the"
+        "machine starts on it with the k arguments as the body's"
+        "environment, as k steps of beta would leave it. The body is kept"
+        "in the unfolding cache under the constant applied to k; the lazy"
+        "delta step unfolds the same way. Instructions retired, one worker:"
+        "etale 46.0 G to 44.6 G, rep14 5.7 G to 5.4 G, contdiff 32.3 G to"
+        "32.1 G, Init 117.3 G to 116.9 G."
+    chosen = "DomainsDropped"
+    rejected = ["ValueInstantiated"]
+    impacts = [lunfold, lunfoldAt, lunfoldPeeled, unfoldStep, stepPeeled]
+
+fn lunfoldAt(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A constant at levels: a definition or theorem with a value has the lambdas its arguments meet taken off first."
+    match c
+        Option.Some(k) -> match Check.State.valueOf(k)
+            Option.Some(v) -> lunfoldPeeled(st, f, Check.State.headOf(k), v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms, cheapRec, cheapProj)
+            Option.None -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+        Option.None -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+
+verify lunfoldAt
+    resultExpr(lunfoldAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), [Level.Zero], Option.None, [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero])
+
+fn lunfoldPeeled(st: St, f: Expr, h: Head, v: Expr, k: Int, ls: List<Level>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "With k lambdas met, the body under them at the levels, run with the first k arguments as its environment; with none, or levels of the wrong count, the whole value as before."
+    match Bool.and(k > 0, List.len(h.params) == List.len(ls))
+        false -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+        true -> lbodyRun(peeledBody(st, Core.Exprs.app(f, Core.Exprs.natLit(k)), h, v, k, ls), k, stack, ms, cheapRec, cheapProj)
+
+verify lunfoldPeeled
+    resultExpr(lunfoldPeeled(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 1, [Level.Zero], [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {}), false, false)) => Core.Exprs.natLit(4)
+
+fn peeledBody(st: St, key: Expr, h: Head, v: Expr, k: Int, ls: List<Level>) -> RE
+    ? "The value under its first k lambdas at the levels, from the unfolding cache or instantiated now and kept there under the constant applied to k."
+    match Check.State.cacheGet(st.unfoldCache, key)
+        Option.Some(b) -> RE(e = b, st = st)
+        Option.None -> ruleStore(st, key, Core.Subst.instLevelParams(peelLams(v, k), h.params, ls))
+
+verify peeledBody
+    peeledBody(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.bvar(0), 0, []).e => Core.Exprs.bvar(0)
+
+fn lbodyRun(b: RE, k: Int, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The machine on a body whose k lambdas met the first k arguments: those in its environment, the innermost first, as beta pushes them."
+    lcore(b.st, b.e, List.reverse(List.take(stack, k)), List.drop(stack, k), ms, true, cheapRec, cheapProj)
+
+verify lbodyRun
+    resultExpr(lbodyRun(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 1, [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {}), false, false)) => Core.Exprs.natLit(4)
+
+fn lamsUpTo(e: Expr, n: Int, k: Int) -> Int
+    ? "How many leading lambdas e has past the k counted, up to n."
+    match k >= n
+        true -> k
+        false -> match e
+            Expr.Lam(_, _, b) -> lamsUpTo(b, n, k + 1)
+            _ -> k
+
+verify lamsUpTo
+    lamsUpTo(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 3, 0) => 1
+    lamsUpTo(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 0, 0) => 0
+
+fn peelLams(e: Expr, k: Int) -> Expr
+    ? "e under its first k lambdas."
+    match k <= 0
+        true -> e
+        false -> match e
+            Expr.Lam(_, _, b) -> peelLams(b, k - 1)
+            _ -> e
+
+verify peelLams
+    peelLams(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 1) => Core.Exprs.bvar(0)
+
+fn lunfoldWhole(st: St, f: Expr, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The whole value at its levels takes the waiting arguments; anything else is stuck."
     u = unfoldConst(st, f)
     match u.o
         Option.Some(v) -> lcore(u.st, v, [], stack, ms, true, cheapRec, cheapProj)
         Option.None -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = u.st))
 
-verify lunfold
-    resultExpr(lunfold(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+verify lunfoldWhole
+    resultExpr(lunfoldWhole(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
 
 fn lproject(st: St, s: Name, i: Int, x: MX, stack: List<Clo>, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A projection of a built structure; the field takes the waiting arguments as they are."
@@ -3221,11 +3402,50 @@ fn unfoldWhnf(st: St, e: Expr) -> Result<RE, Fail>
         Option.None -> stepStored(unfoldStep(st, e)?, e)
 
 fn unfoldStep(st: St, e: Expr) -> Result<RE, Fail>
-    ? "One unfolding step and the cheap whnfCore after it."
+    ? "One unfolding step and the cheap whnfCore after it. A head at universe levels has the lambdas its arguments meet taken off before the levels are put in, as the machine unfolds (DomainsDropped)."
+    match Core.Apps.fnOf(e)
+        Expr.Const(_, n, ls) -> match List.len(ls) > 0
+            true -> stepAt(st, e, Core.Apps.fnOf(e), ls, Check.State.lookup(st, n))
+            false -> unfoldStepWhole(st, e)
+        _ -> unfoldStepWhole(st, e)
+
+fn stepAt(st: St, e: Expr, f: Expr, ls: List<Level>, c: Option<Const>) -> Result<RE, Fail>
+    ? "The step for a head at levels with a value."
+    match c
+        Option.Some(k) -> match Check.State.valueOf(k)
+            Option.Some(v) -> stepPeeled(st, e, f, Check.State.headOf(k), v, Core.Apps.argsOf(e), ls)
+            Option.None -> unfoldStepWhole(st, e)
+        Option.None -> unfoldStepWhole(st, e)
+
+verify stepAt
+    resultExpr(stepAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), [], Option.None)) => Core.Exprs.fvar(1)
+
+fn stepPeeled(st: St, e: Expr, f: Expr, h: Head, v: Expr, args: List<Expr>, ls: List<Level>) -> Result<RE, Fail>
+    ? "The body under the lambdas the arguments meet, at the levels, run by whnfCore's machine with those arguments as its environment."
+    k = lamsUpTo(v, List.len(args), 0)
+    match Bool.and(k > 0, List.len(h.params) == List.len(ls))
+        false -> unfoldStepWhole(st, e)
+        true -> stepRun(peeledBody(st, Core.Exprs.app(f, Core.Exprs.natLit(k)), h, v, k, ls), k, closedAll(args, []))
+
+verify stepPeeled
+    resultExpr(stepPeeled(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), [], [])) => Core.Exprs.fvar(1)
+
+fn stepRun(b: RE, k: Int, stack: List<Clo>) -> Result<RE, Fail>
+    ? "whnfCore's machine on the body, as unfoldStep runs it after unfolding: no delta, recursors on cheap terms not reduced, projections cheap."
+    lcore(b.st, b.e, List.reverse(List.take(stack, k)), List.drop(stack, k), MS(next = 0, forced = {}), false, false, true)
+
+verify stepRun
+    resultExpr(stepRun(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 1, [Clo.Clo(-1, Core.Exprs.natLit(4), [])])) => Core.Exprs.natLit(4)
+
+fn unfoldStepWhole(st: St, e: Expr) -> Result<RE, Fail>
+    ? "One unfolding of the whole value and the cheap whnfCore after it."
     u = unfoldDefinition(st, e)
     match u.o
         Option.Some(x) -> whnfCoreM(u.st, x, false, true)
         Option.None -> Result.Ok(RE(e = e, st = u.st))
+
+verify unfoldStepWhole
+    resultExpr(unfoldStepWhole(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
 
 verify unfoldStep
     resultExpr(unfoldStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
