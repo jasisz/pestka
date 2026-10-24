@@ -139,7 +139,7 @@ verify sort
 
 fn cnst(n: Name, us: List<Level>) -> Expr
     ? "A constant applied to universe levels. Its metadata is packed in, as a compound node's is: an application meets constants at its head, and walking the levels there again every time cost more than the word."
-    Expr.Const(leafWord(Core.Hash.mix(Core.Hash.mix(3, Core.Names.hashOf(n)), levelsHash(us, 0)), 0, 0, flag(anyParam(us))), n, us)
+    Expr.Const(leafWord(Core.Hash.mix2(3, Core.Names.hashOf(n), levelsHash(us, 0)), 0, 0, flag(anyParam(us))), n, us)
 
 verify cnst
     hasParam(cnst(Core.Names.anon(), [Level.Param(Core.Names.anon())])) => true
@@ -163,7 +163,7 @@ fn binderWord(tag: Int, t: Expr, b: Expr) -> Int
     ? "The word of a node that binds one variable over b: the body's range seen from outside the binder."
     wt = wordOf(t)
     wb = wordOf(b)
-    (Core.Hash.mix(Core.Hash.mix(tag, hashIn(wt)), hashIn(wb)) * 64 + Int.min(sizeIn(wt) + sizeIn(wb) + 1, 63)) * 33554432 + flagsOf(wt, wb) + Int.max(Bits.and(wt, 16383), under(Bits.and(wb, 16383)))
+    (Core.Hash.mix2(tag, hashIn(wt), hashIn(wb)) * 64 + Int.min(sizeIn(wt) + sizeIn(wb) + 1, 63)) * 33554432 + flagsOf(wt, wb) + Int.max(Bits.and(wt, 16383), under(Bits.and(wb, 16383)))
 
 verify binderWord
     binderWord(5, sort(Level.Zero), bvar(3)) == pack(binderMeta(5, sort(Level.Zero), bvar(3))) => true
@@ -199,7 +199,7 @@ fn letE(n: Name, t: Expr, v: Expr, b: Expr) -> Expr
     wt = wordOf(t)
     wv = wordOf(v)
     wb = wordOf(b)
-    Expr.Let((Core.Hash.mix(Core.Hash.mix(Core.Hash.mix(7, hashIn(wt)), hashIn(wv)), hashIn(wb)) * 64 + Int.min(sizeIn(wt) + sizeIn(wv) + sizeIn(wb) + 1, 63)) * 33554432 + Bits.or(flagsOf(wt, wv), flagsOf(wb, wb)) + Int.max(Int.max(Bits.and(wt, 16383), Bits.and(wv, 16383)), under(Bits.and(wb, 16383))), t, v, b)
+    Expr.Let((Core.Hash.mix(Core.Hash.mix2(7, hashIn(wt), hashIn(wv)), hashIn(wb)) * 64 + Int.min(sizeIn(wt) + sizeIn(wv) + sizeIn(wb) + 1, 63)) * 33554432 + Bits.or(flagsOf(wt, wv), flagsOf(wb, wb)) + Int.max(Int.max(Bits.and(wt, 16383), Bits.and(wv, 16383)), under(Bits.and(wb, 16383))), t, v, b)
 
 verify letE
     looseRange(letE(Core.Names.anon(), bvar(0), bvar(4), bvar(0))) => 5
@@ -222,7 +222,7 @@ verify strLit
 fn proj(s: Name, i: Int, e: Expr) -> Expr
     ? "Projection of field i out of a structure value."
     w = wordOf(e)
-    Expr.Proj((Core.Hash.mix(Core.Hash.mix(Core.Hash.mix(10, Core.Names.hashOf(s)), i), hashIn(w)) * 64 + Int.min(sizeIn(w) + 1, 63)) * 33554432 + flagsOf(w, w) + Bits.and(w, 16383), s, i, e)
+    Expr.Proj((Core.Hash.mix(Core.Hash.mix2(10, Core.Names.hashOf(s), i), hashIn(w)) * 64 + Int.min(sizeIn(w) + 1, 63)) * 33554432 + flagsOf(w, w) + Bits.and(w, 16383), s, i, e)
 
 verify proj
     looseRange(proj(Core.Names.anon(), 0, bvar(1))) => 2
@@ -299,7 +299,7 @@ verify leafWord
 
 fn joined(tag: Int, wf: Int, wa: Int) -> Int
     ? "The word of a node over two parts, from theirs alone: the hashes mixed after the tag, sizes added and capped, variable bits and parameter flags or-ed, the larger range. A saturated range stays saturated."
-    (Core.Hash.mix(Core.Hash.mix(tag, hashIn(wf)), hashIn(wa)) * 64 + Int.min(sizeIn(wf) + sizeIn(wa) + 1, 63)) * 33554432 + flagsOf(wf, wa) + Int.max(Bits.and(wf, 16383), Bits.and(wa, 16383))
+    (Core.Hash.mix2(tag, hashIn(wf), hashIn(wa)) * 64 + Int.min(sizeIn(wf) + sizeIn(wa) + 1, 63)) * 33554432 + flagsOf(wf, wa) + Int.max(Bits.and(wf, 16383), Bits.and(wa, 16383))
 
 verify joined
     unpack(joined(4, wordOf(bvar(0)), wordOf(bvar(3)))).range => 4

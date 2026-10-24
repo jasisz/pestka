@@ -5,7 +5,7 @@ module Hash
         "is below 2^20, so one mixing step never leaves a machine word."
         "A hash only narrows a comparison; equality is still decided"
         "structurally."
-    exposes [mix, ofText, ofInts]
+    exposes [mix, mix2, ofText, ofInts]
     effects []
 
 fn mix(a: Int, b: Int) -> Int
@@ -16,6 +16,19 @@ verify mix
     mix(0, 5) => 5
     mix(1, 0) => 1000003
     mix(2147483646, 2147483646) => Int.mod(2147483646 * 1000004, 2147483647)
+
+fn mix2(a: Int, b: Int, c: Int) -> Int
+    ? "mix(mix(a, b), c) with one remainder instead of two: for a below 2^11 and b and c below 2^31 the unreduced sum stays below 2^53, and its remainder is the one the two steps give."
+    Int.mod((a * 1000003 + b) * 1000003 + c, 2147483647)
+
+verify mix2
+    mix2(4, 5, 6) => mix(mix(4, 5), 6)
+
+verify mix2 law sameAsTwoMixes
+    given a: Int = [0, 4, 10, 2047]
+    given b: Int = [0, 1, 1000003, 2147483646]
+    given c: Int = [0, 7, 2147483646]
+    mix2(a, b, c) => mix(mix(a, b), c)
 
 fn ofText(s: String) -> Int
     ? "Hash of a string, over its code points."
