@@ -19,7 +19,7 @@ written in Aver, by an AI agent under human guidance.
 ## Status
 
 On the small Lean Kernel Arena tests (all but `perf/` and the large corpora)
-Pestka answers 171 of 171 correctly.
+Pestka answers 172 of 172 correctly.
 
 The Arena's large tests and its `perf/` tests, exported as the Arena exports
 them and checked on an Apple M2 Pro: on one worker, as the Arena runs Pestka,
@@ -28,15 +28,15 @@ the Arena ranks checkers by.
 
 | Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 8 workers | Peak, 8 workers |
 |---|---|---|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 172.0 G | 18 s | 1.0 GB | 7.6 s | 1.4 GB |
-| `std` (98,086) | accepted | 292.7 G | 31 s | 1.3 GB | 12 s | 2.5 GB |
-| `reachability` | accepted | 91.5 G | 8.4 s | 0.4 GB | 7.4 s | 0.5 GB |
-| `con-leche` | accepted | 321.3 G | 39 s | 1.2 GB | 17 s | 2.0 GB |
-| `cedar` | accepted | 406.8 G | 45 s | 1.6 GB | 17 s | 2.6 GB |
-| `navier-stokes-euler` | accepted | 1.76 T | 182 s | 3.8 GB | 90 s | 8.7 GB |
-| `cslib` | accepted | 1.77 T | 227 s | 3.9 GB | 74 s | 7.0 GB |
-| `mathlib` (702,040) | accepted | 6.35 T | 823 s | 7.1 GB | 250 s | 10.9 GB |
-| `perf/`, 28 tests (in brackets `magma-list-deep-n36`) | as expected | 391 G (273 G) | 33 s (26 s) | 1.0 GB | 33 s (26 s) | 1.0 GB |
+| `init` (58,170 declarations) | accepted | 136.2 G | 13 s | 0.8 GB | 6.0 s | 1.2 GB |
+| `std` (98,086) | accepted | 230.0 G | 23 s | 1.4 GB | 9.4 s | 2.0 GB |
+| `reachability` | accepted | 79.7 G | 7.0 s | 0.5 GB | 6.3 s | 0.4 GB |
+| `con-leche` | accepted | 245.8 G | 27 s | 1.4 GB | 15 s | 1.7 GB |
+| `cedar` | accepted | 323.4 G | 32 s | 1.5 GB | 13 s | 2.2 GB |
+| `navier-stokes-euler` | accepted | 1.53 T | 144 s | 4.8 GB | 84 s | 7.8 GB |
+| `cslib` | accepted | 1.40 T | 161 s | 4.6 GB | 63 s | 6.1 GB |
+| `mathlib` (702,040) | accepted | 5.06 T | 597 s | 8.7 GB | 199 s | 10.5 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 405 G (232 G) | 34 s (19 s) | 1.0 GB | 33 s (19 s) | 1.0 GB |
 
 ## What it does differently
 
@@ -67,6 +67,17 @@ The checker follows the reference kernel's algorithm. What is its own:
   found again. On slices of `mathlib` naming variables by their place in the
   telescope and the next point cut 18–20% of the instructions; naming them
   by their kind instead cut 4–5% more.
+- **Terms are equal as Lean's are.** Lean's kernel compares expressions
+  without the names and annotations of their binders; Pestka's terms do not
+  hold them, so equality of terms is equality up to the names of bound
+  variables, and a cache finds its result again for a term that differs
+  from one it has seen only in such a name. Leaving them out cut about 7%
+  of the instructions on `Init`.
+- **A term knows which variables may be in it.** Each free variable has one
+  of ten bits, by its number, and each term the bits of the variables in it,
+  kept with its hash in one word. Abstracting variables, as closing a binder
+  does, skips every subterm that shares no bit with them; before, 59% of the
+  nodes it rebuilt came back unchanged. This cut nearly 3% on `Init`.
 - **What a worker finds is kept across declarations.** Each worker meets its
   declarations in file order, so every constant a result rests on is still
   there in the next one. It carries its variables and their context, and the
