@@ -1364,13 +1364,41 @@ fn recMajor(st: St, e: Expr, ls: List<Level>, rv: Rec, args: List<Expr>, majorId
 verify recMajor
     resultOpt(recMajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, false, false)) => Option.None
 
+decision CtorMajorAsIs
+    date = "2026-10-24"
+    reason =
+        "Every time a recursor fired, its major premise went through"
+        "structure eta, an equality check, whnf (with a store into the whnf"
+        "cache) and structure expansion, even when it already was a"
+        "constructor application, as a list's tail is at every step of a"
+        "lookup: each of those steps leaves a constructor application as it is."
+        "Now a literal becomes its constructor and a constructor application"
+        "fires at once; Nat.succ is left to the old path, where whnf may fold"
+        "it into a literal. Instructions retired, one worker, on Aver 58a0c12f:"
+        "perf/magma-list-deep-n36 227.5 G to 218.0 G, all 30 perf tests 393.5 G"
+        "to 381.8 G, Init 127.8 G to 127.1 G, etale and qb9 unchanged."
+    chosen = "CtorMajorAsIs"
+    rejected = ["EveryMajorReduced"]
+    impacts = [majorToCtor, majorSlow]
+
 fn majorToCtor(st: St, rv: Rec, major: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "K first; then structure eta before any reduction of the major, so that a major with no weak head normal form does not stop the recursor (lean4#15351); then whnf, and literal or structure expansion."
+    ? "K first; a literal is its constructor and a constructor application other than Nat.succ is already what every later step would leave it (CtorMajorAsIs); otherwise structure eta before any reduction of the major, so that a major with no weak head normal form does not stop the recursor (lean4#15351); then whnf, and literal or structure expansion."
     m1 = kMajor(st, rv, major)?
+    match m1.e
+        Expr.NatLit(n) -> Result.Ok(RE(e = Check.Lits.natLitToCtor(n), st = m1.st))
+        _ -> match Bool.and(isCtorApp(m1.st, m1.e), Bool.not(Core.Apps.isConst(Core.Apps.fnOf(m1.e), Check.Lits.natSucc)))
+            true -> Result.Ok(m1)
+            false -> majorSlow(m1, rv, cheapRec, cheapProj)
+
+fn majorSlow(m1: RE, rv: Rec, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A major that is neither a literal nor a constructor application, or is Nat.succ of something: structure eta first, then whnf and expansion."
     m0 = etaBeforeWhnf(m1.st, rv, m1.e)?
     match m0.e == m1.e
         false -> Result.Ok(m0)
         true -> majorReduced(whnfMaybe(m0.st, m1.e, cheapRec, cheapProj, cheapRec)?, rv)
+
+verify majorSlow
+    resultExpr(majorSlow(RE(e = Core.Exprs.natLit(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), false, false)) => Check.Lits.natLitToCtor(2)
 
 fn majorReduced(m2: RE, rv: Rec) -> Result<RE, Fail>
     ? "After whnf: a literal becomes its constructor, a structure value is eta expanded."
