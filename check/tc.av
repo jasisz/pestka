@@ -491,13 +491,43 @@ fn openedEnd(r: RE, rev: List<Expr>, ids: List<Int>) -> Result<Opened, Fail>
 verify openedEnd
     openedEnd(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], []) == Result.Ok(Opened(t = Core.Exprs.sort(Level.Zero), rev = [], ids = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => true
 
+decision DeclaredBodyUnbuilt
+    date = "2026-10-25"
+    reason =
+        "openedFits built the declared body with the lambdas' variables put"
+        "in, a second copy of it after the one checking the type had built,"
+        "only to find it the same term as the body's type, as it nearly"
+        "always is. fitsUnder tells that without building, but only for"
+        "terms under 63 nodes, and a theorem's statement is rarely that"
+        "small. fitsWithin compares the same way with a budget of nodes"
+        "visited instead, so that a body sharing parts cannot make the walk"
+        "long; the body is built and compared in full only when the walk"
+        "finds a difference or the budget runs out. Instructions retired,"
+        "one worker: etale 46.0 G to 45.8 G, contdiff 32.3 G to 32.2 G, Init"
+        "117.3 G to 117.0 G. The same budget in place of the size limit in"
+        "argFits gained nothing (etale 45.8 G, Init 117.3 G) and is not"
+        "used there."
+    chosen = "DeclaredBodyUnbuilt"
+    rejected = ["DeclaredBodyBuilt", "ArgumentsWithinBudget"]
+    impacts = [openedFits, fitsWithin]
+
 fn openedFits(o: Opened, rest: Expr) -> Result<RB, Fail>
-    ? "The body's type against the declared body under the same variables, which are then closed."
-    r = isDefEq(o.st, o.t, Core.Subst.instantiate(rest, o.rev))?
-    Result.Ok(RB(b = r.b, st = Check.State.closeVars(r.st, List.len(o.ids))))
+    ? "The body's type against the declared body under the same variables, which are then closed; found the same term without building the declared body when it is (DeclaredBodyUnbuilt)."
+    match fitsWithin(o.t, rest, o.rev, 0, 4096) >= 0
+        true -> Result.Ok(RB(b = true, st = Check.State.closeVars(o.st, List.len(o.ids))))
+        false -> openedBuilt(o, rest)
 
 verify openedFits
     resultBool(openedFits(Opened(t = Core.Exprs.sort(Level.Zero), rev = [], ids = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero))) => true
+
+fn openedBuilt(o: Opened, rest: Expr) -> Result<RB, Fail>
+    ? "The declared body built under the variables and compared in full."
+    r = isDefEq(o.st, o.t, Core.Subst.instantiate(rest, o.rev))?
+    Result.Ok(RB(b = r.b, st = Check.State.closeVars(r.st, List.len(o.ids))))
+
+verify openedBuilt
+    resultBool(openedBuilt(Opened(t = Core.Exprs.sort(Level.Zero), rev = [], ids = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero))) => true
+    resultBool(openedBuilt(Opened(t = Core.Exprs.sort(Level.Zero), rev = [], ids = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Succ(Level.Zero)))) => false
 
 fn lamLoop(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Opens nested lambdas with their variables, then infers the body and closes it as a pi."
@@ -706,6 +736,49 @@ verify fitsUnder law sameAsBuilt
     given i: Int = [0, 1, 2]
     given j: Int = [0, 1, 2]
     fitsUnder(Core.Subst.instantiate(fitSample(i), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)]), fitSample(j), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)], 0) => Core.Subst.instantiate(fitSample(i), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)]) == Core.Subst.instantiate(fitSample(j), [Core.Exprs.natLit(7), Core.Exprs.fvar(3)])
+
+fn fitsWithin(t: Expr, d: Expr, subst: List<Expr>, off: Int, left: Int) -> Int
+    ? "fitsUnder with a budget of nodes of d visited instead of a limit on d's size: what is left of the budget when t is d with subst put in, or -1 when it is not or the budget runs out, as it may on a domain that shares parts."
+    match left <= 0
+        true -> -1
+        false -> match Core.Exprs.looseRange(d) <= off
+            true -> match sameTerm(t, d)
+                true -> left - 1
+                false -> -1
+            false -> fitsWithinNode(t, d, subst, off, left - 1)
+
+verify fitsWithin
+    fitsWithin(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.bvar(0)), [Core.Exprs.natLit(2)], 0, 10) >= 0 => true
+    fitsWithin(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(3)), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.bvar(0)), [Core.Exprs.natLit(2)], 0, 10) => -1
+    fitsWithin(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.bvar(0)), [Core.Exprs.natLit(2)], 0, 1) => -1
+
+fn fitsWithinNode(t: Expr, d: Expr, subst: List<Expr>, off: Int, left: Int) -> Int
+    ? "fitsWithin one node of d down, as fitsNode, the budget passed from part to part."
+    match d
+        Expr.BVar(i) -> match fitsVar(t, i, subst, off)
+            true -> left
+            false -> -1
+        Expr.App(_, f, a) -> match t
+            Expr.App(_, g, b) -> fitsWithin(b, a, subst, off, fitsWithin(g, f, subst, off, left))
+            _ -> -1
+        Expr.Lam(_, dt, db) -> match t
+            Expr.Lam(_, tt, tb) -> fitsWithin(tb, db, subst, off + 1, fitsWithin(tt, dt, subst, off, left))
+            _ -> -1
+        Expr.Pi(_, dt, db) -> match t
+            Expr.Pi(_, tt, tb) -> fitsWithin(tb, db, subst, off + 1, fitsWithin(tt, dt, subst, off, left))
+            _ -> -1
+        Expr.Let(_, dt, dv, db) -> match t
+            Expr.Let(_, tt, tv, tb) -> fitsWithin(tb, db, subst, off + 1, fitsWithin(tv, dv, subst, off, fitsWithin(tt, dt, subst, off, left)))
+            _ -> -1
+        Expr.Proj(_, s, i, dx) -> match t
+            Expr.Proj(_, s2, i2, tx) -> match Bool.and(s == s2, i == i2)
+                true -> fitsWithin(tx, dx, subst, off, left)
+                false -> -1
+            _ -> -1
+        _ -> -1
+
+verify fitsWithinNode
+    fitsWithinNode(Core.Exprs.natLit(1), Core.Exprs.natLit(1), [], 0, 5) => -1
 
 fn fitSample(k: Int) -> Expr
     ? "Domains for the law: bound variables in head, argument and binder position."
