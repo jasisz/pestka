@@ -454,12 +454,31 @@ record AnnAt
     bi: Binder
     end: Int
 
+decision TextsTogether
+    date = "2026-10-24"
+    reason =
+        "A text looked for at a position is a slice of the line compared"
+        "with it, and every slice of two characters or more is a string of"
+        "its own, about 250 instructions however short the text. Binder"
+        "lines looked for seven texts, two of them right after others: the"
+        "binder's opening after the lambda's key or the pi's, and the body's"
+        "key after the annotation. Texts that stand together are now looked"
+        "for as one, the pi's opening is part of the prefix its line starts"
+        "with, and the annotation's first letter picks the one text to look"
+        "for instead of trying the four in turn. Instructions retired, one"
+        "worker, reading only: Init 22.75 G to 22.28 G; checked in full,"
+        "etale 57.22 G to 57.03 G, qb9 104.69 G to 104.04 G, Init 125.60 G"
+        "to 125.04 G (medians of three runs or more)."
+    chosen = "TextsTogether"
+    rejected = ["TextsInTurn"]
+    impacts = [binderLine, lamAfterIe, piAfter, binderAt, annotationAt, annotated, binderBody]
+
 fn binderLine(line: String) -> Option<BinderIds>
     ? "Lambdas and pi types, the next most common lines, in their canonical forms: the lambda's index comes first, the pi's last. Read by position as application lines are, and accepted only in those forms exactly."
     match String.startsWith(line, "{{\"ie\":")
         true -> lamAfterIe(line, canonAt(line, 6))
-        false -> match String.startsWith(line, "{{\"forallE\":")
-            true -> piAfter(line, binderAt(line, 11))
+        false -> match String.startsWith(line, "{{\"forallE\":{{\"binderInfo\":\"")
+            true -> piAfter(line, binderAt(line, 26))
             false -> Option.None
 
 verify binderLine
@@ -474,10 +493,10 @@ verify binderLine
     binderLine("{{\"ie\":7,\"bvar\":0}}") => Option.None
 
 fn lamAfterIe(line: String, i: NumAt) -> Option<BinderIds>
-    ? "A lambda's binder after its index."
-    match textAt(line, i.end, ",\"lam\":")
+    ? "A lambda's binder after its index, its key and the binder's opening looked for as one text (TextsTogether)."
+    match textAt(line, i.end, ",\"lam\":{{\"binderInfo\":\"")
         false -> Option.None
-        true -> lamEnd(line, i, binderAt(line, i.end + 7))
+        true -> lamEnd(line, i, binderAt(line, i.end + 22))
 
 verify lamAfterIe
     lamAfterIe("x", NumAt(value = 0, end = -1)) => Option.None
@@ -494,7 +513,7 @@ verify lamEnd
     lamEnd("x", NumAt(value = 0, end = 0), Option.None) => Option.None
 
 fn piAfter(line: String, b: Option<BinderAt>) -> Option<BinderIds>
-    ? "A pi's index after its binder."
+    ? "A pi's index after its binder; the binder's opening was part of the line's prefix (TextsTogether)."
     match b
         Option.None -> Option.None
         Option.Some(x) -> match textAt(line, x.end, ",\"ie\":")
@@ -514,38 +533,47 @@ verify piEnd
     piEnd("x7}}", BinderAt(bi = Binder.Default, body = 3, name = 2, typ = 1, end = 0), NumAt(value = 7, end = 2)) => Option.Some(BinderIds(ie = 7, nameIdx = 2, typeIdx = 1, bodyIdx = 3, bi = Binder.Default, isLam = false))
 
 fn binderAt(line: String, p: Int) -> Option<BinderAt>
-    ? "The object {{\"binderInfo\":\"B\",\"body\":D,\"name\":N,\"type\":T}} at p, in this form exactly; its end is just after its closing brace."
-    match textAt(line, p, "{{\"binderInfo\":\"")
-        false -> Option.None
-        true -> binderBody(line, annotationAt(line, p + 15))
+    ? "The object {{\"binderInfo\":\"B\",\"body\":D,\"name\":N,\"type\":T}} from p, just after the quote that opens B, in this form exactly; its end is just after its closing brace."
+    binderBody(line, annotationAt(line, p))
 
 verify binderAt
-    binderAt("{{\"binderInfo\":\"default\",\"body\":3,\"name\":2,\"type\":1}}", 0) => Option.Some(BinderAt(bi = Binder.Default, body = 3, name = 2, typ = 1, end = 51))
-    binderAt("{{\"binderInfo\":\"default\",\"body\":3,\"type\":1}}", 0) => Option.None
+    binderAt("default\",\"body\":3,\"name\":2,\"type\":1}}", 0) => Option.Some(BinderAt(bi = Binder.Default, body = 3, name = 2, typ = 1, end = 36))
+    binderAt("default\",\"body\":3,\"type\":1}}", 0) => Option.None
 
 fn annotationAt(line: String, i: Int) -> Option<AnnAt>
-    ? "One of the four binder annotations at i, with its closing quote."
-    match textAt(line, i, "default\"")
-        true -> Option.Some(AnnAt(bi = Binder.Default, end = i + 8))
-        false -> match textAt(line, i, "implicit\"")
-            true -> Option.Some(AnnAt(bi = Binder.Implicit, end = i + 9))
-            false -> match textAt(line, i, "instImplicit\"")
-                true -> Option.Some(AnnAt(bi = Binder.InstImplicit, end = i + 13))
-                false -> match textAt(line, i, "strictImplicit\"")
-                    true -> Option.Some(AnnAt(bi = Binder.StrictImplicit, end = i + 15))
-                    false -> Option.None
+    ? "One of the four binder annotations at i with its closing quote and the body's key after it, looked for as one text; the first letter, and the second after an i, picks the annotation (TextsTogether)."
+    match String.charAt(line, i)
+        Option.Some("d") -> annotated(line, i, "default\",\"body\":", Binder.Default)
+        Option.Some("s") -> annotated(line, i, "strictImplicit\",\"body\":", Binder.StrictImplicit)
+        Option.Some("i") -> match String.charAt(line, i + 1)
+            Option.Some("m") -> annotated(line, i, "implicit\",\"body\":", Binder.Implicit)
+            _ -> annotated(line, i, "instImplicit\",\"body\":", Binder.InstImplicit)
+        _ -> Option.None
 
 verify annotationAt
-    annotationAt("\"implicit\",", 1) => Option.Some(AnnAt(bi = Binder.Implicit, end = 10))
-    annotationAt("\"implicitly\",", 1) => Option.None
+    annotationAt("\"implicit\",\"body\":", 1) => Option.Some(AnnAt(bi = Binder.Implicit, end = 18))
+    annotationAt("\"instImplicit\",\"body\":", 1) => Option.Some(AnnAt(bi = Binder.InstImplicit, end = 22))
+    annotationAt("\"strictImplicit\",\"body\":", 1) => Option.Some(AnnAt(bi = Binder.StrictImplicit, end = 24))
+    annotationAt("\"default\",\"body\":", 1) => Option.Some(AnnAt(bi = Binder.Default, end = 17))
+    annotationAt("\"implicitly\",\"body\":", 1) => Option.None
+    annotationAt("\"inst\",\"body\":", 1) => Option.None
+    annotationAt("\"other\",\"body\":", 1) => Option.None
+
+fn annotated(line: String, i: Int, t: String, bi: Binder) -> Option<AnnAt>
+    ? "The annotation bi when its text t stands at i, with where t ends."
+    match textAt(line, i, t)
+        true -> Option.Some(AnnAt(bi = bi, end = i + String.byteLength(t)))
+        false -> Option.None
+
+verify annotated
+    annotated("xab", 1, "ab", Binder.Default) => Option.Some(AnnAt(bi = Binder.Default, end = 3))
+    annotated("xab", 1, "ac", Binder.Default) => Option.None
 
 fn binderBody(line: String, a: Option<AnnAt>) -> Option<BinderAt>
-    ? "The body's index after the annotation."
+    ? "The body's index after the annotation and the body's key."
     match a
         Option.None -> Option.None
-        Option.Some(x) -> match textAt(line, x.end, ",\"body\":")
-            false -> Option.None
-            true -> binderName(line, x.bi, canonAt(line, x.end + 8))
+        Option.Some(x) -> binderName(line, x.bi, canonAt(line, x.end))
 
 verify binderBody
     binderBody("x", Option.None) => Option.None
