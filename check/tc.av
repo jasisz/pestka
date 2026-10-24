@@ -1926,14 +1926,43 @@ fn lstuck(h: MX, stack: List<Clo>) -> Expr
 verify lstuck
     lstuck(MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), []) => Core.Exprs.fvar(0)
 
+decision VariableIsItsClosure
+    date = "2026-10-24"
+    reason =
+        "An argument that was a bound variable got a closure of its own over"
+        "the whole environment, with a number of its own: one more allocation"
+        "per argument, the environment kept alive by it, and, once built, a"
+        "second memo entry for what the variable's closure already had. Most"
+        "arguments inside matchers and structural recursion are variables. A"
+        "variable of the environment now is its closure there, which builds to"
+        "the same term. Instructions retired, one worker, on Aver 58a0c12f:"
+        "perf/magma-list-deep-n36 218.0 G to 204.9 G, all 30 perf tests"
+        "381.8 G to 361.8 G, Init 127.1 G to 126.6 G, qb9 94.5 G to 94.2 G."
+    chosen = "VariableIsItsClosure"
+    rejected = ["ClosureForEveryArgument"]
+    impacts = [closure, varClosure]
+
 fn closure(a: Expr, env: List<Clo>, id: Int) -> Clo
-    ? "a as a closure over env; a term with no loose bound variable needs no environment, and is its own value."
-    match Core.Exprs.looseRange(a) == 0
-        true -> Clo.Clo(-1, a, [])
-        false -> Clo.Clo(id, a, env)
+    ? "a as a closure over env; a term with no loose bound variable needs no environment, and is its own value; a variable of env is its closure there, built at most once under that closure's number (VariableIsItsClosure)."
+    match a
+        Expr.BVar(i) -> varClosure(List.drop(env, i), a, env, id)
+        _ -> match Core.Exprs.looseRange(a) == 0
+            true -> Clo.Clo(-1, a, [])
+            false -> Clo.Clo(id, a, env)
+
+fn varClosure(from: List<Clo>, a: Expr, env: List<Clo>, id: Int) -> Clo
+    ? "The closure a variable stands for, or, past the environment, the variable itself over it as before."
+    match from
+        [c, .._] -> c
+        [] -> Clo.Clo(id, a, env)
+
+verify varClosure
+    varClosure([Clo.Clo(-1, Core.Exprs.natLit(2), [])], Core.Exprs.bvar(0), [], 3) => Clo.Clo(-1, Core.Exprs.natLit(2), [])
+    varClosure([], Core.Exprs.bvar(4), [], 3) => Clo.Clo(3, Core.Exprs.bvar(4), [])
 
 verify closure
     closure(Core.Exprs.natLit(1), [Clo.Clo(-1, Core.Exprs.natLit(2), [])], 5) => Clo.Clo(-1, Core.Exprs.natLit(1), [])
+    closure(Core.Exprs.bvar(0), [Clo.Clo(7, Core.Exprs.bvar(1), [])], 5) => Clo.Clo(7, Core.Exprs.bvar(1), [])
 
 fn closedAll(xs: List<Expr>, acc: List<Clo>) -> List<Clo>
     ? "Built terms as closures, in order."
