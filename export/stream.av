@@ -41,10 +41,36 @@ fn decoded(path: String, offset: Int, carry: String, t: Tables, line: Int, worke
     ? "The chunk as text, leaving out the bytes of a character its end cuts in two: at most three."
     ! [Disk.readBytesAt]
     match String.fromUtf8(Bytes.take(b, Bytes.len(b) - cut))
-        Result.Ok(text) -> splitChunk(path, offset + Bytes.len(b) - cut, splitApart("{carry}{text}"), t, line, workers)
+        Result.Ok(text) -> splitChunk(path, offset + Bytes.len(b) - cut, carried(carry, splitApart(text)), t, line, workers)
         Result.Err(e) -> match cut >= 3
             true -> Outcome.Declined("cannot read {path}: {e}")
             false -> decoded(path, offset, carry, t, line, workers, b, cut + 1)
+
+decision CarryJoinsTheFirstLine
+    date = "2026-10-24"
+    reason =
+        "The unfinished line a chunk ends with was put in front of the next"
+        "chunk's text before the text was split, and the interpolation built"
+        "the 64 MB of the two in a buffer and copied them once more into the"
+        "string. The text is now split as it is, and the carry joins only"
+        "its first part, which it begins. Instructions retired, one worker,"
+        "reading only: Init 24.24 G to 23.90 G, peak 771 MB to 633 MB;"
+        "checked in full, etale 57.52 G to 57.46 G, qb9 105.66 G to"
+        "105.57 G, Init 126.45 G to 126.22 G."
+    chosen = "CarryJoinsTheFirstLine"
+    rejected = ["CarryJoinsTheText"]
+    impacts = [decoded, carried]
+
+fn carried(carry: String, parts: List<String>) -> List<String>
+    ? "The parts of a chunk with the unfinished line of the chunk before put back in front of the first, which it begins (CarryJoinsTheFirstLine). A split always gives at least one part."
+    match parts
+        [] -> [carry]
+        [first, ..rest] -> List.prepend(carry + first, rest)
+
+verify carried
+    carried("ab", ["c", "d"]) => ["abc", "d"]
+    carried("", ["c"]) => ["c"]
+    carried("ab", []) => ["ab"]
 
 fn splitApart(text: String) -> List<String>
     ? "The lines of a chunk, split on a thread of their own, so that their strings sit apart from the terms built from them and go back to the system once the chunk is read."
