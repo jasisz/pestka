@@ -52,8 +52,8 @@ verify oneArg
 fn localFor(st: St, t: Expr) -> RE
     ? "A fresh variable for the binder of pi (or lambda) t, its type stripped of annotations."
     match t
-        Expr.Pi(_, n, d, _, bi) -> Check.State.names(st, n, consume(d), Option.None, bi)
-        Expr.Lam(_, n, d, _, bi) -> Check.State.names(st, n, consume(d), Option.None, bi)
+        Expr.Pi(_, d, _) -> Check.State.names(st, Core.Names.anon(), consume(d), Option.None, Binder.Default)
+        Expr.Lam(_, d, _) -> Check.State.names(st, Core.Names.anon(), consume(d), Option.None, Binder.Default)
         _ -> Check.State.names(st, Core.Names.anon(), t, Option.None, Binder.Default)
 
 verify localFor
@@ -80,9 +80,9 @@ fn mentions(e: Expr, ns: List<Name>) -> Bool
     match e
         Expr.Const(_, n, _) -> List.contains(ns, n)
         Expr.App(_, f, a) -> Bool.or(mentions(f, ns), mentions(a, ns))
-        Expr.Lam(_, _, t, b, _) -> Bool.or(mentions(t, ns), mentions(b, ns))
-        Expr.Pi(_, _, t, b, _) -> Bool.or(mentions(t, ns), mentions(b, ns))
-        Expr.Let(_, _, t, v, b) -> Bool.or(mentions(t, ns), Bool.or(mentions(v, ns), mentions(b, ns)))
+        Expr.Lam(_, t, b) -> Bool.or(mentions(t, ns), mentions(b, ns))
+        Expr.Pi(_, t, b) -> Bool.or(mentions(t, ns), mentions(b, ns))
+        Expr.Let(_, t, v, b) -> Bool.or(mentions(t, ns), Bool.or(mentions(v, ns), mentions(b, ns)))
         Expr.Proj(_, _, _, x) -> mentions(x, ns)
         _ -> false
 
@@ -93,7 +93,7 @@ verify mentions
 fn countPis(t: Expr) -> Int
     ? "Number of leading pi binders, syntactically."
     match t
-        Expr.Pi(_, _, _, b, _) -> countPis(b) + 1
+        Expr.Pi(_, _, b) -> countPis(b) + 1
         _ -> 0
 
 verify countPis

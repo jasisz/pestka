@@ -136,7 +136,7 @@ fn inferCore(st: NSt, tenv: List<Val>, env: List<Val>, e: Expr, only: Bool) -> R
         Expr.App -> inferApp(st, tenv, env, e, only)
         Expr.Lam -> lamLoop(st, st, tenv, env, e, [], only)
         Expr.Pi -> piLoop(st, st, tenv, env, e, [], only)
-        Expr.Let(_, _, t, v, b) -> inferLet(st, tenv, env, t, v, b, only)
+        Expr.Let(_, t, v, b) -> inferLet(st, tenv, env, t, v, b, only)
         Expr.NatLit -> Result.Ok(NV(v = Val.Cst(Check.Lits.name1("Nat"), [], []), st = st))
         Expr.StrLit -> Result.Ok(NV(v = Val.Cst(Check.Lits.name1("String"), [], []), st = st))
         Expr.Proj(_, s, i, x) -> inferProj(st, tenv, env, s, i, x, only)
@@ -298,7 +298,7 @@ verify argChecked
 fn checkAgainst(st: NSt, tenv: List<Val>, env: List<Val>, e: Expr, expected: Val) -> Result<NB, Fail>
     ? "Whether e has the type expected, in checking mode. A lambda is checked against a pi without its own type being built: its domain must be a type equal to the pi's, and its body is checked against the pi's codomain under one fresh variable, the steps that comparing the lambda's type with expected would take. Anything else is inferred and compared."
     match e
-        Expr.Lam(_, n, d, b, bi) -> lamAgainst(whnf(st, expected)?, tenv, env, e, n, d, b, bi)
+        Expr.Lam(_, d, b) -> lamAgainst(whnf(st, expected)?, tenv, env, e, Core.Names.anon(), d, b, Binder.Default)
         _ -> inferAgainst(st, tenv, env, e, expected)
 
 verify checkAgainst
@@ -366,7 +366,7 @@ verify sortOf
 fn lamLoop(st: NSt, before: NSt, tenv: List<Val>, env: List<Val>, e: Expr, binders: List<Tuple<Name, Expr, Binder>>, only: Bool) -> Result<NV, Fail>
     ? "Opens nested lambdas, each at the next level, then infers the body; binders keeps each domain read back as a term, innermost first."
     match e
-        Expr.Lam(_, n, d, b, bi) -> lamStep(st, before, tenv, env, n, d, b, bi, binders, only)
+        Expr.Lam(_, d, b) -> lamStep(st, before, tenv, env, Core.Names.anon(), d, b, Binder.Default, binders, only)
         _ -> lamEnd(st, before, tenv, env, e, binders, only)
 
 verify lamLoop
@@ -412,7 +412,7 @@ verify wrapPis
 fn piLoop(st: NSt, before: NSt, tenv: List<Val>, env: List<Val>, e: Expr, us: List<Level>, only: Bool) -> Result<NV, Fail>
     ? "Opens nested pis collecting their domains' levels; the type is the imax of them all and the body's."
     match e
-        Expr.Pi(_, n, d, b, bi) -> piStep(st, before, tenv, env, n, d, b, bi, us, only)
+        Expr.Pi(_, d, b) -> piStep(st, before, tenv, env, Core.Names.anon(), d, b, Binder.Default, us, only)
         _ -> piEnd(st, before, tenv, env, e, us, only)
 
 verify piLoop
@@ -1053,7 +1053,7 @@ verify majorInduct
 fn majorAfter(t: Expr, n: Int) -> Name
     ? "Skips n binders and names the head of the next domain."
     match t
-        Expr.Pi(_, _, d, b, _) -> match n == 0
+        Expr.Pi(_, d, b) -> match n == 0
             true -> Option.withDefault(Core.Apps.constName(Core.Apps.fnOf(d)), Core.Names.anon())
             false -> majorAfter(b, n - 1)
         _ -> Core.Names.anon()
@@ -2275,7 +2275,7 @@ verify unusedArgs
 fn lamCount(e: Expr, acc: Int) -> Int
     ? "How many lambdas e starts with, plus acc."
     match e
-        Expr.Lam(_, _, _, b, _) -> lamCount(b, acc + 1)
+        Expr.Lam(_, _, b) -> lamCount(b, acc + 1)
         _ -> acc
 
 verify lamCount
@@ -2284,7 +2284,7 @@ verify lamCount
 fn lamBody(e: Expr) -> Expr
     ? "e without its leading lambdas."
     match e
-        Expr.Lam(_, _, _, b, _) -> lamBody(b)
+        Expr.Lam(_, _, b) -> lamBody(b)
         _ -> e
 
 verify lamBody

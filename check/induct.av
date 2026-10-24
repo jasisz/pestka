@@ -91,9 +91,9 @@ fn uniformChildren(blk: Blk, e: Expr, offset: Int) -> Bool
     ? "The children of a node."
     match e
         Expr.App(_, f, a) -> Bool.and(uniformIn(blk, f, offset), uniformIn(blk, a, offset))
-        Expr.Lam(_, _, t, b, _) -> Bool.and(uniformIn(blk, t, offset), uniformIn(blk, b, offset + 1))
-        Expr.Pi(_, _, t, b, _) -> Bool.and(uniformIn(blk, t, offset), uniformIn(blk, b, offset + 1))
-        Expr.Let(_, _, t, v, b) -> Bool.and(uniformIn(blk, t, offset), Bool.and(uniformIn(blk, v, offset), uniformIn(blk, b, offset + 1)))
+        Expr.Lam(_, t, b) -> Bool.and(uniformIn(blk, t, offset), uniformIn(blk, b, offset + 1))
+        Expr.Pi(_, t, b) -> Bool.and(uniformIn(blk, t, offset), uniformIn(blk, b, offset + 1))
+        Expr.Let(_, t, v, b) -> Bool.and(uniformIn(blk, t, offset), Bool.and(uniformIn(blk, v, offset), uniformIn(blk, b, offset + 1)))
         Expr.Proj(_, _, _, x) -> uniformIn(blk, x, offset)
         _ -> true
 
@@ -175,7 +175,7 @@ fn walkType(st: St, t: Expr, nparams: Int, params: List<Expr>, first: Bool, i: I
     ? "Normalizes and opens one binder at a time."
     w = Check.Tc.whnf(st, t)?
     match w.e
-        Expr.Pi(_, _, d, b, _) -> walkBinder(w.st, w.e, d, b, nparams, params, first, i, newRev, nidx)
+        Expr.Pi(_, d, b) -> walkBinder(w.st, w.e, d, b, nparams, params, first, i, newRev, nidx)
         _ -> Result.Ok(WT(st = w.st, t = w.e, params = newRev, i = i, nidx = nidx))
 
 verify walkType
@@ -263,7 +263,7 @@ verify ctorsRec
 fn domainsMention(t: Expr, names: List<Name>) -> Bool
     ? "Some binder domain of the telescope mentions the names."
     match t
-        Expr.Pi(_, _, d, b, _) -> Bool.or(Check.Telescope.mentions(d, names), domainsMention(b, names))
+        Expr.Pi(_, d, b) -> Bool.or(Check.Telescope.mentions(d, names), domainsMention(b, names))
         _ -> false
 
 verify domainsMention
@@ -290,7 +290,7 @@ verify ctorsReflexive
 fn piDomainMentions(t: Expr, names: List<Name>) -> Bool
     ? "A binder domain that is itself a pi mentioning the names."
     match t
-        Expr.Pi(_, _, d, b, _) -> Bool.or(Bool.and(isPi(d), Check.Telescope.mentions(d, names)), piDomainMentions(b, names))
+        Expr.Pi(_, d, b) -> Bool.or(Bool.and(isPi(d), Check.Telescope.mentions(d, names)), piDomainMentions(b, names))
         _ -> false
 
 verify piDomainMentions
@@ -343,7 +343,7 @@ verify oneCtor
 fn walkCtor(st: St, blk: Blk, t: Expr, n: Name, idx: Int, i: Int) -> Result<St, Fail>
     ? "Parameters must be the block's; each field is checked; the result must be the type applied to the parameters."
     match t
-        Expr.Pi(_, _, d, b, _) -> match i < blk.nparams
+        Expr.Pi(_, d, b) -> match i < blk.nparams
             true -> ctorParam(st, blk, d, b, n, idx, i)
             false -> ctorField(st, blk, t, d, b, n, idx, i)
         _ -> match Check.Blk.isValidIndApp(blk, t, idx)
@@ -390,7 +390,7 @@ fn positivity(st: St, blk: Blk, t: Expr, n: Name, i: Int) -> Result<St, Fail>
     match Check.Telescope.mentions(w.e, blk.names)
         false -> Result.Ok(w.st)
         true -> match w.e
-            Expr.Pi(_, _, d, b, _) -> match Check.Telescope.mentions(d, blk.names)
+            Expr.Pi(_, d, b) -> match Check.Telescope.mentions(d, blk.names)
                 true -> Result.Err(reject("arg #{i + 1} of '{nm(n)}' has a non positive occurrence of the datatypes being declared"))
                 false -> posBody(Check.Telescope.localFor(w.st, w.e), blk, b, n, i)
             _ -> match Check.Blk.validIndex(blk, w.e)
@@ -494,7 +494,7 @@ verify elimByCtors
 fn elimWalk(st: St, blk: Blk, t: Expr, i: Int, toCheck: List<Expr>) -> Result<RB, Fail>
     ? "Every field outside Prop must occur among the result's arguments."
     match t
-        Expr.Pi(_, _, d, b, _) -> elimField(Check.Telescope.localFor(st, t), blk, d, b, i, toCheck)
+        Expr.Pi(_, d, b) -> elimField(Check.Telescope.localFor(st, t), blk, d, b, i, toCheck)
         _ -> Result.Ok(RB(b = Bool.not(allIn(toCheck, Core.Apps.argsOf(t))), st = st))
 
 verify elimWalk
@@ -543,7 +543,7 @@ fn isRecArg(st: St, blk: Blk, t: Expr) -> Result<RIx, Fail>
     ? "A field whose type, under its own binders, is a valid application of a type of the block; which one."
     w = Check.Tc.whnf(st, t)?
     match w.e
-        Expr.Pi(_, _, _, b, _) -> recArgUnder(Check.Telescope.localFor(w.st, w.e), blk, b)
+        Expr.Pi(_, _, b) -> recArgUnder(Check.Telescope.localFor(w.st, w.e), blk, b)
         _ -> Result.Ok(RIx(o = Check.Blk.validIndex(blk, w.e), st = w.st))
 
 verify isRecArg

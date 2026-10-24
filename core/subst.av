@@ -164,9 +164,9 @@ fn build(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
     ? "Rebuilds one node, going one binder deeper in binding positions."
     match e
         Expr.App(_, f, a) -> buildApp(op, f, a, offset, memo)
-        Expr.Lam(_, n, t, b, bi) -> buildBinder(op, n, t, b, bi, offset, memo, true)
-        Expr.Pi(_, n, t, b, bi) -> buildBinder(op, n, t, b, bi, offset, memo, false)
-        Expr.Let(_, n, t, v, b) -> buildLet(op, n, t, v, b, offset, memo)
+        Expr.Lam(_, t, b) -> buildBinder(op, Core.Names.anon(), t, b, Binder.Default, offset, memo, true)
+        Expr.Pi(_, t, b) -> buildBinder(op, Core.Names.anon(), t, b, Binder.Default, offset, memo, false)
+        Expr.Let(_, t, v, b) -> buildLet(op, Core.Names.anon(), t, v, b, offset, memo)
         Expr.Proj(_, s, i, x) -> buildProj(op, s, i, x, offset, memo)
         _ -> SR(e = e, memo = memo)
 
@@ -285,9 +285,9 @@ fn applySpec(op: Op, e: Expr, offset: Int) -> Expr
         Expr.BVar(i) -> bvarCase(op, i, offset)
         Expr.FVar(id) -> fvarCase(op, id, offset)
         Expr.App(_, f, a) -> Core.Exprs.app(applySpec(op, f, offset), applySpec(op, a, offset))
-        Expr.Lam(_, n, t, b, bi) -> Core.Exprs.lam(n, applySpec(op, t, offset), applySpec(op, b, offset + 1), bi)
-        Expr.Pi(_, n, t, b, bi) -> Core.Exprs.pi(n, applySpec(op, t, offset), applySpec(op, b, offset + 1), bi)
-        Expr.Let(_, n, t, v, b) -> Core.Exprs.letE(n, applySpec(op, t, offset), applySpec(op, v, offset), applySpec(op, b, offset + 1))
+        Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), applySpec(op, t, offset), applySpec(op, b, offset + 1), Binder.Default)
+        Expr.Pi(_, t, b) -> Core.Exprs.pi(Core.Names.anon(), applySpec(op, t, offset), applySpec(op, b, offset + 1), Binder.Default)
+        Expr.Let(_, t, v, b) -> Core.Exprs.letE(Core.Names.anon(), applySpec(op, t, offset), applySpec(op, v, offset), applySpec(op, b, offset + 1))
         Expr.Proj(_, sn, i, x) -> Core.Exprs.proj(sn, i, applySpec(op, x, offset))
         _ -> e
 
@@ -396,9 +396,9 @@ fn levelNode(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Int, Tuple<Expr
     ? "One compound node of instLevelParams."
     match e
         Expr.App(_, f, a) -> lapp(lgo(f, ps, us, memo), a, ps, us)
-        Expr.Lam(_, n, t, b, bi) -> lbinder(lgo(t, ps, us, memo), n, b, bi, ps, us, true)
-        Expr.Pi(_, n, t, b, bi) -> lbinder(lgo(t, ps, us, memo), n, b, bi, ps, us, false)
-        Expr.Let(_, n, t, v, b) -> llet(lgo(t, ps, us, memo), n, v, b, ps, us)
+        Expr.Lam(_, t, b) -> lbinder(lgo(t, ps, us, memo), Core.Names.anon(), b, Binder.Default, ps, us, true)
+        Expr.Pi(_, t, b) -> lbinder(lgo(t, ps, us, memo), Core.Names.anon(), b, Binder.Default, ps, us, false)
+        Expr.Let(_, t, v, b) -> llet(lgo(t, ps, us, memo), Core.Names.anon(), v, b, ps, us)
         Expr.Proj(_, s, i, x) -> lproj(lgo(x, ps, us, memo), s, i)
         _ -> SR(e = e, memo = memo)
 
@@ -463,9 +463,9 @@ fn looseAt(e: Expr, i: Int) -> Bool
         false -> match e
             Expr.BVar(j) -> j == i
             Expr.App(_, f, a) -> Bool.or(looseAt(f, i), looseAt(a, i))
-            Expr.Lam(_, _, t, b, _) -> Bool.or(looseAt(t, i), looseAt(b, i + 1))
-            Expr.Pi(_, _, t, b, _) -> Bool.or(looseAt(t, i), looseAt(b, i + 1))
-            Expr.Let(_, _, t, v, b) -> Bool.or(looseAt(t, i), Bool.or(looseAt(v, i), looseAt(b, i + 1)))
+            Expr.Lam(_, t, b) -> Bool.or(looseAt(t, i), looseAt(b, i + 1))
+            Expr.Pi(_, t, b) -> Bool.or(looseAt(t, i), looseAt(b, i + 1))
+            Expr.Let(_, t, v, b) -> Bool.or(looseAt(t, i), Bool.or(looseAt(v, i), looseAt(b, i + 1)))
             Expr.Proj(_, _, _, x) -> looseAt(x, i)
             _ -> false
 

@@ -365,8 +365,8 @@ verify fvarId
 fn domainOf(e: Expr) -> Expr
     ? "Binder domain of a lambda or pi."
     match e
-        Expr.Lam(_, _, d, _, _) -> d
-        Expr.Pi(_, _, d, _, _) -> d
+        Expr.Lam(_, d, _) -> d
+        Expr.Pi(_, d, _) -> d
         _ -> e
 
 verify domainOf
@@ -375,8 +375,8 @@ verify domainOf
 fn bodyOf(e: Expr) -> Expr
     ? "Binder body of a lambda or pi."
     match e
-        Expr.Lam(_, _, _, b, _) -> b
-        Expr.Pi(_, _, _, b, _) -> b
+        Expr.Lam(_, _, b) -> b
+        Expr.Pi(_, _, b) -> b
         _ -> e
 
 verify bodyOf
@@ -394,7 +394,7 @@ verify sortLevel
 fn lamLoop(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Opens nested lambdas with their variables, then infers the body and closes it as a pi."
     match e
-        Expr.Lam(_, n, d, b, bi) -> lamStep(st, n, Core.Subst.instantiate(d, rev), b, bi, rev, ids, only)
+        Expr.Lam(_, d, b) -> lamStep(st, Core.Names.anon(), Core.Subst.instantiate(d, rev), b, Binder.Default, rev, ids, only)
         _ -> lamEnd(st, e, rev, ids, only)
 
 verify lamLoop
@@ -464,7 +464,7 @@ verify openAgain
 fn piLoop(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, us: List<Level>, only: Bool) -> Result<RE, Fail>
     ? "Opens nested pis collecting the domains' levels; the result is the imax of them all."
     match e
-        Expr.Pi(_, n, d, b, bi) -> piStep(st, n, Core.Subst.instantiate(d, rev), b, bi, rev, ids, us, only)
+        Expr.Pi(_, d, b) -> piStep(st, Core.Names.anon(), Core.Subst.instantiate(d, rev), b, Binder.Default, rev, ids, us, only)
         _ -> piEnd(st, e, rev, us, only)
 
 verify piLoop
@@ -552,7 +552,7 @@ fn argsChecked(st: St, ft: Expr, args: List<Expr>, pending: List<Expr>) -> Resul
     match args
         [] -> Result.Ok(RE(e = argsInto(ft, pending, []), st = st))
         [x, ..rest] -> match ft
-            Expr.Pi(_, _, d, b, _) -> argChecked(st, x, d, b, rest, pending)
+            Expr.Pi(_, d, b) -> argChecked(st, x, d, b, rest, pending)
             _ -> argsAfterWhnf(ensurePi(st, argsInto(ft, pending, []))?, args)
 
 verify argsChecked
@@ -616,14 +616,14 @@ fn fitsNode(t: Expr, d: Expr, subst: List<Expr>, off: Int) -> Bool
         Expr.App(_, f, a) -> match t
             Expr.App(_, g, b) -> Bool.and(fitsUnder(g, f, subst, off), fitsUnder(b, a, subst, off))
             _ -> false
-        Expr.Lam(_, _, dt, db, _) -> match t
-            Expr.Lam(_, _, tt, tb, _) -> Bool.and(fitsUnder(tt, dt, subst, off), fitsUnder(tb, db, subst, off + 1))
+        Expr.Lam(_, dt, db) -> match t
+            Expr.Lam(_, tt, tb) -> Bool.and(fitsUnder(tt, dt, subst, off), fitsUnder(tb, db, subst, off + 1))
             _ -> false
-        Expr.Pi(_, _, dt, db, _) -> match t
-            Expr.Pi(_, _, tt, tb, _) -> Bool.and(fitsUnder(tt, dt, subst, off), fitsUnder(tb, db, subst, off + 1))
+        Expr.Pi(_, dt, db) -> match t
+            Expr.Pi(_, tt, tb) -> Bool.and(fitsUnder(tt, dt, subst, off), fitsUnder(tb, db, subst, off + 1))
             _ -> false
-        Expr.Let(_, _, dt, dv, db) -> match t
-            Expr.Let(_, _, tt, tv, tb) -> Bool.and(Bool.and(fitsUnder(tt, dt, subst, off), fitsUnder(tv, dv, subst, off)), fitsUnder(tb, db, subst, off + 1))
+        Expr.Let(_, dt, dv, db) -> match t
+            Expr.Let(_, tt, tv, tb) -> Bool.and(Bool.and(fitsUnder(tt, dt, subst, off), fitsUnder(tv, dv, subst, off)), fitsUnder(tb, db, subst, off + 1))
             _ -> false
         Expr.Proj(_, s, i, dx) -> match t
             Expr.Proj(_, s2, i2, tx) -> Bool.and(Bool.and(s == s2, i == i2), fitsUnder(tx, dx, subst, off))
@@ -697,7 +697,7 @@ fn appWalk(st: St, ft: Expr, args: List<Expr>, pending: List<Expr>, env: List<Ex
     match args
         [] -> Result.Ok(RE(e = argsInto(ft, pending, env), st = st))
         [x, ..rest] -> match ft
-            Expr.Pi(_, _, _, b, _) -> appWalk(st, b, rest, List.prepend(x, pending), env)
+            Expr.Pi(_, _, b) -> appWalk(st, b, rest, List.prepend(x, pending), env)
             _ -> appWalkWhnf(st, argsInto(ft, pending, env), x, rest, env)
 
 verify appWalk
@@ -742,7 +742,7 @@ verify minstEach
 fn letLoop(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Opens nested lets as let variables, then infers the body."
     match e
-        Expr.Let(_, n, t, v, b) -> letStep(st, n, Core.Subst.instantiate(t, rev), Core.Subst.instantiate(v, rev), b, rev, ids, only)
+        Expr.Let(_, t, v, b) -> letStep(st, Core.Names.anon(), Core.Subst.instantiate(t, rev), Core.Subst.instantiate(v, rev), b, rev, ids, only)
         _ -> letEnd(st, e, rev, ids, only)
 
 verify letLoop
@@ -799,7 +799,7 @@ verify cheapBeta
 fn cheapPeel(e: Expr, f: Expr, args: List<Expr>, i: Int) -> Expr
     ? "Skips as many lambdas as there are arguments."
     match f
-        Expr.Lam(_, _, _, b, _) -> match i < List.len(args)
+        Expr.Lam(_, _, b) -> match i < List.len(args)
             true -> cheapPeel(e, b, args, i + 1)
             false -> cheapDone(e, f, args, i)
         _ -> cheapDone(e, f, args, i)
@@ -928,7 +928,7 @@ fn projWalk(st: St, idx: Int, x: Expr, ty: Expr, sname: Name, r: Expr, params: L
     f = projFields(pp.st, p.e, sname, x, 0, idx, pp.b)?
     w = whnf(f.st, f.e)?
     match w.e
-        Expr.Pi(_, _, d, _, _) -> projResult(w.st, d, pp.b)
+        Expr.Pi(_, d, _) -> projResult(w.st, d, pp.b)
         _ -> Result.Err(badProj())
 
 verify projWalk
@@ -946,7 +946,7 @@ verify projParams
 fn projParam(w: RE, p: Expr, rest: List<Expr>) -> Result<RE, Fail>
     ? "One parameter binder."
     match w.e
-        Expr.Pi(_, _, _, b, _) -> projParams(w.st, Core.Subst.instantiate1(b, p), rest)
+        Expr.Pi(_, _, b) -> projParams(w.st, Core.Subst.instantiate1(b, p), rest)
         _ -> Result.Err(badProj())
 
 verify projParam
@@ -964,7 +964,7 @@ verify projFields
 fn projField(w: RE, sname: Name, x: Expr, i: Int, idx: Int, propType: Bool) -> Result<RE, Fail>
     ? "One earlier field."
     match w.e
-        Expr.Pi(_, _, d, b, _) -> match Core.Exprs.looseRange(b) > 0
+        Expr.Pi(_, d, b) -> match Core.Exprs.looseRange(b) > 0
             true -> projDependent(w.st, d, b, sname, x, i, idx, propType)
             false -> projFields(w.st, b, sname, x, i + 1, idx, propType)
         _ -> Result.Err(badProj())
@@ -1074,7 +1074,7 @@ fn coreWork(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail
     ? "One whnfCore step by shape."
     match e
         Expr.App -> coreApp(st, e, Core.Apps.fnOf(e), Core.Apps.argsOf(e), cheapRec, cheapProj)
-        Expr.Let(_, _, _, v, b) -> whnfCore(st, Core.Subst.instantiate1(b, v), cheapRec, cheapProj)
+        Expr.Let(_, _, v, b) -> whnfCore(st, Core.Subst.instantiate1(b, v), cheapRec, cheapProj)
         Expr.Proj(_, s, i, x) -> coreProj(st, e, s, i, x, cheapRec, cheapProj)
         _ -> Result.Ok(RE(e = e, st = st))
 
@@ -1096,7 +1096,7 @@ verify coreApp
 fn beta(f: Expr, args: List<Expr>, consumed: List<Expr>) -> Expr
     ? "Consumes one argument per lambda; consumed is newest first."
     match f
-        Expr.Lam(_, _, _, b, _) -> match args
+        Expr.Lam(_, _, b) -> match args
             [a, ..rest] -> beta(b, rest, List.prepend(a, consumed))
             [] -> Core.Subst.instantiate(f, consumed)
         _ -> Core.Apps.mkApps(Core.Subst.instantiate(f, consumed), args)
@@ -1333,7 +1333,7 @@ verify majorInduct
 fn majorAfter(t: Expr, n: Int) -> Name
     ? "Skips n binders and names the head of the next domain."
     match t
-        Expr.Pi(_, _, d, b, _) -> match n == 0
+        Expr.Pi(_, d, b) -> match n == 0
             true -> Option.withDefault(Core.Apps.constName(Core.Apps.fnOf(d)), Core.Names.anon())
             false -> majorAfter(b, n - 1)
         _ -> Core.Names.anon()
@@ -1633,11 +1633,11 @@ fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool,
     ? "The machine on closures. An argument or a let value is a term with the environment it was met in, numbered so that it is built at most once; beta and let push such a closure, and a bound variable in head position goes on as its closure. At a constant: a recursor applied to a constructor takes its rule's right-hand side with the other arguments still closures; then, when delta is on, Nat arithmetic on literals and unfolding a definition, again with the arguments as they are. Terms are built only when the head is stuck, for the major premise of a recursor, and for the arguments of quotient rules and Nat arithmetic."
     match t
         Expr.App(_, f, a) -> lcore(st, f, env, List.prepend(closure(a, env, ms.next), stack), MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
-        Expr.Lam(_, _, _, body, _) -> match stack
+        Expr.Lam(_, _, body) -> match stack
             [c, ..rest] -> lcore(st, body, List.prepend(c, env), rest, ms, delta, cheapRec, cheapProj)
             [] -> Result.Ok(RE(e = matTerm(t, env, ms).e, st = st))
         Expr.BVar(i) -> lclo(st, nthClo(env, i), stack, ms, delta, cheapRec, cheapProj)
-        Expr.Let(_, _, _, v, body) -> lcore(st, body, List.prepend(closure(v, env, ms.next), env), stack, MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
+        Expr.Let(_, _, v, body) -> lcore(st, body, List.prepend(closure(v, env, ms.next), env), stack, MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
         Expr.FVar(id) -> lvar(st, t, Check.State.localValue(st.lctx, id), stack, ms, delta, cheapRec, cheapProj)
         Expr.Const(_, n, ls) -> lconst(st, t, ls, Check.State.lookup(st, n), stack, ms, delta, cheapRec, cheapProj)
         Expr.Proj(_, s, i, x) -> lproject(st, s, i, matTerm(x, env, ms), stack, delta, cheapRec, cheapProj)
@@ -1906,9 +1906,9 @@ fn lbuild(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, 
     ? "Rebuilds one node, one binder deeper in binding positions."
     match e
         Expr.App(_, f, a) -> lapp2(lgo(f, off, env, ms, memo), a, off, env)
-        Expr.Lam(_, n, t, b, bi) -> lbinder(lgo(t, off, env, ms, memo), n, b, bi, off, env, true)
-        Expr.Pi(_, n, t, b, bi) -> lbinder(lgo(t, off, env, ms, memo), n, b, bi, off, env, false)
-        Expr.Let(_, n, t, v, b) -> llet(lgo(t, off, env, ms, memo), n, v, b, off, env)
+        Expr.Lam(_, t, b) -> lbinder(lgo(t, off, env, ms, memo), Core.Names.anon(), b, Binder.Default, off, env, true)
+        Expr.Pi(_, t, b) -> lbinder(lgo(t, off, env, ms, memo), Core.Names.anon(), b, Binder.Default, off, env, false)
+        Expr.Let(_, t, v, b) -> llet(lgo(t, off, env, ms, memo), Core.Names.anon(), v, b, off, env)
         Expr.Proj(_, s, i, x) -> lproj2(lgo(x, off, env, ms, memo), s, i)
         _ -> LS(e = e, ms = ms, memo = memo)
 
@@ -2622,7 +2622,7 @@ verify bindDomains
 fn bindVar(st: St, t: Expr, s: Expr, rev: List<Expr>, isLam: Bool, tyS: Option<Expr>) -> Result<RB, Fail>
     ? "A variable only when a body uses it; otherwise a placeholder."
     match Bool.or(Core.Exprs.looseRange(bodyOf(t)) > 0, Core.Exprs.looseRange(bodyOf(s)) > 0)
-        true -> bindFresh(Check.State.namesAt(st, binderName(s), Option.withDefault(tyS, Core.Subst.instantiate(domainOf(s), rev)), Option.None, binderInfo(s)), t, s, rev, isLam)
+        true -> bindFresh(Check.State.namesAt(st, Core.Names.anon(), Option.withDefault(tyS, Core.Subst.instantiate(domainOf(s), rev)), Option.None, Binder.Default), t, s, rev, isLam)
         false -> bindLoop(st, bodyOf(t), bodyOf(s), List.prepend(Core.Exprs.cnst(Check.Lits.dontcare, []), rev), isLam)
 
 verify bindVar
@@ -2634,26 +2634,6 @@ fn bindFresh(loc: RE, t: Expr, s: Expr, rev: List<Expr>, isLam: Bool) -> Result<
 
 verify bindFresh
     resultBool(bindFresh(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(1), Core.Exprs.natLit(1), [], true)) => true
-
-fn binderName(e: Expr) -> Name
-    ? "The binder's name."
-    match e
-        Expr.Lam(_, n, _, _, _) -> n
-        Expr.Pi(_, n, _, _, _) -> n
-        _ -> Core.Names.anon()
-
-verify binderName
-    binderName(Core.Exprs.bvar(0)) => Core.Names.anon()
-
-fn binderInfo(e: Expr) -> Binder
-    ? "The binder's annotation."
-    match e
-        Expr.Lam(_, _, _, _, bi) -> bi
-        Expr.Pi(_, _, _, _, bi) -> bi
-        _ -> Binder.Default
-
-verify binderInfo
-    binderInfo(Core.Exprs.bvar(0)) => Binder.Default
 
 fn proofIrrel(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
     ? "If t proves a proposition, t and s are equal exactly when their types are. When the declarations of t's head constant already say that t is no proof, its type is not built to find that out (notProofByHead)."
@@ -2752,7 +2732,7 @@ fn peelPis(e: Expr, k: Int) -> Option<Expr>
     match k <= 0
         true -> Option.Some(e)
         false -> match e
-            Expr.Pi(_, _, _, b, _) -> peelPis(b, k - 1)
+            Expr.Pi(_, _, b) -> peelPis(b, k - 1)
             _ -> Option.None
 
 verify peelPis
@@ -3031,7 +3011,7 @@ verify unusedArgs
 fn lamCount(e: Expr, acc: Int) -> Int
     ? "How many lambdas e starts with, plus acc."
     match e
-        Expr.Lam(_, _, _, b, _) -> lamCount(b, acc + 1)
+        Expr.Lam(_, _, b) -> lamCount(b, acc + 1)
         _ -> acc
 
 verify lamCount
@@ -3040,7 +3020,7 @@ verify lamCount
 fn lamBody(e: Expr) -> Expr
     ? "e without its leading lambdas."
     match e
-        Expr.Lam(_, _, _, b, _) -> lamBody(b)
+        Expr.Lam(_, _, b) -> lamBody(b)
         _ -> e
 
 verify lamBody
@@ -3235,7 +3215,7 @@ verify etaCore
 fn etaWithType(w: RE, t: Expr, s: Expr) -> Result<RB, Fail>
     ? "Needs s's type to be a pi."
     match w.e
-        Expr.Pi(_, n, d, _, bi) -> isDefEq(w.st, t, Core.Exprs.lam(n, d, Core.Exprs.app(s, Core.Exprs.bvar(0)), bi))
+        Expr.Pi(_, d, _) -> isDefEq(w.st, t, Core.Exprs.lam(Core.Names.anon(), d, Core.Exprs.app(s, Core.Exprs.bvar(0)), Binder.Default))
         _ -> no(w.st)
 
 verify etaWithType

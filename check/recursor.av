@@ -100,7 +100,7 @@ fn indicesOfType(st: St, blk: Blk, t: Expr, i: Int, accRev: List<Expr>) -> Resul
     ? "Opens a type's binders: parameters become the block's, indices fresh variables."
     w = Check.Tc.whnf(st, t)?
     match w.e
-        Expr.Pi(_, _, _, b, _) -> match i < blk.nparams
+        Expr.Pi(_, _, b) -> match i < blk.nparams
             true -> indicesOfType(w.st, blk, Core.Subst.instantiate1(b, Check.Blk.nthExpr(blk.params, i)), i + 1, accRev)
             false -> indexHere(Check.Telescope.localFor(w.st, w.e), blk, b, i, accRev)
         _ -> Result.Ok(XS(st = w.st, xs = List.reverse(accRev)))
@@ -145,7 +145,7 @@ verify minorsOf
 fn ctorShape(st: St, blk: Blk, t: Expr, i: Int, fieldsRev: List<Expr>, recsRev: List<Expr>) -> Result<CF, Fail>
     ? "Opens a constructor type: the block's parameters, then a fresh variable per field, noting the recursive ones."
     match t
-        Expr.Pi(_, _, d, b, _) -> match i < blk.nparams
+        Expr.Pi(_, d, b) -> match i < blk.nparams
             true -> ctorShape(st, blk, Core.Subst.instantiate1(b, Check.Blk.nthExpr(blk.params, i)), i + 1, fieldsRev, recsRev)
             false -> shapeField(Check.Induct.isRecArg(st, blk, d)?, blk, t, b, i, fieldsRev, recsRev)
         _ -> Result.Ok(CF(st = st, t = t, fields = List.reverse(fieldsRev), recs = List.reverse(recsRev)))
@@ -200,7 +200,7 @@ fn uTeleFrom(st: St, t: Expr, accRev: List<Expr>) -> Result<UT, Fail>
     ? "Normalizes and opens binders until the target."
     w = Check.Tc.whnf(st, t)?
     match w.e
-        Expr.Pi(_, _, _, b, _) -> uTeleUnder(Check.Telescope.localFor(w.st, w.e), b, accRev)
+        Expr.Pi(_, _, b) -> uTeleUnder(Check.Telescope.localFor(w.st, w.e), b, accRev)
         _ -> Result.Ok(UT(st = w.st, xs = List.reverse(accRev), target = w.e))
 
 verify uTeleFrom

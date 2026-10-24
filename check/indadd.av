@@ -155,9 +155,9 @@ fn reservedIn(e: Expr) -> Bool
         Expr.Const(_, n, _) -> rootIs(n, "_nested")
         Expr.Proj(_, s, _, x) -> Bool.or(rootIs(s, "_nested"), reservedIn(x))
         Expr.App(_, f, a) -> Bool.or(reservedIn(f), reservedIn(a))
-        Expr.Lam(_, _, t, b, _) -> Bool.or(reservedIn(t), reservedIn(b))
-        Expr.Pi(_, _, t, b, _) -> Bool.or(reservedIn(t), reservedIn(b))
-        Expr.Let(_, _, t, v, b) -> Bool.or(reservedIn(t), Bool.or(reservedIn(v), reservedIn(b)))
+        Expr.Lam(_, t, b) -> Bool.or(reservedIn(t), reservedIn(b))
+        Expr.Pi(_, t, b) -> Bool.or(reservedIn(t), reservedIn(b))
+        Expr.Let(_, t, v, b) -> Bool.or(reservedIn(t), Bool.or(reservedIn(v), reservedIn(b)))
         _ -> false
 
 verify reservedIn
@@ -199,9 +199,9 @@ fn nestedIn(env: Env, names: List<Name>, e: Expr) -> Bool
         true -> true
         false -> match e
             Expr.App(_, f, a) -> Bool.or(nestedIn(env, names, f), nestedIn(env, names, a))
-            Expr.Lam(_, _, t, b, _) -> Bool.or(nestedIn(env, names, t), nestedIn(env, names, b))
-            Expr.Pi(_, _, t, b, _) -> Bool.or(nestedIn(env, names, t), nestedIn(env, names, b))
-            Expr.Let(_, _, t, v, b) -> Bool.or(nestedIn(env, names, t), Bool.or(nestedIn(env, names, v), nestedIn(env, names, b)))
+            Expr.Lam(_, t, b) -> Bool.or(nestedIn(env, names, t), nestedIn(env, names, b))
+            Expr.Pi(_, t, b) -> Bool.or(nestedIn(env, names, t), nestedIn(env, names, b))
+            Expr.Let(_, t, v, b) -> Bool.or(nestedIn(env, names, t), Bool.or(nestedIn(env, names, v), nestedIn(env, names, b)))
             Expr.Proj(_, _, _, x) -> nestedIn(env, names, x)
             _ -> false
 

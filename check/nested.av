@@ -104,9 +104,9 @@ fn occursIn(env: Env, names: List<Name>, e: Expr) -> Bool
         Option.Some -> true
         Option.None -> match e
             Expr.App(_, f, a) -> Bool.or(occursIn(env, names, f), occursIn(env, names, a))
-            Expr.Lam(_, _, t, b, _) -> Bool.or(occursIn(env, names, t), occursIn(env, names, b))
-            Expr.Pi(_, _, t, b, _) -> Bool.or(occursIn(env, names, t), occursIn(env, names, b))
-            Expr.Let(_, _, t, v, b) -> Bool.or(occursIn(env, names, t), Bool.or(occursIn(env, names, v), occursIn(env, names, b)))
+            Expr.Lam(_, t, b) -> Bool.or(occursIn(env, names, t), occursIn(env, names, b))
+            Expr.Pi(_, t, b) -> Bool.or(occursIn(env, names, t), occursIn(env, names, b))
+            Expr.Let(_, t, v, b) -> Bool.or(occursIn(env, names, t), Bool.or(occursIn(env, names, v), occursIn(env, names, b)))
             Expr.Proj(_, _, _, x) -> occursIn(env, names, x)
             _ -> false
 
@@ -160,8 +160,8 @@ fn getParams(st: St, t: Expr, n: Int, accRev: List<Expr>) -> Result<PS, Fail>
     match n <= 0
         true -> Result.Ok(PS(st = st, xs = List.reverse(accRev), body = t))
         false -> match t
-            Expr.Pi(_, nm, d, b, bi) -> paramHere(Check.State.names(st, nm, d, Option.None, bi), b, n, accRev)
-            Expr.Lam(_, nm, d, b, bi) -> paramHere(Check.State.names(st, nm, d, Option.None, bi), b, n, accRev)
+            Expr.Pi(_, d, b) -> paramHere(Check.State.names(st, Core.Names.anon(), d, Option.None, Binder.Default), b, n, accRev)
+            Expr.Lam(_, d, b) -> paramHere(Check.State.names(st, Core.Names.anon(), d, Option.None, Binder.Default), b, n, accRev)
             _ -> Result.Err(reject("invalid inductive datatype declaration, incorrect number of parameters"))
 
 verify getParams
@@ -249,9 +249,9 @@ fn replaceKids(ns: NS, as: List<Expr>, e: Expr) -> Result<NE, Fail>
     ? "The children of a node."
     match e
         Expr.App(_, f, a) -> kids2(ns, as, f, a, 0, Core.Names.anon(), Binder.Default)
-        Expr.Lam(_, n, t, b, bi) -> kids2(ns, as, t, b, 1, n, bi)
-        Expr.Pi(_, n, t, b, bi) -> kids2(ns, as, t, b, 2, n, bi)
-        Expr.Let(_, n, t, v, b) -> kidsLet(ns, as, n, t, v, b)
+        Expr.Lam(_, t, b) -> kids2(ns, as, t, b, 1, Core.Names.anon(), Binder.Default)
+        Expr.Pi(_, t, b) -> kids2(ns, as, t, b, 2, Core.Names.anon(), Binder.Default)
+        Expr.Let(_, t, v, b) -> kidsLet(ns, as, Core.Names.anon(), t, v, b)
         Expr.Proj(_, s, i, x) -> kidsProj(replaceAll(ns, as, x)?, s, i)
         _ -> Result.Ok(NE(ns = ns, e = e))
 
@@ -407,7 +407,7 @@ fn stripPis(e: Expr, k: Int, ps: List<Expr>, n: Int) -> Result<Expr, Fail>
     match k <= 0
         true -> Result.Ok(Core.Subst.instantiateRev(e, List.take(ps, n)))
         false -> match e
-            Expr.Pi(_, _, _, b, _) -> stripPis(b, k - 1, ps, n)
+            Expr.Pi(_, _, b) -> stripPis(b, k - 1, ps, n)
             _ -> Result.Err(reject("invalid nested inductive datatype, ill-formed declaration"))
 
 verify stripPis
@@ -704,9 +704,9 @@ fn restoreKids(auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>
     ? "The children of a node."
     match t
         Expr.App(_, f, a) -> Result.Ok(Core.Exprs.app(restoreBody(auxEnv, ns, recMap, as, f)?, restoreBody(auxEnv, ns, recMap, as, a)?))
-        Expr.Lam(_, n, d, b, bi) -> Result.Ok(Core.Exprs.lam(n, restoreBody(auxEnv, ns, recMap, as, d)?, restoreBody(auxEnv, ns, recMap, as, b)?, bi))
-        Expr.Pi(_, n, d, b, bi) -> Result.Ok(Core.Exprs.pi(n, restoreBody(auxEnv, ns, recMap, as, d)?, restoreBody(auxEnv, ns, recMap, as, b)?, bi))
-        Expr.Let(_, n, d, v, b) -> Result.Ok(Core.Exprs.letE(n, restoreBody(auxEnv, ns, recMap, as, d)?, restoreBody(auxEnv, ns, recMap, as, v)?, restoreBody(auxEnv, ns, recMap, as, b)?))
+        Expr.Lam(_, d, b) -> Result.Ok(Core.Exprs.lam(Core.Names.anon(), restoreBody(auxEnv, ns, recMap, as, d)?, restoreBody(auxEnv, ns, recMap, as, b)?, Binder.Default))
+        Expr.Pi(_, d, b) -> Result.Ok(Core.Exprs.pi(Core.Names.anon(), restoreBody(auxEnv, ns, recMap, as, d)?, restoreBody(auxEnv, ns, recMap, as, b)?, Binder.Default))
+        Expr.Let(_, d, v, b) -> Result.Ok(Core.Exprs.letE(Core.Names.anon(), restoreBody(auxEnv, ns, recMap, as, d)?, restoreBody(auxEnv, ns, recMap, as, v)?, restoreBody(auxEnv, ns, recMap, as, b)?))
         Expr.Proj(_, s, i, x) -> Result.Ok(Core.Exprs.proj(s, i, restoreBody(auxEnv, ns, recMap, as, x)?))
         _ -> Result.Ok(t)
 

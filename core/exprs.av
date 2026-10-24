@@ -46,7 +46,7 @@ decision BindersUnnamed
         "the quick path of definitional equality fell back to comparing up"
         "to names. Now the constructors put in the anonymous name and the"
         "default annotation, so terms that differ only there are one term."
-        "The node keeps the two fields, which now always hold the same."
+        "The node has no fields for them."
         "One worker: qb9 135.7 G to 132.0 G instructions, etale 71.3 G to"
         "70.8 G, Init 161.6 G to 158.0 G."
     chosen = "BindersUnnamed"
@@ -109,9 +109,9 @@ type Expr
     Sort(Level)
     Const(Int, Name, List<Level>)
     App(Int, Expr, Expr)
-    Lam(Int, Name, Expr, Expr, Binder)
-    Pi(Int, Name, Expr, Expr, Binder)
-    Let(Int, Name, Expr, Expr, Expr)
+    Lam(Int, Expr, Expr)
+    Pi(Int, Expr, Expr)
+    Let(Int, Expr, Expr, Expr)
     NatLit(Int)
     StrLit(String)
     Proj(Int, Name, Int, Expr)
@@ -179,7 +179,7 @@ verify binderMeta
 
 fn lam(n: Name, t: Expr, b: Expr, bi: Binder) -> Expr
     ? "Lambda abstraction; b refers to the bound variable as index 0. The binder's name and annotation are not kept (BindersUnnamed)."
-    Expr.Lam(binderWord(5, t, b), Core.Names.anon(), t, b, Binder.Default)
+    Expr.Lam(binderWord(5, t, b), t, b)
 
 verify lam
     looseRange(lam(Core.Names.anon(), sort(Level.Zero), bvar(0), Binder.Default)) => 0
@@ -188,7 +188,7 @@ verify lam
 
 fn pi(n: Name, t: Expr, b: Expr, bi: Binder) -> Expr
     ? "Dependent function type. The binder's name and annotation are not kept (BindersUnnamed)."
-    Expr.Pi(binderWord(6, t, b), Core.Names.anon(), t, b, Binder.Default)
+    Expr.Pi(binderWord(6, t, b), t, b)
 
 verify pi
     hashOf(pi(Core.Names.anon(), bvar(0), bvar(0), Binder.Default)) == hashOf(lam(Core.Names.anon(), bvar(0), bvar(0), Binder.Default)) => false
@@ -199,7 +199,7 @@ fn letE(n: Name, t: Expr, v: Expr, b: Expr) -> Expr
     wt = wordOf(t)
     wv = wordOf(v)
     wb = wordOf(b)
-    Expr.Let((Core.Hash.mix(Core.Hash.mix(Core.Hash.mix(7, hashIn(wt)), hashIn(wv)), hashIn(wb)) * 64 + Int.min(sizeIn(wt) + sizeIn(wv) + sizeIn(wb) + 1, 63)) * 33554432 + Bits.or(flagsOf(wt, wv), flagsOf(wb, wb)) + Int.max(Int.max(Bits.and(wt, 16383), Bits.and(wv, 16383)), under(Bits.and(wb, 16383))), Core.Names.anon(), t, v, b)
+    Expr.Let((Core.Hash.mix(Core.Hash.mix(Core.Hash.mix(7, hashIn(wt)), hashIn(wv)), hashIn(wb)) * 64 + Int.min(sizeIn(wt) + sizeIn(wv) + sizeIn(wb) + 1, 63)) * 33554432 + Bits.or(flagsOf(wt, wv), flagsOf(wb, wb)) + Int.max(Int.max(Bits.and(wt, 16383), Bits.and(wv, 16383)), under(Bits.and(wb, 16383))), t, v, b)
 
 verify letE
     looseRange(letE(Core.Names.anon(), bvar(0), bvar(4), bvar(0))) => 5
@@ -235,9 +235,9 @@ fn metaOf(e: Expr) -> Meta
         Expr.Sort(l) -> Meta(hash = Core.Hash.mix(2, Core.Levels.hashOf(l)), range = 0, vars = 0, params = Core.Levels.hasParam(l), size = 1)
         Expr.Const(m, _, _) -> unpack(m)
         Expr.App(m, _, _) -> unpack(m)
-        Expr.Lam(m, _, _, _, _) -> unpack(m)
-        Expr.Pi(m, _, _, _, _) -> unpack(m)
-        Expr.Let(m, _, _, _, _) -> unpack(m)
+        Expr.Lam(m, _, _) -> unpack(m)
+        Expr.Pi(m, _, _) -> unpack(m)
+        Expr.Let(m, _, _, _) -> unpack(m)
         Expr.NatLit(n) -> Meta(hash = Core.Hash.mix(8, Int.mod(n, 2147483647)), range = 0, vars = 0, params = false, size = 1)
         Expr.StrLit(s) -> Meta(hash = Core.Hash.mix(9, Core.Hash.ofText(s)), range = 0, vars = 0, params = false, size = 1)
         Expr.Proj(m, _, _, _) -> unpack(m)
@@ -278,9 +278,9 @@ fn wordOf(e: Expr) -> Int
         Expr.Sort(l) -> leafWord(Core.Hash.mix(2, Core.Levels.hashOf(l)), 0, 0, flag(Core.Levels.hasParam(l)))
         Expr.Const(m, _, _) -> m
         Expr.App(m, _, _) -> m
-        Expr.Lam(m, _, _, _, _) -> m
-        Expr.Pi(m, _, _, _, _) -> m
-        Expr.Let(m, _, _, _, _) -> m
+        Expr.Lam(m, _, _) -> m
+        Expr.Pi(m, _, _) -> m
+        Expr.Let(m, _, _, _) -> m
         Expr.NatLit(n) -> leafWord(Core.Hash.mix(8, Int.mod(n, 2147483647)), 0, 0, 0)
         Expr.StrLit(s) -> leafWord(Core.Hash.mix(9, Core.Hash.ofText(s)), 0, 0, 0)
         Expr.Proj(m, _, _, _) -> m
@@ -367,9 +367,9 @@ fn packedOf(e: Expr) -> Int
     match e
         Expr.Const(m, _, _) -> m
         Expr.App(m, _, _) -> m
-        Expr.Lam(m, _, _, _, _) -> m
-        Expr.Pi(m, _, _, _, _) -> m
-        Expr.Let(m, _, _, _, _) -> m
+        Expr.Lam(m, _, _) -> m
+        Expr.Pi(m, _, _) -> m
+        Expr.Let(m, _, _, _) -> m
         Expr.Proj(m, _, _, _) -> m
         _ -> -1
 
