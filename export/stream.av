@@ -21,9 +21,31 @@ fn readFile(path: String, workers: Int) -> Outcome
     ! [Disk.readBytesAt]
     chunked(path, 0, "", Export.Tables.empty(), 1, workers)
 
+decision ChunksSplitWhereRead
+    date = "2026-10-24"
+    reason =
+        "A chunk of 64 MB was split into lines on a thread of its own, so"
+        "that the strings of its lines would not share allocator pages with"
+        "the terms built from them and would go back to the system once the"
+        "chunk was read. But it is the reading thread that frees them, each"
+        "free going to the heap of a thread that has ended, and on Init"
+        "that cost about 150 instructions a line. Chunks are now 16 MB, split"
+        "on the reading thread: the strings of one chunk, whose places the"
+        "next chunk's take, are a quarter of what a chunk's were. The tables"
+        "are also handed to the feeding of the lines after the header rather"
+        "than shared with it, which made the first name, level or"
+        "expression a chunk adds copy the whole map or vector it went into."
+        "Instructions retired, one worker, reading only: Init 23.92 G to"
+        "22.74 G, peak 632 MB to 367 MB; checked in full, etale 57.57 G to"
+        "57.17 G, qb9 105.67 G to 104.27 G, Init 126.26 G to 125.05 G, and"
+        "on eight workers Init 151.5 G to 150.3 G with the same peak."
+    chosen = "ChunksSplitWhereRead"
+    rejected = ["ChunksSplitApart"]
+    impacts = [chunkBytes, decoded, afterHeader]
+
 fn chunkBytes() -> Int
-    ? "How much of the file one chunk reads."
-    67108864
+    ? "How much of the file one chunk reads: 16 MB, some 300000 lines (ChunksSplitWhereRead)."
+    16777216
 
 verify chunkBytes
     chunkBytes() > 0 => true
@@ -41,7 +63,7 @@ fn decoded(path: String, offset: Int, carry: String, t: Tables, line: Int, worke
     ? "The chunk as text, leaving out the bytes of a character its end cuts in two: at most three."
     ! [Disk.readBytesAt]
     match String.fromUtf8(Bytes.take(b, Bytes.len(b) - cut))
-        Result.Ok(text) -> splitChunk(path, offset + Bytes.len(b) - cut, carried(carry, splitApart(text)), t, line, workers)
+        Result.Ok(text) -> splitChunk(path, offset + Bytes.len(b) - cut, carried(carry, linesIn(text)), t, line, workers)
         Result.Err(e) -> match cut >= 3
             true -> Outcome.Declined("cannot read {path}: {e}")
             false -> decoded(path, offset, carry, t, line, workers, b, cut + 1)
@@ -72,27 +94,12 @@ verify carried
     carried("", ["c"]) => ["c"]
     carried("ab", []) => ["ab"]
 
-fn splitApart(text: String) -> List<String>
-    ? "The lines of a chunk, split on a thread of their own, so that their strings sit apart from the terms built from them and go back to the system once the chunk is read."
-    match (linesIn(text), nothing())!
-        (parts, _) -> parts
-
-verify splitApart
-    splitApart("a\nb") => ["a", "b"]
-
 fn linesIn(text: String) -> List<String>
     ? "The lines of a text."
     String.split(text, "\n")
 
 verify linesIn
     linesIn("a\nb") => ["a", "b"]
-
-fn nothing() -> Int
-    ? "The other half of the product splitApart runs."
-    0
-
-verify nothing
-    nothing() => 0
 
 fn splitChunk(path: String, next: Int, parts: List<String>, t: Tables, line: Int, workers: Int) -> Outcome
     ? "Feeds the chunk's complete lines; its last part is unfinished and waits for the next chunk."
@@ -162,11 +169,11 @@ verify feedHeader
     feedHeader(Export.Tables.empty(), [], 1) => Fed.More(Export.Tables.empty(), 1)
 
 fn afterHeader(t: Tables, version: Result<String, String>, rest: List<String>, workers: Int) -> Fed
-    ? "An unreadable header rejects; an unknown version declines."
+    ? "An unreadable header rejects; an unknown version declines. The lines after a header are fed here, not through feed again: the tables then pass to them rather than being shared with them (ChunksSplitWhereRead)."
     match version
         Result.Err(e) -> Fed.Stop(Outcome.Rejected("line 1: {e}"))
         Result.Ok(v) -> match Export.Reader.supported(v)
-            true -> feed(t, rest, 2, workers)
+            true -> fedBody(Export.Reader.readParallel(t, rest, 2, workers), 2 + List.len(rest))
             false -> Fed.Stop(Outcome.Declined("format version {v} is not supported"))
 
 verify afterHeader
