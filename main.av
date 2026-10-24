@@ -9,13 +9,47 @@ module Main
     depends [Core.Names, Check.State, Check.Decl, Export.Stream, Export.Tables]
     effects [Args.get, Console.print, Disk.readBytesAt]
 
+record Verdict
+    code: Int
+    held: Option<Check.Decl.Checking>
+
 fn main() -> Int
+    ? "Reads the file, checks it and ends with the exit status. The input and what checking found are still held here when main ends, so the process ends without freeing them (FactsHeldToExit)."
     ! [Args.get, Console.print, Disk.readBytesAt]
-    match Args.get()
-        [path] -> report(Export.Stream.readFile(path, 8), 8, Core.Old)
-        [path, n] -> report(Export.Stream.readFile(path, workersOf(n)), workersOf(n), Core.Old)
-        [path, n, c] -> report(Export.Stream.readFile(path, workersOf(n)), workersOf(n), coreOf(c))
-        _ -> declined("usage: pestka FILE.ndjson [WORKERS [old|next|both]]")
+    args = Args.get()
+    o = input(args)
+    v = report(o, workersIn(args), coreIn(args))
+    v.code
+
+fn input(args: List<String>) -> Outcome
+    ? "The file read on as many workers as asked for, or the usage as a decline."
+    ! [Disk.readBytesAt]
+    match args
+        [path] -> Export.Stream.readFile(path, 8)
+        [path, n] -> Export.Stream.readFile(path, workersOf(n))
+        [path, n, _] -> Export.Stream.readFile(path, workersOf(n))
+        _ -> Outcome.Declined("usage: pestka FILE.ndjson [WORKERS [old|next|both]]")
+
+fn workersIn(args: List<String>) -> Int
+    ? "The workers the arguments ask for; eight by default."
+    match args
+        [_, n] -> workersOf(n)
+        [_, n, _] -> workersOf(n)
+        _ -> 8
+
+verify workersIn
+    workersIn(["f", "3"]) => 3
+    workersIn(["f"]) => 8
+
+fn coreIn(args: List<String>) -> Core
+    ? "The core the arguments pick; the first by default."
+    match args
+        [_, _, c] -> coreOf(c)
+        _ -> Core.Old
+
+verify coreIn
+    coreIn(["f", "1", "next"]) => Core.Next
+    coreIn(["f"]) => Core.Old
 
 fn workersOf(n: String) -> Int
     ? "The number of workers asked for, at least one; anything unreadable means eight."
@@ -40,19 +74,20 @@ verify coreOf
     coreOf("next") => Core.Next
     coreOf("x") => Core.Old
 
-fn report(o: Outcome, workers: Int, core: Core) -> Int
+fn report(o: Outcome, workers: Int, core: Core) -> Verdict
     ? "Prints the verdict."
     ! [Console.print]
     match o
-        Outcome.Rejected(why) -> rejected(why)
-        Outcome.Declined(why) -> declined(why)
+        Outcome.Rejected(why) -> Verdict(code = rejected(why), held = Option.None)
+        Outcome.Declined(why) -> Verdict(code = declined(why), held = Option.None)
         Outcome.Read(t) -> summary(t, workers, core)
 
-fn summary(p: Parsed, workers: Int, core: Core) -> Int
-    ? "Counts of what the file defines, then the checking verdict."
+fn summary(p: Parsed, workers: Int, core: Core) -> Verdict
+    ? "Counts of what the file defines, then the checking verdict, with what checking found."
     ! [Console.print]
     Console.print("constants {p.constants}, declarations {List.len(p.decls)}, names {p.names}, levels {p.levels}, expressions {p.exprs}")
-    verdict(Check.Decl.checkParallel(p.decls, workers, core))
+    c = Check.Decl.checkHeld(p.decls, workers, core)
+    Verdict(code = verdict(c.run), held = Option.Some(c))
 
 fn verdict(r: Result<Run, Fail>) -> Int
     ? "Accepted only when every declaration was checked; admitted inductive blocks make it a decline."

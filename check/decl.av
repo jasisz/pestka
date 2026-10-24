@@ -11,7 +11,7 @@ module Decl
         "environment at its own place in the file, so that they can be"
         "checked apart; the verdict names the first failure in file order,"
         "as checking strictly in order would."
-    exposes [Run, Job, Admitted, Chunk, Checked, Core, Kept, checkAll, checkParallel, admit, due, chunks, checkChunk, combine, jobChecks, jobFor]
+    exposes [Run, Job, Admitted, Chunk, Checked, Checking, Core, Kept, checkAll, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks, jobFor]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Cache, Check.State, Check.Tc, Check.IndAdd, Next.Decl]
     effects []
 
@@ -74,6 +74,11 @@ record Checked
     failure: Option<Fail>
     at: Int
     count: Int
+    kept: Kept
+
+record Checking
+    run: Result<Run, Fail>
+    held: List<Checked>
 
 fn checkAll(decls: List<Decl>) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations before the first failure the building met, one after another."
@@ -120,11 +125,34 @@ verify chunks
 
 fn checkParallel(decls: List<Decl>, workers: Int, core: Core) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations on workers at once with the given core: runs of 16 consecutive declarations are dealt to the workers in turn, which evens out their loads, and each worker checks its runs in file order."
-    a = admit(decls)
-    combine(a, runWorkers(deal(chunks(due(a), a.run.env, core, keepFor(workers), 16, [], 0, []), workers, 0, emptyGroups(workers, []))))
+    checkHeld(decls, workers, core).run
 
 verify checkParallel
     checkParallel([], 4, Core.Both) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
+
+decision FactsHeldToExit
+    date = "2026-10-24"
+    reason =
+        "A program compiled to Rust ends the process at the tail of main"
+        "without freeing what main still holds. The facts a worker kept"
+        "across declarations were freed term by term as its last run"
+        "ended, just before the process ended anyway. Each worker's facts"
+        "now come back in its result, and main holds them, with the input"
+        "and the run, until the verdict ends the process. Instructions"
+        "retired, one worker: etale 62.9 G to 60.4 G, qb9 115.1 G to"
+        "111.3 G, Init 136.2 G to 134.4 G."
+    chosen = "FactsHeldToExit"
+    rejected = ["FreedAtTheEnd"]
+    impacts = [checkHeld, groupLoop, Checked]
+
+fn checkHeld(decls: List<Decl>, workers: Int, core: Core) -> Checking
+    ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit)."
+    a = admit(decls)
+    cs = runWorkers(deal(chunks(due(a), a.run.env, core, keepFor(workers), 16, [], 0, []), workers, 0, emptyGroups(workers, [])))
+    Checking(run = combine(a, cs), held = cs)
+
+verify checkHeld
+    List.len(checkHeld([], 2, Core.Old).held) => 2
 
 fn keepFor(workers: Int) -> Int
     ? "How many hashes a map carried across declarations keeps before it is emptied (a quarter of it for definitions' values at levels). Every worker keeps maps of its own, and mathlib on eight workers already peaks near 13 GB; one worker alone keeps four times as much. Twice as much took mathlib from 10467.3 G to 10336.7 G instructions and its peak from 8.28 GB to 8.90 GB; twice that, once terms were smaller, from 5124.6 G to 5010.4 G and from 7.91 GB to 8.89 GB."
@@ -183,7 +211,7 @@ fn runWorkers(groups: List<List<Chunk>>) -> List<Checked>
         _ -> halves(List.take(groups, Int.div(List.len(groups), 2)), List.drop(groups, Int.div(List.len(groups), 2)))
 
 verify runWorkers
-    runWorkers([[], []]) => [Checked(failure = Option.None, at = 0, count = 0), Checked(failure = Option.None, at = 0, count = 0)]
+    runWorkers([[], []]) => [Checked(failure = Option.None, at = 0, count = 0, kept = keptEmpty()), Checked(failure = Option.None, at = 0, count = 0, kept = keptEmpty())]
 
 fn halves(left: List<List<Chunk>>, right: List<List<Chunk>>) -> List<Checked>
     ? "The two halves at once."
@@ -198,7 +226,7 @@ fn checkGroup(g: List<Chunk>) -> Checked
     groupLoop(g, keptEmpty(), 0)
 
 verify checkGroup
-    checkGroup([]) => Checked(failure = Option.None, at = 0, count = 0)
+    checkGroup([]) => Checked(failure = Option.None, at = 0, count = 0, kept = keptEmpty())
 
 fn keptEmpty() -> Kept
     ? "No facts in either core."
@@ -217,7 +245,7 @@ verify oldEmpty
 fn groupLoop(g: List<Chunk>, kept: Kept, count: Int) -> Checked
     ? "Run after run."
     match g
-        [] -> Checked(failure = Option.None, at = 0, count = count)
+        [] -> Checked(failure = Option.None, at = 0, count = count, kept = kept)
         [c, ..rest] -> chunkLoop(c.jobs, c.env, c.core, c.keep, rest, kept, count)
 
 verify groupLoop
@@ -228,7 +256,7 @@ fn checkChunk(c: Chunk) -> Checked
     chunkLoop(c.jobs, c.env, c.core, c.keep, [], keptEmpty(), 0)
 
 verify checkChunk
-    checkChunk(Chunk(env = Check.State.envEmpty(), jobs = [], core = Core.Old, keep = 65536)) => Checked(failure = Option.None, at = 0, count = 0)
+    checkChunk(Chunk(env = Check.State.envEmpty(), jobs = [], core = Core.Old, keep = 65536)) => Checked(failure = Option.None, at = 0, count = 0, kept = keptEmpty())
 
 fn chunkLoop(jobs: List<Job>, env: Env, core: Core, keep: Int, more: List<Chunk>, kept: Kept, count: Int) -> Checked
     ? "One job after another, then the next run, until one fails."
@@ -243,10 +271,10 @@ fn chunkNext(r: Result<Kept, Fail>, j: Job, env: Env, core: Core, keep: Int, res
     ? "Goes on, or stops with the named failure and its position."
     match r
         Result.Ok(kept) -> chunkLoop(rest, env, core, keep, more, kept, count + 1)
-        Result.Err(e) -> Checked(failure = Option.Some(failNamed(e, j.head.name)), at = j.pos, count = count)
+        Result.Err(e) -> Checked(failure = Option.Some(failNamed(e, j.head.name)), at = j.pos, count = count, kept = keptEmpty())
 
 verify chunkNext
-    chunkNext(Result.Err(Fail.Reject("bad")), Job(pos = 4, upTo = 0, head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), Check.State.envEmpty(), Core.Old, 65536, [], [], 0) => Checked(failure = Option.Some(Fail.Reject("x: bad")), at = 4, count = 0)
+    chunkNext(Result.Err(Fail.Reject("bad")), Job(pos = 4, upTo = 0, head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), Check.State.envEmpty(), Core.Old, 65536, [], [], 0) => Checked(failure = Option.Some(Fail.Reject("x: bad")), at = 4, count = 0, kept = keptEmpty())
 
 fn jobFor(core: Core, keep: Int, j: Job, env: Env, kept: Kept) -> Result<Kept, Fail>
     ? "A deferred declaration checked by the first core, the second, or both; with both, any difference in their answers is a failure that says what each answered."
@@ -321,7 +349,7 @@ fn combine(a: Admitted, results: List<Checked>) -> Result<Run, Fail>
     firstOf(results, a.failure, a.at, 0, a)
 
 verify combine
-    combine(admit([]), [Checked(failure = Option.Some(Fail.Reject("b")), at = 9, count = 0), Checked(failure = Option.Some(Fail.Reject("a")), at = 2, count = 0)]) => Result.Err(Fail.Reject("a"))
+    combine(admit([]), [Checked(failure = Option.Some(Fail.Reject("b")), at = 9, count = 0, kept = keptEmpty()), Checked(failure = Option.Some(Fail.Reject("a")), at = 2, count = 0, kept = keptEmpty())]) => Result.Err(Fail.Reject("a"))
 
 fn firstOf(rs: List<Checked>, best: Option<Fail>, bestAt: Int, count: Int, a: Admitted) -> Result<Run, Fail>
     ? "Keeps the earliest failure seen so far."
