@@ -466,6 +466,24 @@ record Opened
     ids: List<Int>
     st: St
 
+decision DomainsCheckedWithType
+    date = "2026-10-25"
+    reason =
+        "lamOpen runs only when every lambda of a declaration's value has, as"
+        "written, the domain of the declared type's pi at its place"
+        "(TelescopeOnce), and the declared type is checked before the value:"
+        "each of its domains was found to be a type under the variables of the"
+        "domains before it. The lambdas' variables are those very variables,"
+        "since counted variables of equal domains are equal, so each lambda's"
+        "domain, put in as the pi's was, is a term already found to be a type."
+        "Checking it again found the same cached answer, after comparing the"
+        "domain built again with the one built for the type. Instructions"
+        "retired, one worker: etale 44.5 G to 44.3 G, contdiff 32.0 G to"
+        "31.9 G, Init 116.6 G to 116.3 G."
+    chosen = "DomainsCheckedWithType"
+    rejected = ["DomainsCheckedAgain"]
+    impacts = [lamOpenStep]
+
 fn lamOpen(st: St, e: Expr, rev: List<Expr>, ids: List<Int>) -> Result<Opened, Fail>
     ? "lamLoop in checking mode, left open: the lambdas' variables declared and the body's type inferred under them, not closed into a pi."
     match e
@@ -476,13 +494,13 @@ verify lamOpen
     lamOpen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [], []) == Result.Err(Fail.Reject("the type checker met a loose bound variable")) => true
 
 fn lamOpenStep(st: St, d: Expr, b: Expr, rev: List<Expr>, ids: List<Int>) -> Result<Opened, Fail>
-    ? "Checks the domain is a type, then declares the variable, as lamStep."
-    st1 = domainChecked(st, d, false)?
-    loc = Check.State.namesAt(st1, Core.Names.anon(), d, Option.None, Binder.Default)
+    ? "Declares the variable, as lamStep, without checking the domain is a type: it is the declared type's domain as written, under the same variables, and checking the type found it one (DomainsCheckedWithType)."
+    loc = Check.State.namesAt(st, Core.Names.anon(), d, Option.None, Binder.Default)
     lamOpen(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids))
 
 verify lamOpenStep
-    lamOpenStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(0), [], []) == Result.Err(Fail.Reject("the type checker met a loose bound variable")) => true
+    lamOpenStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.natLit(1), [], []) == Result.Err(Fail.Reject("the type checker met a loose bound variable")) => false
+    lamOpenStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(1), [], []) == Result.Err(Fail.Reject("the type checker met a loose bound variable")) => true
 
 fn openedEnd(r: RE, rev: List<Expr>, ids: List<Int>) -> Result<Opened, Fail>
     ? "The body's type with the variables still open."
