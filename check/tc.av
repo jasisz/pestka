@@ -5,7 +5,7 @@ module Tc
         "step. The three call each other (whnf infers types for iota on"
         "structures, equality normalizes, inference checks equality), so"
         "they live in one module. Every function threads the checker state."
-    exposes [RI, LD, inferType, check, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel]
+    exposes [RI, LD, inferType, check, valueFits, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Cache, Check.State, Check.Lits, Core.Hash]
     effects []
 
@@ -390,6 +390,114 @@ fn sortLevel(e: Expr) -> Level
 
 verify sortLevel
     sortLevel(Core.Exprs.sort(Level.Succ(Level.Zero))) => Level.Succ(Level.Zero)
+
+decision TelescopeOnce
+    date = "2026-10-24"
+    reason =
+        "A definition's value was checked by inferring its type, which opens"
+        "the value's lambdas, infers the body under their variables and closes"
+        "the body's type over them into a pi; that pi was then compared with"
+        "the declared type, which opens both pis again. When the lambdas'"
+        "domains are the declared pis' domains as written, which on etale, qb9"
+        "and Init holds for 99.8% of them, the pi built is the declared one"
+        "with the inferred body, and comparing it is comparing the bodies under"
+        "the same variables: the counted variables of equal domains are the"
+        "very ones the lambdas got. So the body's type is compared with the"
+        "declared body under the lambdas' variables, and no pi is built or"
+        "opened again. Closing the root body's type over its variables alone"
+        "was 1.4 G on etale and 2.8 G on qb9. Instructions retired, one"
+        "worker, on Aver 58a0c12f: etale 51.0 G to 49.3 G, qb9 97.5 G to"
+        "94.2 G, Init 128.6 G to 127.7 G."
+    chosen = "TelescopeOnce"
+    rejected = ["BuildThenCompare"]
+    impacts = [valueFits, lamOpen, openedFits]
+
+fn valueFits(st: St, v: Expr, ty: Expr) -> Result<RB, Fail>
+    ? "Whether the value v checks and has the declared type ty. When v's lambdas have ty's pis' domains as written, the body's type is compared with ty's body under their variables (TelescopeOnce); otherwise, or when v's type is already known, v's type is compared with ty."
+    match Bool.or(Core.Exprs.looseRange(v) > 0, cachedType(st, v, false) != Option.None)
+        true -> plainFits(check(st, v)?, ty)
+        false -> match telescopeRest(v, ty)
+            Option.Some(rest) -> openedFits(lamOpen(st, v, [], [])?, rest)
+            Option.None -> plainFits(check(st, v)?, ty)
+
+verify valueFits
+    resultBool(valueFits(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default))) => true
+    resultBool(valueFits(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default))) => false
+    resultBool(valueFits(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Succ(Level.Zero)))) => true
+
+fn plainFits(r: RE, ty: Expr) -> Result<RB, Fail>
+    ? "The value's inferred type against the declared one."
+    isDefEq(r.st, r.e, ty)
+
+verify plainFits
+    resultBool(plainFits(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero))) => true
+
+fn telescopeRest(v: Expr, ty: Expr) -> Option<Expr>
+    ? "When v is lambdas whose domains are, as written, the domains of as many leading pis of ty: ty past those pis."
+    match v
+        Expr.Lam(_, d, b) -> match ty
+            Expr.Pi(_, e, c) -> match d == e
+                true -> telescopeOn(b, c)
+                false -> Option.None
+            _ -> Option.None
+        _ -> Option.None
+
+verify telescopeRest
+    telescopeRest(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Implicit)) => Option.Some(Core.Exprs.bvar(0))
+    telescopeRest(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default)) => Option.None
+    telescopeRest(Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero)) => Option.None
+
+fn telescopeOn(b: Expr, c: Expr) -> Option<Expr>
+    ? "telescopeRest past the first lambda: the rest of ty once v's lambdas end."
+    match b
+        Expr.Lam(_, d, b2) -> match c
+            Expr.Pi(_, e, c2) -> match d == e
+                true -> telescopeOn(b2, c2)
+                false -> Option.None
+            _ -> Option.None
+        _ -> Option.Some(c)
+
+verify telescopeOn
+    telescopeOn(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) => Option.Some(Core.Exprs.bvar(1))
+
+record Opened
+    t: Expr
+    rev: List<Expr>
+    ids: List<Int>
+    st: St
+
+fn lamOpen(st: St, e: Expr, rev: List<Expr>, ids: List<Int>) -> Result<Opened, Fail>
+    ? "lamLoop in checking mode, left open: the lambdas' variables declared and the body's type inferred under them, not closed into a pi."
+    match e
+        Expr.Lam(_, d, b) -> lamOpenStep(st, Core.Subst.instantiate(d, rev), b, rev, ids)
+        _ -> openedEnd(bodyType(st, e, rev, List.len(ids), false)?, rev, ids)
+
+verify lamOpen
+    lamOpen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [], []) == Result.Err(Fail.Reject("the type checker met a loose bound variable")) => true
+
+fn lamOpenStep(st: St, d: Expr, b: Expr, rev: List<Expr>, ids: List<Int>) -> Result<Opened, Fail>
+    ? "Checks the domain is a type, then declares the variable, as lamStep."
+    st1 = domainChecked(st, d, false)?
+    loc = Check.State.namesAt(st1, Core.Names.anon(), d, Option.None, Binder.Default)
+    lamOpen(loc.st, b, List.prepend(loc.e, rev), List.prepend(fvarId(loc.e), ids))
+
+verify lamOpenStep
+    lamOpenStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(0), [], []) == Result.Err(Fail.Reject("the type checker met a loose bound variable")) => true
+
+fn openedEnd(r: RE, rev: List<Expr>, ids: List<Int>) -> Result<Opened, Fail>
+    ? "The body's type with the variables still open."
+    Result.Ok(Opened(t = cheapBeta(r.e), rev = rev, ids = ids, st = r.st))
+
+verify openedEnd
+    openedEnd(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], []) == Result.Ok(Opened(t = Core.Exprs.sort(Level.Zero), rev = [], ids = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => true
+
+fn openedFits(o: Opened, rest: Expr) -> Result<RB, Fail>
+    ? "The body's type against the declared body under the same variables, which are then closed."
+    r = isDefEq(o.st, o.t, Core.Subst.instantiate(rest, o.rev))?
+    Result.Ok(RB(b = r.b, st = Check.State.closeVars(r.st, List.len(o.ids))))
+
+verify openedFits
+    resultBool(openedFits(Opened(t = Core.Exprs.sort(Level.Zero), rev = [], ids = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero))) => true
 
 fn lamLoop(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Result<RE, Fail>
     ? "Opens nested lambdas with their variables, then infers the body and closes it as a pi."

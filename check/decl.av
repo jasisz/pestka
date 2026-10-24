@@ -664,8 +664,7 @@ verify hasDup
 fn valueChecks(st: St, ty: Expr, v: Expr, isThm: Bool) -> Result<OldFacts, Fail>
     ? "A theorem's type a proposition, and the value's type equal to the declared one; returns the shared cache of checked closed terms."
     st2 = thmProp(st, ty, isThm)?
-    vt = Check.Tc.check(st2, v)?
-    eq = Check.Tc.isDefEq(vt.st, vt.e, ty)?
+    eq = Check.Tc.valueFits(st2, v, ty)?
     match eq.b
         true -> Result.Ok(carried(eq.st))
         false -> Result.Err(Fail.Reject("declaration type mismatch"))
