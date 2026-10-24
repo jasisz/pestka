@@ -2655,15 +2655,37 @@ fn proofIrrelInferred(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
 verify proofIrrelInferred
     resultInt(proofIrrelInferred(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero))) => 0
 
+decision NoProofReadFromTypes
+    date = "2026-10-24"
+    reason =
+        "Before comparing two terms by proof irrelevance, the checker asks"
+        "whether the first is a proof. notProofByHead answered that from the"
+        "head constant's type only when it ended in a sort or in a constant"
+        "family; everything else had its type inferred and its sort found,"
+        "most often to hear no. On qb9 30 thousand projections x.i cost 2.6 G"
+        "that way, about 90 thousand instructions each, inferring the type of"
+        "a whole instance. A projection is now read from its field's type in"
+        "the structure's constructor, with a sort that is never zero at any"
+        "levels; a type ending in a type variable (HAdd.hAdd ends in its"
+        "gamma, bound with Type u) by that variable's domain; a free variable"
+        "head by its type; a partial application by the rest of its pis."
+        "Instructions retired, one worker: etale 53.9 G to 52.4 G, qb9 103.3 G"
+        "to 100.2 G, Init 132.4 G to 132.1 G."
+    chosen = "NoProofReadFromTypes"
+    rejected = ["ConstantFamiliesOnly"]
+    impacts = [notProofByHead, typeSays, projSays]
+
 fn notProofByHead(st: St, t: Expr) -> Bool
     ? "Whether t is surely no proof by the declarations of its head alone. Let t be a constant c at levels applied to exactly as many arguments as c's type has syntactic pis. If the type then ends in a sort, t is a type; if it ends in a constant D applied to as many arguments as D's type has syntactic pis, ending in Sort v, then t's type has sort v at the levels as written in c's type and then at t's levels. Inference finds t's type and its sort just so, peeling those pis without normalizing, and t is a proof exactly when that sort is zero; the arguments of t never enter. Anything else is left to inference."
     match Core.Apps.fnOf(t)
         Expr.Const(_, n, ls) -> headSays(st, Check.State.lookup(st, n), ls, Core.Apps.numArgs(t))
+        Expr.FVar(id) -> localSays(st, id, Core.Apps.numArgs(t))
+        Expr.Proj(_, sn, i, _) -> projSays(st, sn, i, Core.Apps.numArgs(t))
         _ -> false
 
 verify notProofByHead
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("F"), []), Core.Exprs.sort(Level.Zero))) => true
-    notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("F"), [])) => false
+    notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("F"), [])) => true
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("v"), [])) => true
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("p"), [])) => false
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.fvar(0)) => false
@@ -2676,56 +2698,171 @@ verify probeEnv
     Check.State.envSize(probeEnv()) => 5
 
 fn headSays(st: St, c: Option<Const>, ls: List<Level>, k: Int) -> Bool
-    ? "notProofByHead once the head constant is found: its type past k pis."
+    ? "notProofByHead once the head constant is found: its type past k pis, at levels ls. The level counts must agree, as inference requires."
     match c
-        Option.Some(x) -> endSays(st, Check.State.headOf(x), ls, peelPis(Check.State.headOf(x).ty, k))
+        Option.Some(x) -> match List.len(Check.State.headOf(x).params) == List.len(ls)
+            true -> typeSays(st, Check.State.headOf(x).ty, k, Check.State.headOf(x).params, ls)
+            false -> false
         Option.None -> false
 
 verify headSays
     headSays(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.None, [], 0) => false
 
-fn endSays(st: St, h: Head, ls: List<Level>, rest: Option<Expr>) -> Bool
-    ? "A sort means a type; a constant applied to arguments is looked at in turn. The level counts must agree, as inference requires."
-    match List.len(h.params) == List.len(ls)
-        false -> false
-        true -> match rest
-            Option.None -> false
-            Option.Some(e) -> match e
-                Expr.Sort -> true
-                _ -> familySays(st, h, ls, Core.Apps.fnOf(e), Core.Apps.numArgs(e))
+fn localSays(st: St, id: Int, k: Int) -> Bool
+    ? "notProofByHead for a free variable applied to k arguments, by its type."
+    match Check.State.localType(st.lctx, id)
+        Result.Ok(ty) -> typeSays(st, ty, k, [], [])
+        Result.Err -> false
 
-verify endSays
-    endSays(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], Option.Some(Core.Exprs.sort(Level.Zero))) => true
+verify localSays
+    localSays(Check.State.fresh(probeEnv(), [], Safety.Safe), 0, 0) => false
 
-fn familySays(st: St, h: Head, ls: List<Level>, d: Expr, m: Int) -> Bool
-    ? "The family D of t's type, applied to m arguments."
+fn typeSays(st: St, ty: Expr, k: Int, ps: List<Name>, ls: List<Level>) -> Bool
+    ? "A head of type ty applied to k arguments, the parameters ps being ls: past k syntactic pis, a sort means the term is a type, and a pi means a function, a proof exactly when its codomain is one; otherwise its type must be a family whose sort is surely not zero (familySays)."
+    match peelPis(ty, k)
+        Option.None -> false
+        Option.Some(e) -> match e
+            Expr.Sort -> true
+            Expr.Pi -> typeSays(st, ty, k + 1, ps, ls)
+            _ -> familySays(st, ty, k, ps, ls, Core.Apps.fnOf(e), Core.Apps.numArgs(e))
+
+verify typeSays
+    typeSays(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), 0, [], []) => true
+    typeSays(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("T"), []), 0, [], []) => true
+    typeSays(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("P"), []), 0, [], []) => false
+    typeSays(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Succ(Level.Zero)), Core.Exprs.bvar(0), Binder.Default), 1, [], []) => true
+    typeSays(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 1, [], []) => false
+
+fn familySays(st: St, ty: Expr, k: Int, ps: List<Name>, ls: List<Level>, d: Expr, m: Int) -> Bool
+    ? "The family d of the term's type, applied to m arguments: a constant whose type past m pis ends in a sort, a variable bound by one of the k pis of ty, or a free variable, whose type is so; the sort must not be zero at the levels. A type variable is the usual case: HAdd.hAdd ends in its γ, which is bound with Type u (NoProofByTypeVariables)."
     match d
-        Expr.Const(_, dn, dls) -> sortSays(h, ls, dls, Check.State.lookup(st, dn), m)
+        Expr.Const(_, dn, dls) -> sortSays(ps, ls, dls, Check.State.lookup(st, dn), m)
+        Expr.BVar(j) -> sortNotZero(peelAfter(piDomain(ty, k - 1 - j), m), ps, ls)
+        Expr.FVar(id) -> localSortSays(st, id, m)
         _ -> false
 
 verify familySays
-    familySays(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], Core.Exprs.fvar(0), 0) => false
+    familySays(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), 0, [], [], Core.Exprs.natLit(0), 0) => false
 
-fn sortSays(h: Head, ls: List<Level>, dls: List<Level>, dc: Option<Const>, m: Int) -> Bool
-    ? "D's type past m pis must be a sort."
+fn projSays(st: St, s: Name, i: Int, m: Int) -> Bool
+    ? "notProofByHead for x.i of the structure s applied to m arguments, by the type of field i in s's constructor alone, without x's type: x's levels are unknown, so a sort there must be one that is never zero (NoProofByFieldType)."
+    match Check.State.lookup(st, s)
+        Option.Some(Const.CInduct(iv)) -> match iv.ctors
+            [k] -> fieldSays(st, Check.State.lookup(st, k), iv.numParams + i, m)
+            _ -> false
+        _ -> false
+
+verify projSays
+    projSays(Check.State.fresh(probeEnv(), [], Safety.Safe), Check.Lits.name1("T"), 0, 0) => false
+
+fn fieldSays(st: St, c: Option<Const>, n: Int, m: Int) -> Bool
+    ? "projSays once the constructor is found: its pi n is the field."
+    match c
+        Option.Some(Const.CCtor(k)) -> match piDomain(k.head.ty, n)
+            Option.Some(d) -> fieldEndSays(st, k.head.ty, n, d, m)
+            Option.None -> false
+        _ -> false
+
+verify fieldSays
+    fieldSays(Check.State.fresh(probeEnv(), [], Safety.Safe), Option.None, 0, 0) => false
+
+fn fieldEndSays(st: St, cty: Expr, n: Int, d: Expr, m: Int) -> Bool
+    ? "The field's type d, under the n pis of the constructor type cty before it, past m pis of its own: a sort, a pi read on, or a family whose sort is never zero."
+    match peelPis(d, m)
+        Option.None -> false
+        Option.Some(e) -> match e
+            Expr.Sort -> true
+            Expr.Pi -> fieldEndSays(st, cty, n, d, m + 1)
+            _ -> fieldFamilySays(st, cty, n, d, m, Core.Apps.fnOf(e), Core.Apps.numArgs(e))
+
+verify fieldEndSays
+    fieldEndSays(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), 0, Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Binder.Default), 0) => true
+    fieldEndSays(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Succ(Level.Zero)), Core.Exprs.bvar(0), Binder.Default), 1, Core.Exprs.bvar(0), 0) => true
+    fieldEndSays(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Param(Core.Names.anon())), Core.Exprs.bvar(0), Binder.Default), 1, Core.Exprs.bvar(0), 0) => false
+
+fn fieldFamilySays(st: St, cty: Expr, n: Int, d: Expr, m: Int, f: Expr, a: Int) -> Bool
+    ? "The family f, applied to a arguments, of the field's type: a constant, or a variable bound by one of the m pis of d or by one of the n pis of cty before the field."
+    match f
+        Expr.Const(_, dn, dls) -> neverZeroFamily(Check.State.lookup(st, dn), dls, a)
+        Expr.BVar(j) -> match j < m
+            true -> neverZeroSort(peelAfter(piDomain(d, m - 1 - j), a))
+            false -> neverZeroSort(peelAfter(piDomain(cty, n - 1 - (j - m)), a))
+        _ -> false
+
+verify fieldFamilySays
+    fieldFamilySays(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), 0, Core.Exprs.sort(Level.Zero), 0, Core.Exprs.cnst(Check.Lits.name1("T"), []), 0) => true
+    fieldFamilySays(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), 0, Core.Exprs.sort(Level.Zero), 0, Core.Exprs.cnst(Check.Lits.name1("P"), []), 0) => false
+
+fn neverZeroFamily(c: Option<Const>, dls: List<Level>, a: Int) -> Bool
+    ? "A constant's type past a pis is a sort never zero at its levels as written."
+    match c
+        Option.Some(x) -> match List.len(Check.State.headOf(x).params) == List.len(dls)
+            true -> match peelPis(Check.State.headOf(x).ty, a)
+                Option.Some(Expr.Sort(w)) -> Core.Univ.isNotZero(Core.Univ.instantiate(w, Check.State.headOf(x).params, dls))
+                _ -> false
+            false -> false
+        Option.None -> false
+
+verify neverZeroFamily
+    neverZeroFamily(Option.None, [], 0) => false
+
+fn neverZeroSort(e: Option<Expr>) -> Bool
+    ? "A sort that is never zero, whatever the levels."
+    match e
+        Option.Some(Expr.Sort(v)) -> Core.Univ.isNotZero(v)
+        _ -> false
+
+verify neverZeroSort
+    neverZeroSort(Option.Some(Core.Exprs.sort(Level.Succ(Level.Param(Core.Names.anon()))))) => true
+    neverZeroSort(Option.Some(Core.Exprs.sort(Level.Param(Core.Names.anon())))) => false
+
+fn localSortSays(st: St, id: Int, m: Int) -> Bool
+    ? "A free variable used as a family: its type past m pis is a sort that is not zero."
+    match Check.State.localType(st.lctx, id)
+        Result.Ok(ty) -> sortNotZero(peelPis(ty, m), [], [])
+        Result.Err -> false
+
+verify localSortSays
+    localSortSays(Check.State.fresh(probeEnv(), [], Safety.Safe), 0, 0) => false
+
+fn piDomain(ty: Expr, i: Int) -> Option<Expr>
+    ? "The domain of the pi i places in, counting from 0."
+    match i < 0
+        true -> Option.None
+        false -> match ty
+            Expr.Pi(_, d, b) -> match i == 0
+                true -> Option.Some(d)
+                false -> piDomain(b, i - 1)
+            _ -> Option.None
+
+verify piDomain
+    piDomain(Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 0) => Option.Some(Core.Exprs.sort(Level.Zero))
+    piDomain(Core.Exprs.sort(Level.Zero), 0) => Option.None
+    piDomain(Core.Exprs.sort(Level.Zero), -1) => Option.None
+
+fn sortNotZero(e: Option<Expr>, ps: List<Name>, ls: List<Level>) -> Bool
+    ? "A sort whose level is not zero once the parameters ps are ls."
+    match e
+        Option.Some(Expr.Sort(v)) -> Bool.not(Core.Univ.normalizesToZero(Core.Univ.instantiate(v, ps, ls)))
+        _ -> false
+
+verify sortNotZero
+    sortNotZero(Option.Some(Core.Exprs.sort(Level.Succ(Level.Zero))), [], []) => true
+    sortNotZero(Option.Some(Core.Exprs.sort(Level.Zero)), [], []) => false
+    sortNotZero(Option.None, [], []) => false
+
+fn sortSays(ps: List<Name>, ls: List<Level>, dls: List<Level>, dc: Option<Const>, m: Int) -> Bool
+    ? "D's type past m pis must be a sort, not zero at D's levels as written, then at ls for ps."
     match dc
-        Option.Some(c) -> levelSays(h, ls, dls, Check.State.headOf(c), peelPis(Check.State.headOf(c).ty, m))
+        Option.Some(c) -> match List.len(Check.State.headOf(c).params) == List.len(dls)
+            true -> match peelPis(Check.State.headOf(c).ty, m)
+                Option.Some(Expr.Sort(v)) -> Bool.not(Core.Univ.normalizesToZero(Core.Univ.instantiate(Core.Univ.instantiate(v, Check.State.headOf(c).params, dls), ps, ls)))
+                _ -> false
+            false -> false
         Option.None -> false
 
 verify sortSays
-    sortSays(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], [], Option.None, 0) => false
-
-fn levelSays(h: Head, ls: List<Level>, dls: List<Level>, dh: Head, rest: Option<Expr>) -> Bool
-    ? "Sort v ends D's type: t is no proof when v at D's levels as written, then at t's levels, is not zero."
-    match List.len(dh.params) == List.len(dls)
-        false -> false
-        true -> match rest
-            Option.Some(Expr.Sort(v)) -> Bool.not(Core.Univ.normalizesToZero(Core.Univ.instantiate(Core.Univ.instantiate(v, dh.params, dls), h.params, ls)))
-            _ -> false
-
-verify levelSays
-    levelSays(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], [], Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Option.Some(Core.Exprs.sort(Level.Zero))) => false
-    levelSays(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], [], Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Option.Some(Core.Exprs.sort(Level.Succ(Level.Zero)))) => true
+    sortSays([], [], [], Option.None, 0) => false
 
 fn peelPis(e: Expr, k: Int) -> Option<Expr>
     ? "e past k syntactic pis, without normalizing; none if fewer."
