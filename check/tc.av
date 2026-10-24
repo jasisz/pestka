@@ -2997,6 +2997,73 @@ fn dropFirst() -> Const
 verify dropFirst
     Check.State.hintsOf(dropFirst()) => Hints.Regular(1)
 
+fn isProposition(st: St, h: Head, ls: List<Level>, d: Expr, ctx: List<Expr>) -> Bool
+    ? "Whether the type d, under the domains ctx of the constant with head h at levels ls, is surely a proposition: a pi whose codomain is one, or a variable or constant applied to as many arguments as its type has syntactic pis, that type ending in a sort zero at the levels."
+    match d
+        Expr.Pi(_, a, b) -> isProposition(st, h, ls, b, List.prepend(a, ctx))
+        _ -> headIsProp(st, h, ls, Core.Apps.fnOf(d), Core.Apps.numArgs(d), ctx)
+
+verify isProposition
+    isProposition(Check.State.fresh(probeEnv(), [], Safety.Safe), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], Core.Exprs.cnst(Check.Lits.name1("P"), []), []) => true
+    isProposition(Check.State.fresh(probeEnv(), [], Safety.Safe), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], Core.Exprs.cnst(Check.Lits.name1("T"), []), []) => false
+    isProposition(Check.State.fresh(probeEnv(), [], Safety.Safe), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], Core.Exprs.bvar(0), [Core.Exprs.sort(Level.Zero)]) => true
+    isProposition(Check.State.fresh(probeEnv(), [], Safety.Safe), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], Core.Exprs.sort(Level.Zero), []) => false
+
+fn headIsProp(st: St, h: Head, ls: List<Level>, f: Expr, m: Int, ctx: List<Expr>) -> Bool
+    ? "The head f of the type, applied to m arguments: its own type past m pis must be a sort zero at the levels."
+    match f
+        Expr.BVar(j) -> sortIsZero(peelAfter(nthDomain(ctx, j), m), h.params, ls)
+        Expr.Const(_, n, dls) -> constIsProp(Check.State.lookup(st, n), dls, m, h, ls)
+        _ -> false
+
+verify headIsProp
+    headIsProp(Check.State.fresh(probeEnv(), [], Safety.Safe), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], Core.Exprs.fvar(0), 0, []) => false
+
+fn constIsProp(c: Option<Const>, dls: List<Level>, m: Int, h: Head, ls: List<Level>) -> Bool
+    ? "A constant's type past m pis is a sort zero at its levels as written, then at h's levels."
+    match c
+        Option.Some(x) -> match List.len(Check.State.headOf(x).params) == List.len(dls)
+            true -> match peelPis(Check.State.headOf(x).ty, m)
+                Option.Some(Expr.Sort(v)) -> Core.Univ.normalizesToZero(Core.Univ.instantiate(Core.Univ.instantiate(v, Check.State.headOf(x).params, dls), h.params, ls))
+                _ -> false
+            false -> false
+        Option.None -> false
+
+verify constIsProp
+    constIsProp(Option.None, [], 0, Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), []) => false
+
+fn peelAfter(d: Option<Expr>, m: Int) -> Option<Expr>
+    ? "peelPis of a domain that may be missing."
+    match d
+        Option.Some(e) -> peelPis(e, m)
+        Option.None -> Option.None
+
+verify peelAfter
+    peelAfter(Option.None, 0) => Option.None
+
+fn nthDomain(ctx: List<Expr>, j: Int) -> Option<Expr>
+    ? "The domain of the binder j places out, the nearest first."
+    match ctx
+        [] -> Option.None
+        [x, ..rest] -> match j <= 0
+            true -> Option.Some(x)
+            false -> nthDomain(rest, j - 1)
+
+verify nthDomain
+    nthDomain([Core.Exprs.bvar(0), Core.Exprs.bvar(1)], 1) => Option.Some(Core.Exprs.bvar(1))
+    nthDomain([], 0) => Option.None
+
+fn sortIsZero(e: Option<Expr>, ps: List<Name>, ls: List<Level>) -> Bool
+    ? "A sort whose level is zero once the parameters ps are ls."
+    match e
+        Option.Some(Expr.Sort(v)) -> Core.Univ.normalizesToZero(Core.Univ.instantiate(v, ps, ls))
+        _ -> false
+
+verify sortIsZero
+    sortIsZero(Option.Some(Core.Exprs.sort(Level.Zero)), [], []) => true
+    sortIsZero(Option.Some(Core.Exprs.sort(Level.Succ(Level.Zero))), [], []) => false
+    sortIsZero(Option.None, [], []) => false
+
 fn unusedArgs(c: Const, k: Int) -> List<Bool>
     ? "For k arguments of c, last first: whether c's value drops the argument. Only when the arguments cover every leading lambda of the value, so that unfolding both sides leaves the body alone, in which that variable does not occur. No flags means compare everything."
     match Check.State.valueOf(c)
@@ -3157,19 +3224,86 @@ fn defEqApp(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
     ? "Congruence: equal heads and equal arguments."
     match Bool.and(Core.Apps.isApp(t), Core.Apps.isApp(s))
         false -> no(st)
-        true -> appHeads(isDefEq(st, Core.Apps.fnOf(t), Core.Apps.fnOf(s))?, Core.Apps.argsOf(t), Core.Apps.argsOf(s))
+        true -> appHeads(isDefEq(st, Core.Apps.fnOf(t), Core.Apps.fnOf(s))?, t, s)
 
 verify defEqApp
     resultBool(defEqApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)))) => false
 
-fn appHeads(r: RB, as: List<Expr>, bs: List<Expr>) -> Result<RB, Fail>
-    ? "Then the arguments, if there are as many."
-    match Bool.and(r.b, List.len(as) == List.len(bs))
-        true -> argsAll(r.st, as, bs)
+fn appHeads(r: RB, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "Then the arguments, if there are as many, first first, leaving out those in places of proofs (ProofArgsSkipped)."
+    match Bool.and(r.b, Core.Apps.numArgs(t) == Core.Apps.numArgs(s))
+        true -> argsOfHead(r.st, Core.Apps.fnOf(t), Core.Apps.argsOf(t), Core.Apps.argsOf(s))
         false -> no(r.st)
 
 verify appHeads
-    resultBool(appHeads(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [])) => true
+    resultBool(appHeads(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), Core.Exprs.fvar(0))) => true
+
+decision ProofArgsSkipped
+    date = "2026-10-24"
+    reason =
+        "Two applications whose heads were found equal were made equal argument"
+        "by argument, and an argument that was a proof was compared like any"
+        "other: its type inferred, found a proposition, and the two types"
+        "compared, often down a chain of instances. But equal heads have equal"
+        "types, so once the arguments before it are equal, an argument in a"
+        "place whose domain is a proposition is a proof of the same proposition"
+        "on both sides, and proofs of one proposition are equal. The arguments"
+        "of a constant are now compared beside the pis of its type; where two"
+        "differ, the domain is read as notProofByHead reads a type, and in a"
+        "place of a proof they are left out. Instructions retired, one worker:"
+        "etale 59.2 G to 53.9 G, qb9 109.4 G to 103.3 G, Init 131.5 G to"
+        "132.4 G. Doing the same in the arguments of one definition on both"
+        "sides gave nothing (their proofs are mostly the same term)."
+    chosen = "ProofArgsSkipped"
+    rejected = ["EveryArgumentCompared", "ProofFlagsUpFront"]
+    impacts = [argsTyped, isProposition, appHeads]
+
+fn argsOfHead(st: St, f: Expr, as: List<Expr>, bs: List<Expr>) -> Result<RB, Fail>
+    ? "The arguments of a constant are compared beside the pis of its type, so that the place of an argument is looked at only when two arguments differ there (ProofArgsSkipped); those of any other head, one by one."
+    match f
+        Expr.Const(_, n, ls) -> argsOfConst(st, Check.State.lookup(st, n), ls, as, bs)
+        _ -> argsAll(st, as, bs)
+
+verify argsOfHead
+    resultBool(argsOfHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.fvar(0), [Core.Exprs.natLit(1)], [Core.Exprs.natLit(2)])) => false
+
+fn argsOfConst(st: St, c: Option<Const>, ls: List<Level>, as: List<Expr>, bs: List<Expr>) -> Result<RB, Fail>
+    ? "argsOfHead once the constant is found; the level counts must agree."
+    match c
+        Option.Some(x) -> match List.len(Check.State.headOf(x).params) == List.len(ls)
+            true -> argsTyped(st, as, bs, Check.State.headOf(x), ls, Check.State.headOf(x).ty, [])
+            false -> argsAll(st, as, bs)
+        Option.None -> argsAll(st, as, bs)
+
+verify argsOfConst
+    resultBool(argsOfConst(Check.State.fresh(probeEnv(), [], Safety.Safe), Option.None, [], [], [])) => true
+
+fn argsTyped(st: St, as: List<Expr>, bs: List<Expr>, h: Head, ls: List<Level>, ty: Expr, ctx: List<Expr>) -> Result<RB, Fail>
+    ? "Pairwise equality beside the pis of ty, the type of the constant with head h at levels ls; ctx holds the domains passed, the nearest first. Identical arguments are equal. Two others in a place whose domain is surely a proposition are proofs whose domains are equal once the arguments before them are, so they are equal too; the rest are compared. Past the syntactic pis, one by one."
+    match ty
+        Expr.Pi(_, d, body) -> match as
+            [] -> yes(st)
+            [a, ..arest] -> match bs
+                [b, ..brest] -> match a == b
+                    true -> argsTyped(st, arest, brest, h, ls, body, List.prepend(d, ctx))
+                    false -> match isProposition(st, h, ls, d, ctx)
+                        true -> argsTyped(st, arest, brest, h, ls, body, List.prepend(d, ctx))
+                        false -> argsTypedNext(isDefEq(st, a, b)?, arest, brest, h, ls, body, List.prepend(d, ctx))
+                [] -> no(st)
+        _ -> argsAll(st, as, bs)
+
+verify argsTyped
+    resultBool(argsTyped(Check.State.fresh(probeEnv(), [], Safety.Safe), [Core.Exprs.fvar(1)], [Core.Exprs.fvar(2)], Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("P"), []), Core.Exprs.sort(Level.Zero), Binder.Default), [])) => true
+    resultBool(argsTyped(Check.State.fresh(probeEnv(), [], Safety.Safe), [Core.Exprs.fvar(1)], [Core.Exprs.fvar(2)], Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("T"), []), Core.Exprs.sort(Level.Zero), Binder.Default), [])) => false
+
+fn argsTypedNext(r: RB, as: List<Expr>, bs: List<Expr>, h: Head, ls: List<Level>, ty: Expr, ctx: List<Expr>) -> Result<RB, Fail>
+    ? "Stops at the first unequal pair."
+    match r.b
+        true -> argsTyped(r.st, as, bs, h, ls, ty, ctx)
+        false -> no(r.st)
+
+verify argsTypedNext
+    resultBool(argsTypedNext(RB(b = false, st = Check.State.fresh(probeEnv(), [], Safety.Safe)), [], [], Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], Core.Exprs.sort(Level.Zero), [])) => false
 
 fn argsAll(st: St, as: List<Expr>, bs: List<Expr>) -> Result<RB, Fail>
     ? "Pairwise equality."
