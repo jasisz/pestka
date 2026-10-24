@@ -127,14 +127,14 @@ verify checkParallel
     checkParallel([], 4, Core.Both) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
 
 fn keepFor(workers: Int) -> Int
-    ? "How many hashes a map carried across declarations keeps before it is emptied (a quarter of it for definitions' values at levels). Every worker keeps maps of its own, and mathlib on eight workers already peaks near 13 GB; one worker alone keeps twice as much, which took mathlib from 10467.3 G to 10336.7 G instructions and its peak from 8.28 GB to 8.90 GB."
+    ? "How many hashes a map carried across declarations keeps before it is emptied (a quarter of it for definitions' values at levels). Every worker keeps maps of its own, and mathlib on eight workers already peaks near 13 GB; one worker alone keeps four times as much. Twice as much took mathlib from 10467.3 G to 10336.7 G instructions and its peak from 8.28 GB to 8.90 GB; twice that, once terms were smaller, from 5124.6 G to 5010.4 G and from 7.91 GB to 8.89 GB."
     match workers > 1
         true -> 65536
-        false -> 131072
+        false -> 262144
 
 verify keepFor
     keepFor(8) => 65536
-    keepFor(1) => 131072
+    keepFor(1) => 262144
 
 fn emptyGroups(n: Int, acc: List<List<Chunk>>) -> List<List<Chunk>>
     ? "n empty groups."
