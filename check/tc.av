@@ -3200,12 +3200,42 @@ fn unfoldedRight(u: RE, t: Expr) -> Result<LD, Fail>
 verify unfoldedRight
     resultStatus(unfoldedRight(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(2))) => 3
 
+decision StepRemembered
+    date = "2026-10-24"
+    reason =
+        "A step of lazy delta, unfolding a term's head and taking the cheap"
+        "whnfCore, depends on the term alone, and lazy delta meets the same"
+        "step in other pairs of the same declaration: on etale 38 thousand"
+        "of 263 thousand steps repeated one already taken. The result is now"
+        "remembered for the declaration. Instructions retired, one worker, on"
+        "Aver bc71777c: etale 48.4 G to 48.2 G, qb9 92.5 G to 91.9 G, Init"
+        "124.0 G to 123.8 G."
+    chosen = "StepRemembered"
+    rejected = ["StepTakenAgain"]
+    impacts = [unfoldWhnf, stepStored]
+
 fn unfoldWhnf(st: St, e: Expr) -> Result<RE, Fail>
-    ? "Unfolds the head and takes the cheap whnfCore."
+    ? "Unfolds the head and takes the cheap whnfCore. The result is a function of e alone, so it is remembered for the declaration: lazy delta meets the same step again in other pairs (StepRemembered)."
+    match Check.State.cacheGet(st.stepCache, e)
+        Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+        Option.None -> stepStored(unfoldStep(st, e)?, e)
+
+fn unfoldStep(st: St, e: Expr) -> Result<RE, Fail>
+    ? "One unfolding step and the cheap whnfCore after it."
     u = unfoldDefinition(st, e)
     match u.o
         Option.Some(x) -> whnfCoreM(u.st, x, false, true)
         Option.None -> Result.Ok(RE(e = e, st = u.st))
+
+verify unfoldStep
+    resultExpr(unfoldStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
+
+fn stepStored(r: RE, e: Expr) -> Result<RE, Fail>
+    ? "Remembers a step's result."
+    Result.Ok(RE(e = r.e, st = St.update(r.st, stepCache = Check.State.cachePut(r.st.stepCache, e, r.e))))
+
+verify stepStored
+    resultExpr(stepStored(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(2))) => Core.Exprs.natLit(1)
 
 verify unfoldWhnf
     resultExpr(unfoldWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
