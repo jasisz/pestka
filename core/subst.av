@@ -373,7 +373,9 @@ fn instLevelParams(e: Expr, ps: List<Name>, us: List<Level>) -> Expr
     ? "Replaces universe parameters ps by us everywhere in e. Each parameter put in for itself, as a constant used at its own parameters is, changes nothing, and e is returned as it is."
     match sameParams(ps, us)
         true -> e
-        false -> lgo(e, ps, us, {}).e
+        false -> match Core.Exprs.treeSize(e) < 32
+            true -> done(lsmall(e, ps, us))
+            false -> lgo(e, ps, us, {}).e
 
 verify instLevelParams
     instLevelParams(Core.Exprs.sort(Level.Param(Core.Names.anon())), [Core.Names.anon()], [Level.Zero]) => Core.Exprs.sort(Level.Zero)
@@ -404,11 +406,28 @@ fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Int, Tuple<Expr, Expr
             Expr.Sort(l) -> SR(e = Core.Exprs.sort(Core.Univ.instantiate(l, ps, us)), memo = memo)
             Expr.Const(_, n, ls) -> SR(e = Core.Exprs.cnst(n, levelsOf(ls, ps, us, [])), memo = memo)
             _ -> match Core.Exprs.treeSize(e) < 32
-                true -> levelNode(e, ps, us, memo)
+                true -> SR(e = lsmall(e, ps, us), memo = memo)
                 false -> lmemoed(e, ps, us, memo, Core.Exprs.hashOf(e))
 
 verify lgo
     lgo(Core.Exprs.bvar(0), [], [], {}).e => Core.Exprs.bvar(0)
+
+fn lsmall(e: Expr, ps: List<Name>, us: List<Level>) -> Expr
+    ? "instLevelParams on a term of fewer than 32 tree nodes: plain recursion that skips terms without parameters, with no memo to carry."
+    match Core.Exprs.hasParam(e)
+        false -> e
+        true -> match e
+            Expr.Sort(l) -> Core.Exprs.sort(Core.Univ.instantiate(l, ps, us))
+            Expr.Const(_, n, ls) -> Core.Exprs.cnst(n, levelsOf(ls, ps, us, []))
+            Expr.App(_, f, a) -> Core.Exprs.app(lsmall(f, ps, us), lsmall(a, ps, us))
+            Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), lsmall(t, ps, us), lsmall(b, ps, us), Binder.Default)
+            Expr.Pi(_, t, b) -> Core.Exprs.pi(Core.Names.anon(), lsmall(t, ps, us), lsmall(b, ps, us), Binder.Default)
+            Expr.Let(_, t, v, b) -> Core.Exprs.letE(Core.Names.anon(), lsmall(t, ps, us), lsmall(v, ps, us), lsmall(b, ps, us))
+            Expr.Proj(_, s, i, x) -> Core.Exprs.proj(s, i, lsmall(x, ps, us))
+            _ -> e
+
+verify lsmall
+    lsmall(Core.Exprs.app(Core.Exprs.sort(Level.Param(Core.Names.anon())), Core.Exprs.bvar(0)), [Core.Names.anon()], [Level.Zero]) => Core.Exprs.app(Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0))
 
 fn lmemoed(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Int, Tuple<Expr, Expr>>, key: Int) -> SR
     ? "A node already rebuilt is reused."
