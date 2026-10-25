@@ -7,8 +7,8 @@ module Exprs
         "a tree, capped, so that traversals know when memoizing pays), packed"
         "into one word below 2^62 so that every node stays small, computed once"
         "by the constructors here and never by callers."
-    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, appHash3, looseRange, within, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
-    exposes opaque [Word, Tag, Index]
+    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, appHash3, key, keyAt, hashKey, looseRange, within, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
+    exposes opaque [Word, Tag, Index, Key]
     depends [Core.Hash, Core.Names, Core.Levels]
     effects []
 
@@ -104,6 +104,22 @@ decision ReadersByWord
     rejected = ["LeafFirst"]
     impacts = [wordOf, looseRange, varsOf, hasFVar, hasParam]
 
+decision KeysAsMachineWords
+    date = "2026-10-25"
+    reason =
+        "The memos of substitution and of the machine, and every cache of the"
+        "checker, were maps keyed by Int, whose keys the Rust backend hashes"
+        "and compares as Ints that might be large. Their keys are now a Key, a"
+        "refinement over Int below 2^62 held as a machine word, made from a"
+        "term's hash (and depth) here, so the maps are keyed by machine words."
+        "Aver measured a get and a set on such a map at 198 instructions"
+        "against 276. One worker on Aver d2a1db25: etale 35.4 G to 35.0 G"
+        "instructions, Init 94.9 G to 93.7 G, std 159.8 G to 157.8 G,"
+        "con-leche 156.0 G to 153.5 G."
+    chosen = "KeysAsMachineWords"
+    rejected = ["IntKeys"]
+    impacts = [Key, keyOf, key, keyAt, hashKey]
+
 decision WordsAsMachineWords
     date = "2026-10-25"
     reason =
@@ -145,6 +161,9 @@ record Tag
     value: Int
 
 record Index
+    value: Int
+
+record Key
     value: Int
 
 type Expr
@@ -197,6 +216,40 @@ fn indexOf(n: Int) -> Result<Index, String>
     match Bool.and(n >= 0, n < 1099511627776)
         true -> Result.Ok(Index(value = n))
         false -> Result.Err("index out of range")
+
+fn keyOf(n: Int) -> Result<Key, String>
+    ? "A key of a memo or a cache as a machine word: below 2^62, which compiled Aver holds as a machine word, so that the map's keys are machine words too (KeysAsMachineWords)."
+    match Bool.and(n >= 0, n <= 4611686018427387903)
+        true -> Result.Ok(Key(value = n))
+        false -> Result.Err("key out of range")
+
+verify keyOf
+    keyOf(-1) => Result.Err("key out of range")
+    keyOf(4611686018427387904) => Result.Err("key out of range")
+
+fn key(n: Int) -> Key
+    ? "A key from an Int in range; anything else is key 0, which only makes a lookup compare with another node and miss."
+    match keyOf(n)
+        Result.Ok(k) -> k
+        Result.Err(_) -> Key(value = 0)
+
+verify key
+    key(5) => Key(value = 5)
+    key(-5) => Key(value = 0)
+
+fn keyAt(e: Expr, depth: Int) -> Key
+    ? "The key of e under depth binders: the depth above the hash."
+    key(depth * 2147483648 + hashOf(e))
+
+verify keyAt
+    keyAt(bvar(0), 1) == keyAt(bvar(0), 0) => false
+
+fn hashKey(e: Expr) -> Key
+    ? "The key of e: its hash."
+    key(hashOf(e))
+
+verify hashKey
+    hashKey(bvar(0)) == keyAt(bvar(0), 0) => true
 
 verify indexOf
     indexOf(-1) => Result.Err("index out of range")

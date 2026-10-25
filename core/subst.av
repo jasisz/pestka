@@ -102,7 +102,7 @@ verify untouched
 
 record SR
     e: Expr
-    memo: Map<Int, Tuple<Expr, Expr>>
+    memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>
 
 fn apply(op: Op, e: Expr, offset: Int) -> Expr
     ? "Applies op to e under offset binders; a term too small for the memo goes without one. small is called as the argument of done, not in tail position, so that it does not join a cycle of tail calls through lift."
@@ -120,7 +120,7 @@ verify done
 verify apply
     apply(Op.Lift(0, 1), Core.Exprs.bvar(0), 1) => Core.Exprs.bvar(0)
 
-fn go(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
+fn go(op: Op, e: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Skips what op cannot touch; otherwise visits."
     match untouched(op, e, offset)
         true -> SR(e = e, memo = memo)
@@ -129,14 +129,14 @@ fn go(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
 verify go
     go(Op.Lift(0, 1), Core.Exprs.bvar(0), 0, {}).e => Core.Exprs.bvar(1)
 
-fn visit(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
+fn visit(op: Op, e: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Variables are rewritten directly; compound nodes go through the memo."
     match e
         Expr.BVar(i) -> SR(e = bvarCase(op, i, offset), memo = memo)
         Expr.FVar(id) -> SR(e = fvarCase(op, id, offset), memo = memo)
         _ -> match Core.Exprs.isSmall(e)
             true -> SR(e = small(op, e, offset), memo = memo)
-            false -> memoed(op, e, offset, memo, offset * 2147483648 + Core.Exprs.hashOf(e))
+            false -> memoed(op, e, offset, memo, Core.Exprs.keyAt(e, offset))
 
 verify visit
     visit(Op.Abstract([3], 1, 3), Core.Exprs.fvar(3), 0, {}).e => Core.Exprs.bvar(0)
@@ -159,16 +159,16 @@ verify small
     small(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.sort(Level.Zero)), 0) => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.sort(Level.Zero))
     small(Op.Inst([Core.Exprs.fvar(5)], 1), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Binder.Default), 0) => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.fvar(5), Core.Exprs.fvar(5), Binder.Default)
 
-fn memoed(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>, key: Int) -> SR
+fn memoed(op: Op, e: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, key: Core.Exprs.Key) -> SR
     ? "A node already rebuilt at this depth is reused."
     match hit(Map.get(memo, key), e)
         Option.Some(r) -> SR(e = r, memo = memo)
         Option.None -> remember(build(op, e, offset, memo), e, key)
 
 verify memoed
-    memoed(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), 0, {}, 7).e => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(1))
+    memoed(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), 0, {}, Core.Exprs.hashKey(Core.Exprs.bvar(7))).e => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(1))
 
-fn remember(r: SR, e: Expr, key: Int) -> SR
+fn remember(r: SR, e: Expr, key: Core.Exprs.Key) -> SR
     ? "Records a rebuilt node; an older entry with the same key is replaced, which only costs a later recomputation."
     SR(e = r.e, memo = Map.set(r.memo, key, (e, r.e)))
 
@@ -185,9 +185,9 @@ verify hit
     hit(Option.Some((Core.Exprs.bvar(0), Core.Exprs.bvar(1))), Core.Exprs.bvar(2)) => Option.None
 
 verify remember
-    Map.len(remember(SR(e = Core.Exprs.bvar(1), memo = {}), Core.Exprs.bvar(0), 3).memo) => 1
+    Map.len(remember(SR(e = Core.Exprs.bvar(1), memo = {}), Core.Exprs.bvar(0), Core.Exprs.hashKey(Core.Exprs.bvar(3))).memo) => 1
 
-fn build(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
+fn build(op: Op, e: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Rebuilds one node, going one binder deeper in binding positions."
     match e
         Expr.App(_, f, a) -> buildApp(op, f, a, offset, memo)
@@ -200,7 +200,7 @@ fn build(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
 verify build
     build(Op.Lift(0, 1), Core.Exprs.sort(Level.Zero), 0, {}).e => Core.Exprs.sort(Level.Zero)
 
-fn buildApp(op: Op, f: Expr, a: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
+fn buildApp(op: Op, f: Expr, a: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Function, then argument."
     rf = go(op, f, offset, memo)
     ra = go(op, a, offset, rf.memo)
@@ -209,7 +209,7 @@ fn buildApp(op: Op, f: Expr, a: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Ex
 verify buildApp
     buildApp(Op.Lift(0, 2), Core.Exprs.bvar(0), Core.Exprs.bvar(1), 0, {}).e => Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(3))
 
-fn buildBinder(op: Op, n: Name, t: Expr, b: Expr, bi: Binder, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>, isLam: Bool) -> SR
+fn buildBinder(op: Op, n: Name, t: Expr, b: Expr, bi: Binder, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, isLam: Bool) -> SR
     ? "Domain at this depth, body one deeper."
     rt = go(op, t, offset, memo)
     rb = go(op, b, offset + 1, rt.memo)
@@ -220,7 +220,7 @@ fn buildBinder(op: Op, n: Name, t: Expr, b: Expr, bi: Binder, offset: Int, memo:
 verify buildBinder
     buildBinder(Op.Lift(0, 1), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default, 0, {}, true).e => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.bvar(0), Binder.Default)
 
-fn buildLet(op: Op, n: Name, t: Expr, v: Expr, b: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
+fn buildLet(op: Op, n: Name, t: Expr, v: Expr, b: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Type and value at this depth, body one deeper."
     rt = go(op, t, offset, memo)
     rv = go(op, v, offset, rt.memo)
@@ -230,7 +230,7 @@ fn buildLet(op: Op, n: Name, t: Expr, v: Expr, b: Expr, offset: Int, memo: Map<I
 verify buildLet
     buildLet(Op.Lift(0, 1), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(1), 0, {}).e => Core.Exprs.letE(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.bvar(1), Core.Exprs.bvar(2))
 
-fn buildProj(op: Op, s: Name, i: Int, x: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
+fn buildProj(op: Op, s: Name, i: Int, x: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "The projected structure."
     r = go(op, x, offset, memo)
     SR(e = Core.Exprs.proj(s, i, r.e), memo = r.memo)
@@ -398,7 +398,7 @@ verify sameParams
     sameParams([], []) => true
     sameParams([Core.Names.anon()], []) => false
 
-fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
+fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Skips terms without parameters; compound nodes go through the memo."
     match Core.Exprs.hasParam(e)
         false -> SR(e = e, memo = memo)
@@ -407,7 +407,7 @@ fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Int, Tuple<Expr, Expr
             Expr.Const(_, n, ls) -> SR(e = Core.Exprs.cnst(n, levelsOf(ls, ps, us, [])), memo = memo)
             _ -> match Core.Exprs.isSmall(e)
                 true -> SR(e = lsmall(e, ps, us), memo = memo)
-                false -> lmemoed(e, ps, us, memo, Core.Exprs.hashOf(e))
+                false -> lmemoed(e, ps, us, memo, Core.Exprs.hashKey(e))
 
 verify lgo
     lgo(Core.Exprs.bvar(0), [], [], {}).e => Core.Exprs.bvar(0)
@@ -429,16 +429,16 @@ fn lsmall(e: Expr, ps: List<Name>, us: List<Level>) -> Expr
 verify lsmall
     lsmall(Core.Exprs.app(Core.Exprs.sort(Level.Param(Core.Names.anon())), Core.Exprs.bvar(0)), [Core.Names.anon()], [Level.Zero]) => Core.Exprs.app(Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0))
 
-fn lmemoed(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Int, Tuple<Expr, Expr>>, key: Int) -> SR
+fn lmemoed(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, key: Core.Exprs.Key) -> SR
     ? "A node already rebuilt is reused."
     match hit(Map.get(memo, key), e)
         Option.Some(r) -> SR(e = r, memo = memo)
         Option.None -> remember(levelNode(e, ps, us, memo), e, key)
 
 verify lmemoed
-    lmemoed(Core.Exprs.bvar(0), [], [], {}, 1).e => Core.Exprs.bvar(0)
+    lmemoed(Core.Exprs.bvar(0), [], [], {}, Core.Exprs.hashKey(Core.Exprs.bvar(1))).e => Core.Exprs.bvar(0)
 
-fn levelNode(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
+fn levelNode(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "One compound node of instLevelParams."
     match e
         Expr.App(_, f, a) -> lapp(lgo(f, ps, us, memo), a, ps, us)

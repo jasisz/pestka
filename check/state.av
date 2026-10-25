@@ -185,22 +185,22 @@ record St
     lctx: Locals
     next: Int
     topLevel: Int
-    vars: Map<Int, Bucket>
+    vars: Map<Core.Exprs.Key, Bucket>
     params: List<Name>
     checkParams: Bool
     safety: Safety
     eager: Bool
-    inferCache: Map<Int, Bucket>
-    checkCache: Map<Int, Bucket>
-    whnfCache: Map<Int, Bucket>
-    coreCache: Map<Int, Bucket>
-    stepCache: Map<Int, Bucket>
-    eqOk: Map<Int, Bucket>
-    eqFail: Map<Int, Bucket>
-    eqNo: Map<Int, Bucket>
-    unfoldCache: Map<Int, Bucket>
-    levelTypes: Map<Int, Bucket>
-    closed: Map<Int, Bucket>
+    inferCache: Map<Core.Exprs.Key, Bucket>
+    checkCache: Map<Core.Exprs.Key, Bucket>
+    whnfCache: Map<Core.Exprs.Key, Bucket>
+    coreCache: Map<Core.Exprs.Key, Bucket>
+    stepCache: Map<Core.Exprs.Key, Bucket>
+    eqOk: Map<Core.Exprs.Key, Bucket>
+    eqFail: Map<Core.Exprs.Key, Bucket>
+    eqNo: Map<Core.Exprs.Key, Bucket>
+    unfoldCache: Map<Core.Exprs.Key, Bucket>
+    levelTypes: Map<Core.Exprs.Key, Bucket>
+    closed: Map<Core.Exprs.Key, Bucket>
     open: Int
     opened: Expr
     keep: Int
@@ -447,7 +447,7 @@ verify namesCounted
 fn namesKeyed(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, code: Int) -> RE
     ? "The variable kept for these parts, or a new one kept for them. The parts are compared where they are; the term that keeps them is built only for a new variable."
     h = varHash(code, ty, value)
-    match varFind(Core.Cache.get(st.vars, h), code, ty, value)
+    match varFind(Core.Cache.get(st.vars, Core.Exprs.key(h)), code, ty, value)
         Option.Some(x) -> RE(e = x, st = st)
         Option.None -> namesNew(st, n, ty, value, bi, code, h)
 
@@ -458,7 +458,7 @@ fn namesNew(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, code: In
     ? "A new variable, kept under its parts."
     serial = st.next
     x = Core.Exprs.fvar(numbered(serial))
-    RE(e = x, st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), vars = Core.Cache.add(st.vars, h, (varKey(code, ty, value), x)), next = serial + 1))
+    RE(e = x, st = St.update(st, lctx = localPut(st.lctx, serial, serial, Local(name = n, ty = ty, value = value, binder = bi)), vars = Core.Cache.add(st.vars, Core.Exprs.key(h), (varKey(code, ty, value), x)), next = serial + 1))
 
 verify namesNew
     namesNew(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default, 0, 0).st.next => 1
@@ -700,29 +700,29 @@ fn wrapLocal(l: Local, ty: Expr, before: List<Int>, r: Expr, isLam: Bool, dropDe
 verify wrapLocal
     wrapLocal(Local(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), value = Option.Some(Core.Exprs.sort(Level.Zero)), binder = Binder.Default), Core.Exprs.sort(Level.Zero), [], Core.Exprs.sort(Level.Zero), false, true) => Core.Exprs.sort(Level.Zero)
 
-fn cacheGet(cache: Map<Int, Bucket>, key: Expr) -> Option<Expr>
+fn cacheGet(cache: Map<Core.Exprs.Key, Bucket>, key: Expr) -> Option<Expr>
     ? "A cached result for key, found by hash and confirmed by equality."
-    Core.Cache.find(cache, Core.Exprs.hashOf(key), key)
+    Core.Cache.find(cache, Core.Exprs.hashKey(key), key)
 
 verify cacheGet
     cacheGet(Core.Cache.empty(), Core.Exprs.bvar(0)) => Option.None
     cacheGet(cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
 
-fn cachePut(cache: Map<Int, Bucket>, key: Expr, v: Expr) -> Map<Int, Bucket>
+fn cachePut(cache: Map<Core.Exprs.Key, Bucket>, key: Expr, v: Expr) -> Map<Core.Exprs.Key, Bucket>
     ? "Stores a result under the key's hash."
-    Core.Cache.add(cache, Core.Exprs.hashOf(key), (key, v))
+    Core.Cache.add(cache, Core.Exprs.hashKey(key), (key, v))
 
 verify cachePut
     Core.Cache.size(cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => 1
 
-fn pairKey(a: Expr, b: Expr) -> Int
+fn pairKey(a: Expr, b: Expr) -> Core.Exprs.Key
     ? "One key for an unordered pair."
-    Core.Exprs.pairHash(a, b)
+    Core.Exprs.key(Core.Exprs.pairHash(a, b))
 
 verify pairKey
     pairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) == pairKey(Core.Exprs.bvar(1), Core.Exprs.bvar(0)) => true
 
-fn pairGet(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Bool
+fn pairGet(cache: Map<Core.Exprs.Key, Bucket>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded."
     hasPair(Core.Cache.get(cache, pairKey(a, b)), a, b)
 
@@ -758,21 +758,21 @@ fn alike(x: Expr, a: Expr) -> Bool
 verify alike
     alike(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.lam(Core.Names.str(Core.Names.anon(), "x"), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)) => true
 
-fn pairPut(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Map<Int, Bucket>
+fn pairPut(cache: Map<Core.Exprs.Key, Bucket>, a: Expr, b: Expr) -> Map<Core.Exprs.Key, Bucket>
     ? "Records the pair."
     Core.Cache.add(cache, pairKey(a, b), (a, b))
 
 verify pairPut
     Core.Cache.size(pairPut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => 1
 
-fn closedPairKey(a: Expr, b: Expr) -> Int
+fn closedPairKey(a: Expr, b: Expr) -> Core.Exprs.Key
     ? "The key of a pair in the cache kept across declarations: above every term hash, so that it never meets an entry for a type there."
-    pairKey(a, b) + 1099511627776
+    Core.Exprs.key(Core.Exprs.pairHash(a, b) + 1099511627776)
 
 verify closedPairKey
-    closedPairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) > 1099511627775 => true
+    closedPairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) == pairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) => false
 
-fn closedPairGet(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Bool
+fn closedPairGet(cache: Map<Core.Exprs.Key, Bucket>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded in the cache kept across declarations."
     hasPair(Core.Cache.get(cache, closedPairKey(a, b)), a, b)
 
@@ -780,21 +780,21 @@ verify closedPairGet
     closedPairGet(closedPairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
     closedPairGet(pairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
 
-fn closedPairPut(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Map<Int, Bucket>
+fn closedPairPut(cache: Map<Core.Exprs.Key, Bucket>, a: Expr, b: Expr) -> Map<Core.Exprs.Key, Bucket>
     ? "Records the pair in the cache kept across declarations."
     Core.Cache.add(cache, closedPairKey(a, b), (a, b))
 
 verify closedPairPut
     Core.Cache.size(closedPairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
 
-fn closedFailKey(a: Expr, b: Expr) -> Int
+fn closedFailKey(a: Expr, b: Expr) -> Core.Exprs.Key
     ? "The key of a pair known to differ, in the cache kept across declarations: above the keys of equal pairs."
-    pairKey(a, b) + 2199023255552
+    Core.Exprs.key(Core.Exprs.pairHash(a, b) + 2199023255552)
 
 verify closedFailKey
-    closedFailKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) > 2199023255551 => true
+    closedFailKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) == closedPairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) => false
 
-fn closedFailGet(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Bool
+fn closedFailGet(cache: Map<Core.Exprs.Key, Bucket>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded as different in the cache kept across declarations."
     hasPair(Core.Cache.get(cache, closedFailKey(a, b)), a, b)
 
@@ -802,7 +802,7 @@ verify closedFailGet
     closedFailGet(closedFailPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
     closedFailGet(closedPairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
 
-fn closedFailPut(cache: Map<Int, Bucket>, a: Expr, b: Expr) -> Map<Int, Bucket>
+fn closedFailPut(cache: Map<Core.Exprs.Key, Bucket>, a: Expr, b: Expr) -> Map<Core.Exprs.Key, Bucket>
     ? "Records the pair as different in the cache kept across declarations."
     Core.Cache.add(cache, closedFailKey(a, b), (a, b))
 

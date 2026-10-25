@@ -17,7 +17,7 @@ module Decl
 
 record Run
     env: Env
-    closed: Map<Int, Bucket>
+    closed: Map<Core.Exprs.Key, Bucket>
     checked: Int
     trusted: Int
     skipped: Int
@@ -52,20 +52,20 @@ record Kept
     next: Facts
 
 record OldFacts
-    closed: Map<Int, Bucket>
-    unfolds: Map<Int, Bucket>
-    types: Map<Int, Bucket>
-    vars: Map<Int, Bucket>
+    closed: Map<Core.Exprs.Key, Bucket>
+    unfolds: Map<Core.Exprs.Key, Bucket>
+    types: Map<Core.Exprs.Key, Bucket>
+    vars: Map<Core.Exprs.Key, Bucket>
     lctx: Locals
     next: Int
     topLevel: Int
-    inferCache: Map<Int, Bucket>
-    checkCache: Map<Int, Bucket>
-    whnfCache: Map<Int, Bucket>
-    coreCache: Map<Int, Bucket>
-    eqOk: Map<Int, Bucket>
-    eqFail: Map<Int, Bucket>
-    eqNo: Map<Int, Bucket>
+    inferCache: Map<Core.Exprs.Key, Bucket>
+    checkCache: Map<Core.Exprs.Key, Bucket>
+    whnfCache: Map<Core.Exprs.Key, Bucket>
+    coreCache: Map<Core.Exprs.Key, Bucket>
+    eqOk: Map<Core.Exprs.Key, Bucket>
+    eqFail: Map<Core.Exprs.Key, Bucket>
+    eqNo: Map<Core.Exprs.Key, Bucket>
 
 record Checked
     failure: Option<Fail>
@@ -428,7 +428,7 @@ fn carried(st: St) -> OldFacts
     full = Core.Cache.size(st.vars) > st.keep
     OldFacts(closed = st.closed, unfolds = bounded(st.unfoldCache, Int.div(st.keep, 4)), types = bounded(st.levelTypes, st.keep), vars = bounded(st.vars, st.keep), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = openKept(st.inferCache, full, st.keep), checkCache = openKept(st.checkCache, full, st.keep), whnfCache = openKept(st.whnfCache, full, st.keep), coreCache = openKept(st.coreCache, full, st.keep), eqOk = openKept(st.eqOk, full, st.keep), eqFail = openKept(st.eqFail, full, st.keep), eqNo = openKept(st.eqNo, full, st.keep))
 
-fn openKept(m: Map<Int, Bucket>, full: Bool, limit: Int) -> Map<Int, Bucket>
+fn openKept(m: Map<Core.Exprs.Key, Bucket>, full: Bool, limit: Int) -> Map<Core.Exprs.Key, Bucket>
     ? "A map that may hold free variables: emptied with the variables, else past its own limit."
     match full
         true -> Core.Cache.empty()
@@ -449,7 +449,7 @@ verify localsKept
 verify carried
     Core.Cache.size(carried(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).unfolds) => 0
 
-fn bounded(m: Map<Int, Bucket>, limit: Int) -> Map<Int, Bucket>
+fn bounded(m: Map<Core.Exprs.Key, Bucket>, limit: Int) -> Map<Core.Exprs.Key, Bucket>
     ? "A map carried across declarations, emptied once it passes limit hashes: kept for the whole run, values instantiated at levels once took mathlib past 14 GB and constant types took it there again on one worker, while most entries are asked for again within a few declarations."
     match Core.Cache.size(m) > limit
         true -> Core.Cache.empty()

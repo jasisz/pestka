@@ -46,37 +46,37 @@ type Bucket
     OneEntry(Tuple<Expr, Expr>)
     Entries(List<Tuple<Expr, Expr>>)
 
-fn empty() -> Map<Int, Bucket>
+fn empty() -> Map<Core.Exprs.Key, Bucket>
     ? "No entries."
     {}
 
 verify empty
     size(empty()) => 0
 
-fn size(m: Map<Int, Bucket>) -> Int
+fn size(m: Map<Core.Exprs.Key, Bucket>) -> Int
     ? "Number of hashes with an entry."
     Map.len(m)
 
 verify size
-    size(add(add(empty(), 1, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 17, (Core.Exprs.bvar(2), Core.Exprs.bvar(3)))) => 2
+    size(add(add(empty(), Core.Exprs.key(1), (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), Core.Exprs.key(17), (Core.Exprs.bvar(2), Core.Exprs.bvar(3)))) => 2
 
-fn get(m: Map<Int, Bucket>, key: Int) -> Bucket
+fn get(m: Map<Core.Exprs.Key, Bucket>, key: Core.Exprs.Key) -> Bucket
     ? "The bucket stored under key, or an empty one."
     match Map.get(m, key)
         Option.Some(b) -> b
         Option.None -> Bucket.NoEntry
 
 verify get
-    get(empty(), 3) => Bucket.NoEntry
-    get(add(empty(), 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 3) => Bucket.OneEntry((Core.Exprs.bvar(0), Core.Exprs.bvar(1)))
+    get(empty(), Core.Exprs.key(3)) => Bucket.NoEntry
+    get(add(empty(), Core.Exprs.key(3), (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), Core.Exprs.key(3)) => Bucket.OneEntry((Core.Exprs.bvar(0), Core.Exprs.bvar(1)))
 
-fn add(m: Map<Int, Bucket>, key: Int, entry: Tuple<Expr, Expr>) -> Map<Int, Bucket>
+fn add(m: Map<Core.Exprs.Key, Bucket>, key: Core.Exprs.Key, entry: Tuple<Expr, Expr>) -> Map<Core.Exprs.Key, Bucket>
     ? "Prepends entry to key's bucket. The map is read first and then named once, so that the set changes it in place."
     b = get(m, key)
     Map.set(m, key, joined(entry, b))
 
 verify add
-    get(add(add(empty(), 3, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 3, (Core.Exprs.bvar(2), Core.Exprs.bvar(3))), 3) => Bucket.Entries([(Core.Exprs.bvar(2), Core.Exprs.bvar(3)), (Core.Exprs.bvar(0), Core.Exprs.bvar(1))])
+    get(add(add(empty(), Core.Exprs.key(3), (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), Core.Exprs.key(3), (Core.Exprs.bvar(2), Core.Exprs.bvar(3))), Core.Exprs.key(3)) => Bucket.Entries([(Core.Exprs.bvar(2), Core.Exprs.bvar(3)), (Core.Exprs.bvar(0), Core.Exprs.bvar(1))])
 
 fn joined(entry: Tuple<Expr, Expr>, b: Bucket) -> Bucket
     ? "A bucket with entry in front."
@@ -88,13 +88,13 @@ fn joined(entry: Tuple<Expr, Expr>, b: Bucket) -> Bucket
 verify joined
     joined((Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Bucket.NoEntry) => Bucket.OneEntry((Core.Exprs.bvar(0), Core.Exprs.bvar(1)))
 
-fn find(m: Map<Int, Bucket>, key: Int, e: Expr) -> Option<Expr>
+fn find(m: Map<Core.Exprs.Key, Bucket>, key: Core.Exprs.Key, e: Expr) -> Option<Expr>
     ? "The value paired with an expression equal to e in key's bucket."
     findIn(get(m, key), e)
 
 verify find
-    find(add(empty(), 4, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 4, Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
-    find(add(empty(), 4, (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), 4, Core.Exprs.bvar(2)) => Option.None
+    find(add(empty(), Core.Exprs.key(4), (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), Core.Exprs.key(4), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
+    find(add(empty(), Core.Exprs.key(4), (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), Core.Exprs.key(4), Core.Exprs.bvar(2)) => Option.None
 
 fn findIn(bucket: Bucket, e: Expr) -> Option<Expr>
     ? "The value paired with an expression equal to e in a bucket."
