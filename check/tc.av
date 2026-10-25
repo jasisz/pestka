@@ -2148,9 +2148,150 @@ fn lunfoldAt(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo
     ? "A constant at levels: a definition or theorem with a value has the lambdas its arguments meet taken off first."
     match c
         Option.Some(k) -> match Check.State.valueOf(k)
-            Option.Some(v) -> lunfoldPeeled(st, f, Check.State.headOf(k), v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms, cheapRec, cheapProj)
+            Option.Some(v) -> lunfoldCases(st, f, Check.State.headOf(k), v, ls, stack, ms, cheapRec, cheapProj)
             Option.None -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
         Option.None -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+
+decision CasesOnDirect
+    date = "2026-10-25"
+    reason =
+        "A casesOn, unfolded, is its recursor applied to its arguments, each"
+        "minor premise wrapped in lambdas that take the constructor's fields"
+        "and the induction hypotheses and pass the fields on: the machine"
+        "unfolded it, pushed every argument, fired the recursor's rule, ran"
+        "its right-hand side and the wrapper, a few dozen steps for one"
+        "choice. A computation by decide meets one per number it takes"
+        "apart. When a definition named casesOn has exactly that value (its"
+        "recursor at its own levels, the arguments in that order, each minor"
+        "premise a wrapper of that shape), the major premise is brought to"
+        "its constructor as the recursor would and the minor premise of that"
+        "constructor gets the fields and the remaining arguments: what"
+        "unfolding, the rule and beta give. Any other value is unfolded as"
+        "before. One worker on Aver d2a1db25: perf/magma-list-deep-n36"
+        "214.2 G to 203.9 G instructions, magma-list-pair-n21 60.2 G to"
+        "56.5 G, reachability 70.1 G to 65.8 G, all 30 perf tests 360.3 G to"
+        "343.0 G; etale and Init as they were."
+    chosen = "CasesOnDirect"
+    rejected = ["CasesOnUnfolded"]
+    impacts = [lunfoldCases, casesOf, lcases]
+
+record CasesOn
+    rv: Rec
+    total: Int
+    majorAt: Int
+    minorsAt: Int
+
+fn lunfoldCases(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A casesOn whose value is its recursor's (casesOf) and that has all its arguments goes to the minor premise of the major premise's constructor (CasesOnDirect); anything else unfolds."
+    match casesOf(st, h, v)
+        Option.Some(cs) -> match Bool.and(List.len(stack) >= cs.total, List.len(h.params) == List.len(ls))
+            true -> lcases(st, f, h, v, ls, cs, stack, matClo(nthClo(stack, cs.majorAt), ms), cheapRec, cheapProj)
+            false -> lunfoldPeeled(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms, cheapRec, cheapProj)
+        Option.None -> lunfoldPeeled(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms, cheapRec, cheapProj)
+
+verify lunfoldCases
+    resultExpr(lunfoldCases(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero])
+
+fn lcases(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, cs: CasesOn, stack: List<Clo>, major: MX, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The major premise brought to its constructor as the recursor brings it; with no rule for its head, the casesOn unfolds as before."
+    m = majorToCtor(st, cs.rv, major.e, cheapRec, cheapProj)?
+    match ruleFor(cs.rv.rules, Core.Apps.fnOf(m.e))
+        Option.Some(rule) -> lcasesFire(m.st, f, h, v, ls, cs, rule, Core.Apps.argsOf(m.e), stack, major.ms, cheapRec, cheapProj)
+        Option.None -> lunfoldPeeled(m.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms, cheapRec, cheapProj)
+
+verify lcases
+    resultExpr(lcases(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false), total = 1, majorAt = 0, minorsAt = 0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])], MX(e = Core.Exprs.natLit(0), ms = MS(next = 0, forced = {})), false, false)) => Core.Exprs.natLit(7)
+
+fn lcasesFire(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, cs: CasesOn, rule: RecRule, majorArgs: List<Expr>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The constructor's minor premise takes its fields and the arguments after the casesOn's own."
+    match rule.nfields > List.len(majorArgs)
+        true -> lunfoldPeeled(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms, cheapRec, cheapProj)
+        false -> lclo(st, nthClo(stack, cs.minorsAt + ruleNumber(cs.rv.rules, rule.ctor, 0)), List.concat(closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), List.drop(stack, cs.total)), ms, true, cheapRec, cheapProj)
+
+verify lcasesFire
+    resultExpr(lcasesFire(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [], k = false, isUnsafe = false), total = 1, majorAt = 0, minorsAt = 0), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), [], [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero])
+
+fn casesOf(st: St, h: Head, v: Expr) -> Option<CasesOn>
+    ? "The casesOn shape of a definition named casesOn: its value is lambdas over its recursor applied, at its own levels, to the parameters, the motive, the minor premises each wrapped (minorFits), the indices and the major premise, in that order. The name only spares other definitions the look."
+    match h.name
+        Name.Str(_, "casesOn", _) -> casesBody(st, h, lamsUpTo(v, 1099511627776, 0), v)
+        _ -> Option.None
+
+verify casesOf
+    casesOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Head(name = Core.Names.str(Core.Names.anon(), "casesOn"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1)) => Option.None
+
+fn casesBody(st: St, h: Head, n: Int, v: Expr) -> Option<CasesOn>
+    ? "The recursor at the head of the body under the value's n lambdas."
+    body = peelLams(v, n)
+    match Core.Apps.fnOf(body)
+        Expr.Const(_, r, rls) -> match Check.State.lookup(st, r)
+            Option.Some(Const.CRec(rv)) -> casesFits(rv, rls == Check.State.paramLevels(h.params), n, Core.Apps.argsOf(body))
+            _ -> Option.None
+        _ -> Option.None
+
+verify casesBody
+    casesBody(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), 0, Core.Exprs.natLit(1)) => Option.None
+
+fn casesFits(rv: Rec, levelsOwn: Bool, n: Int, args: List<Expr>) -> Option<CasesOn>
+    ? "Whether the recursor's arguments are the casesOn's own: parameters and motive, minor premises, indices and major premise, the bound variables at their places; a casesOn of a recursor with several motives is left to unfold."
+    p = rv.numParams
+    i = rv.numIndices
+    nm = rv.numMinors
+    total = p + i + nm + 2
+    match Bool.and(Bool.and(levelsOwn, rv.numMotives == 1), Bool.and(n == total, List.len(args) == total))
+        false -> Option.None
+        true -> match Bool.and(Bool.and(varsFrom(args, n - 1, p + 1), varsFrom(List.drop(args, p + 1 + nm), n - p - 2, i + 1)), minorsFit(List.drop(args, p + 1), rv.rules, n - p - i - 3, nm, p, 0))
+            true -> Option.Some(CasesOn(rv = rv, total = total, majorAt = p + i + 1, minorsAt = p + i + 2))
+            false -> Option.None
+
+verify casesFits
+    casesFits(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false), true, 3, [Core.Exprs.bvar(2), Core.Exprs.bvar(0), Core.Exprs.bvar(1)]) == Option.None => false
+    casesFits(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false), true, 3, [Core.Exprs.bvar(2), Core.Exprs.bvar(1), Core.Exprs.bvar(0)]) => Option.None
+
+fn varsFrom(xs: List<Expr>, top: Int, count: Int) -> Bool
+    ? "Whether the first count terms are the bound variables top, top - 1, and so on down."
+    match count <= 0
+        true -> true
+        false -> match xs
+            [x, ..rest] -> Bool.and(x == Core.Exprs.bvar(top), varsFrom(rest, top - 1, count - 1))
+            [] -> false
+
+verify varsFrom
+    varsFrom([Core.Exprs.bvar(3), Core.Exprs.bvar(2)], 3, 2) => true
+    varsFrom([Core.Exprs.bvar(3), Core.Exprs.bvar(1)], 3, 2) => false
+
+fn minorsFit(ws: List<Expr>, rules: List<RecRule>, top: Int, count: Int, p: Int, j: Int) -> Bool
+    ? "Whether each of the count minor premises is the casesOn's own, the bound variable top, top - 1, and so on, wrapped for its rule (minorFits), and the j-th rule of the recursor picks the j-th minor premise (ruleSelects)."
+    match count <= 0
+        true -> true
+        false -> match ws
+            [w, ..wrest] -> match rules
+                [r, ..rrest] -> Bool.and(Bool.and(minorFits(w, r.nfields, top), ruleSelects(r, p, count + j, j)), minorsFit(wrest, rrest, top - 1, count - 1, p, j + 1))
+                [] -> false
+            [] -> false
+
+verify minorsFit
+    minorsFit([Core.Exprs.bvar(1)], [RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Binder.Default))], 1, 1, 0, 0) => true
+
+fn ruleSelects(r: RecRule, p: Int, nm: Int, j: Int) -> Bool
+    ? "Whether the rule's right-hand side, under its parameters, motive, nm minor premises and fields, is headed by its j-th minor premise."
+    l = p + 1 + nm + r.nfields
+    Core.Apps.fnOf(peelLams(r.rhs, l)) == Core.Exprs.bvar(l - 1 - (p + 1 + j))
+
+verify ruleSelects
+    ruleSelects(RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Binder.Default)), 0, 1, 0) => true
+    ruleSelects(RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(1), Binder.Default), Binder.Default)), 0, 1, 0) => false
+
+fn minorFits(w: Expr, nf: Int, minor: Int) -> Bool
+    ? "Whether w is lambdas over the constructor's nf fields and its induction hypotheses whose body is the bound variable minor applied to the fields, in order: the minor premise taking the fields and dropping the hypotheses."
+    k = lamsUpTo(w, 1099511627776, 0)
+    body = peelLams(w, k)
+    Bool.and(Bool.and(k >= nf, Core.Apps.fnOf(body) == Core.Exprs.bvar(minor + k)), Bool.and(Core.Apps.numArgs(body) == nf, varsFrom(Core.Apps.argsOf(body), k - 1, nf)))
+
+verify minorFits
+    minorFits(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(1)), Binder.Default), Binder.Default), 1, 0) => true
+    minorFits(Core.Exprs.bvar(1), 0, 1) => true
+    minorFits(Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(0)), 0, 1) => false
 
 verify lunfoldAt
     resultExpr(lunfoldAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), [Level.Zero], Option.None, [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero])
