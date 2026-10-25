@@ -2076,39 +2076,81 @@ decision RigidHeadsStuck
     impacts = [lconst]
 
 fn lconst(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "A constant head: a recursor's rule, a quotient rule, or, with delta, Nat arithmetic and unfolding. A constructor other than Nat.succ, an inductive type and an axiom have nothing to unfold and are stuck at once (RigidHeadsStuck)."
-    match c
-        Option.Some(Const.CRec(rv)) -> lrec(st, f, ls, rv, stack, ms, delta, cheapRec, cheapProj)
-        Option.Some(Const.CQuot) -> lquot(st, f, matStack(stack, ms, []), delta, cheapRec, cheapProj)
-        Option.Some(Const.CCtor) -> match Core.Apps.isConst(f, Check.Lits.natSucc)
-            true -> lnat(st, f, stack, ms, delta, cheapRec, cheapProj)
-            false -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
-        Option.Some(Const.CInduct) -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
-        Option.Some(Const.CAxiom) -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
-        _ -> lnat(st, f, stack, ms, delta, cheapRec, cheapProj)
+    ? "A constant head: a recursor's rule, a quotient rule, or, with delta, Nat arithmetic and unfolding. A constructor other than Nat.succ, an inductive type and an axiom have nothing to unfold and are stuck at once (RigidHeadsStuck). Where the machine goes is worked out by constGo, and it takes one step there (UnfoldPicked)."
+    g = constGo(st, f, ls, c, stack, ms, delta, cheapRec, cheapProj)?
+    match g.run
+        true -> lcore(g.st, g.t, g.env, g.rest, g.ms, delta, cheapRec, cheapProj)
+        false -> Result.Ok(RE(e = lstuck(MX(e = g.t, ms = g.ms), g.rest), st = g.st))
 
 verify lconst
     resultExpr(lconst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}, shapes = {}), true, false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
 
-fn lrec(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+fn constGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
+    ? "Where the machine goes from the constant f, found as c, with the waiting arguments."
+    match c
+        Option.Some(Const.CRec(rv)) -> recGo(st, f, ls, rv, stack, ms, cheapRec, cheapProj)
+        Option.Some(Const.CQuot) -> quotGo(st, f, matStack(stack, ms, []))
+        Option.Some(Const.CCtor) -> match Core.Apps.isConst(f, Check.Lits.natSucc)
+            true -> natGo(st, f, c, stack, ms, delta, cheapRec, cheapProj)
+            false -> Result.Ok(stuckGo(st, f, stack, ms))
+        Option.Some(Const.CInduct) -> Result.Ok(stuckGo(st, f, stack, ms))
+        Option.Some(Const.CAxiom) -> Result.Ok(stuckGo(st, f, stack, ms))
+        _ -> natGo(st, f, c, stack, ms, delta, cheapRec, cheapProj)
+
+verify constGo
+    Result.withDefault(constGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}, shapes = {}), true, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+
+fn recGo(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "A recursor reduces only with its major premise present; the major premise is built and brought to constructor form, the other arguments stay closures."
     majorIdx = rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices
     match majorIdx >= List.len(stack)
-        true -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
-        false -> lmajor(st, f, ls, rv, stack, majorIdx, matClo(nthClo(stack, majorIdx), ms), delta, cheapRec, cheapProj)
+        true -> Result.Ok(stuckGo(st, f, stack, ms))
+        false -> majorGo(st, f, ls, rv, stack, majorIdx, matClo(nthClo(stack, majorIdx), ms), cheapRec, cheapProj)
 
-verify lrec
-    resultExpr(lrec(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
+verify recGo
+    Result.withDefault(recGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], MS(next = 0, forced = {}, shapes = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
-fn lmajor(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, major: MX, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+fn majorGo(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, major: MX, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "The major premise in constructor form, as the reference reduces it, picks the rule; rhs params motives minors fields extra-arguments, as ruleRhs builds it, with the recursor's own arguments still closures. Without a rule the recursor is stuck as it was met. The rule is picked by plain functions, not by steps of the machine (PickedNotStepped)."
     p = recPick(st, f, ls, rv, stack, majorIdx, major.e, cheapRec, cheapProj)?
     match p.ok
-        true -> lcore(p.st, p.body, p.env, p.rest, major.ms, delta, cheapRec, cheapProj)
-        false -> Result.Ok(RE(e = lstuck(MX(e = f, ms = major.ms), stack), st = p.st))
+        true -> Result.Ok(Go(st = p.st, ms = major.ms, run = true, t = p.body, env = p.env, rest = p.rest))
+        false -> Result.Ok(stuckGo(p.st, f, stack, major.ms))
 
-verify lmajor
-    resultExpr(lmajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [Clo.Clo(-1, Core.Exprs.fvar(0), [])], 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}, shapes = {})), false, false, false)) => Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("r"), []), Core.Exprs.fvar(0))
+verify majorGo
+    Result.withDefault(majorGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}, shapes = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+
+fn quotGo(st: St, f: Expr, args: MXs) -> Result<Go, Fail>
+    ? "A quotient rule on built arguments; nothing else reduces a quotient constant."
+    q = quotReduce(st, Core.Apps.mkApps(f, args.es))?
+    match q.o
+        Option.Some(x) -> Result.Ok(Go(st = q.st, ms = args.ms, run = true, t = x, env = [], rest = []))
+        Option.None -> Result.Ok(Go(st = q.st, ms = args.ms, run = false, t = Core.Apps.mkApps(f, args.es), env = [], rest = []))
+
+verify quotGo
+    Result.withDefault(quotGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("q"), []), MXs(es = [], ms = MS(next = 0, forced = {}, shapes = {}))), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+
+fn natGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
+    ? "With delta: Nat.succ of one argument or a Nat operation of two is tried on literals first, as whnf does; otherwise the head, c as found, unfolds. Without delta the constant is stuck."
+    match delta
+        false -> Result.Ok(stuckGo(st, f, stack, ms))
+        true -> match natArity(f, List.len(stack))
+            0 -> unfoldGo(st, f, c, stack, ms, cheapRec, cheapProj)
+            k -> natTryGo(st, f, c, stack, matStack(List.take(stack, k), ms, []), cheapRec, cheapProj)
+
+verify natGo
+    Result.withDefault(natGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}, shapes = {}), false, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+
+fn natTryGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, args: MXs, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
+    ? "Nat arithmetic on the built arguments; a literal result is the answer, otherwise the head unfolds."
+    n = reduceNat(st, Core.Apps.mkApps(f, args.es))?
+    match n.o
+        Option.Some(v) -> Result.Ok(Go(st = n.st, ms = args.ms, run = false, t = v, env = [], rest = []))
+        Option.None -> unfoldGo(n.st, f, c, stack, args.ms, cheapRec, cheapProj)
+
+verify natTryGo
+    Result.withDefault(natTryGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Option.None, [], MXs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], ms = MS(next = 0, forced = {}, shapes = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(3)
+
 
 record RPick
     st: St
@@ -2133,7 +2175,7 @@ decision PickedNotStepped
         "87.0 G, std 148.8 G to 148.4 G, con-leche 141.8 G to 141.5 G."
     chosen = "PickedNotStepped"
     rejected = ["PickedByMachineSteps"]
-    impacts = [lmajor, recPick, sparseGo, sparsePick, casesOnGo, casesPick]
+    impacts = [majorGo, recPick, sparseGo, sparsePick, casesOnGo, casesPick]
 
 fn recPick(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RPick, Fail>
     ? "The right-hand side to run for the major premise e, with its environment and the arguments left; a literal of Nat goes to its rule at once (LiteralCases)."
@@ -2224,27 +2266,6 @@ verify litArgs
     litArgs(0) => []
     litArgs(3) => [Core.Exprs.natLit(2)]
 
-fn lquot(st: St, f: Expr, args: MXs, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "A quotient rule on built arguments; nothing else reduces a quotient constant."
-    q = quotReduce(st, Core.Apps.mkApps(f, args.es))?
-    match q.o
-        Option.Some(x) -> lcore(q.st, x, [], [], args.ms, delta, cheapRec, cheapProj)
-        Option.None -> Result.Ok(RE(e = Core.Apps.mkApps(f, args.es), st = q.st))
-
-verify lquot
-    resultExpr(lquot(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("q"), []), MXs(es = [], ms = MS(next = 0, forced = {}, shapes = {})), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("q"), [])
-
-fn lnat(st: St, f: Expr, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "With delta: Nat.succ of one argument or a Nat operation of two is tried on literals first, as whnf does; otherwise the head unfolds. Without delta the constant is stuck."
-    match delta
-        false -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
-        true -> match natArity(f, List.len(stack))
-            0 -> lunfold(st, f, stack, ms, cheapRec, cheapProj)
-            k -> lnatTry(st, f, stack, matStack(List.take(stack, k), ms, []), cheapRec, cheapProj)
-
-verify lnat
-    resultExpr(lnat(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
-
 fn natArity(f: Expr, n: Int) -> Int
     ? "How many arguments reduceNat takes for this head and this many arguments: 1 for Nat.succ, 2 for a binary Nat operation, 0 when it does not apply."
     match f
@@ -2259,16 +2280,6 @@ verify natArity
     natArity(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), 2) => 2
     natArity(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), 1) => 1
     natArity(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), 3) => 0
-
-fn lnatTry(st: St, f: Expr, stack: List<Clo>, args: MXs, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "Nat arithmetic on the built arguments; a literal result is the answer, otherwise the head unfolds."
-    n = reduceNat(st, Core.Apps.mkApps(f, args.es))?
-    match n.o
-        Option.Some(v) -> Result.Ok(RE(e = v, st = n.st))
-        Option.None -> lunfold(n.st, f, stack, args.ms, cheapRec, cheapProj)
-
-verify lnatTry
-    resultExpr(lnatTry(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), [], MXs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], ms = MS(next = 0, forced = {}, shapes = {})), false, false)) => Core.Exprs.natLit(3)
 
 record Go
     st: St
@@ -2294,20 +2305,16 @@ decision UnfoldPicked
         "magma-list-deep-n36 87.9 G to 81.7 G instructions, reachability"
         "47.5 G to 45.2 G, magma-string-pair-n9 26.9 G to 25.4 G, perf"
         "total 188.0 G to 177.5 G; Init 87.0 G to 86.7 G, std 148.4 G to"
-        "148.0 G, con-leche 141.5 G to 140.8 G."
+        "148.0 G, con-leche 141.5 G to 140.8 G. A constant met at the head"
+        "goes the same way (constGo): recursor, quotient, Nat arithmetic"
+        "and unfolding are one step of a loop of 5 arms, and the constant"
+        "found is handed on instead of looked up again. On Aver 798bd0e1:"
+        "magma-list-deep-n36 82.4 G to 76.7 G, reachability 45.7 G to"
+        "44.2 G, perf total 179.2 G to 170.4 G; Init 87.8 G to 87.4 G, std"
+        "149.7 G to 149.1 G, con-leche 142.4 G to 141.9 G."
     chosen = "UnfoldPicked"
     rejected = ["UnfoldStepped"]
-    impacts = [lunfold, unfoldGo, atGo, bareGo, casesGo, shapedGo, casesOnGo, sparseGo, minorGo, peeledGo, wholeGo]
-
-fn lunfold(st: St, f: Expr, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "A definition's value takes the waiting arguments as they are; anything else is stuck. At universe levels, the lambdas the arguments meet come off the value as written, and only what is under them gets the levels (DomainsDropped). Where the machine goes is worked out by unfoldGo (UnfoldPicked)."
-    g = unfoldGo(st, f, stack, ms, cheapRec, cheapProj)?
-    match g.run
-        true -> lcore(g.st, g.t, g.env, g.rest, g.ms, true, cheapRec, cheapProj)
-        false -> Result.Ok(RE(e = lstuck(MX(e = g.t, ms = g.ms), g.rest), st = g.st))
-
-verify lunfold
-    resultExpr(lunfold(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+    impacts = [lconst, constGo, natGo, unfoldGo, atGo, bareGo, casesGo, shapedGo, casesOnGo, sparseGo, minorGo, peeledGo, wholeGo]
 
 fn stuckGo(st: St, f: Expr, stack: List<Clo>, ms: MS) -> Go
     ? "Stuck as it was met: f with the waiting arguments."
@@ -2316,16 +2323,16 @@ fn stuckGo(st: St, f: Expr, stack: List<Clo>, ms: MS) -> Go
 verify stuckGo
     stuckGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}, shapes = {})).run => false
 
-fn unfoldGo(st: St, f: Expr, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "The constant f: at universe levels through its shape and the unfolding cache; without levels its value as written, through the cache only when a matcher heads its body (MatchersInlined)."
+fn unfoldGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
+    ? "The constant f, found as c: at universe levels through its shape and the unfolding cache; without levels its value as written, through the cache only when a matcher heads its body (MatchersInlined). A definition's value takes the waiting arguments as they are; anything else is stuck. At universe levels, the lambdas the arguments meet come off the value as written, and only what is under them gets the levels (DomainsDropped)."
     match f
-        Expr.Const(_, n, ls) -> match List.len(ls) > 0
-            true -> atGo(st, f, ls, Check.State.lookup(st, n), stack, ms, cheapRec, cheapProj)
-            false -> Result.Ok(bareGo(st, f, Check.State.lookup(st, n), stack, ms))
+        Expr.Const(_, _, ls) -> match List.len(ls) > 0
+            true -> atGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
+            false -> Result.Ok(bareGo(st, f, c, stack, ms))
         _ -> Result.Ok(wholeGo(st, f, stack, ms))
 
 verify unfoldGo
-    Result.withDefault(unfoldGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}, shapes = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(unfoldGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}, shapes = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn bareGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS) -> Go
     ? "A constant without levels: a value takes the waiting arguments; anything else is stuck."
@@ -2475,7 +2482,7 @@ decision DomainsDropped
         "32.1 G, Init 117.3 G to 116.9 G."
     chosen = "DomainsDropped"
     rejected = ["ValueInstantiated"]
-    impacts = [lunfold, atGo, peeledGo, unfoldStep, stepPeeled]
+    impacts = [unfoldGo, atGo, peeledGo, unfoldStep, stepPeeled]
 
 decision CasesOnDirect
     date = "2026-10-25"
