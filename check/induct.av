@@ -101,20 +101,20 @@ fn uniformIn(blk: Blk, e: Expr, offset: Int) -> Bool
 verify uniformIn
     uniformIn(Check.Blk.start([], 0, [], 0), Core.Exprs.fvar(0), 0) => true
 
-fn uniformWalk(blk: Blk, todo: List<Tuple<Expr, Int>>, seen: Map<Int, Bucket>) -> Bool
+fn uniformWalk(blk: Blk, todo: List<Tuple<Expr, Int>>, seen: Map<Core.Exprs.Key, Bucket>) -> Bool
     ? "The subterms still to look at with their depths, and those already looked at: a subterm at a depth is kept under its hash mixed with the depth, beside the depth as a literal."
     match todo
         [] -> true
         [(e, k), ..rest] -> match Core.Exprs.treeSize(e) < 32
             true -> uniformNode(blk, e, k, rest, seen)
-            false -> match Core.Cache.find(seen, Core.Hash.mix(Core.Exprs.hashOf(e), k), e) == Option.Some(Core.Exprs.natLit(k))
+            false -> match Core.Cache.find(seen, Core.Exprs.key(Core.Hash.mix(Core.Exprs.hashOf(e), k)), e) == Option.Some(Core.Exprs.natLit(k))
                 true -> uniformWalk(blk, rest, seen)
-                false -> uniformNode(blk, e, k, rest, Core.Cache.add(seen, Core.Hash.mix(Core.Exprs.hashOf(e), k), (e, Core.Exprs.natLit(k))))
+                false -> uniformNode(blk, e, k, rest, Core.Cache.add(seen, Core.Exprs.key(Core.Hash.mix(Core.Exprs.hashOf(e), k)), (e, Core.Exprs.natLit(k))))
 
 verify uniformWalk
     uniformWalk(Check.Blk.start([], 0, [], 0), [(Core.Exprs.fvar(0), 0), (Core.Exprs.fvar(0), 0)], Core.Cache.empty()) => true
 
-fn uniformNode(blk: Blk, e: Expr, offset: Int, rest: List<Tuple<Expr, Int>>, seen: Map<Int, Bucket>) -> Bool
+fn uniformNode(blk: Blk, e: Expr, offset: Int, rest: List<Tuple<Expr, Int>>, seen: Map<Core.Exprs.Key, Bucket>) -> Bool
     ? "One subterm: an occurrence of a block type is judged, and entered only with more arguments than parameters; any other node's children wait their turn."
     match Core.Apps.fnOf(e)
         Expr.Const(_, n, ls) -> match List.contains(blk.names, n)

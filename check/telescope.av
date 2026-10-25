@@ -97,7 +97,7 @@ fn mentions(e: Expr, ns: List<Name>) -> Bool
     ? "Whether a constant named in ns occurs in e. Each subterm is looked at once, however many paths reach it (MentionsSeenOnce, as NestedSeenOnce)."
     mentionWalk([e], ns, Core.Cache.empty())
 
-fn mentionWalk(todo: List<Expr>, ns: List<Name>, seen: Map<Int, Bucket>) -> Bool
+fn mentionWalk(todo: List<Expr>, ns: List<Name>, seen: Map<Core.Exprs.Key, Bucket>) -> Bool
     ? "The terms still to look at, and those already looked at."
     match todo
         [] -> false
@@ -110,7 +110,7 @@ fn mentionWalk(todo: List<Expr>, ns: List<Name>, seen: Map<Int, Bucket>) -> Bool
 verify mentionWalk
     mentionWalk([Core.Exprs.fvar(0), Core.Exprs.fvar(0)], [Check.Lits.name1("I")], Core.Cache.empty()) => false
 
-fn mentionNode(e: Expr, rest: List<Expr>, ns: List<Name>, seen: Map<Int, Bucket>) -> Bool
+fn mentionNode(e: Expr, rest: List<Expr>, ns: List<Name>, seen: Map<Core.Exprs.Key, Bucket>) -> Bool
     ? "One term: a constant is judged, a compound term's parts wait their turn."
     match e
         Expr.Const(_, n, _) -> match List.contains(ns, n)

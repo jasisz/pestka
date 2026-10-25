@@ -221,7 +221,7 @@ fn nestedIn(env: Env, names: List<Name>, e: Expr) -> Bool
 verify nestedIn
     nestedIn(Check.State.envEmpty(), [], Core.Exprs.fvar(0)) => false
 
-fn nestedWalk(env: Env, names: List<Name>, todo: List<Expr>, seen: Map<Int, Bucket>) -> Bool
+fn nestedWalk(env: Env, names: List<Name>, todo: List<Expr>, seen: Map<Core.Exprs.Key, Bucket>) -> Bool
     ? "The terms still to look at, and those already looked at."
     match todo
         [] -> false
@@ -234,7 +234,7 @@ fn nestedWalk(env: Env, names: List<Name>, todo: List<Expr>, seen: Map<Int, Buck
 verify nestedWalk
     nestedWalk(Check.State.envEmpty(), [], [Core.Exprs.fvar(0), Core.Exprs.fvar(0)], Core.Cache.empty()) => false
 
-fn nestedNode(env: Env, names: List<Name>, e: Expr, rest: List<Expr>, seen: Map<Int, Bucket>) -> Bool
+fn nestedNode(env: Env, names: List<Name>, e: Expr, rest: List<Expr>, seen: Map<Core.Exprs.Key, Bucket>) -> Bool
     ? "One term: an application is judged whole, then its head and arguments wait their turn; a binder's parts likewise."
     match e
         Expr.App -> match nestedHere(env, names, e)

@@ -102,7 +102,7 @@ fn shared(e: Expr) -> Bool
 verify shared
     shared(Core.Exprs.natLit(1)) => false
 
-fn cacheFor(st: St, only: Bool) -> Map<Int, Bucket>
+fn cacheFor(st: St, only: Bool) -> Map<Core.Exprs.Key, Bucket>
     ? "Inference and checking keep separate caches."
     match only
         true -> st.inferCache
@@ -132,7 +132,7 @@ decision ParamsInTheKey
 fn typeGet(st: St, only: Bool, e: Expr) -> Option<Expr>
     ? "The type kept for e in the cache for the mode: under e applied to the declaration's parameters when checking a term with a universe parameter (ParamsInTheKey), else under e."
     match Bool.and(Bool.not(only), Bool.and(st.checkParams, Core.Exprs.hasParam(e)))
-        true -> findOpen(Core.Cache.get(st.checkCache, Core.Exprs.appHash(e, st.paramsTag)), e, st.paramsTag)
+        true -> findOpen(Core.Cache.get(st.checkCache, Core.Exprs.key(Core.Exprs.appHash(e, st.paramsTag))), e, st.paramsTag)
         false -> Check.State.cacheGet(cacheFor(st, only), e)
 
 verify typeGet
@@ -221,8 +221,8 @@ verify openCached
 fn openHit(st: St, e: Expr, around: Expr, only: Bool) -> Option<Expr>
     ? "The cached type of e under around, looked up apart: the cache handed out for the lookup is let go when this returns, before the caller infers and keeps a type, which would otherwise find the cache with two owners and copy all of it."
     match Bool.and(Bool.not(only), Bool.and(st.checkParams, Core.Exprs.hasParam(e)))
-        true -> findTagged(Core.Cache.get(st.checkCache, Core.Exprs.appHash3(e, around, st.paramsTag)), e, around, st.paramsTag)
-        false -> findOpen(Core.Cache.get(cacheFor(st, only), Core.Exprs.appHash(e, around)), e, around)
+        true -> findTagged(Core.Cache.get(st.checkCache, Core.Exprs.key(Core.Exprs.appHash3(e, around, st.paramsTag))), e, around, st.paramsTag)
+        false -> findOpen(Core.Cache.get(cacheFor(st, only), Core.Exprs.key(Core.Exprs.appHash(e, around))), e, around)
 
 verify openHit
     openHit(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.fvar(1), false) => Option.None
@@ -2239,7 +2239,7 @@ verify matTerm
 record LS
     e: Expr
     ms: MS
-    memo: Map<Int, Tuple<Expr, Expr>>
+    memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>
 
 fn fromLS(r: LS) -> MX
     ? "The built term and the machine's memory."
@@ -2248,7 +2248,7 @@ fn fromLS(r: LS) -> MX
 verify fromLS
     fromLS(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = {})).e => Core.Exprs.natLit(1)
 
-fn lgo(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
+fn lgo(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> LS
     ? "As Core.Subst.go for instantiation: what has no loose bound variable at or above off is left alone."
     match Core.Exprs.within(e, off)
         true -> LS(e = e, ms = ms, memo = memo)
@@ -2257,18 +2257,18 @@ fn lgo(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Exp
 verify lgo
     lgo(Core.Exprs.natLit(1), 0, [], MS(next = 0, forced = {}), {}).e => Core.Exprs.natLit(1)
 
-fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
+fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> LS
     ? "A variable takes its closure's value; large compound nodes go through the memo, as in Core.Subst."
     match e
         Expr.BVar(i) -> lbvar(List.drop(env, i - off), i, env, ms, memo)
         _ -> match Core.Exprs.isSmall(e)
             true -> lbuild(e, off, env, ms, memo)
-            false -> lmemoed(e, off, env, ms, memo, off * 2147483648 + Core.Exprs.hashOf(e))
+            false -> lmemoed(e, off, env, ms, memo, Core.Exprs.keyAt(e, off))
 
 verify lvisit
     lvisit(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}).e => Core.Exprs.natLit(2)
 
-fn lbvar(from: List<Clo>, i: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
+fn lbvar(from: List<Clo>, i: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> LS
     ? "The variable's closure, built on first use. A value has no loose bound variable, so it needs no lifting; a variable past the environment drops by its length."
     match from
         [c, .._] -> lvalue(matClo(c, ms), memo)
@@ -2277,28 +2277,28 @@ fn lbvar(from: List<Clo>, i: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<E
 verify lbvar
     lbvar([], 3, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}).e => Core.Exprs.bvar(2)
 
-fn lvalue(x: MX, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
+fn lvalue(x: MX, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> LS
     ? "A built value with the walk's memo."
     LS(e = x.e, ms = x.ms, memo = memo)
 
 verify lvalue
     lvalue(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {})), {}).e => Core.Exprs.natLit(1)
 
-fn lmemoed(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>, key: Int) -> LS
+fn lmemoed(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, key: Core.Exprs.Key) -> LS
     ? "A node already rebuilt at this depth is reused."
     match lhit(Map.get(memo, key), e)
         Option.Some(r) -> LS(e = r, ms = ms, memo = memo)
         Option.None -> lremember(lbuild(e, off, env, ms, memo), e, key)
 
 verify lmemoed
-    lmemoed(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}, 7).e => Core.Exprs.bvar(0)
+    lmemoed(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}, Core.Exprs.hashKey(Core.Exprs.bvar(7))).e => Core.Exprs.bvar(0)
 
-fn lremember(r: LS, e: Expr, key: Int) -> LS
+fn lremember(r: LS, e: Expr, key: Core.Exprs.Key) -> LS
     ? "Records a rebuilt node."
     LS(e = r.e, ms = r.ms, memo = Map.set(r.memo, key, (e, r.e)))
 
 verify lremember
-    Map.len(lremember(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = {}), Core.Exprs.natLit(2), 4).memo) => 1
+    Map.len(lremember(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = {}), Core.Exprs.natLit(2), Core.Exprs.hashKey(Core.Exprs.bvar(4))).memo) => 1
 
 fn lhit(entry: Option<Tuple<Expr, Expr>>, e: Expr) -> Option<Expr>
     ? "The remembered result when the entry is for this very node."
@@ -2311,7 +2311,7 @@ fn lhit(entry: Option<Tuple<Expr, Expr>>, e: Expr) -> Option<Expr>
 verify lhit
     lhit(Option.None, Core.Exprs.natLit(1)) => Option.None
 
-fn lbuild(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
+fn lbuild(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> LS
     ? "Rebuilds one node, one binder deeper in binding positions."
     match e
         Expr.App(_, f, a) -> lapp2(lgo(f, off, env, ms, memo), a, off, env)
@@ -2647,7 +2647,7 @@ fn remembered(r: RB, t: Expr, s: Expr) -> Result<RB, Fail>
 verify remembered
     resultBool(remembered(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(1))) => false
 
-fn keptNo(fails: Map<Int, Bucket>, t: Expr, s: Expr) -> Map<Int, Bucket>
+fn keptNo(fails: Map<Core.Exprs.Key, Bucket>, t: Expr, s: Expr) -> Map<Core.Exprs.Key, Bucket>
     ? "Failures of this declaration. Its free variables are its own, each with one type and value, so a pair that was different stays different; terms with loose bound variables are left out."
     match Bool.and(Core.Exprs.isClosed(t), Core.Exprs.isClosed(s))
         false -> fails
@@ -2663,7 +2663,7 @@ verify isDefEq
     resultBool(isDefEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(5), Core.Exprs.natLit(4))) => false
     resultBool(isDefEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.natLit(1)), Core.Exprs.natLit(1))) => true
 
-fn keptPair(closed: Map<Int, Bucket>, t: Expr, s: Expr) -> Map<Int, Bucket>
+fn keptPair(closed: Map<Core.Exprs.Key, Bucket>, t: Expr, s: Expr) -> Map<Core.Exprs.Key, Bucket>
     ? "The cache kept across declarations, with the pair when it belongs there."
     match sharedPair(t, s)
         true -> Check.State.closedPairPut(closed, t, s)
@@ -2673,7 +2673,7 @@ verify keptPair
     Core.Cache.size(keptPair(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.fvar(0))) => 0
     Core.Cache.size(keptPair(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 1
 
-fn keptFail(closed: Map<Int, Bucket>, t: Expr, s: Expr) -> Map<Int, Bucket>
+fn keptFail(closed: Map<Core.Exprs.Key, Bucket>, t: Expr, s: Expr) -> Map<Core.Exprs.Key, Bucket>
     ? "The cache kept across declarations, with the pair as different when it belongs there."
     match sharedPair(t, s)
         true -> Check.State.closedFailPut(closed, t, s)
