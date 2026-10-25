@@ -5,7 +5,7 @@ module Reader
         "single key, and an item of the name, level or expression table"
         "when it carries an in, il or ie index."
     exposes [header, supported, readAll, readParallel, readLine]
-    depends [Json.Line, Json.Escapes, Json.Access, Core.Exprs, Export.Tables, Export.Items, Export.Declarations]
+    depends [Json.Line, Json.Escapes, Json.Access, Core.Exprs, Core.Decls, Export.Tables, Export.Items, Export.Declarations]
     effects []
 
 fn header(line: String) -> Result<String, String>
@@ -65,12 +65,15 @@ type Line
     BVar(Int, Int)
     Sort(Int, Int)
     Const(Int, Int, List<Int>)
+    LetE(Int, Int, Int, Int, Int)
+    Thm(DeclIds)
+    Defn(DeclIds, Hints, Safety)
     Obj(List<Tuple<String, J>>)
     Blank
     Bad(String)
 
 fn parseLine(line: String) -> Line
-    ? "One line parsed without the tables: an application, binder, name, level, constant, bound variable or sort line in its canonical form by position, any other line through the JSON parser."
+    ? "One line parsed without the tables: an application, binder, name, level, constant, bound variable, let, sort, theorem or definition line in its canonical form by position, any other line through the JSON parser."
     match line == ""
         true -> Line.Blank
         false -> match appLine(line)
@@ -108,6 +111,9 @@ fn applyLine(t: Tables, l: Line) -> Result<Tables, String>
         Line.BVar(ie, k) -> Export.Tables.addExpr(t, ie, Core.Exprs.bvar(k))
         Line.Sort(ie, lv) -> Export.Items.sortAt(t, ie, lv)
         Line.Const(ie, n, us) -> Export.Items.constAt(t, ie, n, us)
+        Line.LetE(ie, n, ty, v, b) -> Export.Items.letAt(t, ie, n, ty, v, b)
+        Line.Thm(d) -> Export.Declarations.thmAt(t, d.name, d.params, d.ty, d.value, d.all)
+        Line.Defn(d, h, sa) -> Export.Declarations.defAt(t, d.name, d.params, d.ty, d.value, d.all, h, sa)
         Line.Obj(fs) -> dispatch(t, fs)
         Line.Blank -> Result.Ok(t)
         Line.Bad(e) -> Result.Err(e)
@@ -290,7 +296,7 @@ verify appIe
 
 fn appEnd(line: String, a: NumAt, f: NumAt, i: NumAt) -> Option<AppIds>
     ? "The closing brace, and nothing after it."
-    match lastAt(line, i.end, "}}")
+    match closedAt(line, i.end)
         true -> Option.Some(AppIds(ie = i.value, fnIdx = f.value, argIdx = a.value))
         false -> Option.None
 
@@ -323,12 +329,36 @@ verify digitAt
     digitAt("a7", 0) => -1
     digitAt("a7", 2) => -1
 
+decision DigitsInTheLoop
+    date = "2026-10-24"
+    reason =
+        "Most of what a line read by position costs is its digits, a step of"
+        "numberAt each. The step called digitAt, which the Rust backend"
+        "keeps a function of its own, and compared the digit it gave with"
+        "zero. numberAt now matches the character itself, so each step is"
+        "one indexed read of the character's code point and the arm for"
+        "its digit. Instructions retired, one worker, reading only: Init"
+        "25.87 G to 24.28 G; checked in full, etale 58.10 G to 57.53 G, qb9"
+        "107.03 G to 105.66 G, Init 128.14 G to 126.45 G."
+    chosen = "DigitsInTheLoop"
+    rejected = ["DigitCalled"]
+    impacts = [numberAt]
+
 fn numberAt(s: String, i: Int, acc: Int) -> NumAt
-    ? "The digits from position i on as a number, and where they stop."
-    d = digitAt(s, i)
-    match d < 0
-        true -> NumAt(value = acc, end = i)
-        false -> numberAt(s, i + 1, acc * 10 + d)
+    ? "The digits from position i on as a number, and where they stop. The digit of each step is matched here rather than read with digitAt (DigitsInTheLoop)."
+    match String.charAt(s, i)
+        Option.Some("0") -> numberAt(s, i + 1, acc * 10)
+        Option.Some("1") -> numberAt(s, i + 1, acc * 10 + 1)
+        Option.Some("2") -> numberAt(s, i + 1, acc * 10 + 2)
+        Option.Some("3") -> numberAt(s, i + 1, acc * 10 + 3)
+        Option.Some("4") -> numberAt(s, i + 1, acc * 10 + 4)
+        Option.Some("5") -> numberAt(s, i + 1, acc * 10 + 5)
+        Option.Some("6") -> numberAt(s, i + 1, acc * 10 + 6)
+        Option.Some("7") -> numberAt(s, i + 1, acc * 10 + 7)
+        Option.Some("8") -> numberAt(s, i + 1, acc * 10 + 8)
+        Option.Some("9") -> numberAt(s, i + 1, acc * 10 + 9)
+        Option.Some -> NumAt(value = acc, end = i)
+        Option.None -> NumAt(value = acc, end = i)
 
 verify numberAt
     numberAt("x12,", 1, 0) => NumAt(value = 12, end = 3)
@@ -360,27 +390,95 @@ verify zeroAt
     zeroAt("0}}", 0) => NumAt(value = 0, end = 1)
     zeroAt("07", 0).end => -1
 
+decision LengthsUncounted
+    date = "2026-10-24"
+    reason =
+        "textAt took the length of the text it looks for with String.len,"
+        "which counts characters, and lastAt counted every character of the"
+        "line to see that the text ends it: a count for every separator of"
+        "a line read by position, and one of the whole line at its end."
+        "Every text the reader looks for is ASCII, so its"
+        "byte length, read in one step, is its length; and the text ends"
+        "the line when no character stands after it, which one indexed read"
+        "tells. Instructions retired, one worker, reading only: Init 27.15 G"
+        "to 25.87 G; checked in full, etale 58.5 G to 58.1 G, qb9 107.3 G"
+        "to 107.0 G, Init 129.3 G to 128.1 G."
+    chosen = "LengthsUncounted"
+    rejected = ["LengthsCounted"]
+    impacts = [textAt, lastAt, endAt]
+
 fn textAt(s: String, i: Int, t: String) -> Bool
-    ? "Whether t stands in s at position i; never at a negative position, where a number that was not found leaves it."
+    ? "Whether t stands in s at position i; never at a negative position, where a number that was not found leaves it. Every t the reader looks for is ASCII, so its length in characters is its length in bytes, which is read without counting."
     match i < 0
         true -> false
-        false -> String.slice(s, i, i + String.len(t)) == t
+        false -> String.slice(s, i, i + String.byteLength(t)) == t
 
 verify textAt
     textAt("ab,cd", 2, ",c") => true
     textAt("ab,cd", 3, ",c") => false
     textAt("ab,cd", 4, "de") => false
     textAt("ab,cd", -1, "ab") => false
+    textAt("αb,cd", 2, ",c") => true
 
 fn lastAt(s: String, i: Int, t: String) -> Bool
-    ? "Whether s ends with t standing at position i."
+    ? "Whether s ends with t standing at position i: t stands there and no character follows it, which needs no count of the characters of s."
     match textAt(s, i, t)
         false -> false
-        true -> i + String.len(t) == String.len(s)
+        true -> endAt(s, i + String.byteLength(t))
 
 verify lastAt
     lastAt("ab}}", 2, "}}") => true
     lastAt("ab}} ", 2, "}}") => false
+    lastAt("αb}}", 2, "}}") => true
+
+fn endAt(s: String, i: Int) -> Bool
+    ? "Whether no character of s stands at position i, for an i the caller keeps at or below the length of s: then i is the length."
+    match String.charAt(s, i)
+        Option.None -> true
+        Option.Some -> false
+
+verify endAt
+    endAt("ab", 2) => true
+    endAt("ab", 1) => false
+
+decision BracesRead
+    date = "2026-10-24"
+    reason =
+        "Every line read by position ends with one closing brace or two,"
+        "and each was a text looked for with textAt or lastAt: a slice of"
+        "the line, a string of its own when two braces were looked for at"
+        "once, compared with the text. A brace is now one indexed read of"
+        "the code point at its position. Instructions retired, one worker,"
+        "reading only: Init 22.31 G to 21.82 G; checked in full, etale"
+        "57.02 G to 56.74 G, qb9 104.04 G to 103.52 G, Init 124.92 G to"
+        "124.11 G (medians)."
+    chosen = "BracesRead"
+    rejected = ["BracesSliced"]
+    impacts = [braceAt, closedAt, appEnd, lamEnd, piEnd, binderClose, nameStrEnd, nameNumEnd, levelOne, constEnd, bvarEnd, sortEnd]
+
+fn braceAt(s: String, i: Int) -> Bool
+    ? "Whether a closing brace stands at position i, read as the code point there (BracesRead)."
+    match String.charAt(s, i)
+        Option.Some("}}") -> true
+        _ -> false
+
+verify braceAt
+    braceAt("a}}", 1) => true
+    braceAt("a}}", 0) => false
+    braceAt("a}}", 2) => false
+    braceAt("a}}", -1) => false
+
+fn closedAt(s: String, i: Int) -> Bool
+    ? "Whether a closing brace stands at position i and nothing after it (BracesRead)."
+    match braceAt(s, i)
+        true -> endAt(s, i + 1)
+        false -> false
+
+verify closedAt
+    closedAt("a}}", 1) => true
+    closedAt("a}}}}", 1) => false
+    closedAt("a}}", 0) => false
+    closedAt("é}}", 1) => true
 
 record BinderIds
     ie: Int
@@ -401,12 +499,31 @@ record AnnAt
     bi: Binder
     end: Int
 
+decision TextsTogether
+    date = "2026-10-24"
+    reason =
+        "A text looked for at a position is a slice of the line compared"
+        "with it, and every slice of two characters or more is a string of"
+        "its own, about 250 instructions however short the text. Binder"
+        "lines looked for seven texts, two of them right after others: the"
+        "binder's opening after the lambda's key or the pi's, and the body's"
+        "key after the annotation. Texts that stand together are now looked"
+        "for as one, the pi's opening is part of the prefix its line starts"
+        "with, and the annotation's first letter picks the one text to look"
+        "for instead of trying the four in turn. Instructions retired, one"
+        "worker, reading only: Init 22.75 G to 22.28 G; checked in full,"
+        "etale 57.22 G to 57.03 G, qb9 104.69 G to 104.04 G, Init 125.60 G"
+        "to 125.04 G (medians of three runs or more)."
+    chosen = "TextsTogether"
+    rejected = ["TextsInTurn"]
+    impacts = [binderLine, lamAfterIe, piAfter, binderAt, annotationAt, annotated, binderBody]
+
 fn binderLine(line: String) -> Option<BinderIds>
     ? "Lambdas and pi types, the next most common lines, in their canonical forms: the lambda's index comes first, the pi's last. Read by position as application lines are, and accepted only in those forms exactly."
     match String.startsWith(line, "{{\"ie\":")
         true -> lamAfterIe(line, canonAt(line, 6))
-        false -> match String.startsWith(line, "{{\"forallE\":")
-            true -> piAfter(line, binderAt(line, 11))
+        false -> match String.startsWith(line, "{{\"forallE\":{{\"binderInfo\":\"")
+            true -> piAfter(line, binderAt(line, 26))
             false -> Option.None
 
 verify binderLine
@@ -421,10 +538,10 @@ verify binderLine
     binderLine("{{\"ie\":7,\"bvar\":0}}") => Option.None
 
 fn lamAfterIe(line: String, i: NumAt) -> Option<BinderIds>
-    ? "A lambda's binder after its index."
-    match textAt(line, i.end, ",\"lam\":")
+    ? "A lambda's binder after its index, its key and the binder's opening looked for as one text (TextsTogether)."
+    match textAt(line, i.end, ",\"lam\":{{\"binderInfo\":\"")
         false -> Option.None
-        true -> lamEnd(line, i, binderAt(line, i.end + 7))
+        true -> lamEnd(line, i, binderAt(line, i.end + 22))
 
 verify lamAfterIe
     lamAfterIe("x", NumAt(value = 0, end = -1)) => Option.None
@@ -433,7 +550,7 @@ fn lamEnd(line: String, i: NumAt, b: Option<BinderAt>) -> Option<BinderIds>
     ? "The lambda line's closing brace, and nothing after it."
     match b
         Option.None -> Option.None
-        Option.Some(x) -> match lastAt(line, x.end, "}}")
+        Option.Some(x) -> match closedAt(line, x.end)
             true -> Option.Some(BinderIds(ie = i.value, nameIdx = x.name, typeIdx = x.typ, bodyIdx = x.body, bi = x.bi, isLam = true))
             false -> Option.None
 
@@ -441,7 +558,7 @@ verify lamEnd
     lamEnd("x", NumAt(value = 0, end = 0), Option.None) => Option.None
 
 fn piAfter(line: String, b: Option<BinderAt>) -> Option<BinderIds>
-    ? "A pi's index after its binder."
+    ? "A pi's index after its binder; the binder's opening was part of the line's prefix (TextsTogether)."
     match b
         Option.None -> Option.None
         Option.Some(x) -> match textAt(line, x.end, ",\"ie\":")
@@ -453,7 +570,7 @@ verify piAfter
 
 fn piEnd(line: String, x: BinderAt, i: NumAt) -> Option<BinderIds>
     ? "The pi line's closing brace, and nothing after it."
-    match lastAt(line, i.end, "}}")
+    match closedAt(line, i.end)
         true -> Option.Some(BinderIds(ie = i.value, nameIdx = x.name, typeIdx = x.typ, bodyIdx = x.body, bi = x.bi, isLam = false))
         false -> Option.None
 
@@ -461,38 +578,47 @@ verify piEnd
     piEnd("x7}}", BinderAt(bi = Binder.Default, body = 3, name = 2, typ = 1, end = 0), NumAt(value = 7, end = 2)) => Option.Some(BinderIds(ie = 7, nameIdx = 2, typeIdx = 1, bodyIdx = 3, bi = Binder.Default, isLam = false))
 
 fn binderAt(line: String, p: Int) -> Option<BinderAt>
-    ? "The object {{\"binderInfo\":\"B\",\"body\":D,\"name\":N,\"type\":T}} at p, in this form exactly; its end is just after its closing brace."
-    match textAt(line, p, "{{\"binderInfo\":\"")
-        false -> Option.None
-        true -> binderBody(line, annotationAt(line, p + 15))
+    ? "The object {{\"binderInfo\":\"B\",\"body\":D,\"name\":N,\"type\":T}} from p, just after the quote that opens B, in this form exactly; its end is just after its closing brace."
+    binderBody(line, annotationAt(line, p))
 
 verify binderAt
-    binderAt("{{\"binderInfo\":\"default\",\"body\":3,\"name\":2,\"type\":1}}", 0) => Option.Some(BinderAt(bi = Binder.Default, body = 3, name = 2, typ = 1, end = 51))
-    binderAt("{{\"binderInfo\":\"default\",\"body\":3,\"type\":1}}", 0) => Option.None
+    binderAt("default\",\"body\":3,\"name\":2,\"type\":1}}", 0) => Option.Some(BinderAt(bi = Binder.Default, body = 3, name = 2, typ = 1, end = 36))
+    binderAt("default\",\"body\":3,\"type\":1}}", 0) => Option.None
 
 fn annotationAt(line: String, i: Int) -> Option<AnnAt>
-    ? "One of the four binder annotations at i, with its closing quote."
-    match textAt(line, i, "default\"")
-        true -> Option.Some(AnnAt(bi = Binder.Default, end = i + 8))
-        false -> match textAt(line, i, "implicit\"")
-            true -> Option.Some(AnnAt(bi = Binder.Implicit, end = i + 9))
-            false -> match textAt(line, i, "instImplicit\"")
-                true -> Option.Some(AnnAt(bi = Binder.InstImplicit, end = i + 13))
-                false -> match textAt(line, i, "strictImplicit\"")
-                    true -> Option.Some(AnnAt(bi = Binder.StrictImplicit, end = i + 15))
-                    false -> Option.None
+    ? "One of the four binder annotations at i with its closing quote and the body's key after it, looked for as one text; the first letter, and the second after an i, picks the annotation (TextsTogether)."
+    match String.charAt(line, i)
+        Option.Some("d") -> annotated(line, i, "default\",\"body\":", Binder.Default)
+        Option.Some("s") -> annotated(line, i, "strictImplicit\",\"body\":", Binder.StrictImplicit)
+        Option.Some("i") -> match String.charAt(line, i + 1)
+            Option.Some("m") -> annotated(line, i, "implicit\",\"body\":", Binder.Implicit)
+            _ -> annotated(line, i, "instImplicit\",\"body\":", Binder.InstImplicit)
+        _ -> Option.None
 
 verify annotationAt
-    annotationAt("\"implicit\",", 1) => Option.Some(AnnAt(bi = Binder.Implicit, end = 10))
-    annotationAt("\"implicitly\",", 1) => Option.None
+    annotationAt("\"implicit\",\"body\":", 1) => Option.Some(AnnAt(bi = Binder.Implicit, end = 18))
+    annotationAt("\"instImplicit\",\"body\":", 1) => Option.Some(AnnAt(bi = Binder.InstImplicit, end = 22))
+    annotationAt("\"strictImplicit\",\"body\":", 1) => Option.Some(AnnAt(bi = Binder.StrictImplicit, end = 24))
+    annotationAt("\"default\",\"body\":", 1) => Option.Some(AnnAt(bi = Binder.Default, end = 17))
+    annotationAt("\"implicitly\",\"body\":", 1) => Option.None
+    annotationAt("\"inst\",\"body\":", 1) => Option.None
+    annotationAt("\"other\",\"body\":", 1) => Option.None
+
+fn annotated(line: String, i: Int, t: String, bi: Binder) -> Option<AnnAt>
+    ? "The annotation bi when its text t stands at i, with where t ends."
+    match textAt(line, i, t)
+        true -> Option.Some(AnnAt(bi = bi, end = i + String.byteLength(t)))
+        false -> Option.None
+
+verify annotated
+    annotated("xab", 1, "ab", Binder.Default) => Option.Some(AnnAt(bi = Binder.Default, end = 3))
+    annotated("xab", 1, "ac", Binder.Default) => Option.None
 
 fn binderBody(line: String, a: Option<AnnAt>) -> Option<BinderAt>
-    ? "The body's index after the annotation."
+    ? "The body's index after the annotation and the body's key."
     match a
         Option.None -> Option.None
-        Option.Some(x) -> match textAt(line, x.end, ",\"body\":")
-            false -> Option.None
-            true -> binderName(line, x.bi, canonAt(line, x.end + 8))
+        Option.Some(x) -> binderName(line, x.bi, canonAt(line, x.end))
 
 verify binderBody
     binderBody("x", Option.None) => Option.None
@@ -517,7 +643,7 @@ verify binderType
 
 fn binderClose(line: String, bi: Binder, d: NumAt, n: NumAt, t: NumAt) -> Option<BinderAt>
     ? "The binder object's closing brace."
-    match textAt(line, t.end, "}}")
+    match braceAt(line, t.end)
         false -> Option.None
         true -> Option.Some(BinderAt(bi = bi, body = d.value, name = n.value, typ = t.value, end = t.end + 1))
 
@@ -535,7 +661,7 @@ verify otherLine
     otherLine("{{\"bvar\" : 0,\"ie\":2}}") => Line.Obj([("bvar", J.JInt(0)), ("ie", J.JInt(2))])
 
 fn quickLine(line: String) -> Option<Line>
-    ? "Names, levels, constants, bound variables and sorts, each only in the exact form lean4export writes: keys in its order, numbers canonical, nothing after the last brace."
+    ? "Names, levels, constants, bound variables, lets, sorts, theorems and definitions, each only in the exact form lean4export writes: keys in its order, numbers canonical, nothing after the last brace."
     match String.startsWith(line, "{{\"in\":")
         true -> nameAfter(line, canonAt(line, 6))
         false -> match String.startsWith(line, "{{\"il\":")
@@ -545,8 +671,8 @@ fn quickLine(line: String) -> Option<Line>
                 false -> match String.startsWith(line, "{{\"bvar\":")
                     true -> bvarAfter(line, canonAt(line, 8))
                     false -> match String.startsWith(line, "{{\"ie\":")
-                        true -> sortAfter(line, canonAt(line, 6))
-                        false -> Option.None
+                        true -> ieAfter(line, canonAt(line, 6))
+                        false -> declAfter(line)
 
 verify quickLine
     quickLine("{{\"in\":1,\"str\":{{\"pre\":0,\"str\":\"Add\"}}}}") => Option.Some(Line.NameStr(1, 0, "Add"))
@@ -567,6 +693,17 @@ verify quickLine
     quickLine("{{\"const\":{{\"name\":5,\"us\":[1,]}},\"ie\":8}}") => Option.None
     quickLine("{{\"in\":1,\"str\":{{\"pre\":0,\"str\":\"Add\"}}}} ") => Option.None
     quickLine("{{\"ie\":0,\"natVal\":\"5\"}}") => Option.None
+    quickLine("{{\"ie\":9,\"letE\":{{\"body\":8,\"name\":1,\"nondep\":false,\"type\":6,\"value\":7}}}}") => Option.Some(Line.LetE(9, 1, 6, 7, 8))
+    quickLine("{{\"ie\":9,\"letE\":{{\"body\":8,\"name\":1,\"nondep\":true,\"type\":6,\"value\":7}}}}") => Option.Some(Line.LetE(9, 1, 6, 7, 8))
+    quickLine("{{\"ie\":9,\"letE\":{{\"body\":8,\"name\":1,\"nondep\":0,\"type\":6,\"value\":7}}}}") => Option.None
+    quickLine("{{\"thm\":{{\"all\":[5],\"levelParams\":[],\"name\":5,\"type\":20,\"value\":21}}}}") => Option.Some(Line.Thm(DeclIds(name = 5, params = [], ty = 20, value = 21, all = [5])))
+    quickLine("{{\"thm\":{{\"all\":[5,6],\"levelParams\":[1,2],\"name\":5,\"type\":20,\"value\":21}}}}") => Option.Some(Line.Thm(DeclIds(name = 5, params = [1, 2], ty = 20, value = 21, all = [5, 6])))
+    quickLine("{{\"thm\":{{\"all\":[5],\"levelParams\":[],\"name\":5,\"type\":20,\"value\":21}}}} ") => Option.None
+    quickLine("{{\"def\":{{\"all\":[22],\"hints\":{{\"regular\":1}},\"levelParams\":[2],\"name\":22,\"safety\":\"safe\",\"type\":67,\"value\":74}}}}") => Option.Some(Line.Defn(DeclIds(name = 22, params = [2], ty = 67, value = 74, all = [22]), Hints.Regular(1), Safety.Safe))
+    quickLine("{{\"def\":{{\"all\":[23],\"hints\":\"abbrev\",\"levelParams\":[],\"name\":23,\"safety\":\"partial\",\"type\":77,\"value\":81}}}}") => Option.Some(Line.Defn(DeclIds(name = 23, params = [], ty = 77, value = 81, all = [23]), Hints.Abbrev, Safety.Partial))
+    quickLine("{{\"def\":{{\"all\":[23],\"hints\":\"opaque\",\"levelParams\":[],\"name\":23,\"safety\":\"unsafe\",\"type\":77,\"value\":81}}}}") => Option.Some(Line.Defn(DeclIds(name = 23, params = [], ty = 77, value = 81, all = [23]), Hints.Opaque, Safety.Unsafe))
+    quickLine("{{\"def\":{{\"all\":[23],\"hints\":\"other\",\"levelParams\":[],\"name\":23,\"safety\":\"safe\",\"type\":77,\"value\":81}}}}") => Option.None
+    quickLine("{{\"def\":{{\"all\":[23],\"hints\":{{\"regular\":01}},\"levelParams\":[],\"name\":23,\"safety\":\"safe\",\"type\":77,\"value\":81}}}}") => Option.None
 
 fn nameAfter(line: String, i: NumAt) -> Option<Line>
     ? "Name.str or Name.num after the index."
@@ -591,7 +728,7 @@ verify nameStrAfter
 fn nameStrEnd(line: String, i: NumAt, pre: NumAt, r: Scan) -> Option<Line>
     ? "The two closing braces after the string, and nothing after them."
     match r
-        Scan.Done(text, at) -> match lastAt(line, at, "}}}}")
+        Scan.Done(text, at) -> match Bool.and(braceAt(line, at), closedAt(line, at + 1))
             true -> Option.Some(Line.NameStr(i.value, pre.value, text))
             false -> Option.None
         Scan.Bad -> Option.None
@@ -611,7 +748,7 @@ verify nameNumAfter
 
 fn nameNumEnd(line: String, i: NumAt, k: NumAt, pre: NumAt) -> Option<Line>
     ? "The two closing braces."
-    match lastAt(line, pre.end, "}}}}")
+    match Bool.and(braceAt(line, pre.end), closedAt(line, pre.end + 1))
         true -> Option.Some(Line.NameNum(i.value, pre.value, k.value))
         false -> Option.None
 
@@ -635,7 +772,7 @@ verify levelAfter
 
 fn levelOne(line: String, i: NumAt, a: NumAt, isSucc: Bool) -> Option<Line>
     ? "A successor or a parameter, then the closing brace."
-    match lastAt(line, a.end, "}}")
+    match closedAt(line, a.end)
         false -> Option.None
         true -> match isSucc
             true -> Option.Some(Line.LevelSucc(i.value, a.value))
@@ -713,7 +850,7 @@ verify constIe
 
 fn constEnd(line: String, n: NumAt, us: UsAt, i: NumAt) -> Option<Line>
     ? "The closing brace."
-    match lastAt(line, i.end, "}}")
+    match closedAt(line, i.end)
         true -> Option.Some(Line.Const(i.value, n.value, us.us))
         false -> Option.None
 
@@ -731,12 +868,294 @@ verify bvarAfter
 
 fn bvarEnd(line: String, b: NumAt, i: NumAt) -> Option<Line>
     ? "The closing brace."
-    match lastAt(line, i.end, "}}")
+    match closedAt(line, i.end)
         true -> Option.Some(Line.BVar(i.value, b.value))
         false -> Option.None
 
 verify bvarEnd
     bvarEnd("x2}}", NumAt(value = 0, end = 0), NumAt(value = 2, end = 2)) => Option.Some(Line.BVar(2, 0))
+
+decision DeclarationsByPosition
+    date = "2026-10-24"
+    reason =
+        "Theorems, definitions and lets went through the JSON parser, which"
+        "costs some 160 instructions a byte of the line: on Init 68000 such"
+        "lines hold 6.6 MB, about 1 G of instructions. They are now read by"
+        "position as the other common lines are, only in the exact form"
+        "lean4export writes, and their parts are looked up in the order the"
+        "JSON path looks them up, so that a line naming an index not yet"
+        "defined is rejected with the same message. Instructions retired,"
+        "one worker, reading only: Init 21.75 G to 20.73 G; checked in"
+        "full, etale 56.79 G to 56.53 G, qb9 103.53 G to 102.90 G, Init"
+        "124.11 G to 123.04 G (medians)."
+    chosen = "DeclarationsByPosition"
+    rejected = ["DeclarationsParsed"]
+    impacts = [quickLine, ieAfter, declAfter, applyLine]
+
+fn ieAfter(line: String, i: NumAt) -> Option<Line>
+    ? "A let or a sort after the line's index; a lambda, whose index also comes first, was tried before."
+    match textAt(line, i.end, ",\"letE\":{{\"body\":")
+        true -> letName(line, i, canonAt(line, i.end + 16))
+        false -> sortAfter(line, i)
+
+verify ieAfter
+    ieAfter("x", NumAt(value = 0, end = -1)) => Option.None
+
+fn letName(line: String, i: NumAt, b: NumAt) -> Option<Line>
+    ? "The let's name after its body."
+    match textAt(line, b.end, ",\"name\":")
+        false -> Option.None
+        true -> letNondep(line, i, b, canonAt(line, b.end + 8))
+
+verify letName
+    letName("x", NumAt(value = 0, end = 0), NumAt(value = 0, end = -1)) => Option.None
+
+fn letNondep(line: String, i: NumAt, b: NumAt, n: NumAt) -> Option<Line>
+    ? "The let's nondep flag, which only matters to elaboration and is not kept, with the type's key after it; the flag's first letter picks the text to look for."
+    match String.charAt(line, n.end + 10)
+        Option.Some("f") -> letType(line, i, b, n, textAt(line, n.end, ",\"nondep\":false,\"type\":"), n.end + 23)
+        Option.Some("t") -> letType(line, i, b, n, textAt(line, n.end, ",\"nondep\":true,\"type\":"), n.end + 22)
+        _ -> Option.None
+
+verify letNondep
+    letNondep("x", NumAt(value = 0, end = 0), NumAt(value = 0, end = 0), NumAt(value = 0, end = -1)) => Option.None
+
+fn letType(line: String, i: NumAt, b: NumAt, n: NumAt, found: Bool, p: Int) -> Option<Line>
+    ? "The let's type at p, when the flag and the type's key were found."
+    match found
+        false -> Option.None
+        true -> letValue(line, i, b, n, canonAt(line, p))
+
+verify letType
+    letType("x", NumAt(value = 0, end = 0), NumAt(value = 0, end = 0), NumAt(value = 0, end = 0), false, 0) => Option.None
+    letType("x", NumAt(value = 0, end = 0), NumAt(value = 0, end = 0), NumAt(value = 0, end = 0), true, 1) => Option.None
+
+fn letValue(line: String, i: NumAt, b: NumAt, n: NumAt, ty: NumAt) -> Option<Line>
+    ? "The let's value after its type."
+    match textAt(line, ty.end, ",\"value\":")
+        false -> Option.None
+        true -> letEnd(line, i, b, n, ty, canonAt(line, ty.end + 9))
+
+verify letValue
+    letValue("x", NumAt(value = 0, end = 0), NumAt(value = 0, end = 0), NumAt(value = 0, end = 0), NumAt(value = 0, end = -1)) => Option.None
+
+fn letEnd(line: String, i: NumAt, b: NumAt, n: NumAt, ty: NumAt, v: NumAt) -> Option<Line>
+    ? "The two closing braces, and nothing after them."
+    match Bool.and(braceAt(line, v.end), closedAt(line, v.end + 1))
+        true -> Option.Some(Line.LetE(i.value, n.value, ty.value, v.value, b.value))
+        false -> Option.None
+
+verify letEnd
+    letEnd("x7}}}}", NumAt(value = 9, end = 0), NumAt(value = 8, end = 0), NumAt(value = 1, end = 0), NumAt(value = 6, end = 0), NumAt(value = 7, end = 2)) => Option.Some(Line.LetE(9, 1, 6, 7, 8))
+
+record DeclIds
+    name: Int
+    params: List<Int>
+    ty: Int
+    value: Int
+    all: List<Int>
+
+record HeadAt
+    params: List<Int>
+    name: Int
+    end: Int
+
+record TailAt
+    ty: Int
+    value: Int
+    end: Int
+
+record HintsAt
+    hints: Hints
+    end: Int
+
+record SafetyAt
+    safety: Safety
+    end: Int
+
+fn declAfter(line: String) -> Option<Line>
+    ? "Theorems and definitions, the declarations most declaration lines are, each only in the exact form lean4export writes."
+    match String.startsWith(line, "{{\"thm\":{{\"all\":[")
+        true -> thmAfter(line, usFirst(line, 15))
+        false -> match String.startsWith(line, "{{\"def\":{{\"all\":[")
+            true -> defAfter(line, usFirst(line, 15))
+            false -> Option.None
+
+verify declAfter
+    declAfter("{{\"axiom\":{{}}}}") => Option.None
+
+fn thmAfter(line: String, all: UsAt) -> Option<Line>
+    ? "A theorem's universe parameters and name, then its type and value, after the names of its mutual group."
+    match headAt(line, all.end)
+        Option.None -> Option.None
+        Option.Some(h) -> thmEnd(all, h, tailAt(line, h.end))
+
+verify thmAfter
+    thmAfter("x", UsAt(us = [], end = -1)) => Option.None
+
+fn thmEnd(all: UsAt, h: HeadAt, tv: Option<TailAt>) -> Option<Line>
+    ? "The theorem, once its type and value end the line."
+    match tv
+        Option.None -> Option.None
+        Option.Some(x) -> Option.Some(Line.Thm(DeclIds(name = h.name, params = h.params, ty = x.ty, value = x.value, all = all.us)))
+
+verify thmEnd
+    thmEnd(UsAt(us = [5], end = 0), HeadAt(params = [], name = 5, end = 0), Option.Some(TailAt(ty = 6, value = 7, end = 0))) => Option.Some(Line.Thm(DeclIds(name = 5, params = [], ty = 6, value = 7, all = [5])))
+    thmEnd(UsAt(us = [5], end = 0), HeadAt(params = [], name = 5, end = 0), Option.None) => Option.None
+
+fn headAt(line: String, p: Int) -> Option<HeadAt>
+    ? "The universe parameters and the name of a declaration from p: ,\"levelParams\":[..],\"name\":N."
+    match textAt(line, p, ",\"levelParams\":[")
+        false -> Option.None
+        true -> headName(line, usFirst(line, p + 16))
+
+verify headAt
+    headAt(",\"levelParams\":[1],\"name\":4,", 0) => Option.Some(HeadAt(params = [1], name = 4, end = 27))
+    headAt(",\"levelParams\":[1],\"name\":04", 0) => Option.None
+
+fn headName(line: String, ps: UsAt) -> Option<HeadAt>
+    ? "The name's index after the universe parameters."
+    match textAt(line, ps.end, ",\"name\":")
+        false -> Option.None
+        true -> headEnd(ps, canonAt(line, ps.end + 8))
+
+verify headName
+    headName("x", UsAt(us = [], end = -1)) => Option.None
+
+fn headEnd(ps: UsAt, n: NumAt) -> Option<HeadAt>
+    ? "The parameters and the name, when the name's index is a number."
+    match n.end < 0
+        true -> Option.None
+        false -> Option.Some(HeadAt(params = ps.us, name = n.value, end = n.end))
+
+verify headEnd
+    headEnd(UsAt(us = [], end = 0), NumAt(value = 0, end = -1)) => Option.None
+
+fn tailAt(line: String, p: Int) -> Option<TailAt>
+    ? "The type and the value of a declaration from p, and the two braces that end its line: ,\"type\":T,\"value\":V}}}}."
+    match textAt(line, p, ",\"type\":")
+        false -> Option.None
+        true -> tailValue(line, canonAt(line, p + 8))
+
+verify tailAt
+    tailAt(",\"type\":3,\"value\":4}}}}", 0) => Option.Some(TailAt(ty = 3, value = 4, end = 21))
+    tailAt(",\"type\":3,\"value\":4}}}}}}", 0) => Option.None
+
+fn tailValue(line: String, ty: NumAt) -> Option<TailAt>
+    ? "The value's index after the type's."
+    match textAt(line, ty.end, ",\"value\":")
+        false -> Option.None
+        true -> tailEnd(line, ty, canonAt(line, ty.end + 9))
+
+verify tailValue
+    tailValue("x", NumAt(value = 0, end = -1)) => Option.None
+
+fn tailEnd(line: String, ty: NumAt, v: NumAt) -> Option<TailAt>
+    ? "The two closing braces, and nothing after them."
+    match Bool.and(braceAt(line, v.end), closedAt(line, v.end + 1))
+        true -> Option.Some(TailAt(ty = ty.value, value = v.value, end = v.end + 2))
+        false -> Option.None
+
+verify tailEnd
+    tailEnd("x4}}}}", NumAt(value = 3, end = 0), NumAt(value = 4, end = 2)) => Option.Some(TailAt(ty = 3, value = 4, end = 4))
+
+fn defAfter(line: String, all: UsAt) -> Option<Line>
+    ? "A definition's reducibility hints after the names of its mutual group; then its parameters and name, its safety, its type and value."
+    match textAt(line, all.end, ",\"hints\":")
+        false -> Option.None
+        true -> defHints(line, all, hintsAt(line, all.end + 9))
+
+verify defAfter
+    defAfter("x", UsAt(us = [], end = -1)) => Option.None
+
+fn hintsAt(line: String, p: Int) -> Option<HintsAt>
+    ? "The hints at p: \"abbrev\", \"opaque\" or {{\"regular\":H}}."
+    match String.charAt(line, p)
+        Option.Some("{{") -> regularAt(line, p)
+        Option.Some("\"") -> match textAt(line, p, "\"abbrev\"")
+            true -> Option.Some(HintsAt(hints = Hints.Abbrev, end = p + 8))
+            false -> match textAt(line, p, "\"opaque\"")
+                true -> Option.Some(HintsAt(hints = Hints.Opaque, end = p + 8))
+                false -> Option.None
+        _ -> Option.None
+
+verify hintsAt
+    hintsAt("\"abbrev\",", 0) => Option.Some(HintsAt(hints = Hints.Abbrev, end = 8))
+    hintsAt("\"opaque\",", 0) => Option.Some(HintsAt(hints = Hints.Opaque, end = 8))
+    hintsAt("{{\"regular\":12}},", 0) => Option.Some(HintsAt(hints = Hints.Regular(12), end = 14))
+    hintsAt("\"other\",", 0) => Option.None
+
+fn regularAt(line: String, p: Int) -> Option<HintsAt>
+    ? "{{\"regular\":H}} at p."
+    match textAt(line, p, "{{\"regular\":")
+        false -> Option.None
+        true -> regularEnd(line, canonAt(line, p + 11))
+
+verify regularAt
+    regularAt("{{\"regular\":x}}", 0) => Option.None
+
+fn regularEnd(line: String, h: NumAt) -> Option<HintsAt>
+    ? "The height's closing brace."
+    match braceAt(line, h.end)
+        true -> Option.Some(HintsAt(hints = Hints.Regular(h.value), end = h.end + 1))
+        false -> Option.None
+
+verify regularEnd
+    regularEnd("x3}}", NumAt(value = 3, end = 2)) => Option.Some(HintsAt(hints = Hints.Regular(3), end = 3))
+
+fn defHints(line: String, all: UsAt, h: Option<HintsAt>) -> Option<Line>
+    ? "The definition's parameters and name after its hints."
+    match h
+        Option.None -> Option.None
+        Option.Some(x) -> match headAt(line, x.end)
+            Option.None -> Option.None
+            Option.Some(hd) -> defSafety(line, all, x.hints, hd, safetyAt(line, hd.end))
+
+verify defHints
+    defHints("x", UsAt(us = [], end = 0), Option.None) => Option.None
+    defHints("x", UsAt(us = [], end = 0), Option.Some(HintsAt(hints = Hints.Abbrev, end = 0))) => Option.None
+
+fn safetyAt(line: String, p: Int) -> Option<SafetyAt>
+    ? "The safety's key and value from p, looked for as one text; the value's first letter picks it."
+    match String.charAt(line, p + 11)
+        Option.Some("s") -> safetyIs(line, p, ",\"safety\":\"safe\"", Safety.Safe)
+        Option.Some("u") -> safetyIs(line, p, ",\"safety\":\"unsafe\"", Safety.Unsafe)
+        Option.Some("p") -> safetyIs(line, p, ",\"safety\":\"partial\"", Safety.Partial)
+        _ -> Option.None
+
+verify safetyAt
+    safetyAt(",\"safety\":\"safe\",", 0) => Option.Some(SafetyAt(safety = Safety.Safe, end = 16))
+    safetyAt(",\"safety\":\"partial\",", 0) => Option.Some(SafetyAt(safety = Safety.Partial, end = 19))
+    safetyAt(",\"safety\":\"sound\",", 0) => Option.None
+
+fn safetyIs(line: String, p: Int, t: String, sa: Safety) -> Option<SafetyAt>
+    ? "The safety sa when its text t stands at p, with where t ends."
+    match textAt(line, p, t)
+        true -> Option.Some(SafetyAt(safety = sa, end = p + String.byteLength(t)))
+        false -> Option.None
+
+verify safetyIs
+    safetyIs("xab", 1, "ab", Safety.Safe) => Option.Some(SafetyAt(safety = Safety.Safe, end = 3))
+
+fn defSafety(line: String, all: UsAt, hints: Hints, hd: HeadAt, s: Option<SafetyAt>) -> Option<Line>
+    ? "The definition's type and value after its safety."
+    match s
+        Option.None -> Option.None
+        Option.Some(x) -> defEnd(all, hints, hd, x.safety, tailAt(line, x.end))
+
+verify defSafety
+    defSafety("x", UsAt(us = [], end = 0), Hints.Abbrev, HeadAt(params = [], name = 0, end = 0), Option.None) => Option.None
+    defSafety("x", UsAt(us = [], end = 0), Hints.Abbrev, HeadAt(params = [], name = 0, end = 0), Option.Some(SafetyAt(safety = Safety.Safe, end = 0))) => Option.None
+
+fn defEnd(all: UsAt, hints: Hints, hd: HeadAt, sa: Safety, tv: Option<TailAt>) -> Option<Line>
+    ? "The definition, once its type and value end the line."
+    match tv
+        Option.None -> Option.None
+        Option.Some(y) -> Option.Some(Line.Defn(DeclIds(name = hd.name, params = hd.params, ty = y.ty, value = y.value, all = all.us), hints, sa))
+
+verify defEnd
+    defEnd(UsAt(us = [1], end = 0), Hints.Abbrev, HeadAt(params = [], name = 1, end = 0), Safety.Safe, Option.None) => Option.None
+    defEnd(UsAt(us = [1], end = 0), Hints.Abbrev, HeadAt(params = [], name = 1, end = 0), Safety.Safe, Option.Some(TailAt(ty = 2, value = 3, end = 0))) => Option.Some(Line.Defn(DeclIds(name = 1, params = [], ty = 2, value = 3, all = [1]), Hints.Abbrev, Safety.Safe))
 
 fn sortAfter(line: String, i: NumAt) -> Option<Line>
     ? "The sort's level after the line's index."
@@ -749,7 +1168,7 @@ verify sortAfter
 
 fn sortEnd(line: String, i: NumAt, l: NumAt) -> Option<Line>
     ? "The closing brace."
-    match lastAt(line, l.end, "}}")
+    match closedAt(line, l.end)
         true -> Option.Some(Line.Sort(i.value, l.value))
         false -> Option.None
 

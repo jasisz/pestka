@@ -75,29 +75,41 @@ fn expr(t: Tables, i: Int) -> Result<Expr, String>
             true -> Result.Ok(denseAt(t, i))
             false -> Result.Err("unknown expression index {i}")
 
+decision PlacesMatchedWhereRead
+    date = "2026-10-24"
+    reason =
+        "A place of a chunk was read with Vector.get, which hands back a"
+        "copy, and the option was given to slot, which the Rust backend"
+        "lends it and so copied the expression once more: a count up and"
+        "one down on the expression for every index an expression line"
+        "names. The option is now matched where it is read. Instructions"
+        "retired, one worker, reading only: Init 20.73 G to 20.64 G (median"
+        "of three runs each); checked in full, etale 56.50 G to 56.44 G, qb9"
+        "102.90 G to 102.75 G, Init 123.04 G to 122.86 G (medians)."
+    chosen = "PlacesMatchedWhereRead"
+    rejected = ["PlacesThroughSlot"]
+    impacts = [denseAt, inChunk]
+
 fn denseAt(t: Tables, i: Int) -> Expr
-    ? "Expression i of the dense run, from the chunk it sits in; callers keep i below dense."
+    ? "Expression i of the dense run, from the chunk it sits in; callers keep i below dense, so the place is always filled. The place is matched here rather than in a function of its own (PlacesMatchedWhereRead)."
     match i >= Vector.len(t.chunks) * 65536
-        true -> slot(Vector.get(t.cur, Int.mod(i, 65536)))
+        true -> match Vector.get(t.cur, Int.mod(i, 65536))
+            Option.Some(e) -> e
+            Option.None -> Core.Exprs.bvar(0)
         false -> inChunk(Vector.get(t.chunks, Int.div(i, 65536)), Int.mod(i, 65536))
 
 fn inChunk(c: Option<Vector<Expr>>, j: Int) -> Expr
-    ? "Place j of a frozen chunk. A match rather than a default: a default chunk would be built on every read."
+    ? "Place j of a frozen chunk, matched where it is read (PlacesMatchedWhereRead). A match rather than a default: a default chunk would be built on every read."
     match c
-        Option.Some(v) -> slot(Vector.get(v, j))
+        Option.Some(v) -> match Vector.get(v, j)
+            Option.Some(e) -> e
+            Option.None -> Core.Exprs.bvar(0)
         Option.None -> Core.Exprs.bvar(0)
 
 verify inChunk
     inChunk(Option.None, 3) => Core.Exprs.bvar(0)
-
-fn slot(o: Option<Expr>) -> Expr
-    ? "What a place of a chunk holds; places below dense are always filled."
-    match o
-        Option.Some(e) -> e
-        Option.None -> Core.Exprs.bvar(0)
-
-verify slot
-    slot(Option.Some(Core.Exprs.natLit(1))) => Core.Exprs.natLit(1)
+    inChunk(Option.Some(Vector.fromList([Core.Exprs.natLit(1)])), 0) => Core.Exprs.natLit(1)
+    inChunk(Option.Some(Vector.fromList([Core.Exprs.natLit(1)])), 1) => Core.Exprs.bvar(0)
 
 verify denseAt
     denseAt(sequential(empty(), 0, 3), 2) => Core.Exprs.natLit(2)

@@ -3,7 +3,7 @@ module Declarations
         "Lines that declare constants: axioms, definitions, theorems, opaque"
         "constants, the quotient package and inductive blocks. Every name,"
         "level and expression they mention must already be in the tables."
-    exposes [declLine]
+    exposes [declLine, thmAt, defAt]
     depends [Json.Line, Json.Access, Core.Names, Core.Exprs, Core.Decls, Export.Tables]
     effects []
 
@@ -37,6 +37,37 @@ fn head(t: Tables, o: List<Tuple<String, J>>) -> Result<Head, String>
 
 verify head
     head(Export.Tables.empty(), [("levelParams", J.JArr([])), ("name", J.JInt(0)), ("type", J.JInt(0))]) => Result.Err("unknown expression index 0")
+
+fn headOf(t: Tables, name: Int, params: List<Int>, ty: Int) -> Result<Head, String>
+    ? "head from the indices a line read by position gives, looked up in the order head looks them up."
+    n = Export.Tables.name(t, name)?
+    ps = Export.Tables.names(t, params, [])?
+    Result.Ok(Head(name = n, params = ps, ty = Export.Tables.expr(t, ty)?))
+
+verify headOf
+    headOf(Export.Tables.empty(), 0, [], 0) => Result.Err("unknown expression index 0")
+    headOf(Export.Tables.empty(), 3, [], 0) => Result.Err("unknown name index 3")
+    headOf(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.bvar(0)), Export.Tables.empty()), 0, [0], 0) => Result.Ok(Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)))
+
+fn thmAt(t: Tables, name: Int, params: List<Int>, ty: Int, val: Int, group: List<Int>) -> Result<Tables, String>
+    ? "A theorem from the indices of a thm line read by position, looked up in the order declOf looks them up."
+    h = headOf(t, name, params, ty)?
+    v = Export.Tables.expr(t, val)?
+    Result.Ok(Export.Tables.addDecl(t, Decl.Thm(h, v, Export.Tables.names(t, group, [])?)))
+
+verify thmAt
+    thmAt(Export.Tables.empty(), 0, [], 0, 0, [0]) => Result.Err("unknown expression index 0")
+    List.len(Result.withDefault(thmAt(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.bvar(0)), Export.Tables.empty()), 0, [], 0, 0, [0]), Export.Tables.empty()).decls) => 1
+
+fn defAt(t: Tables, name: Int, params: List<Int>, ty: Int, val: Int, group: List<Int>, hints: Hints, safety: Safety) -> Result<Tables, String>
+    ? "A definition from the indices of a def line read by position, looked up in the order defOf looks them up."
+    h = headOf(t, name, params, ty)?
+    v = Export.Tables.expr(t, val)?
+    Result.Ok(Export.Tables.addDecl(t, Decl.Defn(h, v, hints, safety, Export.Tables.names(t, group, [])?)))
+
+verify defAt
+    defAt(Export.Tables.empty(), 0, [], 0, 0, [0], Hints.Abbrev, Safety.Safe) => Result.Err("unknown expression index 0")
+    List.len(Result.withDefault(defAt(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.bvar(0)), Export.Tables.empty()), 0, [], 0, 0, [0], Hints.Abbrev, Safety.Safe), Export.Tables.empty()).decls) => 1
 
 fn value(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
     ? "The value of a definition, theorem or opaque constant."

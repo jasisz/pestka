@@ -28,15 +28,18 @@ the Arena ranks checkers by.
 
 | Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 8 workers | Peak, 8 workers |
 |---|---|---|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 134.1 G | 14 s | 0.9 GB | 5.4 s | 1.2 GB |
-| `std` (98,086) | accepted | 226.4 G | 23 s | 1.4 GB | 8.2 s | 2.0 GB |
-| `reachability` | accepted | 79.4 G | 6.9 s | 0.5 GB | 5.8 s | 0.5 GB |
-| `con-leche` | accepted | 242.3 G | 27 s | 1.4 GB | 14 s | 1.9 GB |
-| `cedar` | accepted | 320.2 G | 31 s | 1.5 GB | 12 s | 2.2 GB |
-| `navier-stokes-euler` | accepted | 1.52 T | 139 s | 4.7 GB | 74 s | 7.5 GB |
-| `cslib` | accepted | 1.39 T | 159 s | 4.5 GB | 57 s | 6.1 GB |
-| `mathlib` (702,040) | accepted | 5.02 T | 570 s | 8.3 GB | 164 s | 10.2 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 404 G (232 G) | 33 s (19 s) | 1.0 GB | 33 s (19 s) | 1.0 GB |
+| `init` (58,170 declarations) | accepted | 92.1 G | 12 s | 0.8 GB | 5.5 s | 1.2 GB |
+| `std` (98,086) | accepted | 155.3 G | 21 s | 1.3 GB | 10 s | 1.9 GB |
+| `reachability` | accepted | 65.6 G | 6.2 s | 0.5 GB | 5.4 s | 0.5 GB |
+| `con-leche` | accepted | 151.6 G | 19 s | 1.2 GB | 8.7 s | 1.8 GB |
+| `cedar` | accepted | 214.6 G | 38 s | 1.4 GB | 12 s | 2.1 GB |
+| `navier-stokes-euler`* | accepted | 1.52 T | 139 s | 4.7 GB | 74 s | 7.5 GB |
+| `cslib` | accepted | 805.2 G | 124 s | 4.4 GB | 43 s | 5.9 GB |
+| `mathlib` (702,040) | accepted | 2.80 T | 452 s | 7.5 GB | 159 s | 10.1 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 343 G (204 G) | 29 s (16 s) | 1.0 GB | 29 s (17 s) | 1.0 GB |
+
+\* Measured with an earlier Pestka, at Aver `ea0c38c7`; not measured again
+since, its export taking more disk than was at hand.
 
 ## What it does differently
 
@@ -78,13 +81,32 @@ The checker follows the reference kernel's algorithm. What is its own:
   kept with its hash in one word. Abstracting variables, as closing a binder
   does, skips every subterm that shares no bit with them; before, 59% of the
   nodes it rebuilt came back unchanged. This cut nearly 3% on `Init`.
+- **Proofs are not compared.** Two applications of one constant are equal
+  when their arguments are, and once the arguments before it are equal, an
+  argument in a place whose domain is a proposition is a proof of the same
+  proposition on both sides; proofs of one proposition are equal, so such
+  arguments are left out. Whether a domain is a proposition is read from the
+  constant's type, not inferred. This cut about 9% on a `mathlib`
+  declaration.
+- **Metadata and keys are machine words.** A term's packed metadata, the kind
+  mixed into its hash, a variable's number and the key of every memo and
+  cache are refinements over Int bounded below 2^62, which Aver holds as
+  raw 64-bit words: making and reading them is machine arithmetic, and the
+  caches are maps keyed by machine words. This cut about 15% on a `mathlib`
+  declaration and 13% on `Init`.
+- **A casesOn goes straight to its branch.** A definition named casesOn whose
+  value is its recursor applied to its own arguments, each minor premise
+  wrapped to drop the induction hypotheses, is not unfolded: the major
+  premise is brought to its constructor and that constructor's minor premise
+  takes the fields. Computations by `decide` meet one per number and list
+  they take apart; this cut about 5% on the `perf/` tests.
 - **What a worker finds is kept across declarations.** Each worker meets its
   declarations in file order, so every constant a result rests on is still
   there in the next one. It carries its variables and their context, and the
   results of inference, checking, reduction and comparison, about closed
-  terms and, with variables named as above, open ones too; checking a term
-  with a universe parameter is kept for the same parameters, and the last
-  four lists of parameters keep theirs.
+  terms and, with variables named as above, open ones too; what checking
+  found about a term with a universe parameter is kept under the
+  declaration's parameters, for every declaration with the same ones.
   A constant's type and a definition's value at universe levels depend only
   on the levels as written, and are kept as well. Every cache has a limit and
   is emptied past it.
