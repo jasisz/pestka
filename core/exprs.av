@@ -5,9 +5,10 @@ module Exprs
         "and every constant carries its metadata (structural hash, loose bound variable range, which free variables may occur,"
         "whether free variables or universe parameters occur, and its size as"
         "a tree, capped, so that traversals know when memoizing pays), packed"
-        "into one Int so that every node stays small, computed once"
+        "into one word below 2^62 so that every node stays small, computed once"
         "by the constructors here and never by callers."
     exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, looseRange, hasFVar, hasParam, treeSize, varsOf, varsOfId]
+    exposes opaque [Word, Tag, Index]
     depends [Core.Hash, Core.Names, Core.Levels]
     effects []
 
@@ -103,6 +104,27 @@ decision ReadersByWord
     rejected = ["LeafFirst"]
     impacts = [wordOf, looseRange, varsOf, hasFVar, hasParam]
 
+decision WordsAsMachineWords
+    date = "2026-10-25"
+    reason =
+        "A node's word was an Int, and every division, mask, sum and"
+        "product that made or read one checked for overflow and for a"
+        "boxed operand, although a word is always below 2^62. Now it is a"
+        "Word, a refinement over Int below 2^62 that compiled Aver holds"
+        "as a machine word, and the arithmetic over it runs on that word:"
+        "a node's kind is a Tag below 2^11 named as a literal, and a"
+        "variable's number is narrowed to an Index below 2^40 before its"
+        "leaf's word is made. The bound is written as at most 2^62 - 1:"
+        "2^62 itself is past the Ints compiled Aver holds in place, so a"
+        "check against it built a boxed number every time, and with that"
+        "bound the words gained a third of what they gain now. Narrowing"
+        "the ingredients of every hash mix the same way cost as much as it"
+        "saved, so mix stays on Int. One worker on Aver 949dc9ab: etale"
+        "41.8 G to 35.9 G instructions, Init 108.4 G to 95.8 G."
+    chosen = "WordsAsMachineWords"
+    rejected = ["WordsAsInts", "IngredientsNarrowed"]
+    impacts = [Word, Tag, Index, joined, binderWord, leafWordOf, wordOf, packedOf, hashOf, looseRange, varsOf, hasParam, treeSize]
+
 type Binder
     Default
     Implicit
@@ -116,18 +138,69 @@ record Meta
     params: Bool
     size: Int
 
+record Word
+    value: Int
+
+record Tag
+    value: Int
+
+record Index
+    value: Int
+
 type Expr
     BVar(Int)
     FVar(Int)
     Sort(Level)
-    Const(Int, Name, List<Level>)
-    App(Int, Expr, Expr)
-    Lam(Int, Expr, Expr)
-    Pi(Int, Expr, Expr)
-    Let(Int, Expr, Expr, Expr)
+    Const(Word, Name, List<Level>)
+    App(Word, Expr, Expr)
+    Lam(Word, Expr, Expr)
+    Pi(Word, Expr, Expr)
+    Let(Word, Expr, Expr, Expr)
     NatLit(Int)
     StrLit(String)
-    Proj(Int, Name, Int, Expr)
+    Proj(Word, Name, Int, Expr)
+
+fn fromInt(n: Int) -> Result<Word, String>
+    ? "The packed metadata as a word: below 2^62, as pack keeps it (law fitsSixtyTwoBits), so compiled Aver holds it as a machine word (WordsAsMachineWords). The bound is spelled as at most 2^62 - 1, an Int held in place."
+    match Bool.and(n >= 0, n <= 4611686018427387903)
+        true -> Result.Ok(Word(value = n))
+        false -> Result.Err("word out of range")
+
+verify fromInt
+    fromInt(-1) => Result.Err("word out of range")
+    fromInt(4611686018427387904) => Result.Err("word out of range")
+
+fn word(n: Int) -> Word
+    ? "A word from packed metadata, which is always in range; anything else would read as the word that claims every variable, flag and range, which only ever makes traversals look further."
+    match fromInt(n)
+        Result.Ok(w) -> w
+        Result.Err(_) -> Word(value = 2147483647)
+
+verify word
+    word(7) => Word(value = 7)
+    unpack(word(-1).value).range => 1099511627776
+    unpack(word(-1).value).vars => 1023
+    unpack(word(-1).value).params => true
+
+fn tagOf(n: Int) -> Result<Tag, String>
+    ? "The kind of a node, mixed into its hash first: below 2^11, as mix2 asks of its first ingredient. The constructors here name theirs as literals."
+    match Bool.and(n >= 0, n < 2048)
+        true -> Result.Ok(Tag(value = n))
+        false -> Result.Err("tag out of range")
+
+verify tagOf
+    tagOf(2048) => Result.Err("tag out of range")
+    tagOf(-1) => Result.Err("tag out of range")
+
+fn indexOf(n: Int) -> Result<Index, String>
+    ? "A variable's number as a machine word: below 2^40, as every number the checker gives a variable is, so that a leaf's word is made on the machine word."
+    match Bool.and(n >= 0, n < 1099511627776)
+        true -> Result.Ok(Index(value = n))
+        false -> Result.Err("index out of range")
+
+verify indexOf
+    indexOf(-1) => Result.Err("index out of range")
+    indexOf(1099511627776) => Result.Err("index out of range")
 
 fn bvar(i: Int) -> Expr
     ? "Bound variable by de Bruijn index."
@@ -160,7 +233,7 @@ verify cnst
 
 fn app(f: Expr, a: Expr) -> Expr
     ? "Application."
-    Expr.App(joined(4, wordOf(f), wordOf(a)), f, a)
+    Expr.App(joined(Tag(value = 4), wordOf(f), wordOf(a)), f, a)
 
 verify app
     looseRange(app(bvar(0), bvar(3))) => 4
@@ -172,19 +245,19 @@ fn binderMeta(tag: Int, t: Expr, b: Expr) -> Meta
     mb = metaOf(b)
     Meta(hash = Core.Hash.mix(Core.Hash.mix(tag, mt.hash), mb.hash), range = Int.max(mt.range, Int.max(mb.range - 1, 0)), vars = Bits.or(mt.vars, mb.vars), params = Bool.or(mt.params, mb.params), size = sized(mt.size + mb.size))
 
-fn binderWord(tag: Int, t: Expr, b: Expr) -> Int
+fn binderWord(tag: Tag, t: Expr, b: Expr) -> Word
     ? "The word of a node that binds one variable over b: the body's range seen from outside the binder."
-    wt = wordOf(t)
-    wb = wordOf(b)
-    (Core.Hash.mix2(tag, hashIn(wt), hashIn(wb)) * 64 + Int.min(sizeIn(wt) + sizeIn(wb) + 1, 63)) * 33554432 + flagsOf(wt, wb) + Int.max(Bits.and(wt, 16383), under(Bits.and(wb, 16383)))
+    wt = wordOf(t).value
+    wb = wordOf(b).value
+    word((Int.mod((tag.value * 1000003 + Int.div(wt, 2147483648)) * 1000003 + Int.div(wb, 2147483648), 2147483647) * 64 + Int.min(Bits.and(Int.div(wt, 33554432), 63) + Bits.and(Int.div(wb, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(wt, wb), 33538048) + Int.max(Bits.and(wt, 16383), Int.max(Bits.and(wb, 16383) - 1, 0) + Int.div(Bits.and(wb, 16383), 16383)))
 
 verify binderWord
-    binderWord(5, sort(Level.Zero), bvar(3)) == pack(binderMeta(5, sort(Level.Zero), bvar(3))) => true
+    binderWord(Tag(value = 5), sort(Level.Zero), bvar(3)).value == pack(binderMeta(5, sort(Level.Zero), bvar(3))) => true
 
 verify binderWord law packsBinderMeta
     given i: Int = 0..6
     given j: Int = 0..6
-    binderWord(6, wordSample(i), wordSample(j)) => pack(binderMeta(6, wordSample(i), wordSample(j)))
+    binderWord(Tag(value = 6), wordSample(i), wordSample(j)).value => pack(binderMeta(6, wordSample(i), wordSample(j)))
 
 verify binderMeta
     binderMeta(5, sort(Level.Zero), bvar(0)).range => 0
@@ -192,7 +265,7 @@ verify binderMeta
 
 fn lam(n: Name, t: Expr, b: Expr, bi: Binder) -> Expr
     ? "Lambda abstraction; b refers to the bound variable as index 0. The binder's name and annotation are not kept (BindersUnnamed)."
-    Expr.Lam(binderWord(5, t, b), t, b)
+    Expr.Lam(binderWord(Tag(value = 5), t, b), t, b)
 
 verify lam
     looseRange(lam(Core.Names.anon(), sort(Level.Zero), bvar(0), Binder.Default)) => 0
@@ -201,7 +274,7 @@ verify lam
 
 fn pi(n: Name, t: Expr, b: Expr, bi: Binder) -> Expr
     ? "Dependent function type. The binder's name and annotation are not kept (BindersUnnamed)."
-    Expr.Pi(binderWord(6, t, b), t, b)
+    Expr.Pi(binderWord(Tag(value = 6), t, b), t, b)
 
 verify pi
     hashOf(pi(Core.Names.anon(), bvar(0), bvar(0), Binder.Default)) == hashOf(lam(Core.Names.anon(), bvar(0), bvar(0), Binder.Default)) => false
@@ -212,7 +285,7 @@ fn letE(n: Name, t: Expr, v: Expr, b: Expr) -> Expr
     wt = wordOf(t)
     wv = wordOf(v)
     wb = wordOf(b)
-    Expr.Let((Core.Hash.mix(Core.Hash.mix2(7, hashIn(wt), hashIn(wv)), hashIn(wb)) * 64 + Int.min(sizeIn(wt) + sizeIn(wv) + sizeIn(wb) + 1, 63)) * 33554432 + Bits.or(flagsOf(wt, wv), flagsOf(wb, wb)) + Int.max(Int.max(Bits.and(wt, 16383), Bits.and(wv, 16383)), under(Bits.and(wb, 16383))), t, v, b)
+    Expr.Let(word((Core.Hash.mix(Core.Hash.mix2(7, hashIn(wt), hashIn(wv)), hashIn(wb)) * 64 + Int.min(sizeIn(wt) + sizeIn(wv) + sizeIn(wb) + 1, 63)) * 33554432 + Bits.or(flagsOf(wt, wv), flagsOf(wb, wb)) + Int.max(Int.max(Bits.and(wt.value, 16383), Bits.and(wv.value, 16383)), under(Bits.and(wb.value, 16383)))), t, v, b)
 
 verify letE
     looseRange(letE(Core.Names.anon(), bvar(0), bvar(4), bvar(0))) => 5
@@ -235,7 +308,7 @@ verify strLit
 fn proj(s: Name, i: Int, e: Expr) -> Expr
     ? "Projection of field i out of a structure value."
     w = wordOf(e)
-    Expr.Proj((Core.Hash.mix(Core.Hash.mix2(10, Core.Names.hashOf(s), i), hashIn(w)) * 64 + Int.min(sizeIn(w) + 1, 63)) * 33554432 + flagsOf(w, w) + Bits.and(w, 16383), s, i, e)
+    Expr.Proj(word((Core.Hash.mix(Core.Hash.mix2(10, Core.Names.hashOf(s), i), hashIn(w)) * 64 + Int.min(sizeIn(w) + 1, 63)) * 33554432 + flagsOf(w, w) + Bits.and(w.value, 16383)), s, i, e)
 
 verify proj
     looseRange(proj(Core.Names.anon(), 0, bvar(1))) => 2
@@ -246,14 +319,14 @@ fn metaOf(e: Expr) -> Meta
         Expr.BVar(i) -> Meta(hash = Core.Hash.mix(1, i), range = i + 1, vars = 0, params = false, size = 1)
         Expr.FVar(i) -> Meta(hash = Core.Hash.mix(11, i), range = 0, vars = varsOfId(i), params = false, size = 1)
         Expr.Sort(l) -> Meta(hash = Core.Hash.mix(2, Core.Levels.hashOf(l)), range = 0, vars = 0, params = Core.Levels.hasParam(l), size = 1)
-        Expr.Const(m, _, _) -> unpack(m)
-        Expr.App(m, _, _) -> unpack(m)
-        Expr.Lam(m, _, _) -> unpack(m)
-        Expr.Pi(m, _, _) -> unpack(m)
-        Expr.Let(m, _, _, _) -> unpack(m)
+        Expr.Const(m, _, _) -> unpack(m.value)
+        Expr.App(m, _, _) -> unpack(m.value)
+        Expr.Lam(m, _, _) -> unpack(m.value)
+        Expr.Pi(m, _, _) -> unpack(m.value)
+        Expr.Let(m, _, _, _) -> unpack(m.value)
         Expr.NatLit(n) -> Meta(hash = Core.Hash.mix(8, Int.mod(n, 2147483647)), range = 0, vars = 0, params = false, size = 1)
         Expr.StrLit(s) -> Meta(hash = Core.Hash.mix(9, Core.Hash.ofText(s)), range = 0, vars = 0, params = false, size = 1)
-        Expr.Proj(m, _, _, _) -> unpack(m)
+        Expr.Proj(m, _, _, _) -> unpack(m.value)
 
 verify metaOf
     metaOf(bvar(0)).range => 1
@@ -283,23 +356,22 @@ verify anyParam
     anyParam([]) => false
     anyParam([Level.Zero, Level.Param(Core.Names.anon())]) => true
 
-fn wordOf(e: Expr) -> Int
+fn wordOf(e: Expr) -> Word
     ? "The packed metadata of any node: the word a compound node or a constant carries, or a leaf's, made on the spot. The carried word is read first (ReadersByWord)."
-    p = packedOf(e)
-    match p < 0
-        true -> leafWordOf(e)
-        false -> p
+    match packedOf(e)
+        Option.Some(w) -> w
+        Option.None -> leafWordOf(e)
 
 verify wordOf
-    unpack(wordOf(bvar(2))).range => 3
-    unpack(wordOf(fvar(3 * 1024 + 4))).vars => 4
-    wordOf(app(bvar(0), bvar(1))) == pack(metaOf(app(bvar(0), bvar(1)))) => true
+    unpack(wordOf(bvar(2)).value).range => 3
+    unpack(wordOf(fvar(3 * 1024 + 4)).value).vars => 4
+    wordOf(app(bvar(0), bvar(1))).value == pack(metaOf(app(bvar(0), bvar(1)))) => true
 
-fn leafWordOf(e: Expr) -> Int
+fn leafWordOf(e: Expr) -> Word
     ? "A leaf's word, made on the spot; a node that carries its word gives that."
     match e
-        Expr.BVar(i) -> leafWord(Core.Hash.mix(1, i), Int.min(i + 1, 16383), 0, 0)
-        Expr.FVar(i) -> leafWord(Core.Hash.mix(11, i), 0, varsOfId(i), 0)
+        Expr.BVar(i) -> bvarWord(i)
+        Expr.FVar(i) -> fvarWord(i)
         Expr.Sort(l) -> leafWord(Core.Hash.mix(2, Core.Levels.hashOf(l)), 0, 0, flag(Core.Levels.hasParam(l)))
         Expr.Const(m, _, _) -> m
         Expr.App(m, _, _) -> m
@@ -311,26 +383,46 @@ fn leafWordOf(e: Expr) -> Int
         Expr.Proj(m, _, _, _) -> m
 
 verify leafWordOf
-    unpack(leafWordOf(bvar(2))).range => 3
+    unpack(leafWordOf(bvar(2)).value).range => 3
 
-fn leafWord(hash: Int, range: Int, vars: Int, params: Int) -> Int
+fn bvarWord(i: Int) -> Word
+    ? "A bound variable's word: mix(1, i) as its hash, its index and one as its range. An index below 2^40 is spelled out on the machine word."
+    match indexOf(i)
+        Result.Ok(x) -> word(Int.mod(1000003 + x.value, 2147483647) * 2147483648 + 33554432 + Int.min(x.value + 1, 16383))
+        Result.Err(_) -> leafWord(Core.Hash.mix(1, i), Int.min(i + 1, 16383), 0, 0)
+
+verify bvarWord law sameAsLeaf
+    given i: Int = [0, 1, 16382, 16383, 1099511627775, 1099511627776, -3]
+    bvarWord(i) => leafWord(Core.Hash.mix(1, i), Int.min(i + 1, 16383), 0, 0)
+
+fn fvarWord(i: Int) -> Word
+    ? "A free variable's word: mix(11, i) as its hash, its bits (varsOfId: the low ten, all ten when none is set) in place. A number below 2^40 is spelled out on the machine word."
+    match indexOf(i)
+        Result.Ok(x) -> word(Int.mod(11000033 + x.value, 2147483647) * 2147483648 + 33554432 + (Bits.and(x.value, 1023) + 1023 * Int.div(1024 - Bits.and(x.value, 1023), 1024)) * 16384)
+        Result.Err(_) -> leafWord(Core.Hash.mix(11, i), 0, varsOfId(i), 0)
+
+verify fvarWord law sameAsLeaf
+    given i: Int = [0, 1, 1023, 1024, 3 * 1024 + 4, 1099511627775, 1099511627776]
+    fvarWord(i) => leafWord(Core.Hash.mix(11, i), 0, varsOfId(i), 0)
+
+fn leafWord(hash: Int, range: Int, vars: Int, params: Int) -> Word
     ? "The word of a node of tree size 1, from its parts as pack lays them out."
-    hash * 2147483648 + 33554432 + params * 16777216 + vars * 16384 + range
+    word(hash * 2147483648 + 33554432 + params * 16777216 + vars * 16384 + range)
 
 verify leafWord
-    leafWord(5, 3, 2, 1) == pack(Meta(hash = 5, range = 3, vars = 2, params = true, size = 1)) => true
+    leafWord(5, 3, 2, 1).value == pack(Meta(hash = 5, range = 3, vars = 2, params = true, size = 1)) => true
 
-fn joined(tag: Int, wf: Int, wa: Int) -> Int
-    ? "The word of a node over two parts, from theirs alone: the hashes mixed after the tag, sizes added and capped, variable bits and parameter flags or-ed, the larger range. A saturated range stays saturated."
-    (Core.Hash.mix2(tag, hashIn(wf), hashIn(wa)) * 64 + Int.min(sizeIn(wf) + sizeIn(wa) + 1, 63)) * 33554432 + flagsOf(wf, wa) + Int.max(Bits.and(wf, 16383), Bits.and(wa, 16383))
+fn joined(tag: Tag, wf: Word, wa: Word) -> Word
+    ? "The word of a node over two parts, from theirs alone: the hashes mixed after the tag (mix2, spelled out so that it stays on the machine word), sizes added and capped, variable bits and parameter flags or-ed, the larger range. A saturated range stays saturated."
+    word((Int.mod((tag.value * 1000003 + Int.div(wf.value, 2147483648)) * 1000003 + Int.div(wa.value, 2147483648), 2147483647) * 64 + Int.min(Bits.and(Int.div(wf.value, 33554432), 63) + Bits.and(Int.div(wa.value, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(wf.value, wa.value), 33538048) + Int.max(Bits.and(wf.value, 16383), Bits.and(wa.value, 16383)))
 
 verify joined
-    unpack(joined(4, wordOf(bvar(0)), wordOf(bvar(3)))).range => 4
+    unpack(joined(Tag(value = 4), wordOf(bvar(0)), wordOf(bvar(3))).value).range => 4
 
 verify joined law packsAppMeta
     given i: Int = 0..6
     given j: Int = 0..6
-    joined(4, wordOf(wordSample(i)), wordOf(wordSample(j))) => pack(appMeta(metaOf(wordSample(i)), metaOf(wordSample(j))))
+    joined(Tag(value = 4), wordOf(wordSample(i)), wordOf(wordSample(j))).value => pack(appMeta(metaOf(wordSample(i)), metaOf(wordSample(j))))
 
 fn appMeta(mf: Meta, ma: Meta) -> Meta
     ? "An application's metadata from its parts', as a record: what joined packs."
@@ -353,23 +445,23 @@ fn wordSample(k: Int) -> Expr
 verify wordSample
     looseRange(wordSample(1)) >= 20001 => true
 
-fn hashIn(w: Int) -> Int
+fn hashIn(w: Word) -> Int
     ? "The hash in a word."
-    Int.div(w, 2147483648)
+    Int.div(w.value, 2147483648)
 
 verify hashIn
     hashIn(leafWord(9, 0, 0, 0)) => 9
 
-fn sizeIn(w: Int) -> Int
+fn sizeIn(w: Word) -> Int
     ? "The capped tree size in a word."
-    Bits.and(Int.div(w, 33554432), 63)
+    Bits.and(Int.div(w.value, 33554432), 63)
 
 verify sizeIn
     sizeIn(leafWord(9, 0, 0, 0)) => 1
 
-fn flagsOf(wa: Int, wb: Int) -> Int
+fn flagsOf(wa: Word, wb: Word) -> Int
     ? "The variable bits and the parameter flag of two words, or-ed, in place."
-    Bits.and(Bits.or(wa, wb), 33538048)
+    Bits.and(Bits.or(wa.value, wb.value), 33538048)
 
 verify flagsOf
     flagsOf(leafWord(1, 5, 2, 0), leafWord(1, 7, 4, 1)) => 16777216 + 6 * 16384
@@ -385,37 +477,35 @@ verify under
     under(5) => 4
     under(16383) => 16383
 
-fn packedOf(e: Expr) -> Int
-    ? "The packed metadata of a compound node or a constant, or -1 for another leaf, whose metadata is computed on the spot."
+fn packedOf(e: Expr) -> Option<Word>
+    ? "The packed metadata of a compound node or a constant, or none for another leaf, whose metadata is computed on the spot."
     match e
-        Expr.Const(m, _, _) -> m
-        Expr.App(m, _, _) -> m
-        Expr.Lam(m, _, _) -> m
-        Expr.Pi(m, _, _) -> m
-        Expr.Let(m, _, _, _) -> m
-        Expr.Proj(m, _, _, _) -> m
-        _ -> -1
+        Expr.Const(m, _, _) -> Option.Some(m)
+        Expr.App(m, _, _) -> Option.Some(m)
+        Expr.Lam(m, _, _) -> Option.Some(m)
+        Expr.Pi(m, _, _) -> Option.Some(m)
+        Expr.Let(m, _, _, _) -> Option.Some(m)
+        Expr.Proj(m, _, _, _) -> Option.Some(m)
+        _ -> Option.None
 
 verify packedOf
-    packedOf(bvar(0)) => -1
-    packedOf(app(bvar(0), bvar(0))) >= 0 => true
+    packedOf(bvar(0)) => Option.None
+    packedOf(app(bvar(0), bvar(0))) == Option.None => false
 
 fn hashOf(e: Expr) -> Int
     ? "Structural hash, read alone from a compound node."
-    p = packedOf(e)
-    match p < 0
-        true -> metaOf(e).hash
-        false -> hashIn(p)
+    match packedOf(e)
+        Option.Some(w) -> Int.div(w.value, 2147483648)
+        Option.None -> Int.div(leafWordOf(e).value, 2147483648)
 
 verify hashOf
     hashOf(bvar(0)) == hashOf(bvar(0)) => true
 
 fn looseRange(e: Expr) -> Int
     ? "One more than the largest loose bound variable index; 0 when closed. Read on every node a substitution visits, so it is one mask for a compound node and needs no hash of a leaf."
-    p = packedOf(e)
-    match p < 0
-        true -> leafRange(e)
-        false -> rangeOf(Bits.and(p, 16383))
+    match packedOf(e)
+        Option.Some(w) -> rangeOf(Bits.and(w.value, 16383))
+        Option.None -> leafRange(e)
 
 verify looseRange
     looseRange(bvar(4)) => 5
@@ -441,10 +531,9 @@ verify hasFVar
 
 fn hasParam(e: Expr) -> Bool
     ? "Whether a universe parameter occurs."
-    p = packedOf(e)
-    match p < 0
-        true -> leafParam(e)
-        false -> paramsIn(p) == 1
+    match packedOf(e)
+        Option.Some(w) -> Bits.and(Int.div(w.value, 16777216), 1) == 1
+        Option.None -> leafParam(e)
 
 verify leafParam
     leafParam(sort(Level.Param(Core.Names.anon()))) => true
@@ -543,10 +632,9 @@ verify rangeOf
 
 fn treeSize(e: Expr) -> Int
     ? "How many nodes e has as a tree (a DAG counts shared parts once per use), capped."
-    p = packedOf(e)
-    match p < 0
-        true -> 1
-        false -> sizeIn(p)
+    match packedOf(e)
+        Option.Some(w) -> Bits.and(Int.div(w.value, 33554432), 63)
+        Option.None -> 1
 
 verify treeSize
     treeSize(app(bvar(0), app(bvar(1), bvar(2)))) => 5
@@ -563,10 +651,9 @@ verify varsOfId
 
 fn varsOf(e: Expr) -> Int
     ? "The bits of every free variable occurring in e, or-ed together; 0 when none does. Two terms whose bits share none hold no free variable in common."
-    p = packedOf(e)
-    match p < 0
-        true -> leafVars(e)
-        false -> Bits.and(Int.div(p, 16384), 1023)
+    match packedOf(e)
+        Option.Some(w) -> Bits.and(Int.div(w.value, 16384), 1023)
+        Option.None -> leafVars(e)
 
 fn leafVars(e: Expr) -> Int
     ? "A leaf's variable bits: a free variable's own, none for another leaf."
