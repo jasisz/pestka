@@ -101,12 +101,59 @@ fn linesIn(text: String) -> List<String>
 verify linesIn
     linesIn("a\nb") => ["a", "b"]
 
+decision PartsReadInPlace
+    date = "2026-10-26"
+    reason =
+        "A chunk's parts were fed as a list of all but the last, which"
+        "List.take built anew, a cell for each of some 300000 lines, after"
+        "two walks for the length; the last part was found by a third walk."
+        "On one worker the parts are now read as they are and the last comes"
+        "back as the carry. The first chunk goes the same way once its"
+        "header line is read: a build guided by a profile of a file smaller"
+        "than a chunk otherwise never sees the later chunks' path and lays"
+        "it out as cold code, which made reading Init 13% slower than"
+        "before instead of faster. Instructions retired, one worker, Aver"
+        "02771bf5, reading only, built as the Arena builds: Init 14.3 G to"
+        "14.0 G, con-leche 22.1 G to 21.6 G, etale 4.9 G to 4.7 G; checked"
+        "in full without a profile: etale 31.7 G to 31.4 G, Init 78.3 G to"
+        "77.7 G, con-leche 127.0 G to 126.3 G."
+    chosen = "PartsReadInPlace"
+    rejected = ["PartsTaken"]
+    impacts = [splitChunk, headerFirst, chunkRead]
+
 fn splitChunk(path: String, next: Int, parts: List<String>, t: Tables, line: Int, workers: Int) -> Outcome
-    ? "Feeds the chunk's complete lines; its last part is unfinished and waits for the next chunk."
+    ? "Feeds the chunk's complete lines; its last part is unfinished and waits for the next chunk. On one worker the parts are read in place, the header line first (PartsReadInPlace)."
     ! [Disk.readBytesAt]
-    match feed(t, List.take(parts, List.len(parts) - 1), line, workers)
+    match workers <= 1
+        true -> match line == 1
+            true -> headerFirst(path, next, parts, t, workers)
+            false -> chunkRead(path, next, Export.Reader.readChunk(t, parts, line), workers)
+        false -> match feed(t, List.take(parts, List.len(parts) - 1), line, workers)
+            Fed.Stop(o) -> o
+            Fed.More(fed, at) -> chunked(path, next, lastPart(parts), fed, at, workers)
+
+fn headerFirst(path: String, next: Int, parts: List<String>, t: Tables, workers: Int) -> Outcome
+    ? "The first chunk on one worker: its header line, then its other parts in place. A chunk that ends before the header line does carries it on."
+    ! [Disk.readBytesAt]
+    match parts
+        [h, ..rest] -> match rest
+            [] -> chunked(path, next, h, t, 1, workers)
+            _ -> afterHeaderLine(path, next, feed(t, [h], 1, workers), rest, workers)
+        [] -> chunked(path, next, "", t, 1, workers)
+
+fn afterHeaderLine(path: String, next: Int, f: Fed, rest: List<String>, workers: Int) -> Outcome
+    ? "Reads the parts after the header line in place, or stops with the header's verdict."
+    ! [Disk.readBytesAt]
+    match f
         Fed.Stop(o) -> o
-        Fed.More(fed, at) -> chunked(path, next, lastPart(parts), fed, at, workers)
+        Fed.More(t, line) -> chunkRead(path, next, Export.Reader.readChunk(t, rest, line), workers)
+
+fn chunkRead(path: String, next: Int, c: Chunk, workers: Int) -> Outcome
+    ? "Reads the next chunk with the carry, or stops at a bad line."
+    ! [Disk.readBytesAt]
+    match c
+        Chunk.Bad(e) -> Outcome.Rejected(e)
+        Chunk.Read(t, carry, line) -> chunked(path, next, carry, t, line, workers)
 
 fn lastPart(parts: List<String>) -> String
     ? "The last of the parts a split gives; a split always gives at least one."

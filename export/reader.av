@@ -4,7 +4,7 @@ module Reader
         "other line in order. A line is a declaration when its object has a"
         "single key, and an item of the name, level or expression table"
         "when it carries an in, il or ie index."
-    exposes [header, supported, readAll, readParallel, readLine]
+    exposes [Chunk, header, supported, readAll, readChunk, readParallel, readLine]
     depends [Json.Line, Json.Escapes, Json.Access, Core.Exprs, Core.Decls, Export.Tables, Export.Items, Export.Declarations]
     effects []
 
@@ -46,6 +46,31 @@ fn continueAfter(r: Result<Tables, String>, rest: List<String>, n: Int) -> Resul
 
 verify continueAfter
     continueAfter(Result.Err("x"), [], 4) => Result.Err("line 4: x")
+
+type Chunk
+    Read(Tables, String, Int)
+    Bad(String)
+
+fn readChunk(t: Tables, parts: List<String>, n: Int) -> Chunk
+    ? "Reads the parts a chunk of the file splits into, all but the last, which the chunk ends before its line does: that part comes back with the tables and the number of its line (PartsReadInPlace)."
+    match parts
+        [] -> Chunk.Read(t, "", n)
+        [l] -> Chunk.Read(t, l, n)
+        [l, ..rest] -> chunkAfter(applyLine(t, parseLine(l)), rest, n)
+
+verify readChunk
+    readChunk(Export.Tables.empty(), ["", "ab"], 2) => Chunk.Read(Export.Tables.empty(), "ab", 3)
+    readChunk(Export.Tables.empty(), ["{{\"app\":{{\"arg\":3,\"fn\":3}},\"ie\":1}}", ""], 2) => Chunk.Bad("line 2: unknown expression index 3")
+    readChunk(Export.Tables.empty(), [], 4) => Chunk.Read(Export.Tables.empty(), "", 4)
+
+fn chunkAfter(r: Result<Tables, String>, rest: List<String>, n: Int) -> Chunk
+    ? "Stops at the first bad line of a chunk, naming it; otherwise reads on."
+    match r
+        Result.Err(e) -> Chunk.Bad("line {n}: {e}")
+        Result.Ok(t) -> readChunk(t, rest, n + 1)
+
+verify chunkAfter
+    chunkAfter(Result.Err("x"), [], 4) => Chunk.Bad("line 4: x")
 
 fn readLine(t: Tables, line: String) -> Result<Tables, String>
     ? "Reads one line into the tables."
