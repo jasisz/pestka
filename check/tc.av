@@ -2015,11 +2015,32 @@ fn lvar(st: St, t: Expr, v: Option<Expr>, stack: List<Clo>, ms: MS, delta: Bool,
 verify lvar
     resultExpr(lvar(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Option.None, [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.fvar(0)
 
+decision RigidHeadsStuck
+    date = "2026-10-25"
+    reason =
+        "A constructor, an inductive type or an axiom at the head went the"
+        "way of a definition: Nat arithmetic tried, the constant looked up"
+        "again, its value asked for and the unfolding cache searched, before"
+        "the machine found nothing to unfold and stopped. A computation by"
+        "decide meets a constructor at the head at every value it builds,"
+        "eight hundred thousand times on reachability. Such a head is now"
+        "stuck at once; Nat.succ still goes to the arithmetic on literals."
+        "One worker on Aver 06639a5e: reachability 55.0 G to 54.2 G"
+        "instructions, the rest as it was."
+    chosen = "RigidHeadsStuck"
+    rejected = ["RigidHeadsUnfoldTried"]
+    impacts = [lconst]
+
 fn lconst(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "A constant head: a recursor's rule, a quotient rule, or, with delta, Nat arithmetic and unfolding."
+    ? "A constant head: a recursor's rule, a quotient rule, or, with delta, Nat arithmetic and unfolding. A constructor other than Nat.succ, an inductive type and an axiom have nothing to unfold and are stuck at once (RigidHeadsStuck)."
     match c
         Option.Some(Const.CRec(rv)) -> lrec(st, f, ls, rv, stack, ms, delta, cheapRec, cheapProj)
         Option.Some(Const.CQuot) -> lquot(st, f, matStack(stack, ms, []), delta, cheapRec, cheapProj)
+        Option.Some(Const.CCtor) -> match Core.Apps.isConst(f, Check.Lits.natSucc)
+            true -> lnat(st, f, stack, ms, delta, cheapRec, cheapProj)
+            false -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
+        Option.Some(Const.CInduct) -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
+        Option.Some(Const.CAxiom) -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
         _ -> lnat(st, f, stack, ms, delta, cheapRec, cheapProj)
 
 verify lconst
