@@ -26,6 +26,21 @@ decision MapCaches
     rejected = ["PersistentCaches"]
     impacts = [add, get]
 
+decision BucketsReadInPlace
+    date = "2026-10-25"
+    reason =
+        "A lookup took the bucket out of the map, a copy of the entry or of"
+        "the list of entries, only to compare its keys and drop it. Every"
+        "lookup that only reads now hands the map's own option to a reader,"
+        "which Aver lends instead of copying; get, which copies, is left to"
+        "add, which builds a new bucket from the old one. One worker, with"
+        "Aver's lent map lookups: etale 35.0 G to 34.8 G instructions, Init"
+        "93.8 G to 92.9 G, std 158.1 G to 156.5 G, con-leche 153.7 G to"
+        "152.4 G."
+    chosen = "BucketsReadInPlace"
+    rejected = ["BucketsCopiedOut"]
+    impacts = [find]
+
 decision OneEntryBuckets
     date = "2026-10-22"
     reason =
@@ -89,8 +104,10 @@ verify joined
     joined((Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Bucket.NoEntry) => Bucket.OneEntry((Core.Exprs.bvar(0), Core.Exprs.bvar(1)))
 
 fn find(m: Map<Core.Exprs.Key, Bucket>, key: Core.Exprs.Key, e: Expr) -> Option<Expr>
-    ? "The value paired with an expression equal to e in key's bucket."
-    findIn(get(m, key), e)
+    ? "The value paired with an expression equal to e in key's bucket. The bucket is read where the map holds it, not copied out (BucketsReadInPlace)."
+    match Map.get(m, key)
+        Option.Some(b) -> findIn(b, e)
+        Option.None -> Option.None
 
 verify find
     find(add(empty(), Core.Exprs.key(4), (Core.Exprs.bvar(0), Core.Exprs.bvar(1))), Core.Exprs.key(4), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))

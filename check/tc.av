@@ -132,7 +132,7 @@ decision ParamsInTheKey
 fn typeGet(st: St, only: Bool, e: Expr) -> Option<Expr>
     ? "The type kept for e in the cache for the mode: under e applied to the declaration's parameters when checking a term with a universe parameter (ParamsInTheKey), else under e."
     match Bool.and(Bool.not(only), Bool.and(st.checkParams, Core.Exprs.hasParam(e)))
-        true -> findOpen(Core.Cache.get(st.checkCache, Core.Exprs.key(Core.Exprs.appHash(e, st.paramsTag))), e, st.paramsTag)
+        true -> openIn(Map.get(st.checkCache, Core.Exprs.key(Core.Exprs.appHash(e, st.paramsTag))), e, st.paramsTag)
         false -> Check.State.cacheGet(cacheFor(st, only), e)
 
 verify typeGet
@@ -221,8 +221,8 @@ verify openCached
 fn openHit(st: St, e: Expr, around: Expr, only: Bool) -> Option<Expr>
     ? "The cached type of e under around, looked up apart: the cache handed out for the lookup is let go when this returns, before the caller infers and keeps a type, which would otherwise find the cache with two owners and copy all of it."
     match Bool.and(Bool.not(only), Bool.and(st.checkParams, Core.Exprs.hasParam(e)))
-        true -> findTagged(Core.Cache.get(st.checkCache, Core.Exprs.key(Core.Exprs.appHash3(e, around, st.paramsTag))), e, around, st.paramsTag)
-        false -> findOpen(Core.Cache.get(cacheFor(st, only), Core.Exprs.key(Core.Exprs.appHash(e, around))), e, around)
+        true -> taggedIn(Map.get(st.checkCache, Core.Exprs.key(Core.Exprs.appHash3(e, around, st.paramsTag))), e, around, st.paramsTag)
+        false -> openIn(Map.get(cacheFor(st, only), Core.Exprs.key(Core.Exprs.appHash(e, around))), e, around)
 
 verify openHit
     openHit(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.fvar(1), false) => Option.None
@@ -244,6 +244,24 @@ fn checkedKept(r: RE, key: Expr, e: Expr) -> RE
 
 verify checkedKept
     Core.Cache.size(checkedKept(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0)).st.checkCache) => 1
+
+fn openIn(o: Option<Bucket>, e: Expr, around: Expr) -> Option<Expr>
+    ? "findOpen on the bucket the map holds, read in place (BucketsReadInPlace)."
+    match o
+        Option.Some(k) -> findOpen(k, e, around)
+        Option.None -> Option.None
+
+verify openIn
+    openIn(Option.None, Core.Exprs.bvar(0), Core.Exprs.fvar(1)) => Option.None
+
+fn taggedIn(o: Option<Bucket>, e: Expr, around: Expr, tag: Expr) -> Option<Expr>
+    ? "findTagged on the bucket the map holds, read in place."
+    match o
+        Option.Some(k) -> findTagged(k, e, around, tag)
+        Option.None -> Option.None
+
+verify taggedIn
+    taggedIn(Option.None, Core.Exprs.bvar(0), Core.Exprs.fvar(1), Core.Exprs.natLit(0)) => Option.None
 
 fn findOpen(bucket: Bucket, e: Expr, around: Expr) -> Option<Expr>
     ? "The value stored under e applied to around, compared without building it."
