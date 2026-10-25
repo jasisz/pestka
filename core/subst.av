@@ -90,10 +90,10 @@ verify idsBits
 fn untouched(op: Op, e: Expr, offset: Int) -> Bool
     ? "Whether the operation cannot change e at this depth."
     match op
-        Op.Inst -> Core.Exprs.looseRange(e) <= offset
-        Op.InstRev -> Core.Exprs.looseRange(e) <= offset
-        Op.Lift(s, _) -> Core.Exprs.looseRange(e) <= s + offset
-        Op.Lower(s, _) -> Core.Exprs.looseRange(e) <= s + offset
+        Op.Inst -> Core.Exprs.within(e, offset)
+        Op.InstRev -> Core.Exprs.within(e, offset)
+        Op.Lift(s, _) -> Core.Exprs.within(e, s + offset)
+        Op.Lower(s, _) -> Core.Exprs.within(e, s + offset)
         Op.Abstract(_, _, bits) -> Bits.and(Core.Exprs.varsOf(e), bits) == 0
 
 verify untouched
@@ -106,7 +106,7 @@ record SR
 
 fn apply(op: Op, e: Expr, offset: Int) -> Expr
     ? "Applies op to e under offset binders; a term too small for the memo goes without one. small is called as the argument of done, not in tail position, so that it does not join a cycle of tail calls through lift."
-    match Core.Exprs.treeSize(e) < 32
+    match Core.Exprs.isSmall(e)
         true -> done(small(op, e, offset))
         false -> go(op, e, offset, {}).e
 
@@ -134,7 +134,7 @@ fn visit(op: Op, e: Expr, offset: Int, memo: Map<Int, Tuple<Expr, Expr>>) -> SR
     match e
         Expr.BVar(i) -> SR(e = bvarCase(op, i, offset), memo = memo)
         Expr.FVar(id) -> SR(e = fvarCase(op, id, offset), memo = memo)
-        _ -> match Core.Exprs.treeSize(e) < 32
+        _ -> match Core.Exprs.isSmall(e)
             true -> SR(e = small(op, e, offset), memo = memo)
             false -> memoed(op, e, offset, memo, offset * 2147483648 + Core.Exprs.hashOf(e))
 
@@ -373,7 +373,7 @@ fn instLevelParams(e: Expr, ps: List<Name>, us: List<Level>) -> Expr
     ? "Replaces universe parameters ps by us everywhere in e. Each parameter put in for itself, as a constant used at its own parameters is, changes nothing, and e is returned as it is."
     match sameParams(ps, us)
         true -> e
-        false -> match Core.Exprs.treeSize(e) < 32
+        false -> match Core.Exprs.isSmall(e)
             true -> done(lsmall(e, ps, us))
             false -> lgo(e, ps, us, {}).e
 
@@ -405,7 +405,7 @@ fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Int, Tuple<Expr, Expr
         true -> match e
             Expr.Sort(l) -> SR(e = Core.Exprs.sort(Core.Univ.instantiate(l, ps, us)), memo = memo)
             Expr.Const(_, n, ls) -> SR(e = Core.Exprs.cnst(n, levelsOf(ls, ps, us, [])), memo = memo)
-            _ -> match Core.Exprs.treeSize(e) < 32
+            _ -> match Core.Exprs.isSmall(e)
                 true -> SR(e = lsmall(e, ps, us), memo = memo)
                 false -> lmemoed(e, ps, us, memo, Core.Exprs.hashOf(e))
 
@@ -504,7 +504,7 @@ verify hasLooseBVar
 
 fn looseAt(e: Expr, i: Int) -> Bool
     ? "hasLooseBVar with the index already shifted for the binders passed."
-    match Core.Exprs.looseRange(e) <= i
+    match Core.Exprs.within(e, i)
         true -> false
         false -> match e
             Expr.BVar(j) -> j == i

@@ -6,7 +6,7 @@ module State
         "scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, ParamGen, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache]
     effects []
 
@@ -23,10 +23,6 @@ type Const
     CInduct(IndType)
     CCtor(Ctor)
     CRec(Rec)
-
-record ParamGen
-    params: List<Name>
-    cache: Map<Int, Bucket>
 
 record Placed
     name: Name
@@ -196,7 +192,6 @@ record St
     eager: Bool
     inferCache: Map<Int, Bucket>
     checkCache: Map<Int, Bucket>
-    paramCache: Map<Int, Bucket>
     whnfCache: Map<Int, Bucket>
     coreCache: Map<Int, Bucket>
     stepCache: Map<Int, Bucket>
@@ -210,8 +205,7 @@ record St
     opened: Expr
     keep: Int
     kinds: List<Int>
-    gens: List<ParamGen>
-    paramsBefore: List<Name>
+    paramsTag: Expr
 
 record RE
     e: Expr
@@ -227,10 +221,26 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), paramCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), stepCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Core.Exprs.sort(Level.Zero), keep = 65536, kinds = [], gens = [], paramsBefore = params)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), stepCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Core.Exprs.sort(Level.Zero), keep = 65536, kinds = [], paramsTag = paramsTagOf(params))
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0
+
+fn paramsTagOf(params: List<Name>) -> Expr
+    ? "The declaration's universe parameters as a term: a constant of no name at them. A checked type of a term with parameters is kept under the term applied to it, so that only a declaration with the same parameters finds it (ParamsInTheKey)."
+    Core.Exprs.cnst(Core.Names.anon(), paramLevels(params))
+
+verify paramsTagOf
+    paramsTagOf([Core.Names.anon()]) == paramsTagOf([]) => false
+
+fn paramLevels(ps: List<Name>) -> List<Level>
+    ? "Each parameter as a level."
+    match ps
+        [] -> []
+        [p, ..rest] -> List.prepend(Level.Param(p), paramLevels(rest))
+
+verify paramLevels
+    paramLevels([Core.Names.anon()]) => [Level.Param(Core.Names.anon())]
 
 fn headOf(c: Const) -> Head
     ? "Name, parameters and type of any constant."
@@ -707,9 +717,7 @@ verify cachePut
 
 fn pairKey(a: Expr, b: Expr) -> Int
     ? "One key for an unordered pair."
-    ha = Core.Exprs.hashOf(a)
-    hb = Core.Exprs.hashOf(b)
-    Core.Hash.mix(Int.min(ha, hb), Int.max(ha, hb))
+    Core.Exprs.pairHash(a, b)
 
 verify pairKey
     pairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) == pairKey(Core.Exprs.bvar(1), Core.Exprs.bvar(0)) => true

@@ -69,7 +69,7 @@ fn cachedType(st: St, e: Expr, only: Bool) -> Option<Expr>
     ? "A known type of e: from the cache of closed terms checked in earlier declarations, else from this declaration's cache for the mode; inference also takes the type found by checking e, which is a type of e."
     match shared(e)
         true -> orCached(Check.State.cacheGet(st.closed, e), st, e, only)
-        false -> orChecked(Check.State.cacheGet(cacheFor(st, only, e), e), st, e, only)
+        false -> orChecked(typeGet(st, only, e), st, e, only)
 
 verify cachedType
     cachedType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), true) => Option.None
@@ -79,7 +79,7 @@ fn orChecked(hit: Option<Expr>, st: St, e: Expr, only: Bool) -> Option<Expr>
     match hit
         Option.Some -> hit
         Option.None -> match only
-            true -> Check.State.cacheGet(cacheFor(st, false, e), e)
+            true -> typeGet(st, false, e)
             false -> Option.None
 
 verify orChecked
@@ -90,7 +90,7 @@ fn orCached(hit: Option<Expr>, st: St, e: Expr, only: Bool) -> Option<Expr>
     ? "The shared answer, or this declaration's."
     match hit
         Option.Some -> hit
-        Option.None -> Check.State.cacheGet(cacheFor(st, only, e), e)
+        Option.None -> typeGet(st, only, e)
 
 verify orCached
     orCached(Option.Some(Core.Exprs.natLit(1)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2), true) => Option.Some(Core.Exprs.natLit(1))
@@ -102,16 +102,42 @@ fn shared(e: Expr) -> Bool
 verify shared
     shared(Core.Exprs.natLit(1)) => false
 
-fn cacheFor(st: St, only: Bool, e: Expr) -> Map<Int, Bucket>
-    ? "Inference and checking keep separate caches, and checking a term with a universe parameter one of its declaration's own: checking asks whether the parameter is the declaration's, while the other caches are carried to the next declaration."
+fn cacheFor(st: St, only: Bool) -> Map<Int, Bucket>
+    ? "Inference and checking keep separate caches."
     match only
         true -> st.inferCache
-        false -> match Core.Exprs.hasParam(e)
-            true -> st.paramCache
-            false -> st.checkCache
+        false -> st.checkCache
 
 verify cacheFor
-    Core.Cache.size(cacheFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), true, Core.Exprs.natLit(0))) => 0
+    Core.Cache.size(cacheFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), true)) => 0
+
+decision ParamsInTheKey
+    date = "2026-10-25"
+    reason =
+        "Checking a term with a universe parameter asks whether the parameter"
+        "is the declaration's own, so what it finds holds for declarations with"
+        "the same parameters. Such results were kept in a cache of their own,"
+        "taken up again by a declaration with the same parameters from the last"
+        "four lists kept, and emptied with the variables. Now they are kept with"
+        "every other checked type, under the term applied to the declaration's"
+        "parameters as a term (paramsTagOf): a declaration finds only those of"
+        "its own parameters, from any list met before, with no cache switched."
+        "Leaving the parameters out of the key, which is not sound, was"
+        "measured as the bound: etale 35.7 G to 34.4 G instructions, Init"
+        "95.4 G to 93.6 G."
+    chosen = "ParamsInTheKey"
+    rejected = ["ParamGenerations", "ParamsCheckedOnce"]
+    impacts = [typeGet, checkedKept, openHit]
+
+fn typeGet(st: St, only: Bool, e: Expr) -> Option<Expr>
+    ? "The type kept for e in the cache for the mode: under e applied to the declaration's parameters when checking a term with a universe parameter (ParamsInTheKey), else under e."
+    match Bool.and(Bool.not(only), Bool.and(st.checkParams, Core.Exprs.hasParam(e)))
+        true -> findOpen(Core.Cache.get(st.checkCache, Core.Exprs.appHash(e, st.paramsTag)), e, st.paramsTag)
+        false -> Check.State.cacheGet(cacheFor(st, only), e)
+
+verify typeGet
+    typeGet(checkedKept(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [Core.Names.anon()], Safety.Safe)), Core.Exprs.sort(Level.Param(Core.Names.anon())), Core.Exprs.sort(Level.Param(Core.Names.anon()))).st, false, Core.Exprs.sort(Level.Param(Core.Names.anon()))) => Option.Some(Core.Exprs.natLit(1))
+    typeGet(St.update(checkedKept(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [Core.Names.anon()], Safety.Safe)), Core.Exprs.sort(Level.Param(Core.Names.anon())), Core.Exprs.sort(Level.Param(Core.Names.anon()))).st, paramsTag = Check.State.paramsTagOf([])), false, Core.Exprs.sort(Level.Param(Core.Names.anon()))) => Option.None
 
 fn inferCached(st: St, e: Expr, only: Bool, hit: Option<Expr>) -> Result<RE, Fail>
     ? "Uses a cached type or infers and records one."
@@ -163,7 +189,7 @@ verify boundType
 
 fn inferIn(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "Inference under binders, used past the depth where bodies stop being copied: the loose bound variables of e stand for the free variables in env, the innermost first. Checking walks a body as it is. Inference alone puts the variables in, since it is asked about terms that reduction built, which find the types of their parts only in that form. A closed part goes the usual way."
-    match Core.Exprs.looseRange(e) == 0
+    match Core.Exprs.isClosed(e)
         true -> infer(st, e, only)
         false -> match only
             true -> infer(st, minst(e, env), only)
@@ -194,7 +220,9 @@ verify openCached
 
 fn openHit(st: St, e: Expr, around: Expr, only: Bool) -> Option<Expr>
     ? "The cached type of e under around, looked up apart: the cache handed out for the lookup is let go when this returns, before the caller infers and keeps a type, which would otherwise find the cache with two owners and copy all of it."
-    findOpen(Core.Cache.get(cacheFor(st, only, e), Core.Hash.mix(Core.Hash.mix(4, Core.Exprs.hashOf(e)), Core.Exprs.hashOf(around))), e, around)
+    match Bool.and(Bool.not(only), Bool.and(st.checkParams, Core.Exprs.hasParam(e)))
+        true -> findTagged(Core.Cache.get(st.checkCache, Core.Exprs.appHash3(e, around, st.paramsTag)), e, around, st.paramsTag)
+        false -> findOpen(Core.Cache.get(cacheFor(st, only), Core.Exprs.appHash(e, around)), e, around)
 
 verify openHit
     openHit(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.fvar(1), false) => Option.None
@@ -209,9 +237,9 @@ verify rememberOpen
     Core.Cache.size(rememberOpen(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), false).st.checkCache) => 1
 
 fn checkedKept(r: RE, key: Expr, e: Expr) -> RE
-    ? "Records a checked type under key, in the cache of its declaration when e has a universe parameter (see cacheFor)."
-    match Core.Exprs.hasParam(e)
-        true -> RE(e = r.e, st = St.update(r.st, paramCache = Check.State.cachePut(r.st.paramCache, key, r.e)))
+    ? "Records a checked type under key, applied to the declaration's parameters when e has a universe parameter (ParamsInTheKey)."
+    match Bool.and(r.st.checkParams, Core.Exprs.hasParam(e))
+        true -> RE(e = r.e, st = St.update(r.st, checkCache = Check.State.cachePut(r.st.checkCache, Core.Exprs.app(key, r.st.paramsTag), r.e)))
         false -> RE(e = r.e, st = St.update(r.st, checkCache = Check.State.cachePut(r.st.checkCache, key, r.e)))
 
 verify checkedKept
@@ -229,6 +257,41 @@ fn findOpen(bucket: Bucket, e: Expr, around: Expr) -> Option<Expr>
 verify findOpen
     findOpen(Bucket.OneEntry((Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))), Core.Exprs.bvar(0), Core.Exprs.fvar(2)) => Option.Some(Core.Exprs.natLit(1))
     findOpen(Bucket.OneEntry((Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))), Core.Exprs.bvar(0), Core.Exprs.fvar(3)) => Option.None
+
+fn findTagged(bucket: Bucket, e: Expr, around: Expr, tag: Expr) -> Option<Expr>
+    ? "The value stored under e applied to around and then to tag, compared without building it."
+    match bucket
+        Bucket.NoEntry -> Option.None
+        Bucket.OneEntry((key, v)) -> match isTaggedKey(key, e, around, tag)
+            true -> Option.Some(v)
+            false -> Option.None
+        Bucket.Entries(es) -> findTaggedIn(es, e, around, tag)
+
+verify findTagged
+    findTagged(Bucket.OneEntry((Core.Exprs.app(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(5)), Core.Exprs.natLit(1))), Core.Exprs.bvar(0), Core.Exprs.fvar(2), Core.Exprs.natLit(5)) => Option.Some(Core.Exprs.natLit(1))
+    findTagged(Bucket.OneEntry((Core.Exprs.app(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(5)), Core.Exprs.natLit(1))), Core.Exprs.bvar(0), Core.Exprs.fvar(2), Core.Exprs.natLit(6)) => Option.None
+
+fn findTaggedIn(es: List<Tuple<Expr, Expr>>, e: Expr, around: Expr, tag: Expr) -> Option<Expr>
+    ? "findTagged over a bucket's entries."
+    match es
+        [] -> Option.None
+        [(key, v), ..rest] -> match isTaggedKey(key, e, around, tag)
+            true -> Option.Some(v)
+            false -> findTaggedIn(rest, e, around, tag)
+
+verify findTaggedIn
+    findTaggedIn([], Core.Exprs.bvar(0), Core.Exprs.fvar(3), Core.Exprs.natLit(1)) => Option.None
+
+fn isTaggedKey(key: Expr, e: Expr, around: Expr, tag: Expr) -> Bool
+    ? "Whether key is e applied to around and then to tag."
+    match key
+        Expr.App(_, f, t) -> match t == tag
+            true -> isOpenKey(f, e, around)
+            false -> false
+        _ -> false
+
+verify isTaggedKey
+    isTaggedKey(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.fvar(2), Core.Exprs.natLit(1)) => false
 
 fn findOpenIn(es: List<Tuple<Expr, Expr>>, e: Expr, around: Expr) -> Option<Expr>
     ? "findOpen over a bucket's entries."
@@ -738,7 +801,7 @@ verify argFits
 
 fn fitsUnder(t: Expr, d: Expr, subst: List<Expr>, off: Int) -> Bool
     ? "Whether t is d under off binders with its loose bound variables put in as argsInto puts closed arguments in (subst newest first, at index off and up), binder names and annotations aside. Parts of d the substitution does not reach are compared as they are. Small domains only: a large one, which may share parts, is left to be built."
-    match Core.Exprs.looseRange(d) <= off
+    match Core.Exprs.within(d, off)
         true -> sameTerm(t, d)
         false -> match Core.Exprs.treeSize(d) < 63
             false -> false
@@ -759,7 +822,7 @@ fn fitsWithin(t: Expr, d: Expr, subst: List<Expr>, off: Int, left: Int) -> Int
     ? "fitsUnder with a budget of nodes of d visited instead of a limit on d's size: what is left of the budget when t is d with subst put in, or -1 when it is not or the budget runs out, as it may on a domain that shares parts."
     match left <= 0
         true -> -1
-        false -> match Core.Exprs.looseRange(d) <= off
+        false -> match Core.Exprs.within(d, off)
             true -> match sameTerm(t, d)
                 true -> left - 1
                 false -> -1
@@ -851,7 +914,7 @@ verify argsAfterWhnf
 
 fn argInto(body: Expr, a: Expr, env: List<Expr>) -> Expr
     ? "The pi's body with the argument put in. Only then, when the body uses it, does the argument get its own variables put in."
-    match Core.Exprs.looseRange(body) == 0
+    match Core.Exprs.isClosed(body)
         true -> body
         false -> Core.Subst.instantiate1(body, minst(a, env))
 
@@ -912,7 +975,7 @@ verify appWalkWhnf
 
 fn argsInto(ft: Expr, pending: List<Expr>, env: List<Expr>) -> Expr
     ? "The walked pis' body with the arguments put in. Only then, when the body uses some, do the arguments get their own variables put in."
-    match Core.Exprs.looseRange(ft) == 0
+    match Core.Exprs.isClosed(ft)
         true -> ft
         false -> Core.Subst.instantiate(ft, minstAll(pending, env))
 
@@ -1008,7 +1071,7 @@ verify cheapPeel
 
 fn cheapDone(e: Expr, f: Expr, args: List<Expr>, i: Int) -> Expr
     ? "A closed body, or a body that is one of the bound variables."
-    match Core.Exprs.looseRange(f) == 0
+    match Core.Exprs.isClosed(f)
         true -> Core.Apps.mkApps(f, List.drop(args, i))
         false -> match f
             Expr.BVar(j) -> Core.Apps.mkApps(nth(args, i - j - 1), List.drop(args, i))
@@ -2127,7 +2190,7 @@ fn closure(a: Expr, env: List<Clo>, id: Int) -> Clo
     ? "a as a closure over env; a term with no loose bound variable needs no environment, and is its own value; a variable of env is its closure there, built at most once under that closure's number (VariableIsItsClosure)."
     match a
         Expr.BVar(i) -> varClosure(List.drop(env, i), a, env, id)
-        _ -> match Core.Exprs.looseRange(a) == 0
+        _ -> match Core.Exprs.isClosed(a)
             true -> Clo.Clo(-1, a, [])
             false -> Clo.Clo(id, a, env)
 
@@ -2165,7 +2228,7 @@ verify nthClo
 
 fn matTerm(t: Expr, env: List<Clo>, ms: MS) -> MX
     ? "t with its loose bound variables replaced by their closures, built; a closure is built when its variable is met, so those t never uses stay closures."
-    match Core.Exprs.looseRange(t) == 0
+    match Core.Exprs.isClosed(t)
         true -> MX(e = t, ms = ms)
         false -> fromLS(lgo(t, 0, env, ms, {}))
 
@@ -2187,7 +2250,7 @@ verify fromLS
 
 fn lgo(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
     ? "As Core.Subst.go for instantiation: what has no loose bound variable at or above off is left alone."
-    match Core.Exprs.looseRange(e) <= off
+    match Core.Exprs.within(e, off)
         true -> LS(e = e, ms = ms, memo = memo)
         false -> lvisit(e, off, env, ms, memo)
 
@@ -2198,7 +2261,7 @@ fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, 
     ? "A variable takes its closure's value; large compound nodes go through the memo, as in Core.Subst."
     match e
         Expr.BVar(i) -> lbvar(List.drop(env, i - off), i, env, ms, memo)
-        _ -> match Core.Exprs.treeSize(e) < 32
+        _ -> match Core.Exprs.isSmall(e)
             true -> lbuild(e, off, env, ms, memo)
             false -> lmemoed(e, off, env, ms, memo, off * 2147483648 + Core.Exprs.hashOf(e))
 
@@ -2586,7 +2649,7 @@ verify remembered
 
 fn keptNo(fails: Map<Int, Bucket>, t: Expr, s: Expr) -> Map<Int, Bucket>
     ? "Failures of this declaration. Its free variables are its own, each with one type and value, so a pair that was different stays different; terms with loose bound variables are left out."
-    match Bool.and(Core.Exprs.looseRange(t) == 0, Core.Exprs.looseRange(s) == 0)
+    match Bool.and(Core.Exprs.isClosed(t), Core.Exprs.isClosed(s))
         false -> fails
         true -> Check.State.pairPut(fails, t, s)
 
@@ -3666,7 +3729,7 @@ verify unusedLoop
 
 fn mentions(body: Expr, j: Int) -> Bool
     ? "Whether variable j may occur in body: not when it is outside the loose range, looked up in a small body, assumed in a large one so that a shared term is never walked as a tree."
-    match Core.Exprs.looseRange(body) <= j
+    match Core.Exprs.within(body, j)
         true -> false
         false -> match Core.Exprs.treeSize(body) < 63
             true -> Core.Subst.hasLooseBVar(body, j)
