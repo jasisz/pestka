@@ -361,7 +361,7 @@ fn sameRec(g: Option<Const>, r: Rec) -> Bool
         _ -> false
 
 verify sameRec
-    sameRec(Option.None, Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false)) => false
+    sameRec(Option.None, Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false)) => false
 
 fn sameRules(as: List<RecRule>, bs: List<RecRule>) -> Bool
     ? "Rules pairwise equal."

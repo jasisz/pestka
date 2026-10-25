@@ -521,7 +521,7 @@ fn inductive(env: Env, r: Result<Map<Name, Const>, Fail>, types: List<IndType>, 
     ? "A derived block, or one Pestka cannot derive yet admitted as stated."
     match r
         Result.Ok(cs) -> Result.Ok(Addition.Block(cs))
-        Result.Err(Fail.Decline) -> trusted(env, inductConsts(types, ctors, recs))
+        Result.Err(Fail.Decline) -> trusted(env, inductConsts(env, types, ctors, recs))
         Result.Err(e) -> Result.Err(e)
 
 verify inductive
@@ -639,12 +639,12 @@ fn addConsts(env: Env, cs: List<Const>) -> Env
 verify addConsts
     Check.State.envHas(addConsts(Check.State.envEmpty(), [Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)]), Core.Names.anon()) => true
 
-fn inductConsts(types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> List<Const>
+fn inductConsts(env: Env, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> List<Const>
     ? "Every constant an inductive block declares."
-    List.concat(typeConsts(types, []), List.concat(ctorConsts(ctors, []), recConsts(recs, [])))
+    List.concat(typeConsts(types, []), List.concat(ctorConsts(ctors, []), recConsts(env, types, recs, [])))
 
 verify inductConsts
-    inductConsts([], [], []) => []
+    inductConsts(Check.State.envEmpty(), [], [], []) => []
 
 fn typeConsts(xs: List<IndType>, acc: List<Const>) -> List<Const>
     ? "The types."
@@ -664,11 +664,22 @@ fn ctorConsts(xs: List<Ctor>, acc: List<Const>) -> List<Const>
 verify ctorConsts
     ctorConsts([], []) => []
 
-fn recConsts(xs: List<Rec>, acc: List<Const>) -> List<Const>
-    ? "The recursors."
+fn recConsts(env: Env, types: List<IndType>, xs: List<Rec>, acc: List<Const>) -> List<Const>
+    ? "The recursors, with the facts reduction asks of them found as for a derived block."
     match xs
         [] -> List.reverse(acc)
-        [x, ..rest] -> recConsts(rest, List.prepend(Const.CRec(x), acc))
+        [x, ..rest] -> recConsts(env, types, rest, List.prepend(Const.CRec(Check.Tc.recFacts(x, typeNamed(env, types, Check.Tc.majorInduct(x)))), acc))
 
 verify recConsts
-    recConsts([], []) => []
+    recConsts(Check.State.envEmpty(), [], [], []) => []
+
+fn typeNamed(env: Env, types: List<IndType>, n: Name) -> Option<Const>
+    ? "The block's own type named n, or else the environment's constant."
+    match types
+        [] -> Check.State.envGet(env, n)
+        [t, ..rest] -> match t.head.name == n
+            true -> Option.Some(Const.CInduct(t))
+            false -> typeNamed(env, rest, n)
+
+verify typeNamed
+    typeNamed(Check.State.envEmpty(), [], Core.Names.anon()) => Option.None

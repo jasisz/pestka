@@ -290,7 +290,7 @@ fn oneRec(bs: BS, rs: RS, t: TypeIn, d: Int, minorIdx: Int) -> Result<BS, Fail>
     info = infoAt(rs.infos, d)
     ty = Check.Telescope.piBinding(bs.st, List.concat(prefixArgs(bs.blk, rs), List.concat(info.indices, [info.major])), Core.Apps.mkApps(info.motive, List.concat(info.indices, [info.major])))
     rules = rulesOf(bs.st, bs.blk, rs, t.ctors, minorIdx, [])?
-    rv = Rec(head = Head(name = Check.Blk.recName(t.name), params = recParams(bs.blk), ty = ty), all = bs.blk.names, numParams = bs.blk.nparams, numIndices = Check.Blk.nthInt(bs.blk.nindices, d), numMotives = List.len(rs.infos), numMinors = List.len(rs.minors), rules = rules.rules, k = bs.blk.k, isUnsafe = false)
+    rv = Check.Tc.withFacts(rules.st, Rec(head = Head(name = Check.Blk.recName(t.name), params = recParams(bs.blk), ty = ty), all = bs.blk.names, numParams = bs.blk.nparams, numIndices = Check.Blk.nthInt(bs.blk.nindices, d), numMotives = List.len(rs.infos), numMinors = List.len(rs.minors), rules = rules.rules, k = bs.blk.k, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false))
     Result.Ok(BS(blk = bs.blk, st = St.update(rules.st, block = Map.set(rules.st.block, rv.head.name, Const.CRec(rv)))))
 
 verify oneRec

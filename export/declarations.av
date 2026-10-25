@@ -200,7 +200,7 @@ fn recOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Rec, String>
     ? "One recursor with its rules."
     h = head(t, o)?
     rules = rulesOf(t, Json.Access.arr(o, "rules")?, [])?
-    Result.Ok(Rec(head = h, all = all(t, o)?, numParams = Json.Access.int(o, "numParams")?, numIndices = Json.Access.int(o, "numIndices")?, numMotives = Json.Access.int(o, "numMotives")?, numMinors = Json.Access.int(o, "numMinors")?, rules = rules, k = Json.Access.bool(o, "k")?, isUnsafe = Json.Access.bool(o, "isUnsafe")?))
+    Result.Ok(Rec(head = h, all = all(t, o)?, numParams = Json.Access.int(o, "numParams")?, numIndices = Json.Access.int(o, "numIndices")?, numMotives = Json.Access.int(o, "numMotives")?, numMinors = Json.Access.int(o, "numMinors")?, rules = rules, k = Json.Access.bool(o, "k")?, isUnsafe = Json.Access.bool(o, "isUnsafe")?, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false))
 
 verify recOf
     recOf(Export.Tables.empty(), []) => Result.Err("missing key 'name'")

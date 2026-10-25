@@ -592,10 +592,10 @@ record RL
 fn recTyped(ty: RE, rc: RC, auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, users: List<Name>, rv: Rec, newName: Name, old: Name) -> Result<RC, Fail>
     ? "Then the rules."
     rl = restoreRules(ty.st, auxEnv, ns, recMap, rv.rules, newName != old, [])?
-    declared(RC.update(rc, st = rl.st), newName, Const.CRec(Rec.update(rv, head = Head(name = newName, params = rv.head.params, ty = ty.e), all = users, rules = rl.rules)))
+    declared(RC.update(rc, st = rl.st), newName, Const.CRec(Check.Tc.withFacts(rl.st, Rec.update(rv, head = Head(name = newName, params = rv.head.params, ty = ty.e), all = users, rules = rl.rules))))
 
 verify recTyped
-    Map.len(Result.withDefault(recTyped(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon(), Core.Names.anon()), RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = [])).env) => 1
+    Map.len(Result.withDefault(recTyped(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = []), {}, NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Core.Names.anon(), Core.Names.anon()), RC(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = {}, names = [])).env) => 1
 
 fn restoreRules(st: St, auxEnv: Map<Name, Const>, ns: NS, recMap: List<Tuple<Name, Name>>, rules: List<RecRule>, renamed: Bool, acc: List<RecRule>) -> Result<RL, Fail>
     ? "Each rule's right-hand side, and its constructor when the recursor was renamed."

@@ -5,7 +5,7 @@ module Tc
         "step. The three call each other (whnf infers types for iota on"
         "structures, equality normalizes, inference checks equality), so"
         "they live in one module. Every function threads the checker state."
-    exposes [RI, LD, inferType, check, valueFits, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel]
+    exposes [RI, LD, inferType, check, valueFits, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel, withFacts, recFacts, majorInduct]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Cache, Check.State, Check.Lits, Core.Hash]
     effects []
 
@@ -1534,7 +1534,7 @@ fn recMajor(st: St, e: Expr, ls: List<Level>, rv: Rec, args: List<Expr>, majorId
         false -> recFire(majorToCtor(st, rv, nth(args, majorIdx), cheapRec, cheapProj)?, ls, rv, args, majorIdx)
 
 verify recMajor
-    resultOpt(recMajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, false, false)) => Option.None
+    resultOpt(recMajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, false, false)) => Option.None
 
 decision CtorMajorAsIs
     date = "2026-10-24"
@@ -1570,57 +1570,94 @@ fn majorSlow(m1: RE, rv: Rec, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fai
         true -> majorReduced(whnfMaybe(m0.st, m1.e, cheapRec, cheapProj, cheapRec)?, rv)
 
 verify majorSlow
-    resultExpr(majorSlow(RE(e = Core.Exprs.natLit(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), false, false)) => Check.Lits.natLitToCtor(2)
+    resultExpr(majorSlow(RE(e = Core.Exprs.natLit(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), false, false)) => Check.Lits.natLitToCtor(2)
 
 fn majorReduced(m2: RE, rv: Rec) -> Result<RE, Fail>
     ? "After whnf: a literal becomes its constructor, a structure value is eta expanded."
     match m2.e
         Expr.NatLit(n) -> Result.Ok(RE(e = Check.Lits.natLitToCtor(n), st = m2.st))
         Expr.StrLit(s) -> whnf(m2.st, Check.Lits.strToCtor(s))
-        _ -> toCtorWhenStructure(m2.st, majorInduct(rv), m2.e)
+        _ -> toCtorWhenStructure(m2.st, rv, m2.e)
 
 verify majorReduced
-    resultExpr(majorReduced(RE(e = Core.Exprs.natLit(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false))) => Core.Exprs.cnst(Check.Lits.name2("Nat", "zero"), [])
+    resultExpr(majorReduced(RE(e = Core.Exprs.natLit(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false))) => Core.Exprs.cnst(Check.Lits.name2("Nat", "zero"), [])
 
 fn etaBeforeWhnf(st: St, rv: Rec, e: Expr) -> Result<RE, Fail>
     ? "A major of a non-recursive structure that is not a constructor application becomes mk params e.0 ... e.(n-1) without being reduced. A proof only when the recursor eliminates into any sort: then every field is a proof and its projection is a proof; a proof of a structure that eliminates only into Prop, such as Exists, keeps the reference order."
-    induct = majorInduct(rv)
-    match Bool.and(isNonRecStructure(st, induct), Bool.not(isCtorApp(st, e)))
+    match Bool.and(rv.majorIsStruct, Bool.not(isCtorApp(st, e)))
         false -> Result.Ok(RE(e = e, st = st))
-        true -> etaTyped(whnfOf(inferType(st, e)?)?, rv, induct, e)
+        true -> match rv.elimAnySort
+            true -> Result.Ok(RE(e = etaFields(st, rv.major, e), st = st))
+            false -> structTyped(whnfOf(inferType(st, e)?)?, rv.major, e)
 
 verify etaBeforeWhnf
-    resultExpr(etaBeforeWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+    resultExpr(etaBeforeWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
 
-fn etaTyped(w: RE, rv: Rec, induct: Name, e: Expr) -> Result<RE, Fail>
-    ? "Only when the type really is the structure; a proof only under large elimination."
-    match Core.Apps.isConst(Core.Apps.fnOf(w.e), induct)
-        false -> Result.Ok(RE(e = e, st = w.st))
-        true -> etaUnlessSmallProof(largeElim(w.st, rv, induct), w.e, e, isProp(w.st, w.e)?)
+fn etaFields(st: St, induct: Name, e: Expr) -> Expr
+    ? "mk e.0 ... e.(n-1) without the parameters and with no type inferred (FieldsWithoutType): the major of a well-typed recursor application has the structure's type, a large-eliminating recursor expands values and proofs alike, and a rule takes only the fields, the last arguments."
+    match firstCtor(st, induct)
+        Option.Some(c) -> match Check.State.lookup(st, c)
+            Option.Some(Const.CCtor(kv)) -> projApps(Core.Exprs.cnst(c, []), induct, e, 0, kv.numFields)
+            _ -> e
+        Option.None -> e
 
-verify etaTyped
-    resultExpr(etaTyped(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon(), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+verify etaFields
+    etaFields(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.fvar(0)) => Core.Exprs.fvar(0)
 
-fn etaUnlessSmallProof(large: Bool, ty: Expr, e: Expr, p: RB) -> Result<RE, Fail>
-    ? "Expands a value, or a proof whose recursor eliminates into any sort."
-    match Bool.or(Bool.not(p.b), large)
-        true -> Result.Ok(RE(e = expandEtaStruct(p.st, ty, e), st = p.st))
-        false -> Result.Ok(RE(e = e, st = p.st))
+decision FactsOnTheRecursor
+    date = "2026-10-25"
+    reason =
+        "Every major premise not in constructor form asked again which type"
+        "it belongs to, walking the recursor's type past its parameters,"
+        "motives, minor premises and indices, then looked that type up to"
+        "see whether it is a non-recursive structure, and looked it up once"
+        "more to see whether the recursor eliminates into any sort: eleven"
+        "million binders walked and two and a half million lookups on"
+        "reachability. These are facts about the recursor, so they are"
+        "found once, when the recursor enters the environment, derived or"
+        "admitted as stated, and read off it at every step. One worker on"
+        "Aver 06639a5e: reachability 54.2 G to 52.5 G instructions,"
+        "magma-list-pair-n21 52.7 G to 51.7 G, std and con-leche 0.3%"
+        "fewer."
+    chosen = "FactsOnTheRecursor"
+    rejected = ["FactsAtEveryStep"]
+    impacts = [withFacts, recFacts, etaBeforeWhnf, toCtorWhenStructure, toCtorWhenK]
 
-verify etaUnlessSmallProof
-    resultExpr(etaUnlessSmallProof(false, Core.Exprs.fvar(1), Core.Exprs.fvar(0), RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))) => Core.Exprs.fvar(0)
+decision FieldsWithoutType
+    date = "2026-10-25"
+    reason =
+        "A structure's major premise under a recursor that eliminates into"
+        "any sort is expanded whatever its type, value or proof, and the"
+        "rule then takes only the fields, its last arguments. Its type was"
+        "still inferred and brought to whnf, and whether it is a proof"
+        "computed and dropped, only to fill in parameters nobody reads. The"
+        "type's head is the structure whenever the application is well"
+        "typed, which every term the kernel reduces is. The type is now"
+        "inferred only under a recursor into Prop alone, where a proof stays"
+        "as it is. Measured no change on the large tests; kept because it"
+        "does strictly less."
+    chosen = "FieldsWithoutType"
+    rejected = ["FieldsFromInferredType"]
+    impacts = [etaBeforeWhnf, etaFields]
 
-fn largeElim(st: St, rv: Rec, induct: Name) -> Bool
-    ? "The recursor has one more universe parameter than its type: the motive may land in any sort."
-    match Check.State.lookup(st, induct)
-        Option.Some(Const.CInduct(iv)) -> List.len(rv.head.params) > List.len(iv.head.params)
-        _ -> false
+fn withFacts(st: St, rv: Rec) -> Rec
+    ? "The recursor as it enters the environment, with its facts found."
+    recFacts(rv, Check.State.lookup(st, majorInduct(rv)))
 
-verify largeElim
-    largeElim(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon()) => false
+verify withFacts
+    withFacts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = true, elimAnySort = true)).majorIsStruct => false
+
+fn recFacts(rv: Rec, c: Option<Const>) -> Rec
+    ? "What reduction asks of a recursor at every step, found once from c, the constant its major premise's type names (FactsOnTheRecursor): that type; whether it is a non-recursive structure; whether the recursor has one more universe parameter than the type, so that the motive may land in any sort."
+    match c
+        Option.Some(Const.CInduct(iv)) -> Rec.update(rv, major = majorInduct(rv), majorIsStruct = structureLike(iv), elimAnySort = List.len(rv.head.params) > List.len(iv.head.params))
+        _ -> Rec.update(rv, major = majorInduct(rv), majorIsStruct = false, elimAnySort = false)
+
+verify recFacts
+    recFacts(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = true, elimAnySort = true), Option.None).elimAnySort => false
 
 verify majorToCtor
-    resultExpr(majorToCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Exprs.natLit(0), false, false)) => Core.Exprs.cnst(Check.Lits.name2("Nat", "zero"), [])
+    resultExpr(majorToCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Core.Exprs.natLit(0), false, false)) => Core.Exprs.cnst(Check.Lits.name2("Nat", "zero"), [])
 
 fn kMajor(st: St, rv: Rec, major: Expr) -> Result<RE, Fail>
     ? "For a K-like recursor the major premise may be replaced by the nullary constructor."
@@ -1629,14 +1666,14 @@ fn kMajor(st: St, rv: Rec, major: Expr) -> Result<RE, Fail>
         true -> toCtorWhenK(st, rv, major)
 
 verify kMajor
-    resultExpr(kMajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Exprs.fvar(3))) => Core.Exprs.fvar(3)
+    resultExpr(kMajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Core.Exprs.fvar(3))) => Core.Exprs.fvar(3)
 
 fn majorInduct(rv: Rec) -> Name
     ? "The inductive type of the major premise, read off the recursor's type."
     majorAfter(rv.head.ty, rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices)
 
 verify majorInduct
-    majorInduct(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("Nat"), []), Core.Exprs.bvar(0), Binder.Default)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false)) => Check.Lits.name1("Nat")
+    majorInduct(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("Nat"), []), Core.Exprs.bvar(0), Binder.Default)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false)) => Check.Lits.name1("Nat")
 
 fn majorAfter(t: Expr, n: Int) -> Name
     ? "Skips n binders and names the head of the next domain."
@@ -1653,12 +1690,12 @@ fn toCtorWhenK(st: St, rv: Rec, e: Expr) -> Result<RE, Fail>
     ? "e : I params indices with I K-like becomes I's constructor when the types agree."
     t = inferType(st, e)?
     w = whnf(t.st, t.e)?
-    match Core.Apps.isConst(Core.Apps.fnOf(w.e), majorInduct(rv))
+    match Core.Apps.isConst(Core.Apps.fnOf(w.e), rv.major)
         false -> Result.Ok(RE(e = e, st = w.st))
         true -> kCandidate(w.st, w.e, e, nullaryCtor(w.st, w.e, rv.numParams))
 
 verify toCtorWhenK
-    resultExpr(toCtorWhenK(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = true, isUnsafe = false), Core.Exprs.sort(Level.Zero))) => Core.Exprs.sort(Level.Zero)
+    resultExpr(toCtorWhenK(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = true, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Core.Exprs.sort(Level.Zero))) => Core.Exprs.sort(Level.Zero)
 
 fn kCandidate(st: St, appType: Expr, e: Expr, cand: Option<Expr>) -> Result<RE, Fail>
     ? "Uses the constructor only when its type equals e's."
@@ -1711,11 +1748,18 @@ verify nullaryOf
 fn isNonRecStructure(st: St, n: Name) -> Bool
     ? "One constructor, no indices, not recursive."
     match Check.State.lookup(st, n)
-        Option.Some(Const.CInduct(iv)) -> Bool.and(List.len(iv.ctors) == 1, Bool.and(iv.numIndices == 0, Bool.not(iv.isRec)))
+        Option.Some(Const.CInduct(iv)) -> structureLike(iv)
         _ -> false
 
 verify isNonRecStructure
     isNonRecStructure(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon()) => false
+
+fn structureLike(iv: IndType) -> Bool
+    ? "One constructor, no indices, not recursive."
+    Bool.and(List.len(iv.ctors) == 1, Bool.and(iv.numIndices == 0, Bool.not(iv.isRec)))
+
+verify structureLike
+    structureLike(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false)) => false
 
 fn isCtorApp(st: St, e: Expr) -> Bool
     ? "Headed by a constructor."
@@ -1728,14 +1772,14 @@ fn isCtorApp(st: St, e: Expr) -> Bool
 verify isCtorApp
     isCtorApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)) => false
 
-fn toCtorWhenStructure(st: St, induct: Name, e: Expr) -> Result<RE, Fail>
+fn toCtorWhenStructure(st: St, rv: Rec, e: Expr) -> Result<RE, Fail>
     ? "A value of a non-recursive structure becomes mk e.1 ... e.n (not for proofs)."
-    match Bool.and(isNonRecStructure(st, induct), Bool.not(isCtorApp(st, e)))
+    match Bool.and(rv.majorIsStruct, Bool.not(isCtorApp(st, e)))
         false -> Result.Ok(RE(e = e, st = st))
-        true -> structTyped(whnfOf(inferType(st, e)?)?, induct, e)
+        true -> structTyped(whnfOf(inferType(st, e)?)?, rv.major, e)
 
 verify toCtorWhenStructure
-    resultExpr(toCtorWhenStructure(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+    resultExpr(toCtorWhenStructure(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
 
 fn whnfOf(r: RE) -> Result<RE, Fail>
     ? "whnf of an inferred type."
@@ -1798,7 +1842,7 @@ fn recFire(m: RE, ls: List<Level>, rv: Rec, args: List<Expr>, majorIdx: Int) -> 
         Option.Some(rule) -> Result.Ok(ruleRhs(m.st, rule, ls, rv, args, majorIdx, Core.Apps.argsOf(m.e)))
 
 verify recFire
-    resultOpt(recFire(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0)) => Option.None
+    resultOpt(recFire(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0)) => Option.None
 
 fn ruleFor(rules: List<RecRule>, head: Expr) -> Option<RecRule>
     ? "The rule for the constructor at the head."
@@ -1818,14 +1862,14 @@ fn ruleRhs(st: St, rule: RecRule, ls: List<Level>, rv: Rec, args: List<Expr>, ma
         false -> ruleApplied(ruleAt(st, rule, Core.Exprs.cnst(rv.head.name, ls), rv, ls), rule, rv, args, majorIdx, majorArgs)
 
 verify ruleRhs
-    ruleRhs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, []).o => Option.None
+    ruleRhs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, []).o => Option.None
 
 fn ruleApplied(r: RE, rule: RecRule, rv: Rec, args: List<Expr>, majorIdx: Int, majorArgs: List<Expr>) -> RO
     ? "The instantiated right-hand side applied to the recursor's arguments and the constructor's fields."
     RO(o = Option.Some(Core.Apps.mkApps(Core.Apps.mkApps(Core.Apps.mkApps(r.e, List.take(args, rv.numParams + rv.numMotives + rv.numMinors)), List.drop(majorArgs, List.len(majorArgs) - rule.nfields)), List.drop(args, majorIdx + 1))), st = r.st)
 
 verify ruleApplied
-    ruleApplied(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, [Core.Exprs.natLit(3)]).o => Option.Some(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(3)))
+    ruleApplied(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, [Core.Exprs.natLit(3)]).o => Option.Some(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(3)))
 
 fn ruleAt(st: St, rule: RecRule, f: Expr, rv: Rec, ls: List<Level>) -> RE
     ? "The rule's right-hand side at the recursor's levels. Like an unfolded value, it is remembered for the rest of the declaration, since instantiating the levels walks all of it each time."
@@ -1834,7 +1878,7 @@ fn ruleAt(st: St, rule: RecRule, f: Expr, rv: Rec, ls: List<Level>) -> RE
         _ -> ruleCached(st, rule, rv, ls, f, Core.Exprs.keyAt(f, ruleNumber(rv.rules, rule.ctor, 1)))
 
 verify ruleAt
-    ruleAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Core.Exprs.cnst(Core.Names.anon(), []), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), []).e => Core.Exprs.natLit(1)
+    ruleAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Core.Exprs.cnst(Core.Names.anon(), []), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), []).e => Core.Exprs.natLit(1)
 
 fn ruleCached(st: St, rule: RecRule, rv: Rec, ls: List<Level>, f: Expr, k: Core.Exprs.Key) -> RE
     ? "Shares the unfolding cache: the recursor at its levels f under its key at the rule's place among the rules, made without building a term (KeysUnbuilt)."
@@ -1843,7 +1887,7 @@ fn ruleCached(st: St, rule: RecRule, rv: Rec, ls: List<Level>, f: Expr, k: Core.
         Option.None -> keptAt(st, k, f, Core.Subst.instLevelParams(rule.rhs, rv.head.params, ls))
 
 verify ruleCached
-    Core.Cache.size(ruleCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [Level.Zero], Core.Exprs.natLit(9), Core.Exprs.keyAt(Core.Exprs.natLit(9), 1)).st.unfoldCache) => 1
+    Core.Cache.size(ruleCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [Level.Zero], Core.Exprs.natLit(9), Core.Exprs.keyAt(Core.Exprs.natLit(9), 1)).st.unfoldCache) => 1
 
 decision KeysUnbuilt
     date = "2026-10-25"
@@ -2054,7 +2098,7 @@ fn lrec(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, ms: MS, del
         false -> lmajor(st, f, ls, rv, stack, majorIdx, matClo(nthClo(stack, majorIdx), ms), delta, cheapRec, cheapProj)
 
 verify lrec
-    resultExpr(lrec(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
+    resultExpr(lrec(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
 
 fn lmajor(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, major: MX, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "The major premise in constructor form, as the reference reduces it."
@@ -2062,7 +2106,7 @@ fn lmajor(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx:
     lfire(m, f, ls, rv, stack, majorIdx, major.ms, delta, cheapRec, cheapProj)
 
 verify lmajor
-    resultExpr(lmajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [Clo.Clo(-1, Core.Exprs.fvar(0), [])], 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}, shapes = {})), false, false, false)) => Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("r"), []), Core.Exprs.fvar(0))
+    resultExpr(lmajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [Clo.Clo(-1, Core.Exprs.fvar(0), [])], 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}, shapes = {})), false, false, false)) => Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("r"), []), Core.Exprs.fvar(0))
 
 fn lfire(m: RE, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "The rule of the major premise's constructor; without one the recursor is stuck as it was met."
@@ -2071,7 +2115,7 @@ fn lfire(m: RE, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: I
         Option.Some(rule) -> lrule(m.st, rule, f, ls, rv, stack, majorIdx, Core.Apps.argsOf(m.e), ms, delta, cheapRec, cheapProj)
 
 verify lfire
-    resultExpr(lfire(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
+    resultExpr(lfire(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
 
 fn lrule(st: St, rule: RecRule, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, majorArgs: List<Expr>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "rhs params motives minors fields extra-arguments, as ruleRhs builds it, with the recursor's own arguments still closures."
@@ -2080,7 +2124,7 @@ fn lrule(st: St, rule: RecRule, f: Expr, ls: List<Level>, rv: Rec, stack: List<C
         false -> lruleApplied(ruleAt(st, rule, f, rv, ls), rule, rv, stack, majorIdx, majorArgs, ms, delta, cheapRec, cheapProj)
 
 verify lrule
-    resultExpr(lrule(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
+    resultExpr(lrule(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
 
 decision RuleLambdasAtOnce
     date = "2026-10-25"
@@ -2109,7 +2153,7 @@ fn lruleApplied(r: RE, rule: RecRule, rv: Rec, stack: List<Clo>, majorIdx: Int, 
         false -> lcore(r.st, r.e, [], List.concat(List.take(stack, n), List.concat(closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), List.drop(stack, majorIdx + 1))), ms, delta, cheapRec, cheapProj)
 
 verify lruleApplied
-    resultExpr(lruleApplied(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.natLit(1)
+    resultExpr(lruleApplied(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.natLit(1)
 
 fn lquot(st: St, f: Expr, args: MXs, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A quotient rule on built arguments; nothing else reduces a quotient constant."
@@ -2371,7 +2415,7 @@ fn sparseFits(rv: Rec, n: Int, args: List<Expr>) -> Shape
         false -> Shape.Plain
 
 verify sparseFits
-    sparseFits(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), 1, []) => Shape.Plain
+    sparseFits(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), 1, []) => Shape.Plain
 
 fn minorsOn(args: List<Expr>, rv: Rec, rules: List<RecRule>, j: Int) -> List<Option<MinorOn>>
     ? "Each rule's minor premise ready (minorOn), in the rules' order."
@@ -2380,7 +2424,7 @@ fn minorsOn(args: List<Expr>, rv: Rec, rules: List<RecRule>, j: Int) -> List<Opt
         [r, ..rest] -> List.prepend(minorOn(nth(args, rv.numParams + 1 + j), r, rv, j), minorsOn(args, rv, rest, j + 1))
 
 verify minorsOn
-    minorsOn([], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0) => []
+    minorsOn([], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0) => []
 
 fn minorOn(minor: Expr, r: RecRule, rv: Rec, j: Int) -> Option<MinorOn>
     ? "The j-th minor premise, picked by the j-th rule, under lambdas for the fields and the hypotheses, reading no hypothesis: its body under them."
@@ -2390,7 +2434,7 @@ fn minorOn(minor: Expr, r: RecRule, rv: Rec, j: Int) -> Option<MinorOn>
         false -> Option.None
 
 verify minorOn
-    minorOn(Core.Exprs.natLit(8), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Binder.Default)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [], k = false, isUnsafe = false), 0) => Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8)))
+    minorOn(Core.Exprs.natLit(8), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Binder.Default)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), 0) => Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8)))
 
 fn lshaped(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sh: Shape, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "The constant run by its shape when it has all its arguments; otherwise unfolded."
@@ -2415,7 +2459,7 @@ fn lsparseGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sp: SparseOn, e
         Option.None -> lunfoldPeeled(m.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms, cheapRec, cheapProj)
 
 verify lsparseGo
-    resultExpr(lsparseGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], SparseOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false), n = 1, major = 0, minors = [Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8)))]), [Clo.Clo(-1, Core.Exprs.natLit(0), [])], [Clo.Clo(-1, Core.Exprs.natLit(0), [])], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.natLit(8)
+    resultExpr(lsparseGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], SparseOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), n = 1, major = 0, minors = [Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8)))]), [Clo.Clo(-1, Core.Exprs.natLit(0), [])], [Clo.Clo(-1, Core.Exprs.natLit(0), [])], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.natLit(8)
 
 fn lsparseFire(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sp: SparseOn, mo: Option<MinorOn>, majorArgs: List<Expr>, env0: List<Clo>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "The ready minor premise runs at the definition's arguments with the fields, the hypotheses standing for nothing, and the arguments after the definition's; a minor premise not ready unfolds the definition."
@@ -2426,7 +2470,7 @@ fn lsparseFire(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sp: SparseOn,
         Option.None -> lunfoldPeeled(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms, cheapRec, cheapProj)
 
 verify lsparseFire
-    resultExpr(lsparseFire(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], SparseOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [], k = false, isUnsafe = false), n = 1, major = 0, minors = []), Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8))), [], [Clo.Clo(-1, Core.Exprs.natLit(1), [])], [Clo.Clo(-1, Core.Exprs.natLit(1), [])], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.natLit(8)
+    resultExpr(lsparseFire(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], SparseOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), n = 1, major = 0, minors = []), Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8))), [], [Clo.Clo(-1, Core.Exprs.natLit(1), [])], [Clo.Clo(-1, Core.Exprs.natLit(1), [])], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.natLit(8)
 
 fn nthMinor(xs: List<Option<MinorOn>>, j: Int) -> Option<MinorOn>
     ? "The j-th rule's minor premise, if ready."
@@ -2461,7 +2505,7 @@ fn hypsOf(rule: RecRule, rv: Rec) -> Int
     Core.Apps.numArgs(peelLams(rule.rhs, rv.numParams + rv.numMotives + rv.numMinors + rule.nfields)) - rule.nfields
 
 verify hypsOf
-    hypsOf(RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false)) => 0
+    hypsOf(RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false)) => 0
 
 fn unusedBelow(e: Expr, k: Int) -> Bool
     ? "Whether none of the bound variables 0 to k - 1 occurs loose in e."
@@ -2490,7 +2534,7 @@ fn lcases(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, cs: CasesOn, stack
         Option.None -> lunfoldPeeled(m.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms, cheapRec, cheapProj)
 
 verify lcases
-    resultExpr(lcases(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false), total = 1, majorAt = 0, minorsAt = 0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])], MX(e = Core.Exprs.natLit(0), ms = MS(next = 0, forced = {}, shapes = {})), false, false)) => Core.Exprs.natLit(7)
+    resultExpr(lcases(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), total = 1, majorAt = 0, minorsAt = 0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])], MX(e = Core.Exprs.natLit(0), ms = MS(next = 0, forced = {}, shapes = {})), false, false)) => Core.Exprs.natLit(7)
 
 fn lcasesFire(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, cs: CasesOn, rule: RecRule, majorArgs: List<Expr>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "The constructor's minor premise takes its fields and the arguments after the casesOn's own."
@@ -2499,7 +2543,7 @@ fn lcasesFire(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, cs: CasesOn, r
         false -> lminor(st, nthClo(stack, cs.minorsAt + ruleNumber(cs.rv.rules, rule.ctor, 0)), closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), rule.nfields, List.drop(stack, cs.total), ms, cheapRec, cheapProj)
 
 verify lcasesFire
-    resultExpr(lcasesFire(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [], k = false, isUnsafe = false), total = 1, majorAt = 0, minorsAt = 0), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), [], [], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero])
+    resultExpr(lcasesFire(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), total = 1, majorAt = 0, minorsAt = 0), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), [], [], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero])
 
 fn lminor(st: St, minor: Clo, fields: List<Clo>, nf: Int, rest: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "The minor premise takes the fields: a closure whose term has a lambda for each takes them all at once into its environment (RuleLambdasAtOnce); any other is applied to them."
@@ -2546,8 +2590,8 @@ fn casesFits(rv: Rec, levelsOwn: Bool, n: Int, args: List<Expr>) -> Option<Cases
             false -> Option.None
 
 verify casesFits
-    casesFits(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false), true, 3, [Core.Exprs.bvar(2), Core.Exprs.bvar(0), Core.Exprs.bvar(1)]) == Option.None => false
-    casesFits(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false), true, 3, [Core.Exprs.bvar(2), Core.Exprs.bvar(1), Core.Exprs.bvar(0)]) => Option.None
+    casesFits(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), true, 3, [Core.Exprs.bvar(2), Core.Exprs.bvar(0), Core.Exprs.bvar(1)]) == Option.None => false
+    casesFits(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), true, 3, [Core.Exprs.bvar(2), Core.Exprs.bvar(1), Core.Exprs.bvar(0)]) => Option.None
 
 fn varsFrom(xs: List<Expr>, top: Int, count: Int) -> Bool
     ? "Whether the first count terms are the bound variables top, top - 1, and so on down."

@@ -3,7 +3,11 @@ module Decls
         "Declarations as the export states them. An inductive block keeps"
         "its constructors and recursors together, the way the kernel receives"
         "it; recursors and the computed flags are claims the checker"
-        "re-derives and compares, never inputs it trusts."
+        "re-derives and compares, never inputs it trusts. A recursor also"
+        "carries what reduction asks of it at every step, found once when it"
+        "enters the environment: the type of its major premise, whether that"
+        "is a non-recursive structure, and whether its motive may land in"
+        "any sort."
     exposes [Head, Hints, Safety, QuotKind, IndType, Ctor, RecRule, Rec, Decl, nameOf, constantCount]
     depends [Core.Names, Core.Levels, Core.Exprs]
     effects []
@@ -63,6 +67,9 @@ record Rec
     rules: List<RecRule>
     k: Bool
     isUnsafe: Bool
+    major: Name
+    majorIsStruct: Bool
+    elimAnySort: Bool
 
 type Decl
     Axiom(Head, Bool)

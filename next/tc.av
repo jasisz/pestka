@@ -953,7 +953,7 @@ fn recStep(st: NSt, ls: List<Level>, rv: Rec, xs: List<Val>, majorIdx: Int) -> R
         false -> recFire(majorToCtor(st, rv, Next.Value.nth(xs, majorIdx))?, ls, rv, xs, majorIdx)
 
 verify recStep
-    recStep(sample(), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0) == Result.Ok(NO(o = Option.None, st = sample())) => true
+    recStep(sample(), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0) == Result.Ok(NO(o = Option.None, st = sample())) => true
 
 fn majorToCtor(st: NSt, rv: Rec, major: Val) -> Result<NV, Fail>
     ? "K first; then structure eta before reducing the major; then whnf, literals as constructors, and eta for structure values."
@@ -964,7 +964,7 @@ fn majorToCtor(st: NSt, rv: Rec, major: Val) -> Result<NV, Fail>
         Option.None -> majorReduced(whnf(m0.st, m1.v)?, rv)
 
 verify majorToCtor
-    resultVal(majorToCtor(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Val.Nat(0))) => Val.Cst(Check.Lits.name2("Nat", "zero"), [], [])
+    resultVal(majorToCtor(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Val.Nat(0))) => Val.Cst(Check.Lits.name2("Nat", "zero"), [], [])
 
 fn majorReduced(m: NV, rv: Rec) -> Result<NV, Fail>
     ? "A literal becomes its constructor; a structure value is eta expanded."
@@ -974,7 +974,7 @@ fn majorReduced(m: NV, rv: Rec) -> Result<NV, Fail>
         _ -> structValue(m.st, majorInduct(rv), m.v)
 
 verify majorReduced
-    resultVal(majorReduced(NV(v = Val.Nat(2), st = sample()), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false))) => Val.Cst(Check.Lits.name2("Nat", "succ"), [], [Val.Nat(1)])
+    resultVal(majorReduced(NV(v = Val.Nat(2), st = sample()), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false))) => Val.Cst(Check.Lits.name2("Nat", "succ"), [], [Val.Nat(1)])
 
 fn natCtor(k: Int) -> Val
     ? "A literal as Nat.zero or Nat.succ of the literal below it."
@@ -992,7 +992,7 @@ fn kMajor(st: NSt, rv: Rec, major: Val) -> Result<NV, Fail>
         true -> kTyped(whnfOf(inferVal(st, major)?)?, rv, major)
 
 verify kMajor
-    resultVal(kMajor(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Val.Nat(4))) => Val.Nat(4)
+    resultVal(kMajor(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Val.Nat(4))) => Val.Nat(4)
 
 fn whnfOf(r: NV) -> Result<NV, Fail>
     ? "whnf of a result."
@@ -1010,7 +1010,7 @@ fn kTyped(w: NV, rv: Rec, major: Val) -> Result<NV, Fail>
         _ -> Result.Ok(NV(v = major, st = w.st))
 
 verify kTyped
-    resultVal(kTyped(NV(v = Val.Nat(1), st = sample()), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = true, isUnsafe = false), Val.Nat(4))) => Val.Nat(4)
+    resultVal(kTyped(NV(v = Val.Nat(1), st = sample()), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = true, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Val.Nat(4))) => Val.Nat(4)
 
 fn kCandidate(st: NSt, ty: Val, major: Val, k: Option<Name>, ls: List<Level>, params: List<Val>) -> Result<NV, Fail>
     ? "Uses the constructor only when its type equals the major's."
@@ -1048,7 +1048,7 @@ fn majorInduct(rv: Rec) -> Name
     majorAfter(rv.head.ty, rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices)
 
 verify majorInduct
-    majorInduct(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("Nat"), []), Core.Exprs.bvar(0), Binder.Default)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false)) => Check.Lits.name1("Nat")
+    majorInduct(Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("Nat"), []), Core.Exprs.bvar(0), Binder.Default)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false)) => Check.Lits.name1("Nat")
 
 fn majorAfter(t: Expr, n: Int) -> Name
     ? "Skips n binders and names the head of the next domain."
@@ -1089,7 +1089,7 @@ fn etaBefore(st: NSt, rv: Rec, e: Val) -> Result<NO, Fail>
         true -> etaTyped(whnfOf(inferVal(st, e)?)?, rv, induct, e)
 
 verify etaBefore
-    etaBefore(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Val.Nat(1)) == Result.Ok(NO(o = Option.None, st = sample())) => true
+    etaBefore(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Val.Nat(1)) == Result.Ok(NO(o = Option.None, st = sample())) => true
 
 fn etaTyped(w: NV, rv: Rec, induct: Name, e: Val) -> Result<NO, Fail>
     ? "Only when the type really is the structure; a proof only under large elimination."
@@ -1100,7 +1100,7 @@ fn etaTyped(w: NV, rv: Rec, induct: Name, e: Val) -> Result<NO, Fail>
         _ -> none(w.st)
 
 verify etaTyped
-    etaTyped(NV(v = Val.Nat(1), st = sample()), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon(), Val.Nat(1)) == Result.Ok(NO(o = Option.None, st = sample())) => true
+    etaTyped(NV(v = Val.Nat(1), st = sample()), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Core.Names.anon(), Val.Nat(1)) == Result.Ok(NO(o = Option.None, st = sample())) => true
 
 fn etaUnlessSmallProof(p: NB, ty: Val, e: Val, large: Bool) -> Result<NO, Fail>
     ? "Expands a value, or a proof whose recursor eliminates into any sort."
@@ -1118,7 +1118,7 @@ fn largeElim(st: NSt, rv: Rec, induct: Name) -> Bool
         _ -> false
 
 verify largeElim
-    largeElim(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), Core.Names.anon()) => false
+    largeElim(sample(), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Core.Names.anon()) => false
 
 fn structValue(st: NSt, induct: Name, e: Val) -> Result<NV, Fail>
     ? "After whnf: a value of a non-recursive structure that is not a constructor application becomes mk params e.0 ... (not for proofs)."
@@ -1185,7 +1185,7 @@ fn recFire(m: NV, ls: List<Level>, rv: Rec, xs: List<Val>, majorIdx: Int) -> Res
         _ -> none(m.st)
 
 verify recFire
-    recFire(NV(v = Val.Nat(1), st = sample()), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0) == Result.Ok(NO(o = Option.None, st = sample())) => true
+    recFire(NV(v = Val.Nat(1), st = sample()), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0) == Result.Ok(NO(o = Option.None, st = sample())) => true
 
 fn ruleFor(rules: List<RecRule>, k: Name) -> Option<RecRule>
     ? "The rule for constructor k."
@@ -1207,14 +1207,14 @@ fn recRule(st: NSt, rule: Option<RecRule>, ls: List<Level>, rv: Rec, xs: List<Va
             false -> ruleApplied(st, atLevels(st, Core.Exprs.app(Core.Exprs.cnst(rv.head.name, ls), Core.Exprs.cnst(r.ctor, [])), r.rhs, rv.head.params, ls), r, rv, xs, majorIdx, margs)
 
 verify recRule
-    recRule(sample(), Option.None, [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, []) == Result.Ok(NO(o = Option.None, st = sample())) => true
+    recRule(sample(), Option.None, [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, []) == Result.Ok(NO(o = Option.None, st = sample())) => true
 
 fn ruleApplied(st: NSt, rhs: RE, r: RecRule, rv: Rec, xs: List<Val>, majorIdx: Int, margs: List<Val>) -> Result<NO, Fail>
     ? "rhs params motives minors fields extra-arguments; the right-hand side at the recursor's levels is remembered like an unfolded value, under the recursor at its levels applied to the rule's constructor."
     Result.Ok(NO(o = Option.Some(applyAll(applyAll(applyAll(Next.Value.eval([], rhs.e), List.take(xs, rv.numParams + rv.numMotives + rv.numMinors)), List.drop(margs, List.len(margs) - r.nfields)), List.drop(xs, majorIdx + 1))), st = NSt.update(st, old = rhs.st)))
 
 verify ruleApplied
-    ruleApplied(sample(), RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, []) == Result.Ok(NO(o = Option.Some(Val.Nat(1)), st = sample())) => true
+    ruleApplied(sample(), RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, []) == Result.Ok(NO(o = Option.Some(Val.Nat(1)), st = sample())) => true
 
 fn natStep(st: NSt, v: Val) -> Result<NO, Fail>
     ? "Nat.succ of a literal, and the binary Nat functions on two literals."
