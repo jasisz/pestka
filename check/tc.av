@@ -2060,9 +2060,31 @@ fn lrule(st: St, rule: RecRule, f: Expr, ls: List<Level>, rv: Rec, stack: List<C
 verify lrule
     resultExpr(lrule(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
 
+decision RuleLambdasAtOnce
+    date = "2026-10-25"
+    reason =
+        "A recursor's rule fired with its right-hand side, lambdas over the"
+        "parameters, motives, minor premises and the constructor's fields,"
+        "pushed on the stack: the machine then took the lambdas off one step"
+        "each, each step moving one closure from the stack to the"
+        "environment. For a list that is six steps per element walked. The"
+        "lambdas now come off at once and those closures become the"
+        "environment in one pass, as an unfolded value's do. One worker on"
+        "Aver 06639a5e: perf/magma-list-deep-n36 180.9 G to 168.0 G"
+        "instructions, magma-string-pair-n9 44.0 G to 41.6 G, reachability"
+        "61.1 G to 59.6 G, all 30 perf tests 309.7 G to 293.1 G, Init 89.0 G"
+        "to 88.5 G."
+    chosen = "RuleLambdasAtOnce"
+    rejected = ["RuleLambdasOneByOne"]
+    impacts = [lruleApplied]
+
 fn lruleApplied(r: RE, rule: RecRule, rv: Rec, stack: List<Clo>, majorIdx: Int, majorArgs: List<Expr>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "The right-hand side takes the parameters, motives and minor premises, the constructor's fields and the arguments after the major premise."
-    lcore(r.st, r.e, [], List.concat(List.take(stack, rv.numParams + rv.numMotives + rv.numMinors), List.concat(closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), List.drop(stack, majorIdx + 1))), ms, delta, cheapRec, cheapProj)
+    ? "The right-hand side takes the parameters, motives and minor premises, the constructor's fields and the arguments after the major premise; its lambdas over them come off at once, those arguments its environment, the last first, as beta would leave them (RuleLambdasAtOnce)."
+    n = rv.numParams + rv.numMotives + rv.numMinors
+    l = n + rule.nfields
+    match lamsUpTo(r.e, l, 0) == l
+        true -> lcore(r.st, peelLams(r.e, l), envOf(closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), rule.nfields, envOf(stack, n, [])), List.drop(stack, majorIdx + 1), ms, delta, cheapRec, cheapProj)
+        false -> lcore(r.st, r.e, [], List.concat(List.take(stack, n), List.concat(closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), List.drop(stack, majorIdx + 1))), ms, delta, cheapRec, cheapProj)
 
 verify lruleApplied
     resultExpr(lruleApplied(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.natLit(1)
