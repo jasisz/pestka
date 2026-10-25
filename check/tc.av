@@ -2204,13 +2204,51 @@ verify lnatTry
 fn lunfold(st: St, f: Expr, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A definition's value takes the waiting arguments as they are; anything else is stuck. At universe levels, the lambdas the arguments meet come off the value as written, and only what is under them gets the levels (DomainsDropped)."
     match f
-        Expr.Const(_, n, ls) -> match List.len(ls) > 0
-            true -> lunfoldAt(st, f, ls, Check.State.lookup(st, n), stack, ms, cheapRec, cheapProj)
-            false -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+        Expr.Const(_, n, _) -> lunfoldFound(st, f, Check.State.lookup(st, n), stack, ms, cheapRec, cheapProj)
         _ -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
 
 verify lunfold
     resultExpr(lunfold(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+
+fn lunfoldFound(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The constant f, found as c: at universe levels through its shape and the unfolding cache; without levels its value as written, through the cache only when a matcher heads its body (MatchersInlined)."
+    match f
+        Expr.Const(_, _, ls) -> match List.len(ls) > 0
+            true -> lunfoldAt(st, f, ls, c, stack, ms, cheapRec, cheapProj)
+            false -> lunfoldBare(st, f, c, stack, ms, cheapRec, cheapProj)
+        _ -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
+
+verify lunfoldFound
+    resultExpr(lunfoldFound(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+
+fn lunfoldBare(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A constant without levels: a value takes the waiting arguments; anything else is stuck."
+    match c
+        Option.Some(k) -> match unfoldValue(c, [])
+            Option.Some(v) -> lunfoldBareOn(st, f, Check.State.headOf(k), v, lamsUpTo(v, List.len(stack), 0), stack, ms, cheapRec, cheapProj)
+            Option.None -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
+        Option.None -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
+
+verify lunfoldBare
+    resultExpr(lunfoldBare(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+
+fn lunfoldBareOn(st: St, f: Expr, h: Head, v: Expr, k: Int, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "With a matcher at the head of the body under the k lambdas met, the body from the unfolding cache with the matcher in it; otherwise the value as written."
+    match Bool.and(k > 0, matcherHeaded(peelLams(v, k)))
+        true -> lbodyRun(peeledBody(st, f, h, v, k, []), k, stack, ms, cheapRec, cheapProj)
+        false -> lcore(st, v, [], stack, ms, true, cheapRec, cheapProj)
+
+verify lunfoldBareOn
+    resultExpr(lunfoldBareOn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(3), 0, [], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.natLit(3)
+
+fn matcherHeaded(e: Expr) -> Bool
+    ? "A matcher at the head."
+    match Core.Apps.fnOf(e)
+        Expr.Const(_, n, _) -> matcherNamed(n)
+        _ -> false
+
+verify matcherHeaded
+    matcherHeaded(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("f", "match_2"), []), Core.Exprs.bvar(0))) => true
 
 decision DomainsDropped
     date = "2026-10-25"
@@ -2676,44 +2714,57 @@ decision MatchersInlined
         "worker on Aver 06639a5e: magma-list-deep-n36 124.3 G to 92.4 G"
         "instructions, magma-string-pair-n9 33.9 G to 27.7 G, reachability"
         "52.5 G to 48.8 G, perf total 237.6 G to 197.5 G; Init 1.5%, std"
-        "1.1% and con-leche 2.5% fewer."
+        "1.1% and con-leche 2.5% fewer. A constant without universe levels"
+        "went the old way, its value as written met lambda by lambda; one"
+        "whose body has a matcher at its head now goes through the"
+        "unfolding cache as well: magma-list-pair-n21 51.6 G to 48.6 G,"
+        "reachability 48.8 G to 48.1 G, Init and con-leche as they were."
+        "Handing the constant already found on to the unfolding, instead of"
+        "looking it up again, cost Init 1% and was left out."
     chosen = "MatchersInlined"
     rejected = ["MatchersUnfoldedAtEveryCall"]
-    impacts = [peeledBody, inlined, atomBetas]
+    impacts = [peeledBody, inlined, atomBetas, lunfoldBare, lunfoldBareOn]
 
 fn inlined(st: St, e: Expr, fuel: Int) -> Expr
-    ? "A body under its leading lambdas with a matcher at its head unfolded into it, at most fuel times, the redexes this leaves on atoms reduced (MatchersInlined)."
-    match e
-        Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), t, inlined(st, b, fuel), Binder.Default)
-        _ -> match fuel > 0
-            true -> inlinedAt(st, e, Core.Apps.fnOf(e), fuel)
-            false -> e
+    ? "A body under its leading lambdas with a matcher at its head unfolded into it, at most fuel times, the redexes this leaves on atoms reduced (MatchersInlined); a body without one is kept as it is."
+    Option.withDefault(inlinedIn(st, e, fuel), e)
 
 verify inlined
     inlined(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("match_1"), []), Core.Exprs.bvar(0)), 4) => Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("match_1"), []), Core.Exprs.bvar(0))
 
-fn inlinedAt(st: St, e: Expr, head: Expr, fuel: Int) -> Expr
+fn inlinedIn(st: St, e: Expr, fuel: Int) -> Option<Expr>
+    ? "The body with the matcher unfolded into it, or None when there is none to unfold."
+    match e
+        Expr.Lam(_, t, b) -> lamAround(t, inlinedIn(st, b, fuel))
+        _ -> match fuel > 0
+            true -> inlinedAt(st, e, Core.Apps.fnOf(e), fuel)
+            false -> Option.None
+
+verify inlinedIn
+    inlinedIn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), 4) => Option.None
+
+fn inlinedAt(st: St, e: Expr, head: Expr, fuel: Int) -> Option<Expr>
     ? "A matcher at the head is unfolded when it is a safe definition at its levels with an argument for each of its lambdas; any other head stays."
     match head
         Expr.Const(_, n, ls) -> match matcherNamed(n)
             true -> matcherInto(st, e, Check.State.lookup(st, n), ls, fuel)
-            false -> e
-        _ -> e
+            false -> Option.None
+        _ -> Option.None
 
 verify inlinedAt
-    inlinedAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(0), 4) => Core.Exprs.bvar(0)
+    inlinedAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.bvar(0), 4) => Option.None
 
-fn matcherInto(st: St, e: Expr, c: Option<Const>, ls: List<Level>, fuel: Int) -> Expr
+fn matcherInto(st: St, e: Expr, c: Option<Const>, ls: List<Level>, fuel: Int) -> Option<Expr>
     ? "The matcher's value at the levels takes e's arguments."
     match c
         Option.Some(Const.CDefn(h, v, _, Safety.Safe)) -> match Bool.and(List.len(h.params) == List.len(ls), lamsUpTo(v, Core.Apps.numArgs(e) + 1, 0) <= Core.Apps.numArgs(e))
-            true -> inlined(st, atomBetas(beta(Core.Subst.instLevelParams(v, h.params, ls), Core.Apps.argsOf(e), [])), fuel - 1)
-            false -> e
-        _ -> e
+            true -> Option.Some(inlined(st, atomBetas(beta(Core.Subst.instLevelParams(v, h.params, ls), Core.Apps.argsOf(e), [])), fuel - 1))
+            false -> Option.None
+        _ -> Option.None
 
 verify matcherInto
-    matcherInto(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Option.None, [], 4) => Core.Exprs.bvar(0)
-    matcherInto(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("m"), []), Core.Exprs.bvar(3)), Option.Some(Const.CDefn(Head(name = Check.Lits.name1("m"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.bvar(0)), Binder.Default), Hints.Abbrev, Safety.Safe)), [], 4) => Core.Exprs.bvar(3)
+    matcherInto(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Option.None, [], 4) => Option.None
+    matcherInto(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("m"), []), Core.Exprs.bvar(3)), Option.Some(Const.CDefn(Head(name = Check.Lits.name1("m"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.bvar(0)), Binder.Default), Hints.Abbrev, Safety.Safe)), [], 4) => Option.Some(Core.Exprs.bvar(3))
 
 fn matcherNamed(n: Name) -> Bool
     ? "A name a matcher has, match_ and its number."
@@ -2726,37 +2777,98 @@ verify matcherNamed
     matcherNamed(Check.Lits.name2("List", "casesOn")) => false
 
 fn atomBetas(e: Expr) -> Expr
-    ? "Every redex whose arguments are atoms reduced, inside out. Such a redex never grows, and substituting atoms makes no new one; types are left as they are."
-    match e
-        Expr.App(_, _, _) -> atomRedex(atomBetas(Core.Apps.fnOf(e)), atomBetasAll(Core.Apps.argsOf(e), []))
-        Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), t, atomBetas(b), Binder.Default)
-        Expr.Let(_, t, v, b) -> Core.Exprs.letE(Core.Names.anon(), t, atomBetas(v), atomBetas(b))
-        Expr.Proj(_, s, i, x) -> Core.Exprs.proj(s, i, atomBetas(x))
-        _ -> e
+    ? "Every redex whose arguments are atoms reduced, inside out. Such a redex never grows, and substituting atoms makes no new one; types are left as they are, and so is every subterm without such a redex."
+    Option.withDefault(betasIn(e), e)
 
 verify atomBetas
     atomBetas(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.bvar(5))) => Core.Exprs.bvar(5)
     atomBetas(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.app(Core.Exprs.bvar(5), Core.Exprs.bvar(5)))) => Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.app(Core.Exprs.bvar(5), Core.Exprs.bvar(5)))
 
-fn atomBetasAll(es: List<Expr>, acc: List<Expr>) -> List<Expr>
-    ? "atomBetas of each, in order."
+fn betasIn(e: Expr) -> Option<Expr>
+    ? "e with its redexes on atoms reduced, or None when it has none."
+    match e
+        Expr.App(_, _, _) -> appBetas(Core.Apps.fnOf(e), Core.Apps.argsOf(e), betasIn(Core.Apps.fnOf(e)), betasAll(Core.Apps.argsOf(e), [], false))
+        Expr.Lam(_, t, b) -> lamAround(t, betasIn(b))
+        Expr.Let(_, t, v, b) -> letBetas(t, v, b, betasIn(v), betasIn(b))
+        Expr.Proj(_, s, i, x) -> projBetas(s, i, betasIn(x))
+        _ -> Option.None
+
+verify betasIn
+    betasIn(Core.Exprs.app(Core.Exprs.bvar(5), Core.Exprs.bvar(5))) => Option.None
+
+fn betasAll(es: List<Expr>, acc: List<Expr>, touched: Bool) -> Option<List<Expr>>
+    ? "betasIn of each, in order, or None when none touched."
     match es
-        [] -> List.reverse(acc)
-        [x, ..rest] -> atomBetasAll(rest, List.prepend(atomBetas(x), acc))
+        [] -> match touched
+            true -> Option.Some(List.reverse(acc))
+            false -> Option.None
+        [x, ..rest] -> betasNext(rest, acc, touched, x, betasIn(x))
 
-verify atomBetasAll
-    atomBetasAll([Core.Exprs.bvar(1)], []) => [Core.Exprs.bvar(1)]
+verify betasAll
+    betasAll([Core.Exprs.bvar(1)], [], false) => Option.None
 
-fn atomRedex(f: Expr, args: List<Expr>) -> Expr
-    ? "A lambda on atoms takes them; otherwise the application as it is."
+fn betasNext(rest: List<Expr>, acc: List<Expr>, touched: Bool, x: Expr, r: Option<Expr>) -> Option<List<Expr>>
+    ? "One more, as it was or touched."
+    match r
+        Option.Some(y) -> betasAll(rest, List.prepend(y, acc), true)
+        Option.None -> betasAll(rest, List.prepend(x, acc), touched)
+
+verify betasNext
+    betasNext([], [], false, Core.Exprs.bvar(1), Option.Some(Core.Exprs.bvar(2))) => Option.Some([Core.Exprs.bvar(2)])
+
+fn appBetas(f: Expr, args: List<Expr>, fr: Option<Expr>, ar: Option<List<Expr>>) -> Option<Expr>
+    ? "The head and arguments after theirs; a lambda on atoms then takes them."
+    appRedex(Option.withDefault(fr, f), Option.withDefault(ar, args), Bool.or(fr != Option.None, ar != Option.None))
+
+verify appBetas
+    appBetas(Core.Exprs.bvar(0), [Core.Exprs.bvar(1)], Option.None, Option.None) => Option.None
+
+fn appRedex(f: Expr, args: List<Expr>, touched: Bool) -> Option<Expr>
+    ? "A lambda on atoms takes them; otherwise the application, rebuilt only when a part touched."
+    match atomRedex(f, args)
+        true -> Option.Some(beta(f, args, []))
+        false -> match touched
+            true -> Option.Some(Core.Apps.mkApps(f, args))
+            false -> Option.None
+
+verify appRedex
+    appRedex(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), [Core.Exprs.bvar(4)], false) => Option.Some(Core.Exprs.bvar(4))
+
+fn atomRedex(f: Expr, args: List<Expr>) -> Bool
+    ? "A lambda whose arguments, as many as it takes, are atoms."
     match f
-        Expr.Lam(_, _, _) -> match allAtoms(List.take(args, lamsUpTo(f, List.len(args), 0)))
-            true -> beta(f, args, [])
-            false -> Core.Apps.mkApps(f, args)
-        _ -> Core.Apps.mkApps(f, args)
+        Expr.Lam(_, _, _) -> allAtoms(List.take(args, lamsUpTo(f, List.len(args), 0)))
+        _ -> false
 
 verify atomRedex
-    atomRedex(Core.Exprs.bvar(0), [Core.Exprs.bvar(1)]) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1))
+    atomRedex(Core.Exprs.bvar(0), [Core.Exprs.bvar(1)]) => false
+
+fn lamAround(t: Expr, r: Option<Expr>) -> Option<Expr>
+    ? "A lambda around a changed body."
+    match r
+        Option.Some(b) -> Option.Some(Core.Exprs.lam(Core.Names.anon(), t, b, Binder.Default))
+        Option.None -> Option.None
+
+verify lamAround
+    lamAround(Core.Exprs.sort(Level.Zero), Option.None) => Option.None
+
+fn letBetas(t: Expr, v: Expr, b: Expr, rv: Option<Expr>, rb: Option<Expr>) -> Option<Expr>
+    ? "A let around a changed value or body."
+    match Bool.and(rv == Option.None, rb == Option.None)
+        true -> Option.None
+        false -> Option.Some(Core.Exprs.letE(Core.Names.anon(), t, Option.withDefault(rv, v), Option.withDefault(rb, b)))
+
+verify letBetas
+    letBetas(Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Option.None, Option.None) => Option.None
+
+fn projBetas(s: Name, i: Int, r: Option<Expr>) -> Option<Expr>
+    ? "A projection of a changed term."
+    match r
+        Option.Some(x) -> Option.Some(Core.Exprs.proj(s, i, x))
+        Option.None -> Option.None
+
+verify projBetas
+    projBetas(Core.Names.anon(), 0, Option.None) => Option.None
 
 fn allAtoms(es: List<Expr>) -> Bool
     ? "Variables, constants, sorts and literals only."
