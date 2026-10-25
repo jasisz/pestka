@@ -1558,9 +1558,19 @@ fn majorToCtor(st: St, rv: Rec, major: Expr, cheapRec: Bool, cheapProj: Bool) ->
     m1 = kMajor(st, rv, major)?
     match m1.e
         Expr.NatLit(n) -> Result.Ok(RE(e = Check.Lits.natLitToCtor(n), st = m1.st))
-        _ -> match Bool.and(isCtorApp(m1.st, m1.e), Bool.not(Core.Apps.isConst(Core.Apps.fnOf(m1.e), Check.Lits.natSucc)))
+        _ -> match Bool.and(ruleHeaded(rv.rules, Core.Apps.fnOf(m1.e)), Bool.not(Core.Apps.isConst(Core.Apps.fnOf(m1.e), Check.Lits.natSucc)))
             true -> Result.Ok(m1)
             false -> majorSlow(m1, rv, cheapRec, cheapProj)
+
+fn ruleHeaded(rules: List<RecRule>, h: Expr) -> Bool
+    ? "A head that is the constructor of one of the rules: the major premise is then that constructor applied, and only the rules' names are read, not the environment (CtorMajorAsIs)."
+    match h
+        Expr.Const(_, n, _) -> ruleNamed(rules, n) != Option.None
+        _ -> false
+
+verify ruleHeaded
+    ruleHeaded([RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0))], Core.Exprs.cnst(Check.Lits.natZero, [])) => true
+    ruleHeaded([], Core.Exprs.cnst(Check.Lits.natZero, [])) => false
 
 fn majorSlow(m1: RE, rv: Rec, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A major that is neither a literal nor a constructor application, or is Nat.succ of something: structure eta first, then whnf and expansion."
@@ -2134,7 +2144,7 @@ fn natGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Boo
     ? "With delta: Nat.succ of one argument or a Nat operation of two is tried on literals first, as whnf does; otherwise the head, c as found, unfolds. Without delta the constant is stuck."
     match delta
         false -> Result.Ok(stuckGo(st, f, stack, ms))
-        true -> match natArity(f, List.len(stack))
+        true -> match natArity(f, stack)
             0 -> unfoldGo(st, f, c, stack, ms, cheapRec, cheapProj)
             k -> natTryGo(st, f, c, stack, matStack(List.take(stack, k), ms, []), cheapRec, cheapProj)
 
@@ -2266,20 +2276,28 @@ verify litArgs
     litArgs(0) => []
     litArgs(3) => [Core.Exprs.natLit(2)]
 
-fn natArity(f: Expr, n: Int) -> Int
-    ? "How many arguments reduceNat takes for this head and this many arguments: 1 for Nat.succ, 2 for a binary Nat operation, 0 when it does not apply."
+fn natArity(f: Expr, stack: List<Clo>) -> Int
+    ? "How many arguments reduceNat takes for this head and the waiting arguments: 1 for Nat.succ, 2 for a binary Nat operation, 0 when it does not apply; the arguments are counted only for a Nat operation."
     match f
-        Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []) -> match Bool.and(op == "succ", n == 1)
-            true -> 1
-            false -> match Bool.and(Check.Lits.isNatOp(op), n == 2)
-                true -> 2
-                false -> 0
+        Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []) -> natArityAt(op, List.len(stack))
         _ -> 0
 
 verify natArity
-    natArity(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), 2) => 2
-    natArity(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), 1) => 1
-    natArity(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), 3) => 0
+    natArity(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), [Clo.Clo(-1, Core.Exprs.natLit(1), []), Clo.Clo(-1, Core.Exprs.natLit(2), [])]) => 2
+    natArity(Core.Exprs.cnst(Check.Lits.name1("c"), []), []) => 0
+
+fn natArityAt(op: String, n: Int) -> Int
+    ? "1 for succ of one argument, 2 for a binary operation of two, else 0."
+    match Bool.and(op == "succ", n == 1)
+        true -> 1
+        false -> match Bool.and(Check.Lits.isNatOp(op), n == 2)
+            true -> 2
+            false -> 0
+
+verify natArityAt
+    natArityAt("add", 2) => 2
+    natArityAt("succ", 1) => 1
+    natArityAt("add", 3) => 0
 
 record Go
     st: St
