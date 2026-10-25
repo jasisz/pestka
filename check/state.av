@@ -6,7 +6,7 @@ module State
         "scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, cacheGetAt, cachePutAt]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache]
     effects []
 
@@ -447,7 +447,7 @@ verify namesCounted
 fn namesKeyed(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder, code: Int) -> RE
     ? "The variable kept for these parts, or a new one kept for them. The parts are compared where they are; the term that keeps them is built only for a new variable."
     h = varHash(code, ty, value)
-    match varFind(Core.Cache.get(st.vars, Core.Exprs.key(h)), code, ty, value)
+    match varIn(Map.get(st.vars, Core.Exprs.key(h)), code, ty, value)
         Option.Some(x) -> RE(e = x, st = st)
         Option.None -> namesNew(st, n, ty, value, bi, code, h)
 
@@ -517,6 +517,15 @@ fn optHash(o: Option<Expr>) -> Int
 
 verify optHash
     optHash(Option.None) => 0
+
+fn varIn(o: Option<Bucket>, code: Int, ty: Expr, value: Option<Expr>) -> Option<Expr>
+    ? "varFind on the bucket the map holds, read in place (BucketsReadInPlace)."
+    match o
+        Option.Some(k) -> varFind(k, code, ty, value)
+        Option.None -> Option.None
+
+verify varIn
+    varIn(Option.None, 0, Core.Exprs.bvar(0), Option.None) => Option.None
 
 fn varFind(bucket: Bucket, code: Int, ty: Expr, value: Option<Expr>) -> Option<Expr>
     ? "The variable kept under these parts in a bucket."
@@ -708,6 +717,21 @@ verify cacheGet
     cacheGet(Core.Cache.empty(), Core.Exprs.bvar(0)) => Option.None
     cacheGet(cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
 
+fn cacheGetAt(cache: Map<Core.Exprs.Key, Bucket>, k: Core.Exprs.Key, key: Expr) -> Option<Expr>
+    ? "A cached result kept under the key k, for key: what a key made without building a term finds (KeysUnbuilt)."
+    Core.Cache.find(cache, k, key)
+
+verify cacheGetAt
+    cacheGetAt(cachePutAt(Core.Cache.empty(), Core.Exprs.keyAt(Core.Exprs.bvar(0), 3), Core.Exprs.bvar(0), Core.Exprs.natLit(1)), Core.Exprs.keyAt(Core.Exprs.bvar(0), 3), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.natLit(1))
+    cacheGetAt(cachePutAt(Core.Cache.empty(), Core.Exprs.keyAt(Core.Exprs.bvar(0), 3), Core.Exprs.bvar(0), Core.Exprs.natLit(1)), Core.Exprs.keyAt(Core.Exprs.bvar(0), 2), Core.Exprs.bvar(0)) => Option.None
+
+fn cachePutAt(cache: Map<Core.Exprs.Key, Bucket>, k: Core.Exprs.Key, key: Expr, v: Expr) -> Map<Core.Exprs.Key, Bucket>
+    ? "Stores a result for key under the key k."
+    Core.Cache.add(cache, k, (key, v))
+
+verify cachePutAt
+    Core.Cache.size(cachePutAt(Core.Cache.empty(), Core.Exprs.keyAt(Core.Exprs.bvar(0), 1), Core.Exprs.bvar(0), Core.Exprs.natLit(1))) => 1
+
 fn cachePut(cache: Map<Core.Exprs.Key, Bucket>, key: Expr, v: Expr) -> Map<Core.Exprs.Key, Bucket>
     ? "Stores a result under the key's hash."
     Core.Cache.add(cache, Core.Exprs.hashKey(key), (key, v))
@@ -724,11 +748,21 @@ verify pairKey
 
 fn pairGet(cache: Map<Core.Exprs.Key, Bucket>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded."
-    hasPair(Core.Cache.get(cache, pairKey(a, b)), a, b)
+    pairIn(Map.get(cache, pairKey(a, b)), a, b)
 
 verify pairGet
     pairGet(pairPut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(1), Core.Exprs.bvar(0)) => true
     pairGet(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)) => false
+
+fn pairIn(o: Option<Bucket>, a: Expr, b: Expr) -> Bool
+    ? "hasPair on the bucket the map holds, read in place (BucketsReadInPlace)."
+    match o
+        Option.Some(k) -> hasPair(k, a, b)
+        Option.None -> false
+
+verify pairIn
+    pairIn(Option.None, Core.Exprs.bvar(0), Core.Exprs.bvar(1)) => false
+    pairIn(Option.Some(Bucket.OneEntry((Core.Exprs.bvar(1), Core.Exprs.bvar(0)))), Core.Exprs.bvar(0), Core.Exprs.bvar(1)) => true
 
 fn hasPair(bucket: Bucket, a: Expr, b: Expr) -> Bool
     ? "Membership in either order."
@@ -774,7 +808,7 @@ verify closedPairKey
 
 fn closedPairGet(cache: Map<Core.Exprs.Key, Bucket>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded in the cache kept across declarations."
-    hasPair(Core.Cache.get(cache, closedPairKey(a, b)), a, b)
+    pairIn(Map.get(cache, closedPairKey(a, b)), a, b)
 
 verify closedPairGet
     closedPairGet(closedPairPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
@@ -796,7 +830,7 @@ verify closedFailKey
 
 fn closedFailGet(cache: Map<Core.Exprs.Key, Bucket>, a: Expr, b: Expr) -> Bool
     ? "Whether the pair, in either order, is recorded as different in the cache kept across declarations."
-    hasPair(Core.Cache.get(cache, closedFailKey(a, b)), a, b)
+    pairIn(Map.get(cache, closedFailKey(a, b)), a, b)
 
 verify closedFailGet
     closedFailGet(closedFailPut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(2)), Core.Exprs.natLit(2), Core.Exprs.natLit(1)) => true
