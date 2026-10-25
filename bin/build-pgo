@@ -1,0 +1,20 @@
+#!/bin/sh
+# Builds Pestka as bin/build does, guided by a profile: an instrumented
+# build checks the export named by the first argument on one worker, and
+# the release build in .build/target then uses what that run measured.
+# FLAGS holds further rustc flags for both builds (for example
+# "-C target-cpu=native"). Needs llvm-profdata, on PATH or from rustup's
+# llvm-tools component.
+set -e
+root=$(cd "$(dirname "$0")/.." && pwd)
+train=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+"${AVER:-aver}" compile "$root/main.av" --module-root "$root" -o "$root/.build" >/dev/null
+cd "$root/.build"
+prof="$root/.build/pgo"
+rm -rf "$prof"
+mkdir -p "$prof"
+RUSTFLAGS="$FLAGS -Cprofile-generate=$prof" cargo build --release --target-dir "$root/.build/target-pgo"
+"$root/.build/target-pgo/release/main" "$train" 1 >/dev/null
+profdata=$(command -v llvm-profdata || ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-profdata | head -1)
+"$profdata" merge -o "$prof/merged.profdata" "$prof"
+RUSTFLAGS="$FLAGS -Cprofile-use=$prof/merged.profdata" cargo build --release
