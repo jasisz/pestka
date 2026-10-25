@@ -61,14 +61,11 @@ record OldFacts
     topLevel: Int
     inferCache: Map<Int, Bucket>
     checkCache: Map<Int, Bucket>
-    paramCache: Map<Int, Bucket>
-    paramsOf: List<Name>
     whnfCache: Map<Int, Bucket>
     coreCache: Map<Int, Bucket>
     eqOk: Map<Int, Bucket>
     eqFail: Map<Int, Bucket>
     eqNo: Map<Int, Bucket>
-    gens: List<ParamGen>
 
 record Checked
     failure: Option<Fail>
@@ -237,7 +234,7 @@ verify keptEmpty
 
 fn oldEmpty() -> OldFacts
     ? "No facts in the first core."
-    OldFacts(closed = Core.Cache.empty(), unfolds = Core.Cache.empty(), types = Core.Cache.empty(), vars = Core.Cache.empty(), lctx = Locals.NoLocals, next = 0, topLevel = 0, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), paramCache = Core.Cache.empty(), paramsOf = [], whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), gens = [])
+    OldFacts(closed = Core.Cache.empty(), unfolds = Core.Cache.empty(), types = Core.Cache.empty(), vars = Core.Cache.empty(), lctx = Locals.NoLocals, next = 0, topLevel = 0, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty())
 
 verify oldEmpty
     Core.Cache.size(oldEmpty().unfolds) => 0
@@ -279,9 +276,9 @@ verify chunkNext
 fn jobFor(core: Core, keep: Int, j: Job, env: Env, kept: Kept) -> Result<Kept, Fail>
     ? "A deferred declaration checked by the first core, the second, or both; with both, any difference in their answers is a failure that says what each answered."
     match core
-        Core.Old -> oldKept(jobChecks(j, St.update(checkerFor(env, j), keep = keep, closed = kept.old.closed, unfoldCache = kept.old.unfolds, levelTypes = kept.old.types, vars = kept.old.vars, lctx = kept.old.lctx, next = kept.old.next, topLevel = kept.old.topLevel, inferCache = kept.old.inferCache, checkCache = kept.old.checkCache, paramCache = kept.old.paramCache, gens = kept.old.gens, paramsBefore = kept.old.paramsOf, whnfCache = kept.old.whnfCache, coreCache = kept.old.coreCache, eqOk = kept.old.eqOk, eqFail = kept.old.eqFail, eqNo = kept.old.eqNo)), kept.next)
+        Core.Old -> oldKept(jobChecks(j, St.update(checkerFor(env, j), keep = keep, closed = kept.old.closed, unfoldCache = kept.old.unfolds, levelTypes = kept.old.types, vars = kept.old.vars, lctx = kept.old.lctx, next = kept.old.next, topLevel = kept.old.topLevel, inferCache = kept.old.inferCache, checkCache = kept.old.checkCache, whnfCache = kept.old.whnfCache, coreCache = kept.old.coreCache, eqOk = kept.old.eqOk, eqFail = kept.old.eqFail, eqNo = kept.old.eqNo)), kept.next)
         Core.Next -> nextKept(Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next), kept.old)
-        Core.Both -> agree(jobChecks(j, St.update(checkerFor(env, j), keep = keep, closed = kept.old.closed, unfoldCache = kept.old.unfolds, levelTypes = kept.old.types, vars = kept.old.vars, lctx = kept.old.lctx, next = kept.old.next, topLevel = kept.old.topLevel, inferCache = kept.old.inferCache, checkCache = kept.old.checkCache, paramCache = kept.old.paramCache, gens = kept.old.gens, paramsBefore = kept.old.paramsOf, whnfCache = kept.old.whnfCache, coreCache = kept.old.coreCache, eqOk = kept.old.eqOk, eqFail = kept.old.eqFail, eqNo = kept.old.eqNo)), Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next))
+        Core.Both -> agree(jobChecks(j, St.update(checkerFor(env, j), keep = keep, closed = kept.old.closed, unfoldCache = kept.old.unfolds, levelTypes = kept.old.types, vars = kept.old.vars, lctx = kept.old.lctx, next = kept.old.next, topLevel = kept.old.topLevel, inferCache = kept.old.inferCache, checkCache = kept.old.checkCache, whnfCache = kept.old.whnfCache, coreCache = kept.old.coreCache, eqOk = kept.old.eqOk, eqFail = kept.old.eqFail, eqNo = kept.old.eqNo)), Next.Decl.check(env, j.upTo, j.head, j.value, j.isThm, kept.next))
 
 verify jobFor
     jobFor(Core.Both, 65536, Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.envEmpty(), keptEmpty()) => Result.Err(Fail.Reject("declaration type mismatch"))
@@ -384,7 +381,7 @@ fn checkJobs(jobs: List<Job>, env: Env, facts: OldFacts, limit: Int) -> Result<O
         [] -> Result.Ok(facts)
         [j, ..rest] -> match j.pos < limit
             false -> Result.Ok(facts)
-            true -> jobDone(jobChecks(j, St.update(checkerFor(env, j), closed = facts.closed, unfoldCache = facts.unfolds, levelTypes = facts.types, vars = facts.vars, lctx = facts.lctx, next = facts.next, topLevel = facts.topLevel, inferCache = facts.inferCache, checkCache = facts.checkCache, paramCache = facts.paramCache, gens = facts.gens, paramsBefore = facts.paramsOf, whnfCache = facts.whnfCache, coreCache = facts.coreCache, eqOk = facts.eqOk, eqFail = facts.eqFail, eqNo = facts.eqNo)), j, env, rest, limit)
+            true -> jobDone(jobChecks(j, St.update(checkerFor(env, j), closed = facts.closed, unfoldCache = facts.unfolds, levelTypes = facts.types, vars = facts.vars, lctx = facts.lctx, next = facts.next, topLevel = facts.topLevel, inferCache = facts.inferCache, checkCache = facts.checkCache, whnfCache = facts.whnfCache, coreCache = facts.coreCache, eqOk = facts.eqOk, eqFail = facts.eqFail, eqNo = facts.eqNo)), j, env, rest, limit)
 
 verify checkJobs
     checkJobs([], Check.State.envEmpty(), oldEmpty(), 0) => Result.Ok(oldEmpty())
@@ -418,7 +415,7 @@ verify checkerFor
 
 fn jobChecks(j: Job, st0: St) -> Result<OldFacts, Fail>
     ? "A deferred declaration, from st0, its checker carrying the cache of checked closed terms: the type is a type, a theorem's type a proposition, and the value's type equal to the declared one. Returns the cache. The caller puts the cache into the checker itself, where it moves, so that the cache reaches the checker with one owner and is updated in place."
-    st = typeIsSort(Check.Tc.check(paramsIn(st0), j.head.ty)?)?
+    st = typeIsSort(Check.Tc.check(st0, j.head.ty)?)?
     match j.value
         Option.None -> Result.Ok(carried(st))
         Option.Some(v) -> valueChecks(st, j.head.ty, v, j.isThm)
@@ -427,75 +424,9 @@ verify jobChecks
     jobChecks(Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => Result.Err(Fail.Reject("declaration type mismatch"))
 
 fn carried(st: St) -> OldFacts
-    ? "What the first core takes from a declaration to the next: the facts about closed terms; the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration; and, since a free variable is made of its type and value and how many of its kind are open around it (CountedVariables), the variables made so far with their context, and what was found by inference, checking, reduction and comparison about terms holding them, which holds wherever the same variables appear. The checking of terms with a universe parameter asks whether the parameter is the declaration's own, so it is kept for declarations with the same parameters (ParamGenerations). Each map is emptied past its limit; when the variables are, their context and every map that may hold a variable go with them, so no kept result names a variable that is gone."
+    ? "What the first core takes from a declaration to the next: the facts about closed terms; the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration; and, since a free variable is made of its type and value and how many of its kind are open around it (CountedVariables), the variables made so far with their context, and what was found by inference, checking, reduction and comparison about terms holding them, which holds wherever the same variables appear. What was found by checking terms with a universe parameter is kept under the declaration's parameters (ParamsInTheKey). Each map is emptied past its limit; when the variables are, their context and every map that may hold a variable go with them, so no kept result names a variable that is gone."
     full = Core.Cache.size(st.vars) > st.keep
-    OldFacts(closed = st.closed, unfolds = bounded(st.unfoldCache, Int.div(st.keep, 4)), types = bounded(st.levelTypes, st.keep), vars = bounded(st.vars, st.keep), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = openKept(st.inferCache, full, st.keep), checkCache = openKept(st.checkCache, full, st.keep), paramCache = openKept(st.paramCache, full, st.keep), paramsOf = st.params, whnfCache = openKept(st.whnfCache, full, st.keep), coreCache = openKept(st.coreCache, full, st.keep), eqOk = openKept(st.eqOk, full, st.keep), eqFail = openKept(st.eqFail, full, st.keep), eqNo = openKept(st.eqNo, full, st.keep), gens = gensKept(st.gens, full))
-
-decision ParamGenerations
-    date = "2026-10-23"
-    reason =
-        "Checking a term with a universe parameter asks whether the parameter"
-        "is the declaration's own, so what was found holds for a declaration"
-        "with the same parameters. The cache of those results was emptied"
-        "whenever the parameters changed from one declaration to the next, and"
-        "mathlib goes back and forth between a few lists of them: each change"
-        "freed the whole cache, and the next declaration checked again what"
-        "an earlier one with its parameters had found. Now the caches of the"
-        "last four lists of parameters other than the current one are kept,"
-        "and a declaration takes up the one of its own parameters. They hold"
-        "free variables, so they are emptied with the variables. One worker:"
-        "mathlib 8637.2 G to 8237.5 G instructions, qb9 184.7 G to 182.6 G,"
-        "etale 96.1 G to 94.8 G, Init 204.6 G to 205.4 G."
-    chosen = "ParamGenerations"
-    rejected = ["OneParamCache"]
-    impacts = [paramsIn, switchParams, gensKept]
-
-record Switched
-    cache: Map<Int, Bucket>
-    gens: List<ParamGen>
-
-fn paramsIn(st: St) -> St
-    ? "The checker of a declaration with the cache of its own universe parameters taken up, and the cache of the declaration before kept for its parameters (ParamGenerations). Done in the checker, which holds every map alone, so that no map has a second owner when it is next written."
-    s = switchParams(st.gens, st.paramCache, st.paramsBefore, st.params)
-    St.update(st, paramCache = s.cache, gens = s.gens)
-
-verify paramsIn
-    Core.Cache.size(paramsIn(St.update(Check.State.fresh(Check.State.envEmpty(), [Core.Names.anon()], Safety.Safe), paramCache = Check.State.cachePut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(1)), paramsBefore = [])).paramCache) => 0
-    Core.Cache.size(paramsIn(St.update(Check.State.fresh(Check.State.envEmpty(), [Core.Names.anon()], Safety.Safe), paramCache = Check.State.cachePut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(1)))).paramCache) => 1
-    List.len(paramsIn(St.update(Check.State.fresh(Check.State.envEmpty(), [Core.Names.anon()], Safety.Safe), paramCache = Check.State.cachePut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(1)), paramsBefore = [])).gens) => 1
-
-fn switchParams(gens: List<ParamGen>, cache: Map<Int, Bucket>, before: List<Name>, now: List<Name>) -> Switched
-    ? "The cache for the parameters now, and the caches of other parameters kept: the current one is kept for its own parameters, the oldest beyond four are let go, and the one for now, if kept, is taken out. An empty cache is not kept."
-    match before == now
-        true -> Switched(cache = cache, gens = gens)
-        false -> match Core.Cache.size(cache) == 0
-            true -> takeGen(gens, now, [])
-            false -> takeGen(List.take(List.prepend(ParamGen(params = before, cache = cache), gens), 4), now, [])
-
-verify switchParams
-    Core.Cache.size(switchParams([], Check.State.cachePut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(1)), [], [Core.Names.anon()]).cache) => 0
-    Core.Cache.size(switchParams(switchParams([], Check.State.cachePut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(1)), [], [Core.Names.anon()]).gens, Core.Cache.empty(), [Core.Names.anon()], []).cache) => 1
-    Core.Cache.size(switchParams([], Check.State.cachePut(Core.Cache.empty(), Core.Exprs.natLit(1), Core.Exprs.natLit(1)), [], []).cache) => 1
-
-fn takeGen(gens: List<ParamGen>, now: List<Name>, acc: List<ParamGen>) -> Switched
-    ? "The kept cache for the parameters now, out of the list, or an empty one."
-    match gens
-        [] -> Switched(cache = Core.Cache.empty(), gens = List.reverse(acc))
-        [g, ..rest] -> match g.params == now
-            true -> Switched(cache = g.cache, gens = List.concat(List.reverse(acc), rest))
-            false -> takeGen(rest, now, List.prepend(g, acc))
-
-verify takeGen
-    Core.Cache.size(takeGen([], [], []).cache) => 0
-
-fn gensKept(gens: List<ParamGen>, full: Bool) -> List<ParamGen>
-    ? "The kept caches of other parameters, let go with the variables."
-    match full
-        true -> []
-        false -> gens
-
-verify gensKept
-    gensKept([ParamGen(params = [], cache = Core.Cache.empty())], true) => []
+    OldFacts(closed = st.closed, unfolds = bounded(st.unfoldCache, Int.div(st.keep, 4)), types = bounded(st.levelTypes, st.keep), vars = bounded(st.vars, st.keep), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = openKept(st.inferCache, full, st.keep), checkCache = openKept(st.checkCache, full, st.keep), whnfCache = openKept(st.whnfCache, full, st.keep), coreCache = openKept(st.coreCache, full, st.keep), eqOk = openKept(st.eqOk, full, st.keep), eqFail = openKept(st.eqFail, full, st.keep), eqNo = openKept(st.eqNo, full, st.keep))
 
 fn openKept(m: Map<Int, Bucket>, full: Bool, limit: Int) -> Map<Int, Bucket>
     ? "A map that may hold free variables: emptied with the variables, else past its own limit."

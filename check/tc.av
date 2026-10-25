@@ -69,7 +69,7 @@ fn cachedType(st: St, e: Expr, only: Bool) -> Option<Expr>
     ? "A known type of e: from the cache of closed terms checked in earlier declarations, else from this declaration's cache for the mode; inference also takes the type found by checking e, which is a type of e."
     match shared(e)
         true -> orCached(Check.State.cacheGet(st.closed, e), st, e, only)
-        false -> orChecked(Check.State.cacheGet(cacheFor(st, only, e), e), st, e, only)
+        false -> orChecked(typeGet(st, only, e), st, e, only)
 
 verify cachedType
     cachedType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), true) => Option.None
@@ -79,7 +79,7 @@ fn orChecked(hit: Option<Expr>, st: St, e: Expr, only: Bool) -> Option<Expr>
     match hit
         Option.Some -> hit
         Option.None -> match only
-            true -> Check.State.cacheGet(cacheFor(st, false, e), e)
+            true -> typeGet(st, false, e)
             false -> Option.None
 
 verify orChecked
@@ -90,7 +90,7 @@ fn orCached(hit: Option<Expr>, st: St, e: Expr, only: Bool) -> Option<Expr>
     ? "The shared answer, or this declaration's."
     match hit
         Option.Some -> hit
-        Option.None -> Check.State.cacheGet(cacheFor(st, only, e), e)
+        Option.None -> typeGet(st, only, e)
 
 verify orCached
     orCached(Option.Some(Core.Exprs.natLit(1)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2), true) => Option.Some(Core.Exprs.natLit(1))
@@ -102,16 +102,42 @@ fn shared(e: Expr) -> Bool
 verify shared
     shared(Core.Exprs.natLit(1)) => false
 
-fn cacheFor(st: St, only: Bool, e: Expr) -> Map<Int, Bucket>
-    ? "Inference and checking keep separate caches, and checking a term with a universe parameter one of its declaration's own: checking asks whether the parameter is the declaration's, while the other caches are carried to the next declaration."
+fn cacheFor(st: St, only: Bool) -> Map<Int, Bucket>
+    ? "Inference and checking keep separate caches."
     match only
         true -> st.inferCache
-        false -> match Core.Exprs.hasParam(e)
-            true -> st.paramCache
-            false -> st.checkCache
+        false -> st.checkCache
 
 verify cacheFor
-    Core.Cache.size(cacheFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), true, Core.Exprs.natLit(0))) => 0
+    Core.Cache.size(cacheFor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), true)) => 0
+
+decision ParamsInTheKey
+    date = "2026-10-25"
+    reason =
+        "Checking a term with a universe parameter asks whether the parameter"
+        "is the declaration's own, so what it finds holds for declarations with"
+        "the same parameters. Such results were kept in a cache of their own,"
+        "taken up again by a declaration with the same parameters from the last"
+        "four lists kept, and emptied with the variables. Now they are kept with"
+        "every other checked type, under the term applied to the declaration's"
+        "parameters as a term (paramsTagOf): a declaration finds only those of"
+        "its own parameters, from any list met before, with no cache switched."
+        "Leaving the parameters out of the key, which is not sound, was"
+        "measured as the bound: etale 35.7 G to 34.4 G instructions, Init"
+        "95.4 G to 93.6 G."
+    chosen = "ParamsInTheKey"
+    rejected = ["ParamGenerations", "ParamsCheckedOnce"]
+    impacts = [typeGet, checkedKept, openHit]
+
+fn typeGet(st: St, only: Bool, e: Expr) -> Option<Expr>
+    ? "The type kept for e in the cache for the mode: under e applied to the declaration's parameters when checking a term with a universe parameter (ParamsInTheKey), else under e."
+    match Bool.and(Bool.not(only), Bool.and(st.checkParams, Core.Exprs.hasParam(e)))
+        true -> findOpen(Core.Cache.get(st.checkCache, Core.Exprs.appHash(e, st.paramsTag)), e, st.paramsTag)
+        false -> Check.State.cacheGet(cacheFor(st, only), e)
+
+verify typeGet
+    typeGet(checkedKept(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [Core.Names.anon()], Safety.Safe)), Core.Exprs.sort(Level.Param(Core.Names.anon())), Core.Exprs.sort(Level.Param(Core.Names.anon()))).st, false, Core.Exprs.sort(Level.Param(Core.Names.anon()))) => Option.Some(Core.Exprs.natLit(1))
+    typeGet(St.update(checkedKept(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [Core.Names.anon()], Safety.Safe)), Core.Exprs.sort(Level.Param(Core.Names.anon())), Core.Exprs.sort(Level.Param(Core.Names.anon()))).st, paramsTag = Check.State.paramsTagOf([])), false, Core.Exprs.sort(Level.Param(Core.Names.anon()))) => Option.None
 
 fn inferCached(st: St, e: Expr, only: Bool, hit: Option<Expr>) -> Result<RE, Fail>
     ? "Uses a cached type or infers and records one."
@@ -194,7 +220,9 @@ verify openCached
 
 fn openHit(st: St, e: Expr, around: Expr, only: Bool) -> Option<Expr>
     ? "The cached type of e under around, looked up apart: the cache handed out for the lookup is let go when this returns, before the caller infers and keeps a type, which would otherwise find the cache with two owners and copy all of it."
-    findOpen(Core.Cache.get(cacheFor(st, only, e), Core.Exprs.appHash(e, around)), e, around)
+    match Bool.and(Bool.not(only), Bool.and(st.checkParams, Core.Exprs.hasParam(e)))
+        true -> findTagged(Core.Cache.get(st.checkCache, Core.Exprs.appHash3(e, around, st.paramsTag)), e, around, st.paramsTag)
+        false -> findOpen(Core.Cache.get(cacheFor(st, only), Core.Exprs.appHash(e, around)), e, around)
 
 verify openHit
     openHit(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.fvar(1), false) => Option.None
@@ -209,9 +237,9 @@ verify rememberOpen
     Core.Cache.size(rememberOpen(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), false).st.checkCache) => 1
 
 fn checkedKept(r: RE, key: Expr, e: Expr) -> RE
-    ? "Records a checked type under key, in the cache of its declaration when e has a universe parameter (see cacheFor)."
-    match Core.Exprs.hasParam(e)
-        true -> RE(e = r.e, st = St.update(r.st, paramCache = Check.State.cachePut(r.st.paramCache, key, r.e)))
+    ? "Records a checked type under key, applied to the declaration's parameters when e has a universe parameter (ParamsInTheKey)."
+    match Bool.and(r.st.checkParams, Core.Exprs.hasParam(e))
+        true -> RE(e = r.e, st = St.update(r.st, checkCache = Check.State.cachePut(r.st.checkCache, Core.Exprs.app(key, r.st.paramsTag), r.e)))
         false -> RE(e = r.e, st = St.update(r.st, checkCache = Check.State.cachePut(r.st.checkCache, key, r.e)))
 
 verify checkedKept
@@ -229,6 +257,41 @@ fn findOpen(bucket: Bucket, e: Expr, around: Expr) -> Option<Expr>
 verify findOpen
     findOpen(Bucket.OneEntry((Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))), Core.Exprs.bvar(0), Core.Exprs.fvar(2)) => Option.Some(Core.Exprs.natLit(1))
     findOpen(Bucket.OneEntry((Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(1))), Core.Exprs.bvar(0), Core.Exprs.fvar(3)) => Option.None
+
+fn findTagged(bucket: Bucket, e: Expr, around: Expr, tag: Expr) -> Option<Expr>
+    ? "The value stored under e applied to around and then to tag, compared without building it."
+    match bucket
+        Bucket.NoEntry -> Option.None
+        Bucket.OneEntry((key, v)) -> match isTaggedKey(key, e, around, tag)
+            true -> Option.Some(v)
+            false -> Option.None
+        Bucket.Entries(es) -> findTaggedIn(es, e, around, tag)
+
+verify findTagged
+    findTagged(Bucket.OneEntry((Core.Exprs.app(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(5)), Core.Exprs.natLit(1))), Core.Exprs.bvar(0), Core.Exprs.fvar(2), Core.Exprs.natLit(5)) => Option.Some(Core.Exprs.natLit(1))
+    findTagged(Bucket.OneEntry((Core.Exprs.app(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(2)), Core.Exprs.natLit(5)), Core.Exprs.natLit(1))), Core.Exprs.bvar(0), Core.Exprs.fvar(2), Core.Exprs.natLit(6)) => Option.None
+
+fn findTaggedIn(es: List<Tuple<Expr, Expr>>, e: Expr, around: Expr, tag: Expr) -> Option<Expr>
+    ? "findTagged over a bucket's entries."
+    match es
+        [] -> Option.None
+        [(key, v), ..rest] -> match isTaggedKey(key, e, around, tag)
+            true -> Option.Some(v)
+            false -> findTaggedIn(rest, e, around, tag)
+
+verify findTaggedIn
+    findTaggedIn([], Core.Exprs.bvar(0), Core.Exprs.fvar(3), Core.Exprs.natLit(1)) => Option.None
+
+fn isTaggedKey(key: Expr, e: Expr, around: Expr, tag: Expr) -> Bool
+    ? "Whether key is e applied to around and then to tag."
+    match key
+        Expr.App(_, f, t) -> match t == tag
+            true -> isOpenKey(f, e, around)
+            false -> false
+        _ -> false
+
+verify isTaggedKey
+    isTaggedKey(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.fvar(2), Core.Exprs.natLit(1)) => false
 
 fn findOpenIn(es: List<Tuple<Expr, Expr>>, e: Expr, around: Expr) -> Option<Expr>
     ? "findOpen over a bucket's entries."

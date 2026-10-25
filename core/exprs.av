@@ -7,7 +7,7 @@ module Exprs
         "a tree, capped, so that traversals know when memoizing pays), packed"
         "into one word below 2^62 so that every node stays small, computed once"
         "by the constructors here and never by callers."
-    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, looseRange, within, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
+    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, appHash3, looseRange, within, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
     exposes opaque [Word, Tag, Index]
     depends [Core.Hash, Core.Names, Core.Levels]
     effects []
@@ -520,6 +520,16 @@ verify appHash law sameAsBuilt
     given i: Int = 0..6
     given j: Int = 0..6
     appHash(wordSample(i), wordSample(j)) => hashOf(app(wordSample(i), wordSample(j)))
+
+fn appHash3(f: Expr, a: Expr, t: Expr) -> Int
+    ? "The hash app(app(f, a), t) would have, without building either node."
+    h = Int.mod((4000012 + Int.div(wordOf(f).value, 2147483648)) * 1000003 + Int.div(wordOf(a).value, 2147483648), 2147483647)
+    Int.mod((4000012 + h) * 1000003 + Int.div(wordOf(t).value, 2147483648), 2147483647)
+
+verify appHash3 law sameAsBuilt
+    given i: Int = 0..6
+    given j: Int = 0..6
+    appHash3(wordSample(i), wordSample(j), wordSample(3)) => hashOf(app(app(wordSample(i), wordSample(j)), wordSample(3)))
 
 fn looseRange(e: Expr) -> Int
     ? "One more than the largest loose bound variable index; 0 when closed. Read on every node a substitution visits, so it is one mask for a compound node and needs no hash of a leaf."
