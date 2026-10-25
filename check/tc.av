@@ -2565,23 +2565,81 @@ verify nothingFor
     List.len(nothingFor(2, [])) => 2
 
 fn lcases(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, cs: CasesOn, stack: List<Clo>, major: MX, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "The major premise brought to its constructor as the recursor brings it; with no rule for its head, the casesOn unfolds as before."
-    m = majorToCtor(st, cs.rv, major.e, cheapRec, cheapProj)?
-    match ruleFor(cs.rv.rules, Core.Apps.fnOf(m.e))
-        Option.Some(rule) -> lcasesFire(m.st, f, h, v, ls, cs, rule, Core.Apps.argsOf(m.e), stack, major.ms, cheapRec, cheapProj)
-        Option.None -> lunfoldPeeled(m.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms, cheapRec, cheapProj)
+    ? "The major premise brought to its constructor as the recursor brings it, a literal at once (LiteralCases): the minor premise of its rule takes its fields and the arguments after the casesOn's own; with no rule for its head, the casesOn unfolds as before."
+    p = casesPick(st, cs, major.e, cheapRec, cheapProj)?
+    match p.ok
+        true -> lminor(p.st, nthClo(stack, cs.minorsAt + p.at), p.fields, p.nf, List.drop(stack, cs.total), major.ms, cheapRec, cheapProj)
+        false -> lunfoldPeeled(p.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms, cheapRec, cheapProj)
 
 verify lcases
     resultExpr(lcases(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), total = 1, majorAt = 0, minorsAt = 0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])], MX(e = Core.Exprs.natLit(0), ms = MS(next = 0, forced = {}, shapes = {})), false, false)) => Core.Exprs.natLit(7)
 
-fn lcasesFire(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, cs: CasesOn, rule: RecRule, majorArgs: List<Expr>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "The constructor's minor premise takes its fields and the arguments after the casesOn's own."
-    match rule.nfields > List.len(majorArgs)
-        true -> lunfoldPeeled(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms, cheapRec, cheapProj)
-        false -> lminor(st, nthClo(stack, cs.minorsAt + ruleNumber(cs.rv.rules, rule.ctor, 0)), closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), rule.nfields, List.drop(stack, cs.total), ms, cheapRec, cheapProj)
+record Pick
+    st: St
+    ok: Bool
+    at: Int
+    fields: List<Clo>
+    nf: Int
 
-verify lcasesFire
-    resultExpr(lcasesFire(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), total = 1, majorAt = 0, minorsAt = 0), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), [], [], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero])
+decision LiteralCases
+    date = "2026-10-25"
+    reason =
+        "Nat's casesOn on a literal, as a decide over Fin meets at every"
+        "list index and every compared number, built Nat.succ of the"
+        "literal below, looked for that constructor's rule among the rules"
+        "by its head, and took the literal back out as the field. A literal"
+        "0 now goes to the zero minor premise and n+1 to the succ one with"
+        "the literal n as its field, as that rule would give it. The rule"
+        "is picked by a plain function, not by more steps of the machine:"
+        "two more arms in its loop cost Init, std and con-leche 1% by"
+        "themselves, and one of them, handed the state it did not read,"
+        "copied the caches at every literal (magma-list-pair-n7 4.2 G to"
+        "17.2 G). One worker on Aver 06639a5e: magma-list-deep-n36 93.5 G"
+        "to 88.3 G instructions, magma-string-pair-n9 27.9 G to 27.0 G,"
+        "perf total 195.5 G to 189.0 G; Init, std, con-leche and etale as"
+        "they were."
+    chosen = "LiteralCases"
+    rejected = ["LiteralBuiltAsSucc", "LiteralCasesAsMachineSteps"]
+    impacts = [lcases, casesPick, litPick]
+
+fn casesPick(st: St, cs: CasesOn, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<Pick, Fail>
+    ? "The minor premise for the major premise e, by its place among the rules, with the fields it takes."
+    match e
+        Expr.NatLit(n) -> match Bool.and(cs.rv.major == Check.Lits.nat, List.len(cs.rv.rules) == 2)
+            true -> Result.Ok(litPick(st, cs.rv.rules, n))
+            false -> Result.Ok(ruledPick(cs.rv.rules, majorToCtor(st, cs.rv, e, cheapRec, cheapProj)?))
+        _ -> Result.Ok(ruledPick(cs.rv.rules, majorToCtor(st, cs.rv, e, cheapRec, cheapProj)?))
+
+verify casesPick
+    Result.withDefault(casesPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 2, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "succ"), nfields = 1, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Check.Lits.nat, majorIsStruct = false, elimAnySort = false), total = 2, majorAt = 0, minorsAt = 0), Core.Exprs.natLit(3), false, false), Pick(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = false, at = 9, fields = [], nf = 9)).at => 1
+    Result.withDefault(casesPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Check.Lits.nat, majorIsStruct = false, elimAnySort = false), total = 1, majorAt = 0, minorsAt = 0), Core.Exprs.natLit(0), false, false), Pick(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = false, at = 9, fields = [], nf = 9)).ok => true
+
+fn litPick(st: St, rules: List<RecRule>, n: Int) -> Pick
+    ? "A literal of Nat: 0 the zero rule, n+1 the succ rule with the literal n as its field."
+    match n == 0
+        true -> Pick(st = st, ok = true, at = ruleNumber(rules, Check.Lits.natZero, 0), fields = [], nf = 0)
+        false -> Pick(st = st, ok = true, at = ruleNumber(rules, Check.Lits.natSucc, 0), fields = [Clo.Clo(-1, Core.Exprs.natLit(n - 1), [])], nf = 1)
+
+verify litPick
+    litPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "succ"), nfields = 1, rhs = Core.Exprs.bvar(0))], 4).fields => [Clo.Clo(-1, Core.Exprs.natLit(3), [])]
+
+fn ruledPick(rules: List<RecRule>, m: RE) -> Pick
+    ? "The rule of the constructor at m's head, when there is one and m gives it all its fields."
+    match ruleFor(rules, Core.Apps.fnOf(m.e))
+        Option.Some(rule) -> fieldsPick(m.st, rules, rule, Core.Apps.argsOf(m.e))
+        Option.None -> Pick(st = m.st, ok = false, at = 0, fields = [], nf = 0)
+
+verify ruledPick
+    ruledPick([RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0))], RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).ok => false
+
+fn fieldsPick(st: St, rules: List<RecRule>, rule: RecRule, args: List<Expr>) -> Pick
+    ? "The rule's fields, the last of the constructor's arguments."
+    match rule.nfields > List.len(args)
+        true -> Pick(st = st, ok = false, at = 0, fields = [], nf = 0)
+        false -> Pick(st = st, ok = true, at = ruleNumber(rules, rule.ctor, 0), fields = closedAll(List.drop(args, List.len(args) - rule.nfields), []), nf = rule.nfields)
+
+verify fieldsPick
+    fieldsPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "succ"), nfields = 1, rhs = Core.Exprs.bvar(0))], RecRule(ctor = Check.Lits.name2("Nat", "succ"), nfields = 1, rhs = Core.Exprs.bvar(0)), [Core.Exprs.natLit(2)]).at => 1
 
 fn lminor(st: St, minor: Clo, fields: List<Clo>, nf: Int, rest: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "The minor premise takes the fields: a closure whose term has a lambda for each takes them all at once into its environment (RuleLambdasAtOnce); any other is applied to them."
