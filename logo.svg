@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="40 10 176 236" width="176" height="236" role="img" aria-label="Pestka">
+  <path d="M128 18 C142 26 150 30 162 36 C192 54 208 94 208 138 C208 194 172 236 128 236 C84 236 48 194 48 138 C48 94 64 54 94 36 C106 30 114 26 128 18 Z" fill="#A24A26"/>
+  <g fill="none" stroke="#FFF3E0" stroke-width="17" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M102 100 C115 94 124 102 129 115 L156 186"/>
+    <path d="M129 127 L102 186"/>
+  </g>
+</svg>

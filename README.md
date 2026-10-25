@@ -1,3 +1,5 @@
+<p align="center"><img src="logo.svg" alt="Pestka" width="120"></p>
+
 # Pestka
 
 *Pestka* is Polish for the stone of a fruit, its kernel, and, said of a task,
