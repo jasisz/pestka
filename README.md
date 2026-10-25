@@ -26,22 +26,19 @@ Pestka answers 172 of 172 correctly.
 The Arena's large tests and its `perf/` tests, exported as the Arena exports
 them and checked on an Apple M2 Pro: on one worker, as the Arena runs Pestka,
 and on eight, the default. The instructions retired on one worker are what
-the Arena ranks checkers by.
+the Arena ranks checkers by. The build is the Arena's: `bin/build-pgo`,
+with the profile of a check of `init-prelude` (see Commands).
 
 | Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 8 workers | Peak, 8 workers |
 |---|---|---|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 92.1 G | 12 s | 0.8 GB | 5.5 s | 1.2 GB |
-| `std` (98,086) | accepted | 155.3 G | 21 s | 1.3 GB | 10 s | 1.9 GB |
-| `reachability` | accepted | 65.6 G | 6.2 s | 0.5 GB | 5.4 s | 0.5 GB |
-| `con-leche` | accepted | 151.6 G | 19 s | 1.2 GB | 8.7 s | 1.8 GB |
-| `cedar` | accepted | 214.6 G | 38 s | 1.4 GB | 12 s | 2.1 GB |
-| `navier-stokes-euler`* | accepted | 1.52 T | 139 s | 4.7 GB | 74 s | 7.5 GB |
-| `cslib` | accepted | 805.2 G | 124 s | 4.4 GB | 43 s | 5.9 GB |
-| `mathlib` (702,040) | accepted | 2.80 T | 452 s | 7.5 GB | 159 s | 10.1 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 343 G (204 G) | 29 s (16 s) | 1.0 GB | 29 s (17 s) | 1.0 GB |
-
-\* Measured with an earlier Pestka, at Aver `ea0c38c7`; not measured again
-since, its export taking more disk than was at hand.
+| `init` (58,170 declarations) | accepted | 70.2 G | 9.3 s | 0.8 GB | 4.5 s | 1.1 GB |
+| `std` (98,086) | accepted | 120.4 G | 16 s | 1.3 GB | 7.3 s | 1.8 GB |
+| `reachability` | accepted | 31.2 G | 2.8 s | 0.5 GB | 2.4 s | 0.5 GB |
+| `con-leche` | accepted | 116.1 G | 13 s | 1.2 GB | 6.7 s | 1.7 GB |
+| `cedar` | accepted | 166.6 G | 23 s | 1.4 GB | 8.9 s | 2.0 GB |
+| `cslib` | accepted | 639.7 G | 99 s | 4.1 GB | 35 s | 5.5 GB |
+| `mathlib` (702,040) | accepted | 2.27 T | 383 s | 7.3 GB | 132 s | 9.5 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 125 G (58.0 G) | 9.5 s (3.8 s) | 1.0 GB | 9.3 s (3.8 s) | 1.0 GB |
 
 ## What it does differently
 
@@ -119,7 +116,21 @@ The checker follows the reference kernel's algorithm. What is its own:
   hundreds of times and took 211 s without this, 3 s with it.
 - **Weak head normalization runs a lazy machine**: arguments wait as terms
   with their environment and are built only when needed, each at most once;
-  definitions unfold and recursor rules fire inside it.
+  definitions unfold and recursor rules fire inside it. What it does at a
+  constant (the rule a recursor fires, the branch a casesOn or a matcher
+  takes, the body a definition unfolds to) is worked out by plain functions,
+  and the machine takes one step there: its loop has five arms, where each
+  arm it had cost every other part of the checker as well.
+- **A matcher is unfolded into its callers once.** A function compiled from
+  pattern matching passes its arguments and one lambda per alternative to a
+  matcher, which hands them to a casesOn. The body a definition unfolds to,
+  kept for the rest of the run, has the matcher at its head unfolded into it
+  and the alternatives applied to its fields, so a call goes from the
+  function straight to the casesOn. A literal of `Nat` goes to its branch
+  without being turned into `Nat.succ` of the one below. With the facts a
+  recursor and a casesOn need found once, these and the machine's shorter
+  loop cut about a third of the instructions on the `perf/` tests and a
+  quarter on `reachability`, measured on one Aver.
 - **Deep binders are not copied.** Opening a binder substitutes its variable
   into the body, as the reference does; past 128 open binders, bodies are
   inferred under their variables as they are instead, so deep nesting does
@@ -172,7 +183,8 @@ aver proof check/lits.av --module-root . --backend aver --check-json
   produce input files. Pestka itself never runs Lean. The numbers here come
   from exports made as the Lean Kernel Arena makes them: `lean4export`
   `master` built with Lean 4.34.1, or with the Lean a test project pins.
-- A Rust toolchain, for the compiled build.
+- A Rust toolchain, for the compiled build, with the `llvm-tools` component
+  for `bin/build-pgo`.
 
 ### Installing the pinned Aver
 
@@ -206,12 +218,19 @@ Compiled to Rust, which is the build meant for large inputs:
 
 ```bash
 bin/build                  # aver compile + cargo build --release into .build/
+bin/build-pgo TRAIN.ndjson # the same, guided by a profile of checking TRAIN
 .build/target/release/main FILE.ndjson [WORKERS [old|next|both]]
 tests/run.sh               # every export under tests/export against its expected status
 tests/arena.sh DIR         # the small Lean Kernel Arena tests, each under bin/capped
 ```
 
-`bin/build` uses the `aver` on `PATH`, or the one `AVER` names. The third
+`bin/build` uses the `aver` on `PATH`, or the one `AVER` names.
+`bin/build-pgo` builds once with instrumentation, checks TRAIN with it on
+one worker, and builds again with the profile that run left; `FLAGS` adds
+rustc flags to both builds (the Arena gives `-C target-cpu=native`). It needs
+`llvm-profdata`, from rustup's `llvm-tools` component. The profile of a
+check of `init-prelude` cuts 12–15% of the instructions on every test above,
+those far from it included. The third
 argument picks the core: `old` (the default), `next` (the second core, in
 `next/`, being built), or `both`, which checks every deferred declaration
 with each and rejects at the first where their answers differ.
