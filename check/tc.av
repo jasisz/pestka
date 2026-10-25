@@ -1815,7 +1815,7 @@ fn ruleRhs(st: St, rule: RecRule, ls: List<Level>, rv: Rec, args: List<Expr>, ma
     ? "rhs params motives minors fields extra-arguments."
     match Bool.or(rule.nfields > List.len(majorArgs), List.len(ls) != List.len(rv.head.params))
         true -> RO(o = Option.None, st = st)
-        false -> ruleApplied(ruleAt(st, rule, rv, ls), rule, rv, args, majorIdx, majorArgs)
+        false -> ruleApplied(ruleAt(st, rule, Core.Exprs.cnst(rv.head.name, ls), rv, ls), rule, rv, args, majorIdx, majorArgs)
 
 verify ruleRhs
     ruleRhs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, []).o => Option.None
@@ -1827,30 +1827,72 @@ fn ruleApplied(r: RE, rule: RecRule, rv: Rec, args: List<Expr>, majorIdx: Int, m
 verify ruleApplied
     ruleApplied(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, [Core.Exprs.natLit(3)]).o => Option.Some(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(3)))
 
-fn ruleAt(st: St, rule: RecRule, rv: Rec, ls: List<Level>) -> RE
+fn ruleAt(st: St, rule: RecRule, f: Expr, rv: Rec, ls: List<Level>) -> RE
     ? "The rule's right-hand side at the recursor's levels. Like an unfolded value, it is remembered for the rest of the declaration, since instantiating the levels walks all of it each time."
     match ls
         [] -> RE(e = rule.rhs, st = st)
-        _ -> ruleCached(st, rule, rv, ls, Core.Exprs.app(Core.Exprs.cnst(rv.head.name, ls), Core.Exprs.cnst(rule.ctor, [])))
+        _ -> ruleCached(st, rule, rv, ls, f, Core.Exprs.keyAt(f, ruleNumber(rv.rules, rule.ctor, 1)))
 
 verify ruleAt
-    ruleAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), []).e => Core.Exprs.natLit(1)
+    ruleAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Core.Exprs.cnst(Core.Names.anon(), []), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), []).e => Core.Exprs.natLit(1)
 
-fn ruleCached(st: St, rule: RecRule, rv: Rec, ls: List<Level>, key: Expr) -> RE
-    ? "Shares the unfolding cache: its other keys are constants alone, and this key is the recursor at its levels applied to the rule's constructor."
-    match Check.State.cacheGet(st.unfoldCache, key)
+fn ruleCached(st: St, rule: RecRule, rv: Rec, ls: List<Level>, f: Expr, k: Core.Exprs.Key) -> RE
+    ? "Shares the unfolding cache: the recursor at its levels f under its key at the rule's place among the rules, made without building a term (KeysUnbuilt)."
+    match Check.State.cacheGetAt(st.unfoldCache, k, f)
         Option.Some(v) -> RE(e = v, st = st)
-        Option.None -> ruleStore(st, key, Core.Subst.instLevelParams(rule.rhs, rv.head.params, ls))
+        Option.None -> keptAt(st, k, f, Core.Subst.instLevelParams(rule.rhs, rv.head.params, ls))
 
 verify ruleCached
-    Core.Cache.size(ruleCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [Level.Zero], Core.Exprs.natLit(9)).st.unfoldCache) => 1
+    Core.Cache.size(ruleCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [Level.Zero], Core.Exprs.natLit(9), Core.Exprs.keyAt(Core.Exprs.natLit(9), 1)).st.unfoldCache) => 1
 
-fn ruleStore(st: St, key: Expr, v: Expr) -> RE
-    ? "Remembers an instantiated right-hand side."
-    RE(e = v, st = St.update(st, unfoldCache = Check.State.cachePut(st.unfoldCache, key, v)))
+decision KeysUnbuilt
+    date = "2026-10-25"
+    reason =
+        "Every unfolding at levels looked up the body under its first k"
+        "lambdas under the constant applied to the literal k, and every rule"
+        "of a recursor under the recursor applied to its constructor: two or"
+        "three nodes built, hashed and compared for each lookup, the"
+        "constructor's with its name and levels hashed again. In a"
+        "computation by decide that is several times per element of a list"
+        "walked. The key is now made from the constant already built and the"
+        "count, or the rule's place among the rules, without building a term,"
+        "and the entry is told apart by the constant alone. The first k"
+        "arguments become the body's environment in one pass. One worker on"
+        "Aver d2a1db25: perf/magma-list-deep-n36 221.1 G to 214.2 G"
+        "instructions, magma-string-pair-n9 52.6 G to 50.8 G, reachability"
+        "72.1 G to 70.1 G, Init 92.8 G to 92.3 G."
+    chosen = "KeysUnbuilt"
+    rejected = ["KeysBuilt"]
+    impacts = [peeledBody, ruleAt, ruleCached, keptAt, envOf]
 
-verify ruleStore
-    ruleStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(9), Core.Exprs.natLit(1)).e => Core.Exprs.natLit(1)
+fn ruleNumber(rules: List<RecRule>, ctor: Name, i: Int) -> Int
+    ? "The place of ctor's rule among the rules, from i."
+    match rules
+        [] -> i
+        [r, ..rest] -> match r.ctor == ctor
+            true -> i
+            false -> ruleNumber(rest, ctor, i + 1)
+
+verify ruleNumber
+    ruleNumber([RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1))], Core.Names.anon(), 1) => 1
+
+fn keptAt(st: St, k: Core.Exprs.Key, f: Expr, v: Expr) -> RE
+    ? "v kept in the unfolding cache for f under the key k: a value under its first lambdas under f's key at their count, a recursor's rule under its key at the rule's place (KeysUnbuilt)."
+    RE(e = v, st = St.update(st, unfoldCache = Check.State.cachePutAt(st.unfoldCache, k, f, v)))
+
+verify keptAt
+    keptAt(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.keyAt(Core.Exprs.natLit(9), 1), Core.Exprs.natLit(9), Core.Exprs.natLit(1)).e => Core.Exprs.natLit(1)
+
+fn envOf(stack: List<Clo>, k: Int, acc: List<Clo>) -> List<Clo>
+    ? "The first k closures of the stack as an environment, the last first, as beta would push them: List.reverse(List.take(stack, k)) in one pass."
+    match k <= 0
+        true -> acc
+        false -> match stack
+            [c, ..rest] -> envOf(rest, k - 1, List.prepend(c, acc))
+            [] -> acc
+
+verify envOf
+    envOf([Clo.Clo(-1, Core.Exprs.natLit(1), []), Clo.Clo(-1, Core.Exprs.natLit(2), []), Clo.Clo(-1, Core.Exprs.natLit(3), [])], 2, []) => [Clo.Clo(-1, Core.Exprs.natLit(2), []), Clo.Clo(-1, Core.Exprs.natLit(1), [])]
 
 fn whnf(st: St, e: Expr) -> Result<RE, Fail>
     ? "Weak head normal form: whnfCore, Nat literal arithmetic and definition unfolding, until none applies."
@@ -2013,7 +2055,7 @@ fn lrule(st: St, rule: RecRule, f: Expr, ls: List<Level>, rv: Rec, stack: List<C
     ? "rhs params motives minors fields extra-arguments, as ruleRhs builds it, with the recursor's own arguments still closures."
     match Bool.or(rule.nfields > List.len(majorArgs), List.len(ls) != List.len(rv.head.params))
         true -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
-        false -> lruleApplied(ruleAt(st, rule, rv, ls), rule, rv, stack, majorIdx, majorArgs, ms, delta, cheapRec, cheapProj)
+        false -> lruleApplied(ruleAt(st, rule, f, rv, ls), rule, rv, stack, majorIdx, majorArgs, ms, delta, cheapRec, cheapProj)
 
 verify lrule
     resultExpr(lrule(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false), [], 0, [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
@@ -2117,23 +2159,23 @@ fn lunfoldPeeled(st: St, f: Expr, h: Head, v: Expr, k: Int, ls: List<Level>, sta
     ? "With k lambdas met, the body under them at the levels, run with the first k arguments as its environment; with none, or levels of the wrong count, the whole value as before."
     match Bool.and(k > 0, List.len(h.params) == List.len(ls))
         false -> lunfoldWhole(st, f, stack, ms, cheapRec, cheapProj)
-        true -> lbodyRun(peeledBody(st, Core.Exprs.app(f, Core.Exprs.natLit(k)), h, v, k, ls), k, stack, ms, cheapRec, cheapProj)
+        true -> lbodyRun(peeledBody(st, f, h, v, k, ls), k, stack, ms, cheapRec, cheapProj)
 
 verify lunfoldPeeled
     resultExpr(lunfoldPeeled(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 1, [Level.Zero], [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {}), false, false)) => Core.Exprs.natLit(4)
 
-fn peeledBody(st: St, key: Expr, h: Head, v: Expr, k: Int, ls: List<Level>) -> RE
-    ? "The value under its first k lambdas at the levels, from the unfolding cache or instantiated now and kept there under the constant applied to k."
-    match Check.State.cacheGet(st.unfoldCache, key)
+fn peeledBody(st: St, f: Expr, h: Head, v: Expr, k: Int, ls: List<Level>) -> RE
+    ? "The value under its first k lambdas at the levels, from the unfolding cache or instantiated now and kept there for the constant under its key at k, made without building a term (KeysUnbuilt)."
+    match Check.State.cacheGetAt(st.unfoldCache, Core.Exprs.keyAt(f, k), f)
         Option.Some(b) -> RE(e = b, st = st)
-        Option.None -> ruleStore(st, key, Core.Subst.instLevelParams(peelLams(v, k), h.params, ls))
+        Option.None -> keptAt(st, Core.Exprs.keyAt(f, k), f, Core.Subst.instLevelParams(peelLams(v, k), h.params, ls))
 
 verify peeledBody
     peeledBody(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.bvar(0), 0, []).e => Core.Exprs.bvar(0)
 
 fn lbodyRun(b: RE, k: Int, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "The machine on a body whose k lambdas met the first k arguments: those in its environment, the innermost first, as beta pushes them."
-    lcore(b.st, b.e, List.reverse(List.take(stack, k)), List.drop(stack, k), ms, true, cheapRec, cheapProj)
+    lcore(b.st, b.e, envOf(stack, k, []), List.drop(stack, k), ms, true, cheapRec, cheapProj)
 
 verify lbodyRun
     resultExpr(lbodyRun(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 1, [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {}), false, false)) => Core.Exprs.natLit(4)
@@ -3506,14 +3548,14 @@ fn stepPeeled(st: St, e: Expr, f: Expr, h: Head, v: Expr, args: List<Expr>, ls: 
     k = lamsUpTo(v, List.len(args), 0)
     match Bool.and(k > 0, List.len(h.params) == List.len(ls))
         false -> unfoldStepWhole(st, e)
-        true -> stepRun(peeledBody(st, Core.Exprs.app(f, Core.Exprs.natLit(k)), h, v, k, ls), k, closedAll(args, []))
+        true -> stepRun(peeledBody(st, f, h, v, k, ls), k, closedAll(args, []))
 
 verify stepPeeled
     resultExpr(stepPeeled(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), [], [])) => Core.Exprs.fvar(1)
 
 fn stepRun(b: RE, k: Int, stack: List<Clo>) -> Result<RE, Fail>
     ? "whnfCore's machine on the body, as unfoldStep runs it after unfolding: no delta, recursors on cheap terms not reduced, projections cheap."
-    lcore(b.st, b.e, List.reverse(List.take(stack, k)), List.drop(stack, k), MS(next = 0, forced = {}), false, false, true)
+    lcore(b.st, b.e, envOf(stack, k, []), List.drop(stack, k), MS(next = 0, forced = {}), false, false, true)
 
 verify stepRun
     resultExpr(stepRun(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 1, [Clo.Clo(-1, Core.Exprs.natLit(4), [])])) => Core.Exprs.natLit(4)

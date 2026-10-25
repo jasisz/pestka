@@ -6,7 +6,7 @@ module State
         "scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, cacheGetAt, cachePutAt]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache]
     effects []
 
@@ -716,6 +716,21 @@ fn cacheGet(cache: Map<Core.Exprs.Key, Bucket>, key: Expr) -> Option<Expr>
 verify cacheGet
     cacheGet(Core.Cache.empty(), Core.Exprs.bvar(0)) => Option.None
     cacheGet(cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
+
+fn cacheGetAt(cache: Map<Core.Exprs.Key, Bucket>, k: Core.Exprs.Key, key: Expr) -> Option<Expr>
+    ? "A cached result kept under the key k, for key: what a key made without building a term finds (KeysUnbuilt)."
+    Core.Cache.find(cache, k, key)
+
+verify cacheGetAt
+    cacheGetAt(cachePutAt(Core.Cache.empty(), Core.Exprs.keyAt(Core.Exprs.bvar(0), 3), Core.Exprs.bvar(0), Core.Exprs.natLit(1)), Core.Exprs.keyAt(Core.Exprs.bvar(0), 3), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.natLit(1))
+    cacheGetAt(cachePutAt(Core.Cache.empty(), Core.Exprs.keyAt(Core.Exprs.bvar(0), 3), Core.Exprs.bvar(0), Core.Exprs.natLit(1)), Core.Exprs.keyAt(Core.Exprs.bvar(0), 2), Core.Exprs.bvar(0)) => Option.None
+
+fn cachePutAt(cache: Map<Core.Exprs.Key, Bucket>, k: Core.Exprs.Key, key: Expr, v: Expr) -> Map<Core.Exprs.Key, Bucket>
+    ? "Stores a result for key under the key k."
+    Core.Cache.add(cache, k, (key, v))
+
+verify cachePutAt
+    Core.Cache.size(cachePutAt(Core.Cache.empty(), Core.Exprs.keyAt(Core.Exprs.bvar(0), 1), Core.Exprs.bvar(0), Core.Exprs.natLit(1))) => 1
 
 fn cachePut(cache: Map<Core.Exprs.Key, Bucket>, key: Expr, v: Expr) -> Map<Core.Exprs.Key, Bucket>
     ? "Stores a result under the key's hash."
