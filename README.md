@@ -28,15 +28,15 @@ the Arena ranks checkers by.
 
 | Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 8 workers | Peak, 8 workers |
 |---|---|---|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 93.8 G | 11 s | 0.8 GB | 5.1 s | 1.2 GB |
-| `std` (98,086) | accepted | 158.0 G | 21 s | 1.3 GB | 8.7 s | 1.9 GB |
-| `reachability` | accepted | 72.7 G | 7.1 s | 0.5 GB | 5.9 s | 0.5 GB |
-| `con-leche` | accepted | 153.8 G | 19 s | 1.2 GB | 8.9 s | 1.7 GB |
-| `cedar` | accepted | 216.8 G | 31 s | 1.4 GB | 11 s | 2.1 GB |
+| `init` (58,170 declarations) | accepted | 92.1 G | 12 s | 0.8 GB | 5.5 s | 1.2 GB |
+| `std` (98,086) | accepted | 155.3 G | 21 s | 1.3 GB | 10 s | 1.9 GB |
+| `reachability` | accepted | 65.6 G | 6.2 s | 0.5 GB | 5.4 s | 0.5 GB |
+| `con-leche` | accepted | 151.6 G | 19 s | 1.2 GB | 8.7 s | 1.8 GB |
+| `cedar` | accepted | 214.6 G | 38 s | 1.4 GB | 12 s | 2.1 GB |
 | `navier-stokes-euler`* | accepted | 1.52 T | 139 s | 4.7 GB | 74 s | 7.5 GB |
-| `cslib` | accepted | 811.8 G | 125 s | 4.4 GB | 37 s | 5.9 GB |
-| `mathlib` (702,040) | accepted | 2.82 T | 454 s | 7.6 GB | 151 s | 10.1 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 374 G (223 G) | 31 s (17 s) | 1.0 GB | 31 s (17 s) | 1.0 GB |
+| `cslib` | accepted | 805.2 G | 124 s | 4.4 GB | 43 s | 5.9 GB |
+| `mathlib` (702,040) | accepted | 2.80 T | 452 s | 7.5 GB | 159 s | 10.1 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 343 G (204 G) | 29 s (16 s) | 1.0 GB | 29 s (17 s) | 1.0 GB |
 
 \* Measured with an earlier Pestka, at Aver `ea0c38c7`; not measured again
 since, its export taking more disk than was at hand.
@@ -94,6 +94,12 @@ The checker follows the reference kernel's algorithm. What is its own:
   raw 64-bit words: making and reading them is machine arithmetic, and the
   caches are maps keyed by machine words. This cut about 15% on a `mathlib`
   declaration and 13% on `Init`.
+- **A casesOn goes straight to its branch.** A definition named casesOn whose
+  value is its recursor applied to its own arguments, each minor premise
+  wrapped to drop the induction hypotheses, is not unfolded: the major
+  premise is brought to its constructor and that constructor's minor premise
+  takes the fields. Computations by `decide` meet one per number and list
+  they take apart; this cut about 5% on the `perf/` tests.
 - **What a worker finds is kept across declarations.** Each worker meets its
   declarations in file order, so every constant a result rests on is still
   there in the next one. It carries its variables and their context, and the
