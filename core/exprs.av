@@ -7,7 +7,7 @@ module Exprs
         "a tree, capped, so that traversals know when memoizing pays), packed"
         "into one word below 2^62 so that every node stays small, computed once"
         "by the constructors here and never by callers."
-    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, looseRange, hasFVar, hasParam, treeSize, varsOf, varsOfId]
+    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, looseRange, within, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
     exposes opaque [Word, Tag, Index]
     depends [Core.Hash, Core.Names, Core.Levels]
     effects []
@@ -501,6 +501,26 @@ fn hashOf(e: Expr) -> Int
 verify hashOf
     hashOf(bvar(0)) == hashOf(bvar(0)) => true
 
+fn pairHash(a: Expr, b: Expr) -> Int
+    ? "One key for an unordered pair: the two hashes mixed, the smaller first, read and mixed on the machine word."
+    ha = Int.div(wordOf(a).value, 2147483648)
+    hb = Int.div(wordOf(b).value, 2147483648)
+    Int.mod(Int.min(ha, hb) * 1000003 + Int.max(ha, hb), 2147483647)
+
+verify pairHash law sameAsMix
+    given i: Int = 0..6
+    given j: Int = 0..6
+    pairHash(wordSample(i), wordSample(j)) => Core.Hash.mix(Int.min(hashOf(wordSample(i)), hashOf(wordSample(j))), Int.max(hashOf(wordSample(i)), hashOf(wordSample(j))))
+
+fn appHash(f: Expr, a: Expr) -> Int
+    ? "The hash app(f, a) would have, without building it: mix2(4, ...) as joined makes it, on the machine word."
+    Int.mod((4000012 + Int.div(wordOf(f).value, 2147483648)) * 1000003 + Int.div(wordOf(a).value, 2147483648), 2147483647)
+
+verify appHash law sameAsBuilt
+    given i: Int = 0..6
+    given j: Int = 0..6
+    appHash(wordSample(i), wordSample(j)) => hashOf(app(wordSample(i), wordSample(j)))
+
 fn looseRange(e: Expr) -> Int
     ? "One more than the largest loose bound variable index; 0 when closed. Read on every node a substitution visits, so it is one mask for a compound node and needs no hash of a leaf."
     match packedOf(e)
@@ -516,6 +536,39 @@ fn leafRange(e: Expr) -> Int
     match e
         Expr.BVar(i) -> i + 1
         _ -> 0
+
+fn within(e: Expr, n: Int) -> Bool
+    ? "looseRange(e) <= n, read on the machine word: a saturated range is within no depth a term reaches."
+    match packedOf(e)
+        Option.Some(w) -> match Bits.and(w.value, 16383) == 16383
+            true -> 1099511627776 <= n
+            false -> Bits.and(w.value, 16383) <= n
+        Option.None -> leafRange(e) <= n
+
+verify within law sameAsRange
+    given i: Int = 0..6
+    given n: Int = [0, 1, 3, 16382, 16383, 1099511627776]
+    within(wordSample(i), n) => looseRange(wordSample(i)) <= n
+
+fn isClosed(e: Expr) -> Bool
+    ? "looseRange(e) == 0, read on the machine word."
+    match packedOf(e)
+        Option.Some(w) -> Bits.and(w.value, 16383) == 0
+        Option.None -> leafRange(e) == 0
+
+verify isClosed law sameAsRange
+    given i: Int = 0..6
+    isClosed(wordSample(i)) => looseRange(wordSample(i)) == 0
+
+fn isSmall(e: Expr) -> Bool
+    ? "treeSize(e) < 32, read on the machine word: the size below which substitution keeps no memo."
+    match packedOf(e)
+        Option.Some(w) -> Bits.and(Int.div(w.value, 33554432), 63) < 32
+        Option.None -> true
+
+verify isSmall law sameAsSize
+    given i: Int = 0..6
+    isSmall(wordSample(i)) => treeSize(wordSample(i)) < 32
 
 verify leafRange
     leafRange(bvar(3)) => 4

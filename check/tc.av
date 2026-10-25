@@ -163,7 +163,7 @@ verify boundType
 
 fn inferIn(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "Inference under binders, used past the depth where bodies stop being copied: the loose bound variables of e stand for the free variables in env, the innermost first. Checking walks a body as it is. Inference alone puts the variables in, since it is asked about terms that reduction built, which find the types of their parts only in that form. A closed part goes the usual way."
-    match Core.Exprs.looseRange(e) == 0
+    match Core.Exprs.isClosed(e)
         true -> infer(st, e, only)
         false -> match only
             true -> infer(st, minst(e, env), only)
@@ -194,7 +194,7 @@ verify openCached
 
 fn openHit(st: St, e: Expr, around: Expr, only: Bool) -> Option<Expr>
     ? "The cached type of e under around, looked up apart: the cache handed out for the lookup is let go when this returns, before the caller infers and keeps a type, which would otherwise find the cache with two owners and copy all of it."
-    findOpen(Core.Cache.get(cacheFor(st, only, e), Core.Hash.mix(Core.Hash.mix(4, Core.Exprs.hashOf(e)), Core.Exprs.hashOf(around))), e, around)
+    findOpen(Core.Cache.get(cacheFor(st, only, e), Core.Exprs.appHash(e, around)), e, around)
 
 verify openHit
     openHit(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Core.Exprs.fvar(1), false) => Option.None
@@ -738,7 +738,7 @@ verify argFits
 
 fn fitsUnder(t: Expr, d: Expr, subst: List<Expr>, off: Int) -> Bool
     ? "Whether t is d under off binders with its loose bound variables put in as argsInto puts closed arguments in (subst newest first, at index off and up), binder names and annotations aside. Parts of d the substitution does not reach are compared as they are. Small domains only: a large one, which may share parts, is left to be built."
-    match Core.Exprs.looseRange(d) <= off
+    match Core.Exprs.within(d, off)
         true -> sameTerm(t, d)
         false -> match Core.Exprs.treeSize(d) < 63
             false -> false
@@ -759,7 +759,7 @@ fn fitsWithin(t: Expr, d: Expr, subst: List<Expr>, off: Int, left: Int) -> Int
     ? "fitsUnder with a budget of nodes of d visited instead of a limit on d's size: what is left of the budget when t is d with subst put in, or -1 when it is not or the budget runs out, as it may on a domain that shares parts."
     match left <= 0
         true -> -1
-        false -> match Core.Exprs.looseRange(d) <= off
+        false -> match Core.Exprs.within(d, off)
             true -> match sameTerm(t, d)
                 true -> left - 1
                 false -> -1
@@ -851,7 +851,7 @@ verify argsAfterWhnf
 
 fn argInto(body: Expr, a: Expr, env: List<Expr>) -> Expr
     ? "The pi's body with the argument put in. Only then, when the body uses it, does the argument get its own variables put in."
-    match Core.Exprs.looseRange(body) == 0
+    match Core.Exprs.isClosed(body)
         true -> body
         false -> Core.Subst.instantiate1(body, minst(a, env))
 
@@ -912,7 +912,7 @@ verify appWalkWhnf
 
 fn argsInto(ft: Expr, pending: List<Expr>, env: List<Expr>) -> Expr
     ? "The walked pis' body with the arguments put in. Only then, when the body uses some, do the arguments get their own variables put in."
-    match Core.Exprs.looseRange(ft) == 0
+    match Core.Exprs.isClosed(ft)
         true -> ft
         false -> Core.Subst.instantiate(ft, minstAll(pending, env))
 
@@ -1008,7 +1008,7 @@ verify cheapPeel
 
 fn cheapDone(e: Expr, f: Expr, args: List<Expr>, i: Int) -> Expr
     ? "A closed body, or a body that is one of the bound variables."
-    match Core.Exprs.looseRange(f) == 0
+    match Core.Exprs.isClosed(f)
         true -> Core.Apps.mkApps(f, List.drop(args, i))
         false -> match f
             Expr.BVar(j) -> Core.Apps.mkApps(nth(args, i - j - 1), List.drop(args, i))
@@ -2127,7 +2127,7 @@ fn closure(a: Expr, env: List<Clo>, id: Int) -> Clo
     ? "a as a closure over env; a term with no loose bound variable needs no environment, and is its own value; a variable of env is its closure there, built at most once under that closure's number (VariableIsItsClosure)."
     match a
         Expr.BVar(i) -> varClosure(List.drop(env, i), a, env, id)
-        _ -> match Core.Exprs.looseRange(a) == 0
+        _ -> match Core.Exprs.isClosed(a)
             true -> Clo.Clo(-1, a, [])
             false -> Clo.Clo(id, a, env)
 
@@ -2165,7 +2165,7 @@ verify nthClo
 
 fn matTerm(t: Expr, env: List<Clo>, ms: MS) -> MX
     ? "t with its loose bound variables replaced by their closures, built; a closure is built when its variable is met, so those t never uses stay closures."
-    match Core.Exprs.looseRange(t) == 0
+    match Core.Exprs.isClosed(t)
         true -> MX(e = t, ms = ms)
         false -> fromLS(lgo(t, 0, env, ms, {}))
 
@@ -2187,7 +2187,7 @@ verify fromLS
 
 fn lgo(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, Expr>>) -> LS
     ? "As Core.Subst.go for instantiation: what has no loose bound variable at or above off is left alone."
-    match Core.Exprs.looseRange(e) <= off
+    match Core.Exprs.within(e, off)
         true -> LS(e = e, ms = ms, memo = memo)
         false -> lvisit(e, off, env, ms, memo)
 
@@ -2198,7 +2198,7 @@ fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Int, Tuple<Expr, 
     ? "A variable takes its closure's value; large compound nodes go through the memo, as in Core.Subst."
     match e
         Expr.BVar(i) -> lbvar(List.drop(env, i - off), i, env, ms, memo)
-        _ -> match Core.Exprs.treeSize(e) < 32
+        _ -> match Core.Exprs.isSmall(e)
             true -> lbuild(e, off, env, ms, memo)
             false -> lmemoed(e, off, env, ms, memo, off * 2147483648 + Core.Exprs.hashOf(e))
 
@@ -2586,7 +2586,7 @@ verify remembered
 
 fn keptNo(fails: Map<Int, Bucket>, t: Expr, s: Expr) -> Map<Int, Bucket>
     ? "Failures of this declaration. Its free variables are its own, each with one type and value, so a pair that was different stays different; terms with loose bound variables are left out."
-    match Bool.and(Core.Exprs.looseRange(t) == 0, Core.Exprs.looseRange(s) == 0)
+    match Bool.and(Core.Exprs.isClosed(t), Core.Exprs.isClosed(s))
         false -> fails
         true -> Check.State.pairPut(fails, t, s)
 
@@ -3666,7 +3666,7 @@ verify unusedLoop
 
 fn mentions(body: Expr, j: Int) -> Bool
     ? "Whether variable j may occur in body: not when it is outside the loose range, looked up in a small body, assumed in a large one so that a shared term is never walked as a tree."
-    match Core.Exprs.looseRange(body) <= j
+    match Core.Exprs.within(body, j)
         true -> false
         false -> match Core.Exprs.treeSize(body) < 63
             true -> Core.Subst.hasLooseBVar(body, j)

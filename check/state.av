@@ -707,9 +707,7 @@ verify cachePut
 
 fn pairKey(a: Expr, b: Expr) -> Int
     ? "One key for an unordered pair."
-    ha = Core.Exprs.hashOf(a)
-    hb = Core.Exprs.hashOf(b)
-    Core.Hash.mix(Int.min(ha, hb), Int.max(ha, hb))
+    Core.Exprs.pairHash(a, b)
 
 verify pairKey
     pairKey(Core.Exprs.bvar(0), Core.Exprs.bvar(1)) == pairKey(Core.Exprs.bvar(1), Core.Exprs.bvar(0)) => true
