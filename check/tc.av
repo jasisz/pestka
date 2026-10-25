@@ -671,6 +671,36 @@ fn lamEnd(st: St, e: Expr, rev: List<Expr>, ids: List<Int>, only: Bool) -> Resul
 verify lamEnd
     resultExpr(lamEnd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [], [], true)) => Core.Exprs.sort(Level.Succ(Level.Zero))
 
+decision BodiesCopied
+    date = "2026-10-26"
+    reason =
+        "Inferring a body under its variables as it is, instead of copying it"
+        "with them put in (minst), was built and measured on the branch"
+        "fable/open-inference (commits 6752eb3 and 7f19c39): the open-term"
+        "cache keyed by the hash the term would have with its variables put"
+        "in, found without putting them in (hashUnder, with a memo per scope),"
+        "a hit confirmed through the variables (eqUnder, eqOpen), the"
+        "environment a vector in the state, applications under variables"
+        "checked as whole spines. It answers as the copying does (the Arena's"
+        "171 small tests, 0 wrong) and costs far more: one worker on Aver"
+        "02771bf5, etale 31.8 G to 59.0 G instructions, Init 78.5 G to"
+        "190.8 G, perf/beta-ladder 0.62 G to 3.99 G, perf/app-lam 2.14 G to"
+        "29.3 G. The type of an application needs its arguments closed"
+        "wherever the function's type depends on them, so each such argument"
+        "is put into its variables again at every application above it: on"
+        "etale the arguments alone took 19.0 M nodes against the 5.6 M of the"
+        "copied bodies, the whole check 44.4 M against 26.4 M; on Init 88.2 M"
+        "against 17.5 M, and 142.6 M against 54.6 M. A memo of the"
+        "copies per scope could bring that back to the bodies' count, not"
+        "below it, and the keys, confirmations and variable spines cost about"
+        "a tenth on top. Copying a body once makes every closed part of it"
+        "shared by pointer from then on, which the caches and comparisons"
+        "live on; what inference under the environment would save, the parts"
+        "never needed closed, is less than that."
+    chosen = "BodiesCopied"
+    rejected = ["BodiesUnderVariables"]
+    impacts = [bodyType, deepBody, minst]
+
 fn bodyType(st: St, e: Expr, rev: List<Expr>, k: Int, only: Bool) -> Result<RE, Fail>
     ? "The type of a body under k binders just opened. While at most 128 binders are open around it, the body is copied with its variables put in and inferred as usual. Deeper than that it is inferred under its variables as it is: a body nested that deep would be copied once for every binder above it, and the copies of the levels above stay alive while the levels below are checked."
     was = st.open
