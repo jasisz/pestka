@@ -2101,30 +2101,68 @@ verify lrec
     resultExpr(lrec(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
 
 fn lmajor(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, major: MX, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "The major premise in constructor form, as the reference reduces it."
-    m = majorToCtor(st, rv, major.e, cheapRec, cheapProj)?
-    lfire(m, f, ls, rv, stack, majorIdx, major.ms, delta, cheapRec, cheapProj)
+    ? "The major premise in constructor form, as the reference reduces it, picks the rule; rhs params motives minors fields extra-arguments, as ruleRhs builds it, with the recursor's own arguments still closures. Without a rule the recursor is stuck as it was met. The rule is picked by plain functions, not by steps of the machine (PickedNotStepped)."
+    p = recPick(st, f, ls, rv, stack, majorIdx, major.e, cheapRec, cheapProj)?
+    match p.ok
+        true -> lcore(p.st, p.body, p.env, p.rest, major.ms, delta, cheapRec, cheapProj)
+        false -> Result.Ok(RE(e = lstuck(MX(e = f, ms = major.ms), stack), st = p.st))
 
 verify lmajor
     resultExpr(lmajor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [Clo.Clo(-1, Core.Exprs.fvar(0), [])], 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}, shapes = {})), false, false, false)) => Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("r"), []), Core.Exprs.fvar(0))
 
-fn lfire(m: RE, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "The rule of the major premise's constructor; without one the recursor is stuck as it was met."
-    match ruleFor(rv.rules, Core.Apps.fnOf(m.e))
-        Option.None -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = m.st))
-        Option.Some(rule) -> lrule(m.st, rule, f, ls, rv, stack, majorIdx, Core.Apps.argsOf(m.e), ms, delta, cheapRec, cheapProj)
+record RPick
+    st: St
+    ok: Bool
+    body: Expr
+    env: List<Clo>
+    rest: List<Clo>
 
-verify lfire
-    resultExpr(lfire(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
+decision PickedNotStepped
+    date = "2026-10-25"
+    reason =
+        "Firing a recursor took four steps of the machine (major premise,"
+        "rule, checks, right-hand side) and a sparse casesOn two, each a"
+        "turn of the machine's loop that carries all its arguments; and"
+        "every arm the loop has costs the rest of the checker too, Init,"
+        "std and con-leche about 1% for two arms. The rule, its"
+        "right-hand side and the environment it runs in are now worked out"
+        "by plain functions, and the machine takes one step to them; a"
+        "literal of Nat goes to its rule at once there too. One worker on"
+        "Aver 06639a5e, after LiteralCases: perf total 189.0 G to 188.0 G"
+        "instructions, reachability 47.8 G to 47.5 G, Init 87.2 G to"
+        "87.0 G, std 148.8 G to 148.4 G, con-leche 141.8 G to 141.5 G."
+    chosen = "PickedNotStepped"
+    rejected = ["PickedByMachineSteps"]
+    impacts = [lmajor, recPick, lsparseGo, sparsePick, lcases, casesPick]
 
-fn lrule(st: St, rule: RecRule, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, majorArgs: List<Expr>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "rhs params motives minors fields extra-arguments, as ruleRhs builds it, with the recursor's own arguments still closures."
-    match Bool.or(rule.nfields > List.len(majorArgs), List.len(ls) != List.len(rv.head.params))
-        true -> Result.Ok(RE(e = lstuck(MX(e = f, ms = ms), stack), st = st))
-        false -> lruleApplied(ruleAt(st, rule, f, rv, ls), rule, rv, stack, majorIdx, majorArgs, ms, delta, cheapRec, cheapProj)
+fn recPick(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RPick, Fail>
+    ? "The right-hand side to run for the major premise e, with its environment and the arguments left; a literal of Nat goes to its rule at once (LiteralCases)."
+    match e
+        Expr.NatLit(n) -> match Bool.and(rv.major == Check.Lits.nat, List.len(rv.rules) == 2)
+            true -> Result.Ok(recRuled(st, f, ls, rv, stack, majorIdx, ruleNamed(rv.rules, litCtor(n)), litArgs(n)))
+            false -> Result.Ok(recBuilt(f, ls, rv, stack, majorIdx, majorToCtor(st, rv, e, cheapRec, cheapProj)?))
+        _ -> Result.Ok(recBuilt(f, ls, rv, stack, majorIdx, majorToCtor(st, rv, e, cheapRec, cheapProj)?))
 
-verify lrule
-    resultExpr(lrule(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.cnst(Check.Lits.name1("r"), [])
+verify recPick
+    Result.withDefault(recPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, Core.Exprs.fvar(0), false, false), RPick(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, body = Core.Exprs.bvar(0), env = [], rest = [])).ok => false
+
+fn recBuilt(f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, m: RE) -> RPick
+    ? "The rule of the constructor at the head of m, the major premise built."
+    recRuled(m.st, f, ls, rv, stack, majorIdx, ruleFor(rv.rules, Core.Apps.fnOf(m.e)), Core.Apps.argsOf(m.e))
+
+verify recBuilt
+    recBuilt(Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).ok => false
+
+fn recRuled(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, r: Option<RecRule>, majorArgs: List<Expr>) -> RPick
+    ? "A rule that has the constructor's fields and the recursor's levels gives its right-hand side; otherwise nothing fires."
+    match r
+        Option.Some(rule) -> match Bool.or(rule.nfields > List.len(majorArgs), List.len(ls) != List.len(rv.head.params))
+            true -> RPick(st = st, ok = false, body = f, env = [], rest = [])
+            false -> rhsPick(ruleAt(st, rule, f, rv, ls), rule, rv, stack, majorIdx, majorArgs)
+        Option.None -> RPick(st = st, ok = false, body = f, env = [], rest = [])
+
+verify recRuled
+    recRuled(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, Option.None, []).ok => false
 
 decision RuleLambdasAtOnce
     date = "2026-10-25"
@@ -2142,18 +2180,49 @@ decision RuleLambdasAtOnce
         "to 88.5 G."
     chosen = "RuleLambdasAtOnce"
     rejected = ["RuleLambdasOneByOne"]
-    impacts = [lruleApplied]
+    impacts = [rhsPick]
 
-fn lruleApplied(r: RE, rule: RecRule, rv: Rec, stack: List<Clo>, majorIdx: Int, majorArgs: List<Expr>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+fn rhsPick(r: RE, rule: RecRule, rv: Rec, stack: List<Clo>, majorIdx: Int, majorArgs: List<Expr>) -> RPick
     ? "The right-hand side takes the parameters, motives and minor premises, the constructor's fields and the arguments after the major premise; its lambdas over them come off at once, those arguments its environment, the last first, as beta would leave them (RuleLambdasAtOnce)."
     n = rv.numParams + rv.numMotives + rv.numMinors
     l = n + rule.nfields
     match lamsUpTo(r.e, l, 0) == l
-        true -> lcore(r.st, peelLams(r.e, l), envOf(closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), rule.nfields, envOf(stack, n, [])), List.drop(stack, majorIdx + 1), ms, delta, cheapRec, cheapProj)
-        false -> lcore(r.st, r.e, [], List.concat(List.take(stack, n), List.concat(closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), List.drop(stack, majorIdx + 1))), ms, delta, cheapRec, cheapProj)
+        true -> RPick(st = r.st, ok = true, body = peelLams(r.e, l), env = envOf(closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), rule.nfields, envOf(stack, n, [])), rest = List.drop(stack, majorIdx + 1))
+        false -> RPick(st = r.st, ok = true, body = r.e, env = [], rest = List.concat(List.take(stack, n), List.concat(closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), List.drop(stack, majorIdx + 1))))
 
-verify lruleApplied
-    resultExpr(lruleApplied(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.natLit(1)
+verify rhsPick
+    rhsPick(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, []).body => Core.Exprs.natLit(1)
+
+fn ruleNamed(rules: List<RecRule>, ctor: Name) -> Option<RecRule>
+    ? "The rule of the constructor named ctor."
+    match rules
+        [] -> Option.None
+        [r, ..rest] -> match r.ctor == ctor
+            true -> Option.Some(r)
+            false -> ruleNamed(rest, ctor)
+
+verify ruleNamed
+    ruleNamed([], Check.Lits.natZero) => Option.None
+
+fn litCtor(n: Int) -> Name
+    ? "The constructor a literal stands for."
+    match n == 0
+        true -> Check.Lits.natZero
+        false -> Check.Lits.natSucc
+
+verify litCtor
+    litCtor(0) => Check.Lits.natZero
+    litCtor(3) => Check.Lits.natSucc
+
+fn litArgs(n: Int) -> List<Expr>
+    ? "Its arguments: none for 0, the literal n for n+1."
+    match n == 0
+        true -> []
+        false -> [Core.Exprs.natLit(n - 1)]
+
+verify litArgs
+    litArgs(0) => []
+    litArgs(3) => [Core.Exprs.natLit(2)]
 
 fn lquot(st: St, f: Expr, args: MXs, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A quotient rule on built arguments; nothing else reduces a quotient constant."
@@ -2346,7 +2415,7 @@ decision RecHeadedDirect
         "or a minor premise that reads a hypothesis, unfolds as before."
     chosen = "RecHeadedDirect"
     rejected = ["SparseCasesUnfolded"]
-    impacts = [sparseShape, minorOn, lsparseGo, lsparseFire]
+    impacts = [sparseShape, minorOn, lsparseGo, sparseFields]
 
 fn isSparseCases(n: Name) -> Bool
     ? "A name the compiler gives a sparse casesOn: the name only spares other definitions the look (RecHeadedDirect)."
@@ -2489,26 +2558,46 @@ verify lshaped
     resultExpr(lshaped(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], Shape.Plain, [], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
 
 fn lsparseGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sp: SparseOn, env0: List<Clo>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "The major premise, one of the definition's arguments env0, brought to its constructor as the recursor brings it."
+    ? "The major premise, one of the definition's arguments env0, brought to its constructor as the recursor brings it: the ready minor premise runs at the definition's arguments with the fields, the hypotheses standing for nothing, and the arguments after the definition's; a minor premise not ready unfolds the definition."
     major = matClo(nthClo(env0, sp.major), ms)
-    m = majorToCtor(st, sp.rv, major.e, cheapRec, cheapProj)?
-    match ruleFor(sp.rv.rules, Core.Apps.fnOf(m.e))
-        Option.Some(rule) -> lsparseFire(m.st, f, h, v, ls, sp, nthMinor(sp.minors, ruleNumber(sp.rv.rules, rule.ctor, 0)), Core.Apps.argsOf(m.e), env0, stack, major.ms, cheapRec, cheapProj)
-        Option.None -> lunfoldPeeled(m.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms, cheapRec, cheapProj)
+    p = sparsePick(st, sp, major.e, env0, cheapRec, cheapProj)?
+    match p.ok
+        true -> lcore(p.st, p.body, p.env, List.drop(stack, sp.n), major.ms, true, cheapRec, cheapProj)
+        false -> lunfoldPeeled(p.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms, cheapRec, cheapProj)
 
 verify lsparseGo
     resultExpr(lsparseGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], SparseOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), n = 1, major = 0, minors = [Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8)))]), [Clo.Clo(-1, Core.Exprs.natLit(0), [])], [Clo.Clo(-1, Core.Exprs.natLit(0), [])], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.natLit(8)
 
-fn lsparseFire(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sp: SparseOn, mo: Option<MinorOn>, majorArgs: List<Expr>, env0: List<Clo>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "The ready minor premise runs at the definition's arguments with the fields, the hypotheses standing for nothing, and the arguments after the definition's; a minor premise not ready unfolds the definition."
+fn sparsePick(st: St, sp: SparseOn, e: Expr, env0: List<Clo>, cheapRec: Bool, cheapProj: Bool) -> Result<RPick, Fail>
+    ? "The minor premise for the major premise e and the environment it runs in; a literal of Nat goes to its rule at once (LiteralCases)."
+    match e
+        Expr.NatLit(n) -> match Bool.and(sp.rv.major == Check.Lits.nat, List.len(sp.rv.rules) == 2)
+            true -> Result.Ok(sparseFields(st, nthMinor(sp.minors, ruleNumber(sp.rv.rules, litCtor(n), 0)), litArgs(n), env0))
+            false -> Result.Ok(sparseBuilt(sp, majorToCtor(st, sp.rv, e, cheapRec, cheapProj)?, env0))
+        _ -> Result.Ok(sparseBuilt(sp, majorToCtor(st, sp.rv, e, cheapRec, cheapProj)?, env0))
+
+verify sparsePick
+    Result.withDefault(sparsePick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), SparseOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), n = 1, major = 0, minors = []), Core.Exprs.fvar(0), [], false, false), RPick(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, body = Core.Exprs.bvar(0), env = [], rest = [])).ok => false
+
+fn sparseBuilt(sp: SparseOn, m: RE, env0: List<Clo>) -> RPick
+    ? "The minor premise of the constructor at the head of m, the major premise built."
+    match ruleFor(sp.rv.rules, Core.Apps.fnOf(m.e))
+        Option.Some(rule) -> sparseFields(m.st, nthMinor(sp.minors, ruleNumber(sp.rv.rules, rule.ctor, 0)), Core.Apps.argsOf(m.e), env0)
+        Option.None -> RPick(st = m.st, ok = false, body = m.e, env = [], rest = [])
+
+verify sparseBuilt
+    sparseBuilt(SparseOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), n = 1, major = 0, minors = []), RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), []).ok => false
+
+fn sparseFields(st: St, mo: Option<MinorOn>, majorArgs: List<Expr>, env0: List<Clo>) -> RPick
+    ? "A ready minor premise given the constructor's fields: its body, with the hypotheses standing for nothing, the fields and the definition's arguments as its environment."
     match mo
         Option.Some(k) -> match k.nf <= List.len(majorArgs)
-            true -> lcore(st, k.body, envOf(nothingFor(k.hyps, []), k.hyps, envOf(closedAll(List.drop(majorArgs, List.len(majorArgs) - k.nf), []), k.nf, env0)), List.drop(stack, sp.n), ms, true, cheapRec, cheapProj)
-            false -> lunfoldPeeled(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms, cheapRec, cheapProj)
-        Option.None -> lunfoldPeeled(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms, cheapRec, cheapProj)
+            true -> RPick(st = st, ok = true, body = k.body, env = envOf(nothingFor(k.hyps, []), k.hyps, envOf(closedAll(List.drop(majorArgs, List.len(majorArgs) - k.nf), []), k.nf, env0)), rest = [])
+            false -> RPick(st = st, ok = false, body = k.body, env = [], rest = [])
+        Option.None -> RPick(st = st, ok = false, body = Core.Exprs.bvar(0), env = [], rest = [])
 
-verify lsparseFire
-    resultExpr(lsparseFire(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], SparseOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), n = 1, major = 0, minors = []), Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8))), [], [Clo.Clo(-1, Core.Exprs.natLit(1), [])], [Clo.Clo(-1, Core.Exprs.natLit(1), [])], MS(next = 0, forced = {}, shapes = {}), false, false)) => Core.Exprs.natLit(8)
+verify sparseFields
+    sparseFields(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.None, [], []).ok => false
 
 fn nthMinor(xs: List<Option<MinorOn>>, j: Int) -> Option<MinorOn>
     ? "The j-th rule's minor premise, if ready."
