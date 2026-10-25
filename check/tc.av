@@ -2228,10 +2228,21 @@ fn lcasesFire(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, cs: CasesOn, r
     ? "The constructor's minor premise takes its fields and the arguments after the casesOn's own."
     match rule.nfields > List.len(majorArgs)
         true -> lunfoldPeeled(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms, cheapRec, cheapProj)
-        false -> lclo(st, nthClo(stack, cs.minorsAt + ruleNumber(cs.rv.rules, rule.ctor, 0)), List.concat(closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), List.drop(stack, cs.total)), ms, true, cheapRec, cheapProj)
+        false -> lminor(st, nthClo(stack, cs.minorsAt + ruleNumber(cs.rv.rules, rule.ctor, 0)), closedAll(List.drop(majorArgs, List.len(majorArgs) - rule.nfields), []), rule.nfields, List.drop(stack, cs.total), ms, cheapRec, cheapProj)
 
 verify lcasesFire
     resultExpr(lcasesFire(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [], k = false, isUnsafe = false), total = 1, majorAt = 0, minorsAt = 0), RecRule(ctor = Core.Names.anon(), nfields = 1, rhs = Core.Exprs.bvar(0)), [], [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero])
+
+fn lminor(st: St, minor: Clo, fields: List<Clo>, nf: Int, rest: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The minor premise takes the fields: a closure whose term has a lambda for each takes them all at once into its environment (RuleLambdasAtOnce); any other is applied to them."
+    match minor
+        Clo.Clo(_, e, cenv) -> match lamsUpTo(e, nf, 0) == nf
+            true -> lcore(st, peelLams(e, nf), envOf(fields, nf, cenv), rest, ms, true, cheapRec, cheapProj)
+            false -> lclo(st, minor, List.concat(fields, rest), ms, true, cheapRec, cheapProj)
+
+verify lminor
+    resultExpr(lminor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Clo.Clo(-1, Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), []), [Clo.Clo(-1, Core.Exprs.natLit(3), [])], 1, [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.natLit(3)
+    resultExpr(lminor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Clo.Clo(-1, Core.Exprs.natLit(9), []), [], 0, [], MS(next = 0, forced = {}), false, false)) => Core.Exprs.natLit(9)
 
 fn casesOf(st: St, h: Head, v: Expr) -> Option<CasesOn>
     ? "The casesOn shape of a definition named casesOn: its value is lambdas over its recursor applied, at its own levels, to the parameters, the motive, the minor premises each wrapped (minorFits), the indices and the major premise, in that order. The name only spares other definitions the look."
