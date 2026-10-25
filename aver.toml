@@ -3,6 +3,10 @@
 # system allocator cost it about 9% of its time on one thread and half of
 # its memory on eight.
 allocator = "mimalloc"
+# A panic in Pestka is a bug that ends the check either way; without
+# unwinding the compiled program carries no code to free values on the way
+# out of a panic.
+panic = "abort"
 
 [[verify.costly]]
 fn = "expr"
