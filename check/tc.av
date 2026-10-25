@@ -6,7 +6,7 @@ module Tc
         "structures, equality normalizes, inference checks equality), so"
         "they live in one module. Every function threads the checker state."
     exposes [RI, LD, inferType, check, valueFits, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel, withFacts, recFacts, majorInduct]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Cache, Check.State, Check.Lits, Core.Hash]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Cache, Check.State, Check.Lits, Core.Hash, Check.Shapes]
     effects []
 
 decision CongruenceAfterSteps
@@ -1594,11 +1594,20 @@ verify majorReduced
 
 fn etaBeforeWhnf(st: St, rv: Rec, e: Expr) -> Result<RE, Fail>
     ? "A major of a non-recursive structure that is not a constructor application becomes mk params e.0 ... e.(n-1) without being reduced. A proof only when the recursor eliminates into any sort: then every field is a proof and its projection is a proof; a proof of a structure that eliminates only into Prop, such as Exists, keeps the reference order."
-    match Bool.and(rv.majorIsStruct, Bool.not(isCtorApp(st, e)))
+    match rv.majorIsStruct
         false -> Result.Ok(RE(e = e, st = st))
-        true -> match rv.elimAnySort
-            true -> Result.Ok(RE(e = etaFields(st, rv.major, e), st = st))
-            false -> structTyped(whnfOf(inferType(st, e)?)?, rv.major, e)
+        true -> match isCtorApp(st, e)
+            true -> Result.Ok(RE(e = e, st = st))
+            false -> etaStructure(st, rv, e)
+
+fn etaStructure(st: St, rv: Rec, e: Expr) -> Result<RE, Fail>
+    ? "A structure's major premise not built by its constructor: its fields under elimination into any sort, otherwise by its type."
+    match rv.elimAnySort
+        true -> Result.Ok(RE(e = etaFields(st, rv.major, e), st = st))
+        false -> structTyped(whnfOf(inferType(st, e)?)?, rv.major, e)
+
+verify etaStructure
+    resultExpr(etaStructure(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = true, elimAnySort = true), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
 
 verify etaBeforeWhnf
     resultExpr(etaBeforeWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
@@ -1784,9 +1793,11 @@ verify isCtorApp
 
 fn toCtorWhenStructure(st: St, rv: Rec, e: Expr) -> Result<RE, Fail>
     ? "A value of a non-recursive structure becomes mk e.1 ... e.n (not for proofs)."
-    match Bool.and(rv.majorIsStruct, Bool.not(isCtorApp(st, e)))
+    match rv.majorIsStruct
         false -> Result.Ok(RE(e = e, st = st))
-        true -> structTyped(whnfOf(inferType(st, e)?)?, rv.major, e)
+        true -> match isCtorApp(st, e)
+            true -> Result.Ok(RE(e = e, st = st))
+            false -> structTyped(whnfOf(inferType(st, e)?)?, rv.major, e)
 
 verify toCtorWhenStructure
     resultExpr(toCtorWhenStructure(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
@@ -1983,7 +1994,7 @@ fn whnfLoop(st: St, orig: Expr, t: Expr) -> Result<RE, Fail>
 
 fn whnfRun(st: St, orig: Expr, t: Expr) -> Result<RE, Fail>
     ? "Runs the machine with unfolding and stores its result."
-    r = lcore(st, t, [], [], MS(next = 0, forced = {}, shapes = {}), true, false, false)?
+    r = lcore(st, t, [], [], MS(next = 0, forced = {}), true, false, false)?
     Result.Ok(whnfStore(r.st, orig, r.e))
 
 verify whnfRun
@@ -2016,7 +2027,7 @@ verify whnfLoop
 
 fn mcore(st: St, t: Expr, env: List<Expr>, stack: List<Expr>, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "whnfCore as a machine: the head term, the values of its loose bound variables (index 0 first), and the arguments waiting for it (first argument first). The machine keeps them as closures, built only when needed; see lcore."
-    lcore(st, t, closedAll(env, []), closedAll(stack, []), MS(next = 0, forced = {}, shapes = {}), false, cheapRec, cheapProj)
+    lcore(st, t, closedAll(env, []), closedAll(stack, []), MS(next = 0, forced = {}), false, cheapRec, cheapProj)
 
 type Clo
     Clo(Int, Expr, List<Clo>)
@@ -2024,7 +2035,6 @@ type Clo
 record MS
     next: Int
     forced: Map<Int, Expr>
-    shapes: Map<Core.Exprs.Key, Tuple<Expr, Shape>>
 
 record MX
     e: Expr
@@ -2049,8 +2059,8 @@ fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool,
         _ -> Result.Ok(RE(e = lstuck(matTerm(t, env, ms), stack), st = st))
 
 verify lcore
-    resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])], [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.natLit(1)
-    resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), [], [], MS(next = 0, forced = {}, shapes = {}), true, false, false)) => Core.Exprs.natLit(5)
+    resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])], [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.natLit(1)
+    resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), [], [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.natLit(5)
 
 fn lclo(st: St, c: Clo, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A closure in head position: its term, in its own environment."
@@ -2058,7 +2068,7 @@ fn lclo(st: St, c: Clo, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, c
         Clo.Clo(_, e, cenv) -> lcore(st, e, cenv, stack, ms, delta, cheapRec, cheapProj)
 
 verify lclo
-    resultExpr(lclo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Clo.Clo(-1, Core.Exprs.natLit(2), []), [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.natLit(2)
+    resultExpr(lclo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Clo.Clo(-1, Core.Exprs.natLit(2), []), [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.natLit(2)
 
 fn lvar(st: St, t: Expr, v: Option<Expr>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A let-bound free variable goes on as its value; any other is stuck."
@@ -2067,7 +2077,7 @@ fn lvar(st: St, t: Expr, v: Option<Expr>, stack: List<Clo>, ms: MS, delta: Bool,
         Option.None -> Result.Ok(RE(e = lstuck(MX(e = t, ms = ms), stack), st = st))
 
 verify lvar
-    resultExpr(lvar(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Option.None, [], MS(next = 0, forced = {}, shapes = {}), false, false, false)) => Core.Exprs.fvar(0)
+    resultExpr(lvar(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Option.None, [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.fvar(0)
 
 decision RigidHeadsStuck
     date = "2026-10-25"
@@ -2093,7 +2103,7 @@ fn lconst(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, 
         false -> Result.Ok(RE(e = lstuck(MX(e = g.t, ms = g.ms), g.rest), st = g.st))
 
 verify lconst
-    resultExpr(lconst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}, shapes = {}), true, false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+    resultExpr(lconst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
 
 fn constGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "Where the machine goes from the constant f, found as c, with the waiting arguments."
@@ -2108,7 +2118,7 @@ fn constGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>,
         _ -> natGo(st, f, c, stack, ms, delta, cheapRec, cheapProj)
 
 verify constGo
-    Result.withDefault(constGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}, shapes = {}), true, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(constGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}), true, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn recGo(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "A recursor reduces only with its major premise present; the major premise is built and brought to constructor form, the other arguments stay closures."
@@ -2118,7 +2128,7 @@ fn recGo(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, ms: MS, ch
         false -> majorGo(st, f, ls, rv, stack, majorIdx, matClo(nthClo(stack, majorIdx), ms), cheapRec, cheapProj)
 
 verify recGo
-    Result.withDefault(recGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], MS(next = 0, forced = {}, shapes = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(recGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn majorGo(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, major: MX, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "The major premise in constructor form, as the reference reduces it, picks the rule; rhs params motives minors fields extra-arguments, as ruleRhs builds it, with the recursor's own arguments still closures. Without a rule the recursor is stuck as it was met. The rule is picked by plain functions, not by steps of the machine (PickedNotStepped)."
@@ -2128,7 +2138,7 @@ fn majorGo(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx
         false -> Result.Ok(stuckGo(p.st, f, stack, major.ms))
 
 verify majorGo
-    Result.withDefault(majorGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}, shapes = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(majorGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("r"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn quotGo(st: St, f: Expr, args: MXs) -> Result<Go, Fail>
     ? "A quotient rule on built arguments; nothing else reduces a quotient constant."
@@ -2138,7 +2148,7 @@ fn quotGo(st: St, f: Expr, args: MXs) -> Result<Go, Fail>
         Option.None -> Result.Ok(Go(st = q.st, ms = args.ms, run = false, t = Core.Apps.mkApps(f, args.es), env = [], rest = []))
 
 verify quotGo
-    Result.withDefault(quotGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("q"), []), MXs(es = [], ms = MS(next = 0, forced = {}, shapes = {}))), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(quotGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("q"), []), MXs(es = [], ms = MS(next = 0, forced = {}))), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn natGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "With delta: Nat.succ of one argument or a Nat operation of two is tried on literals first, as whnf does; otherwise the head, c as found, unfolds. Without delta the constant is stuck."
@@ -2149,7 +2159,7 @@ fn natGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Boo
             k -> natTryGo(st, f, c, stack, matStack(List.take(stack, k), ms, []), cheapRec, cheapProj)
 
 verify natGo
-    Result.withDefault(natGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}, shapes = {}), false, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(natGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}), false, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn natTryGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, args: MXs, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "Nat arithmetic on the built arguments; a literal result is the answer, otherwise the head unfolds."
@@ -2159,7 +2169,7 @@ fn natTryGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, args: MXs, chea
         Option.None -> unfoldGo(n.st, f, c, stack, args.ms, cheapRec, cheapProj)
 
 verify natTryGo
-    Result.withDefault(natTryGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Option.None, [], MXs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], ms = MS(next = 0, forced = {}, shapes = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(3)
+    Result.withDefault(natTryGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Option.None, [], MXs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], ms = MS(next = 0, forced = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(3)
 
 
 record RPick
@@ -2339,7 +2349,7 @@ fn stuckGo(st: St, f: Expr, stack: List<Clo>, ms: MS) -> Go
     Go(st = st, ms = ms, run = false, t = f, env = [], rest = stack)
 
 verify stuckGo
-    stuckGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}, shapes = {})).run => false
+    stuckGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {})).run => false
 
 fn unfoldGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "The constant f, found as c: at universe levels through its shape and the unfolding cache; without levels its value as written, through the cache only when a matcher heads its body (MatchersInlined). A definition's value takes the waiting arguments as they are; anything else is stuck. At universe levels, the lambdas the arguments meet come off the value as written, and only what is under them gets the levels (DomainsDropped)."
@@ -2350,7 +2360,7 @@ fn unfoldGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRe
         _ -> Result.Ok(wholeGo(st, f, stack, ms))
 
 verify unfoldGo
-    Result.withDefault(unfoldGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}, shapes = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(unfoldGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn bareGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS) -> Go
     ? "A constant without levels: a value takes the waiting arguments; anything else is stuck."
@@ -2361,7 +2371,7 @@ fn bareGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS) -> Go
         Option.None -> stuckGo(st, f, stack, ms)
 
 verify bareGo
-    bareGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}, shapes = {})).run => false
+    bareGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {})).run => false
 
 fn bareOnGo(st: St, f: Expr, h: Head, v: Expr, k: Int, stack: List<Clo>, ms: MS) -> Go
     ? "With a matcher at the head of the body under the k lambdas met, the body from the unfolding cache with the matcher in it; otherwise the value as written."
@@ -2370,14 +2380,14 @@ fn bareOnGo(st: St, f: Expr, h: Head, v: Expr, k: Int, stack: List<Clo>, ms: MS)
         false -> Go(st = st, ms = ms, run = true, t = v, env = [], rest = stack)
 
 verify bareOnGo
-    bareOnGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(3), 0, [], MS(next = 0, forced = {}, shapes = {})).t => Core.Exprs.natLit(3)
+    bareOnGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(3), 0, [], MS(next = 0, forced = {})).t => Core.Exprs.natLit(3)
 
 fn bodyGo(b: RE, k: Int, stack: List<Clo>, ms: MS) -> Go
     ? "A body whose k lambdas met the first k arguments: those its environment, the innermost first, as beta pushes them."
     Go(st = b.st, ms = ms, run = true, t = b.e, env = envOf(stack, k, []), rest = List.drop(stack, k))
 
 verify bodyGo
-    bodyGo(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 1, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}, shapes = {})).rest => []
+    bodyGo(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 1, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {})).rest => []
 
 fn atGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "A constant at levels: a definition or theorem with a value goes by its shape."
@@ -2388,25 +2398,25 @@ fn atGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms
         Option.None -> Result.Ok(wholeGo(st, f, stack, ms))
 
 verify atGo
-    Result.withDefault(atGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [Level.Zero], Option.None, [], MS(next = 0, forced = {}, shapes = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(atGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [Level.Zero], Option.None, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn casesGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "A constant at levels by its shape, found once per run of the machine and kept (ShapesKept): a casesOn whose value is its recursor's goes to its minor premise (CasesOnDirect), a sparse casesOn likewise (RecHeadedDirect), anything else unfolds."
     match casesNamed(h.name)
         false -> Result.Ok(peeledGo(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms))
-        true -> match shapeKept(Map.get(ms.shapes, Core.Exprs.hashKey(f)), f)
+        true -> match shapeKept(Map.get(st.shapes, Core.Exprs.hashKey(f)), f)
             Option.Some(sh) -> shapedGo(st, f, h, v, ls, sh, stack, ms, cheapRec, cheapProj)
             Option.None -> newShapeGo(shapeOf(st, f, h, v, ls), f, h, v, ls, stack, ms, cheapRec, cheapProj)
 
 verify casesGo
-    Result.withDefault(casesGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], [], MS(next = 0, forced = {}, shapes = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(casesGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn newShapeGo(sa: ShapeAt, f: Expr, h: Head, v: Expr, ls: List<Level>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "A shape just found, kept for the rest of the run."
-    shapedGo(sa.st, f, h, v, ls, sa.sh, stack, MS.update(ms, shapes = Map.set(ms.shapes, Core.Exprs.hashKey(f), (f, sa.sh))), cheapRec, cheapProj)
+    ? "A shape just found, kept for the rest of the declaration."
+    shapedGo(St.update(sa.st, shapes = Map.set(sa.st.shapes, Core.Exprs.hashKey(f), (f, sa.sh))), f, h, v, ls, sa.sh, stack, ms, cheapRec, cheapProj)
 
 verify newShapeGo
-    Result.withDefault(newShapeGo(ShapeAt(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), sh = Shape.Plain), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], [], MS(next = 0, forced = {}, shapes = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(newShapeGo(ShapeAt(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), sh = Shape.Plain), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn shapedGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sh: Shape, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "The constant by its shape when it has all its arguments; otherwise unfolded."
@@ -2420,7 +2430,7 @@ fn shapedGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sh: Shape, stack
         Shape.Plain -> Result.Ok(peeledGo(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms))
 
 verify shapedGo
-    Result.withDefault(shapedGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], Shape.Plain, [], MS(next = 0, forced = {}, shapes = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(shapedGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], Shape.Plain, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn casesOnGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, cs: CasesOn, stack: List<Clo>, major: MX, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "The major premise brought to its constructor as the recursor brings it, a literal at once (LiteralCases): the minor premise of its rule takes its fields and the arguments after the casesOn's own; with no rule for its head, the casesOn unfolds as before."
@@ -2430,7 +2440,7 @@ fn casesOnGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, cs: CasesOn, st
         false -> Result.Ok(peeledGo(p.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms))
 
 verify casesOnGo
-    Result.withDefault(casesOnGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), total = 1, majorAt = 0, minorsAt = 0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])], MX(e = Core.Exprs.natLit(0), ms = MS(next = 0, forced = {}, shapes = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = false, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(7)
+    Result.withDefault(casesOnGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), total = 1, majorAt = 0, minorsAt = 0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])], MX(e = Core.Exprs.natLit(0), ms = MS(next = 0, forced = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = false, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(7)
 
 fn minorGo(st: St, minor: Clo, fields: List<Clo>, nf: Int, rest: List<Clo>, ms: MS) -> Go
     ? "The minor premise takes the fields: a closure whose term has a lambda for each takes them all at once into its environment (RuleLambdasAtOnce); any other is applied to them."
@@ -2440,7 +2450,7 @@ fn minorGo(st: St, minor: Clo, fields: List<Clo>, nf: Int, rest: List<Clo>, ms: 
             false -> Go(st = st, ms = ms, run = true, t = e, env = cenv, rest = List.concat(fields, rest))
 
 verify minorGo
-    minorGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Clo.Clo(-1, Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), []), [Clo.Clo(-1, Core.Exprs.natLit(2), [])], 1, [], MS(next = 0, forced = {}, shapes = {})).t => Core.Exprs.bvar(0)
+    minorGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Clo.Clo(-1, Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), []), [Clo.Clo(-1, Core.Exprs.natLit(2), [])], 1, [], MS(next = 0, forced = {})).t => Core.Exprs.bvar(0)
 
 fn sparseGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sp: SparseOn, env0: List<Clo>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "The major premise, one of the definition's arguments env0, brought to its constructor as the recursor brings it: the ready minor premise runs at the definition's arguments with the fields, the hypotheses standing for nothing, and the arguments after the definition's; a minor premise not ready unfolds the definition."
@@ -2451,7 +2461,7 @@ fn sparseGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sp: SparseOn, en
         false -> Result.Ok(peeledGo(p.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms))
 
 verify sparseGo
-    Result.withDefault(sparseGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], SparseOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), n = 1, major = 0, minors = [Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8)))]), [Clo.Clo(-1, Core.Exprs.natLit(0), [])], [Clo.Clo(-1, Core.Exprs.natLit(0), [])], MS(next = 0, forced = {}, shapes = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}, shapes = {}), run = false, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(8)
+    Result.withDefault(sparseGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], SparseOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), n = 1, major = 0, minors = [Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8)))]), [Clo.Clo(-1, Core.Exprs.natLit(0), [])], [Clo.Clo(-1, Core.Exprs.natLit(0), [])], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = false, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(8)
 
 fn peeledGo(st: St, f: Expr, h: Head, v: Expr, k: Int, ls: List<Level>, stack: List<Clo>, ms: MS) -> Go
     ? "With k lambdas met, the body under them at the levels, run with the first k arguments as its environment; with none, or levels of the wrong count, the whole value as before."
@@ -2460,7 +2470,7 @@ fn peeledGo(st: St, f: Expr, h: Head, v: Expr, k: Int, ls: List<Level>, stack: L
         true -> bodyGo(peeledBody(st, f, h, v, k, ls), k, stack, ms)
 
 verify peeledGo
-    peeledGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), 0, [], [], MS(next = 0, forced = {}, shapes = {})).run => false
+    peeledGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), 0, [], [], MS(next = 0, forced = {})).run => false
 
 fn wholeGo(st: St, f: Expr, stack: List<Clo>, ms: MS) -> Go
     ? "The whole value at its levels takes the waiting arguments; anything else is stuck."
@@ -2470,7 +2480,7 @@ fn wholeGo(st: St, f: Expr, stack: List<Clo>, ms: MS) -> Go
         Option.None -> stuckGo(u.st, f, stack, ms)
 
 verify wholeGo
-    wholeGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {}, shapes = {})).run => false
+    wholeGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {})).run => false
 
 
 fn matcherHeaded(e: Expr) -> Bool
@@ -2525,12 +2535,6 @@ decision CasesOnDirect
     rejected = ["CasesOnUnfolded"]
     impacts = [casesGo, casesOf, casesOnGo]
 
-record CasesOn
-    rv: Rec
-    total: Int
-    majorAt: Int
-    minorsAt: Int
-
 fn casesNamed(n: Name) -> Bool
     ? "A name a casesOn or a sparse casesOn has: only such constants have their shape looked up, and the name alone decides nothing."
     match n
@@ -2572,22 +2576,6 @@ verify isSparseCases
     isSparseCases(Core.Names.str(Core.Names.anon(), "_sparseCasesOn_1")) => true
     isSparseCases(Core.Names.str(Core.Names.anon(), "casesOn")) => false
 
-type Shape
-    Plain
-    Cases(CasesOn)
-    Sparse(SparseOn)
-
-record SparseOn
-    rv: Rec
-    n: Int
-    major: Int
-    minors: List<Option<MinorOn>>
-
-record MinorOn
-    nf: Int
-    hyps: Int
-    body: Expr
-
 record ShapeAt
     st: St
     sh: Shape
@@ -2607,7 +2595,14 @@ decision ShapesKept
         "perf/magma-list-deep-n36 163.3 G to 124.1 G instructions,"
         "magma-string-pair-n9 40.7 G to 34.1 G, reachability 59.0 G to"
         "55.0 G, all 30 perf tests 286.9 G to 239.4 G; Init, std and"
-        "con-leche as they were."
+        "con-leche as they were. Kept per run of the machine, a shape was"
+        "still found again in every whnf that met the constant, two million"
+        "runs on reachability; it is now kept in the checker's state for"
+        "the whole declaration. With the test of a structure's major"
+        "premise for its constructor made only for a structure, on Aver"
+        "3f9fd6df: magma-list-pair-n21 42.0 G to 35.9 G, reachability"
+        "40.6 G to 37.5 G, perf total 155.9 G to 147.8 G, Init 82.7 G to"
+        "82.0 G, std 141.4 G to 140.1 G, con-leche 134.9 G to 133.6 G."
     chosen = "ShapesKept"
     rejected = ["ShapesFoundEachTime"]
     impacts = [casesGo, shapeOf, shapedGo]
@@ -3148,14 +3143,14 @@ fn lproject(st: St, s: Name, i: Int, x: MX, stack: List<Clo>, delta: Bool, cheap
         Option.None -> Result.Ok(RE(e = lstuck(MX(e = Core.Exprs.proj(s, i, x.e), ms = x.ms), stack), st = r.st))
 
 verify lproject
-    resultExpr(lproject(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Lits.name1("P"), 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}, shapes = {})), [], false, false, false)) => Core.Exprs.proj(Check.Lits.name1("P"), 0, Core.Exprs.fvar(0))
+    resultExpr(lproject(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Lits.name1("P"), 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), [], false, false, false)) => Core.Exprs.proj(Check.Lits.name1("P"), 0, Core.Exprs.fvar(0))
 
 fn lstuck(h: MX, stack: List<Clo>) -> Expr
     ? "A stuck head applied to the waiting arguments, all built."
     Core.Apps.mkApps(h.e, matStack(stack, h.ms, []).es)
 
 verify lstuck
-    lstuck(MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}, shapes = {})), []) => Core.Exprs.fvar(0)
+    lstuck(MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), []) => Core.Exprs.fvar(0)
 
 decision VariableIsItsClosure
     date = "2026-10-24"
@@ -3220,8 +3215,8 @@ fn matTerm(t: Expr, env: List<Clo>, ms: MS) -> MX
         false -> fromLS(lgo(t, 0, env, ms, {}))
 
 verify matTerm
-    matTerm(Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(3), [])], MS(next = 0, forced = {}, shapes = {})).e => Core.Exprs.natLit(3)
-    matTerm(Core.Exprs.bvar(1), [Clo.Clo(5, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])]), Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}, shapes = {})).ms.forced => {}
+    matTerm(Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(3), [])], MS(next = 0, forced = {})).e => Core.Exprs.natLit(3)
+    matTerm(Core.Exprs.bvar(1), [Clo.Clo(5, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])]), Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {})).ms.forced => {}
 
 record LS
     e: Expr
@@ -3233,7 +3228,7 @@ fn fromLS(r: LS) -> MX
     MX(e = r.e, ms = r.ms)
 
 verify fromLS
-    fromLS(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}, shapes = {}), memo = {})).e => Core.Exprs.natLit(1)
+    fromLS(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = {})).e => Core.Exprs.natLit(1)
 
 fn lgo(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> LS
     ? "As Core.Subst.go for instantiation: what has no loose bound variable at or above off is left alone."
@@ -3242,7 +3237,7 @@ fn lgo(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, Tupl
         false -> lvisit(e, off, env, ms, memo)
 
 verify lgo
-    lgo(Core.Exprs.natLit(1), 0, [], MS(next = 0, forced = {}, shapes = {}), {}).e => Core.Exprs.natLit(1)
+    lgo(Core.Exprs.natLit(1), 0, [], MS(next = 0, forced = {}), {}).e => Core.Exprs.natLit(1)
 
 fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> LS
     ? "A variable takes its closure's value; large compound nodes go through the memo, as in Core.Subst."
@@ -3253,7 +3248,7 @@ fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, T
             false -> lmemoed(e, off, env, ms, memo, Core.Exprs.keyAt(e, off))
 
 verify lvisit
-    lvisit(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}, shapes = {}), {}).e => Core.Exprs.natLit(2)
+    lvisit(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}).e => Core.Exprs.natLit(2)
 
 fn lbvar(from: List<Clo>, i: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> LS
     ? "The variable's closure, built on first use. A value has no loose bound variable, so it needs no lifting; a variable past the environment drops by its length."
@@ -3262,14 +3257,14 @@ fn lbvar(from: List<Clo>, i: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.K
         [] -> LS(e = Core.Exprs.bvar(i - List.len(env)), ms = ms, memo = memo)
 
 verify lbvar
-    lbvar([], 3, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}, shapes = {}), {}).e => Core.Exprs.bvar(2)
+    lbvar([], 3, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}).e => Core.Exprs.bvar(2)
 
 fn lvalue(x: MX, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> LS
     ? "A built value with the walk's memo."
     LS(e = x.e, ms = x.ms, memo = memo)
 
 verify lvalue
-    lvalue(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}, shapes = {})), {}).e => Core.Exprs.natLit(1)
+    lvalue(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {})), {}).e => Core.Exprs.natLit(1)
 
 fn lmemoed(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, key: Core.Exprs.Key) -> LS
     ? "A node already rebuilt at this depth is reused."
@@ -3278,14 +3273,14 @@ fn lmemoed(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, 
         Option.None -> lremember(lbuild(e, off, env, ms, memo), e, key)
 
 verify lmemoed
-    lmemoed(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}, shapes = {}), {}, Core.Exprs.hashKey(Core.Exprs.bvar(7))).e => Core.Exprs.bvar(0)
+    lmemoed(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}, Core.Exprs.hashKey(Core.Exprs.bvar(7))).e => Core.Exprs.bvar(0)
 
 fn lremember(r: LS, e: Expr, key: Core.Exprs.Key) -> LS
     ? "Records a rebuilt node."
     LS(e = r.e, ms = r.ms, memo = Map.set(r.memo, key, (e, r.e)))
 
 verify lremember
-    Map.len(lremember(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}, shapes = {}), memo = {}), Core.Exprs.natLit(2), Core.Exprs.hashKey(Core.Exprs.bvar(4))).memo) => 1
+    Map.len(lremember(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = {}), Core.Exprs.natLit(2), Core.Exprs.hashKey(Core.Exprs.bvar(4))).memo) => 1
 
 fn lhit(entry: Option<Tuple<Expr, Expr>>, e: Expr) -> Option<Expr>
     ? "The remembered result when the entry is for this very node."
@@ -3309,7 +3304,7 @@ fn lbuild(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Map<Core.Exprs.Key, T
         _ -> LS(e = e, ms = ms, memo = memo)
 
 verify lbuild
-    lbuild(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}, shapes = {}), {}).e => Core.Exprs.app(Core.Exprs.natLit(2), Core.Exprs.natLit(2))
+    lbuild(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), {}).e => Core.Exprs.app(Core.Exprs.natLit(2), Core.Exprs.natLit(2))
 
 fn lapp2(rf: LS, a: Expr, off: Int, env: List<Clo>) -> LS
     ? "The argument after the function."
@@ -3317,7 +3312,7 @@ fn lapp2(rf: LS, a: Expr, off: Int, env: List<Clo>) -> LS
     LS(e = Core.Exprs.app(rf.e, ra.e), ms = ra.ms, memo = ra.memo)
 
 verify lapp2
-    lapp2(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}, shapes = {}), memo = {}), Core.Exprs.natLit(2), 0, []).e => Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))
+    lapp2(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = {}), Core.Exprs.natLit(2), 0, []).e => Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))
 
 fn lbinder(rt: LS, n: Name, b: Expr, bi: Binder, off: Int, env: List<Clo>, isLam: Bool) -> LS
     ? "The body one deeper, after the domain."
@@ -3327,7 +3322,7 @@ fn lbinder(rt: LS, n: Name, b: Expr, bi: Binder, off: Int, env: List<Clo>, isLam
         false -> LS(e = Core.Exprs.pi(n, rt.e, rb.e, bi), ms = rb.ms, memo = rb.memo)
 
 verify lbinder
-    lbinder(LS(e = Core.Exprs.sort(Level.Zero), ms = MS(next = 0, forced = {}, shapes = {}), memo = {}), Core.Names.anon(), Core.Exprs.bvar(0), Binder.Default, 0, [], true).e => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
+    lbinder(LS(e = Core.Exprs.sort(Level.Zero), ms = MS(next = 0, forced = {}), memo = {}), Core.Names.anon(), Core.Exprs.bvar(0), Binder.Default, 0, [], true).e => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
 
 fn llet(rt: LS, n: Name, v: Expr, b: Expr, off: Int, env: List<Clo>) -> LS
     ? "The value at this depth, then the body one deeper."
@@ -3336,14 +3331,14 @@ fn llet(rt: LS, n: Name, v: Expr, b: Expr, off: Int, env: List<Clo>) -> LS
     LS(e = Core.Exprs.letE(n, rt.e, rv.e, rb.e), ms = rb.ms, memo = rb.memo)
 
 verify llet
-    llet(LS(e = Core.Exprs.sort(Level.Zero), ms = MS(next = 0, forced = {}, shapes = {}), memo = {}), Core.Names.anon(), Core.Exprs.natLit(1), Core.Exprs.bvar(0), 0, []).e => Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), Core.Exprs.bvar(0))
+    llet(LS(e = Core.Exprs.sort(Level.Zero), ms = MS(next = 0, forced = {}), memo = {}), Core.Names.anon(), Core.Exprs.natLit(1), Core.Exprs.bvar(0), 0, []).e => Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), Core.Exprs.bvar(0))
 
 fn lproj2(r: LS, s: Name, i: Int) -> LS
     ? "The projected structure rebuilt."
     LS(e = Core.Exprs.proj(s, i, r.e), ms = r.ms, memo = r.memo)
 
 verify lproj2
-    lproj2(LS(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}, shapes = {}), memo = {}), Check.Lits.name1("P"), 0).e => Core.Exprs.proj(Check.Lits.name1("P"), 0, Core.Exprs.fvar(0))
+    lproj2(LS(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}), memo = {}), Check.Lits.name1("P"), 0).e => Core.Exprs.proj(Check.Lits.name1("P"), 0, Core.Exprs.fvar(0))
 
 fn matClo(c: Clo, ms: MS) -> MX
     ? "A closure built, at most once: a numbered closure is remembered once built."
@@ -3355,15 +3350,15 @@ fn matClo(c: Clo, ms: MS) -> MX
                 Option.None -> remembered1(matTerm(e, cenv, ms), id)
 
 verify matClo
-    matClo(Clo.Clo(-1, Core.Exprs.natLit(1), []), MS(next = 0, forced = {}, shapes = {})).e => Core.Exprs.natLit(1)
-    matClo(Clo.Clo(3, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])]), MS(next = 0, forced = {}, shapes = {})).ms.forced => {3 => Core.Exprs.natLit(7)}
+    matClo(Clo.Clo(-1, Core.Exprs.natLit(1), []), MS(next = 0, forced = {})).e => Core.Exprs.natLit(1)
+    matClo(Clo.Clo(3, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])]), MS(next = 0, forced = {})).ms.forced => {3 => Core.Exprs.natLit(7)}
 
 fn remembered1(x: MX, id: Int) -> MX
     ? "Records a built closure."
     MX(e = x.e, ms = MS.update(x.ms, forced = Map.set(x.ms.forced, id, x.e)))
 
 verify remembered1
-    remembered1(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}, shapes = {})), 2).ms.forced => {2 => Core.Exprs.natLit(1)}
+    remembered1(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {})), 2).ms.forced => {2 => Core.Exprs.natLit(1)}
 
 fn matStack(stack: List<Clo>, ms: MS, acc: List<Expr>) -> MXs
     ? "Every waiting argument built, first argument first."
@@ -3372,14 +3367,14 @@ fn matStack(stack: List<Clo>, ms: MS, acc: List<Expr>) -> MXs
         [c, ..rest] -> matStackNext(matClo(c, ms), rest, acc)
 
 verify matStack
-    matStack([Clo.Clo(-1, Core.Exprs.natLit(1), [])], MS(next = 0, forced = {}, shapes = {}), []).es => [Core.Exprs.natLit(1)]
+    matStack([Clo.Clo(-1, Core.Exprs.natLit(1), [])], MS(next = 0, forced = {}), []).es => [Core.Exprs.natLit(1)]
 
 fn matStackNext(x: MX, rest: List<Clo>, acc: List<Expr>) -> MXs
     ? "One more built argument."
     matStack(rest, x.ms, List.prepend(x.e, acc))
 
 verify matStackNext
-    matStackNext(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}, shapes = {})), [], []).es => [Core.Exprs.natLit(1)]
+    matStackNext(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {})), [], []).es => [Core.Exprs.natLit(1)]
 
 verify mcore
     resultExpr(mcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Binder.Default), Binder.Default), Core.Exprs.fvar(1)), Core.Exprs.fvar(2)), [], [], false, false)) => Core.Exprs.app(Core.Exprs.fvar(2), Core.Exprs.fvar(1))
@@ -3400,7 +3395,7 @@ fn whnfCoreM(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fai
             false -> mcached(st, e, cheapRec, cheapProj)
         Expr.Let -> mcached(st, e, cheapRec, cheapProj)
         Expr.Proj -> mcached(st, e, cheapRec, cheapProj)
-        Expr.FVar(id) -> lvar(st, e, Check.State.localValue(st.lctx, id), [], MS(next = 0, forced = {}, shapes = {}), false, cheapRec, cheapProj)
+        Expr.FVar(id) -> lvar(st, e, Check.State.localValue(st.lctx, id), [], MS(next = 0, forced = {}), false, cheapRec, cheapProj)
         _ -> Result.Ok(RE(e = e, st = st))
 
 verify whnfCoreM
@@ -4482,7 +4477,7 @@ verify stepPeeled
 
 fn stepRun(b: RE, k: Int, stack: List<Clo>) -> Result<RE, Fail>
     ? "whnfCore's machine on the body, as unfoldStep runs it after unfolding: no delta, recursors on cheap terms not reduced, projections cheap."
-    lcore(b.st, b.e, envOf(stack, k, []), List.drop(stack, k), MS(next = 0, forced = {}, shapes = {}), false, false, true)
+    lcore(b.st, b.e, envOf(stack, k, []), List.drop(stack, k), MS(next = 0, forced = {}), false, false, true)
 
 verify stepRun
     resultExpr(stepRun(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 1, [Clo.Clo(-1, Core.Exprs.natLit(4), [])])) => Core.Exprs.natLit(4)

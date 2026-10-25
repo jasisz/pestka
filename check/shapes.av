@@ -1,0 +1,32 @@
+module Shapes
+    intent =
+        "The shapes the reduction machine runs a casesOn or a sparse"
+        "casesOn by, found once for a constant at its levels and kept in the"
+        "checker's state for the rest of the declaration: where its major"
+        "premise and minor premises sit among its arguments, and each minor"
+        "premise's body under its fields."
+    exposes [Shape, CasesOn, SparseOn, MinorOn]
+    depends [Core.Exprs, Core.Decls]
+    effects []
+
+record CasesOn
+    rv: Rec
+    total: Int
+    majorAt: Int
+    minorsAt: Int
+
+type Shape
+    Plain
+    Cases(CasesOn)
+    Sparse(SparseOn)
+
+record SparseOn
+    rv: Rec
+    n: Int
+    major: Int
+    minors: List<Option<MinorOn>>
+
+record MinorOn
+    nf: Int
+    hyps: Int
+    body: Expr
