@@ -4,7 +4,7 @@
 # of the Aver checkout AVER_SRC names. Arguments as for the compiled build:
 # FILE.ndjson [WORKERS].
 # NODE names the node to run (the one on PATH by default), and V8_FLAGS,
-# when set, replaces the flags below: a heap of up to 13 GB, and young
+# when set, replaces the flags below: a heap of up to 14 GB, and young
 # generation semi-spaces of 256 MB, which spare Init about 4% of its
 # instructions in collections.
 #
@@ -17,7 +17,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 : "${AVER_SRC:?names the Aver checkout whose tools/wasm-work/run.mjs hosts the program}"
 out=$(mktemp) || exit 3
 trap 'rm -f "$out"' EXIT
-flags=${V8_FLAGS-"--max-old-space-size=13000 --min-semi-space-size=256 --max-semi-space-size=256"}
+flags=${V8_FLAGS-"--max-old-space-size=14000 --min-semi-space-size=256 --max-semi-space-size=256"}
 "${NODE:-node}" $flags "$AVER_SRC/tools/wasm-work/run.mjs" "$root/.build-wasm/main.optimized.wasm" "$@" > "$out"
 code=$?
 cat "$out"

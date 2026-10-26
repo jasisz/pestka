@@ -282,7 +282,7 @@ aver run main.av --module-root . --wasm-gc -- FILE.ndjson
 
 `bin/run-wasm` runs the module under Node through Aver's host for wasm-gc
 programs (`tools/wasm-work/run.mjs` of the Aver checkout `AVER_SRC` names),
-with a heap of up to 13 GB and young-generation semi-spaces of 256 MB. It
+with a heap of up to 14 GB and young-generation semi-spaces of 256 MB. It
 passes on Pestka's exit status only when the verdict line agrees with it and
 exits with 3 otherwise, so a crash of V8 or of the host never reads as a
 verdict. `aver run --wasm-gc` uses Wasmtime instead, whose collector is far
