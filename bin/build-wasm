@@ -1,0 +1,9 @@
+#!/bin/sh
+# Compiles Pestka to WebAssembly (wasm-gc) into .build-wasm/, for
+# bin/run-wasm: main.wasm as Aver emits it, and main.optimized.wasm, which
+# Binaryen's wasm-opt (on PATH) tunes for speed; that one is about 6% fewer
+# instructions on Init. Uses the aver on PATH unless AVER names another one;
+# it should be the commit in .aver-version, installed with --features wasm.
+set -e
+root=$(cd "$(dirname "$0")/.." && pwd)
+"${AVER:-aver}" compile "$root/main.av" --module-root "$root" --target wasm-gc --optimize speed -o "$root/.build-wasm" >/dev/null

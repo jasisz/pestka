@@ -42,6 +42,28 @@ below that profile was made from.
 | `mathlib` (702,040) | accepted | 2.23 T | 350 s | 7.3 GB | 141 s | 9.5 GB |
 | `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 68.9 G (14.8 G) | 6.0 s (1.0 s) | 1.0 GB | 5.8 s (1.0 s) | 1.0 GB |
 
+### As WebAssembly
+
+The same source compiled by Aver's own wasm-gc backend (not through Rust or
+LLVM) and run on V8 under Node 26 by `bin/run-wasm`, the Lean Kernel Arena's
+`pestka-wasm` entry: every term, map and closure is an object of the engine's
+garbage collector, and the module is about 0.4 MB. It gives the same verdict
+as the compiled build on every test here and on the small Arena tests. One
+thread, with the module as Aver emits it; `bin/build-wasm` also passes it
+through Binaryen's `wasm-opt`, which cuts another 6% of the instructions on
+`init`.
+
+| Test | Verdict | Instructions | Time | Peak |
+|---|---|---|---|---|
+| `init` | accepted | 369.7 G | 27 s | 2.6 GB |
+| `std` | accepted | 640.9 G | 46 s | 4.6 GB |
+| `reachability` | accepted | 113.7 G | 7.4 s | 1.7 GB |
+| `con-leche` | accepted | 563.7 G | 39 s | 4.3 GB |
+| `cedar` | accepted | 873.1 G | 63 s | 5.5 GB |
+| `cslib` | accepted | 3.18 T | 234 s | 9.6 GB |
+| `mathlib` | accepted | 12.33 T | 894 s | 11.6 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 281 G (32.6 G) | 18 s (1.9 s) | 2.0 GB |
+
 ## What it does differently
 
 The checker follows the reference kernel's algorithm. What is its own:
@@ -187,6 +209,7 @@ aver proof check/lits.av --module-root . --backend aver --check-json
   `master` built with Lean 4.34.1, or with the Lean a test project pins.
 - A Rust toolchain, for the compiled build, with the `llvm-tools` component
   for `bin/build-pgo`.
+- For the WebAssembly build, Node (24 or later) and Binaryen's `wasm-opt`.
 
 ### Installing the pinned Aver
 
@@ -252,10 +275,20 @@ The VM is far slower on large files; use it for `verify` and small inputs.
 Compiled to WebAssembly:
 
 ```bash
-aver compile main.av --module-root . --target wasm-gc -o out/
+bin/build-wasm                               # wasm-gc, optimized by wasm-opt, into .build-wasm/
+AVER_SRC=AVER-CHECKOUT bin/run-wasm FILE.ndjson
 aver compile main.av --module-root . --target wasip2 -o out/
 aver run main.av --module-root . --wasm-gc -- FILE.ndjson
 ```
+
+`bin/run-wasm` runs the module under Node through Aver's host for wasm-gc
+programs (`tools/wasm-work/run.mjs` of the Aver checkout `AVER_SRC` names),
+with a heap of up to 13 GB and young-generation semi-spaces of 256 MB. It
+passes on Pestka's exit status only when the verdict line agrees with it and
+exits with 3 otherwise, so a crash of V8 or of the host never reads as a
+verdict. `aver run --wasm-gc` uses Wasmtime instead, whose collector is far
+slower on Pestka (17 times the instructions of V8 on `etale`) and whose heap
+stops at 4 GiB.
 
 Under wasip2, `Disk` reaches only preopened directories; `aver run --wasip2`
 preopens the current directory, so pass a relative path.
@@ -271,6 +304,7 @@ Kernel Arena and `lake comparator` read:
 | 0 | every declaration accepted |
 | 1 | a declaration rejected |
 | 2 | input uses something Pestka does not support yet (declined) |
+| 3 | `bin/run-wasm` only: the host or V8 failed, no verdict |
 
 ## Layout
 

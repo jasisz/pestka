@@ -1,0 +1,31 @@
+#!/bin/sh
+# Runs the wasm-gc build of bin/build-wasm (.build-wasm/main.optimized.wasm)
+# under Node, through Aver's host for wasm-gc programs: tools/wasm-work/run.mjs
+# of the Aver checkout AVER_SRC names. Arguments as for the compiled build:
+# FILE.ndjson [WORKERS].
+# NODE names the node to run (the one on PATH by default), and V8_FLAGS,
+# when set, replaces the flags below: a heap of up to 13 GB, and young
+# generation semi-spaces of 256 MB, which spare Init about 4% of its
+# instructions in collections.
+#
+# The exit status is Pestka's only when its verdict line agrees with it:
+# 0 with "accepted", 1 with "rejected: ...", 2 with "declined: ...". The
+# host ends with 1 when the program's thread throws, so anything else, a
+# crash of the host or of V8 included, exits with 3: a failure never reads
+# as a verdict.
+root=$(cd "$(dirname "$0")/.." && pwd)
+: "${AVER_SRC:?names the Aver checkout whose tools/wasm-work/run.mjs hosts the program}"
+out=$(mktemp) || exit 3
+trap 'rm -f "$out"' EXIT
+flags=${V8_FLAGS-"--max-old-space-size=13000 --min-semi-space-size=256 --max-semi-space-size=256"}
+"${NODE:-node}" $flags "$AVER_SRC/tools/wasm-work/run.mjs" "$root/.build-wasm/main.optimized.wasm" "$@" > "$out"
+code=$?
+cat "$out"
+last=$(tail -n 1 "$out")
+case "$code:$last" in
+  0:accepted|1:rejected:*|2:declined:*) exit "$code" ;;
+  *)
+    echo "run-wasm: exit status $code with the last line '$last': an error, not a verdict" >&2
+    exit 3
+    ;;
+esac
