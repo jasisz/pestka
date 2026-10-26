@@ -49,20 +49,19 @@ LLVM) and run on V8 under Node 26 by `bin/run-wasm`, the Lean Kernel Arena's
 `pestka-wasm` entry: every term, map and closure is an object of the engine's
 garbage collector, and the module is about 0.4 MB. It gives the same verdict
 as the compiled build on every test here and on the small Arena tests. One
-thread, with the module as Aver emits it; `bin/build-wasm` also passes it
-through Binaryen's `wasm-opt`, which cuts another 6% of the instructions on
-`init`.
+thread, with the module `bin/build-wasm` makes: Binaryen's `wasm-opt` takes
+4–6% of the instructions off the one Aver emits.
 
 | Test | Verdict | Instructions | Time | Peak |
 |---|---|---|---|---|
-| `init` | accepted | 369.7 G | 27 s | 2.6 GB |
-| `std` | accepted | 640.9 G | 46 s | 4.6 GB |
-| `reachability` | accepted | 113.7 G | 7.4 s | 1.7 GB |
-| `con-leche` | accepted | 563.7 G | 39 s | 4.3 GB |
-| `cedar` | accepted | 873.1 G | 63 s | 5.5 GB |
-| `cslib` | accepted | 3.18 T | 234 s | 9.6 GB |
-| `mathlib` | accepted | 12.33 T | 894 s | 11.6 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 281 G (32.6 G) | 18 s (1.9 s) | 2.0 GB |
+| `init` | accepted | 346.6 G | 25 s | 2.5 GB |
+| `std` | accepted | 603.5 G | 44 s | 4.6 GB |
+| `reachability` | accepted | 108.9 G | 7.0 s | 1.7 GB |
+| `con-leche` | accepted | 532.9 G | 37 s | 4.3 GB |
+| `cedar` | accepted | 819.0 G | 61 s | 5.5 GB |
+| `cslib` | accepted | 3.01 T | 233 s | 9.7 GB |
+| `mathlib` | accepted | 11.86 T | 910 s | 11.7 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 267 G (30.3 G) | 17 s (1.7 s) | 2.0 GB |
 
 ## What it does differently
 
