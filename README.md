@@ -25,20 +25,22 @@ Pestka answers 172 of 172 correctly.
 
 The Arena's large tests and its `perf/` tests, exported as the Arena exports
 them and checked on an Apple M2 Pro: on one worker, as the Arena runs Pestka,
-and on eight, the default. The instructions retired on one worker are what
-the Arena ranks checkers by. The build is the Arena's: `bin/build-pgo`,
-with the profile of a check of `init-prelude` (see Commands).
+and on eight, the default; each time is the better of two runs. The
+instructions retired on one worker are what the Arena ranks checkers by.
+The build is `bin/build-pgo` with `-C target-cpu=native`, guided by the
+profile of a check of all of `Init` (see Commands); `init` is the one test
+below that profile was made from.
 
 | Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 8 workers | Peak, 8 workers |
 |---|---|---|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 70.2 G | 9.3 s | 0.8 GB | 4.5 s | 1.1 GB |
-| `std` (98,086) | accepted | 120.4 G | 16 s | 1.3 GB | 7.3 s | 1.8 GB |
-| `reachability` | accepted | 31.2 G | 2.8 s | 0.5 GB | 2.4 s | 0.5 GB |
-| `con-leche` | accepted | 116.1 G | 13 s | 1.2 GB | 6.7 s | 1.7 GB |
-| `cedar` | accepted | 166.6 G | 23 s | 1.4 GB | 8.9 s | 2.0 GB |
-| `cslib` | accepted | 639.7 G | 99 s | 4.1 GB | 35 s | 5.5 GB |
-| `mathlib` (702,040) | accepted | 2.27 T | 383 s | 7.3 GB | 132 s | 9.5 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 125 G (58.0 G) | 9.5 s (3.8 s) | 1.0 GB | 9.3 s (3.8 s) | 1.0 GB |
+| `init` (58,170 declarations) | accepted | 66.6 G | 8.0 s | 0.8 GB | 4.1 s | 1.1 GB |
+| `std` (98,086) | accepted | 116.6 G | 14 s | 1.3 GB | 6.5 s | 1.8 GB |
+| `reachability` | accepted | 31.0 G | 3.0 s | 0.5 GB | 2.5 s | 0.5 GB |
+| `con-leche` | accepted | 109.0 G | 12 s | 1.2 GB | 6.2 s | 1.6 GB |
+| `cedar` | accepted | 161.2 G | 22 s | 1.4 GB | 9.3 s | 2.0 GB |
+| `cslib` | accepted | 627.7 G | 88 s | 4.1 GB | 33 s | 5.4 GB |
+| `mathlib` (702,040) | accepted | 2.23 T | 350 s | 7.3 GB | 141 s | 9.5 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 68.9 G (14.8 G) | 6.0 s (1.0 s) | 1.0 GB | 5.8 s (1.0 s) | 1.0 GB |
 
 ## What it does differently
 
@@ -228,9 +230,10 @@ tests/arena.sh DIR         # the small Lean Kernel Arena tests, each under bin/c
 `bin/build-pgo` builds once with instrumentation, checks TRAIN with it on
 one worker, and builds again with the profile that run left; `FLAGS` adds
 rustc flags to both builds (the Arena gives `-C target-cpu=native`). It needs
-`llvm-profdata`, from rustup's `llvm-tools` component. The profile of a
-check of `init-prelude` cuts 12–15% of the instructions on every test above,
-those far from it included. The third
+`llvm-profdata`, from rustup's `llvm-tools` component. A profile of a check
+of `init-prelude` alone cuts 12–15% of the instructions on every test above,
+those far from it included; one of all of `Init` cuts another 1–1.5% on the
+tests it was not made from (`std`, `con-leche`, `cedar`, `mathlib`). The third
 argument picks the core: `old` (the default), `next` (the second core, in
 `next/`, being built), or `both`, which checks every deferred declaration
 with each and rejects at the first where their answers differ.
@@ -244,9 +247,7 @@ check. Reading shares out the same way: the lines are parsed on the workers
 in rounds and go into the tables in file order, each round while the next
 one is parsed.
 
-Reading all of `Init` (346 MB, 6.1 million expressions) takes about 9 s
-compiled on one thread and about 4 s on eight. The VM is far slower on
-large files; use it for `verify` and small inputs.
+The VM is far slower on large files; use it for `verify` and small inputs.
 
 Compiled to WebAssembly:
 
