@@ -2011,6 +2011,149 @@ fn whnfCached(st: St, e: Expr) -> Result<RE, Fail>
         Option.Some(r) -> Result.Ok(RE(e = r, st = st))
         Option.None -> whnfLoop(st, e, e)
 
+decision ValuesInTheKey
+    date = "2026-10-26"
+    reason =
+        "A computation by decide asks Nat arithmetic for the value of the"
+        "same operand again and again, each time as another term: on"
+        "perf/magma-list-deep-n36, table[a.val * 36 + b.val]! for 5184 pairs"
+        "of a and b that take only 1296 values, each walking the table cell"
+        "by cell through List.get!Internal. The whnf cache, keyed by the"
+        "term, missed every time. An operand of Nat arithmetic now comes to"
+        "its value under a second key on a miss: its closed arithmetic"
+        "arguments brought to whnf first, and the application to them looked"
+        "up and kept as well. The two applications are definitionally equal"
+        "by congruence, so the whnf of one is a whnf of the other. Only an"
+        "operand that has to come to a literal anyway is treated so; doing"
+        "it on every whnf miss also took pair-n21 from 34.8 G to 30.1 G, but"
+        "cost reachability 2.5% and con-leche 0.4%. A key that only left"
+        "proofs out of the term gained nothing, since the repeated values"
+        "come from different terms. Instructions retired, one worker, Aver"
+        "02771bf5, without a profile: n21 4.0 G to 1.5 G, n36 65.9 G to"
+        "17.1 G, string-pair-n9 20.4 G to 8.9 G; pair-n21, reachability,"
+        "etale, con-leche and std as they were. Built as the Arena builds:"
+        "n36 58.1 G to 15.1 G, the 30 perf tests 124.6 G to 69.3 G."
+    chosen = "ValuesInTheKey"
+    rejected = ["ValuesForEveryMiss", "ProofsLeftOutOfTheKey"]
+    impacts = [whnfValue, valuesFirst, byValues, reduceNat, natBin, natFirst]
+
+fn whnfValue(st: St, e: Expr) -> Result<RE, Fail>
+    ? "whnf of an operand of Nat arithmetic, which has to come to a literal: on a cache miss, its closed arithmetic arguments come to their values first and the operand is looked up under them (ValuesInTheKey)."
+    match e
+        Expr.App -> match Check.State.cacheGet(st.whnfCache, e)
+            Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+            Option.None -> match valueArgs(e)
+                true -> valuesFirst(st, e, Core.Apps.argsOf(e), [], false)
+                false -> whnfLoop(st, e, e)
+        _ -> whnf(st, e)
+
+verify whnfValue
+    resultExpr(whnfValue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1))) => Core.Exprs.natLit(1)
+
+fn valueArgs(e: Expr) -> Bool
+    ? "An application of a constant with a closed arithmetic argument, whose value would make a better key (ValuesInTheKey)."
+    match e
+        Expr.App(_, f, _) -> match Core.Apps.fnOf(f)
+            Expr.Const -> anyArith(Core.Apps.argsOf(e))
+            _ -> false
+        _ -> false
+
+verify valueArgs
+    valueArgs(Core.Exprs.natLit(1)) => false
+    valueArgs(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("f"), []), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(1)), Core.Exprs.natLit(2)))) => true
+
+fn anyArith(args: List<Expr>) -> Bool
+    ? "Whether some argument is closed arithmetic."
+    match args
+        [] -> false
+        [a, ..rest] -> match isArith(a)
+            true -> true
+            false -> anyArith(rest)
+
+verify anyArith
+    anyArith([]) => false
+
+fn isArith(a: Expr) -> Bool
+    ? "A closed application of Nat arithmetic, of its notation classes, or of Fin.val: a term whose whnf is cheap and usually a literal."
+    match Core.Exprs.hasFVar(a)
+        true -> false
+        false -> match Core.Apps.fnOf(a)
+            Expr.Const(_, Name.Str(Name.Str(Name.Anon, ns, _), op, _), _) -> arithName(ns, op)
+            _ -> false
+
+verify isArith
+    isArith(Core.Exprs.natLit(1)) => false
+    isArith(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Fin", "val"), []), Core.Exprs.natLit(1))) => true
+
+fn arithName(ns: String, op: String) -> Bool
+    ? "Nat's operations, their notation classes and Fin.val."
+    match ns
+        "Nat" -> Bool.or(Bool.or(Bool.or(op == "add", op == "mul"), Bool.or(op == "sub", op == "mod")), Bool.or(op == "div", op == "succ"))
+        "HAdd" -> op == "hAdd"
+        "HMul" -> op == "hMul"
+        "HSub" -> op == "hSub"
+        "HMod" -> op == "hMod"
+        "HDiv" -> op == "hDiv"
+        "Fin" -> op == "val"
+        _ -> false
+
+verify arithName
+    arithName("HAdd", "hAdd") => true
+    arithName("List", "get") => false
+
+fn valuesFirst(st: St, e: Expr, args: List<Expr>, done: List<Expr>, moved: Bool) -> Result<RE, Fail>
+    ? "The arguments in order, each closed arithmetic one brought to whnf; then the application to them is looked up, unless no argument changed."
+    match args
+        [] -> match moved
+            true -> byValues(st, e, Core.Apps.mkApps(headOf(e), List.reverse(done)))
+            false -> whnfLoop(st, e, e)
+        [a, ..rest] -> match isArith(a)
+            true -> valueThen(whnf(st, a)?, a, e, rest, done, moved)
+            false -> valuesFirst(st, e, rest, List.prepend(a, done), moved)
+
+verify valuesFirst
+    resultExpr(valuesFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), [], [], false)) == Core.Exprs.natLit(1) => true
+
+fn valueThen(r: RE, a: Expr, e: Expr, rest: List<Expr>, done: List<Expr>, moved: Bool) -> Result<RE, Fail>
+    ? "Goes on with the argument's whnf, noting whether it differs from the argument."
+    valuesFirst(r.st, e, rest, List.prepend(r.e, done), Bool.or(moved, Bool.and(isLit(r.e), r.e != a)))
+
+verify valueThen
+    resultExpr(valueThen(RE(e = Core.Exprs.natLit(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(1), Core.Exprs.natLit(1), [], [], false)) == Core.Exprs.natLit(1) => false
+
+fn isLit(e: Expr) -> Bool
+    ? "A Nat literal."
+    match e
+        Expr.NatLit -> true
+        _ -> false
+
+verify isLit
+    isLit(Core.Exprs.natLit(1)) => true
+    isLit(Core.Exprs.bvar(0)) => false
+
+fn headOf(e: Expr) -> Expr
+    ? "The head of an application."
+    Core.Apps.fnOf(e)
+
+verify headOf
+    headOf(Core.Exprs.natLit(1)) => Core.Exprs.natLit(1)
+
+fn byValues(st: St, e: Expr, v: Expr) -> Result<RE, Fail>
+    ? "The application to the arguments' values is definitionally e, by congruence, so its whnf is a whnf of e: found or worked out under v, and kept for e too."
+    match Check.State.cacheGet(st.whnfCache, v)
+        Option.Some(r) -> Result.Ok(whnfStore(st, e, r))
+        Option.None -> alsoFor(whnfLoop(st, v, v)?, e)
+
+verify byValues
+    resultExpr(byValues(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(1))) => Core.Exprs.natLit(1)
+
+fn alsoFor(r: RE, e: Expr) -> Result<RE, Fail>
+    ? "Keeps the result for e as well."
+    Result.Ok(whnfStore(r.st, e, r.e))
+
+verify alsoFor
+    resultExpr(alsoFor(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(2))) => Core.Exprs.natLit(1)
+
 verify whnfCached
     resultExpr(whnfCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
 
@@ -3543,7 +3686,7 @@ verify deltaConst
 fn reduceNat(st: St, e: Expr) -> Result<RO, Fail>
     ? "Nat.succ and the binary Nat functions on literal arguments."
     match e
-        Expr.App(_, Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), "succ", _), []), a) -> natSucc(whnf(st, a)?)
+        Expr.App(_, Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), "succ", _), []), a) -> natSucc(whnfValue(st, a)?)
         Expr.App(_, Expr.App(_, Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []), a), b) -> natBin(st, op, a, b)
         _ -> Result.Ok(RO(o = Option.None, st = st))
 
@@ -3563,7 +3706,7 @@ fn natBin(st: St, op: String, a: Expr, b: Expr) -> Result<RO, Fail>
     ? "Both arguments are normalized and must be literals."
     match Check.Lits.isNatOp(op)
         false -> Result.Ok(RO(o = Option.None, st = st))
-        true -> natFirst(whnf(st, a)?, op, b)
+        true -> natFirst(whnfValue(st, a)?, op, b)
 
 verify natBin
     resultOpt(natBin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), "log2", Core.Exprs.natLit(1), Core.Exprs.natLit(1))) => Option.None
@@ -3572,7 +3715,7 @@ fn natFirst(x: RE, op: String, b: Expr) -> Result<RO, Fail>
     ? "The first argument as a literal."
     match Check.Lits.natValue(x.e)
         Option.None -> Result.Ok(RO(o = Option.None, st = x.st))
-        Option.Some(va) -> natSecond(whnf(x.st, b)?, op, va)
+        Option.Some(va) -> natSecond(whnfValue(x.st, b)?, op, va)
 
 verify natFirst
     resultOpt(natFirst(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), "add", Core.Exprs.natLit(1))) => Option.None
