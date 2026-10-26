@@ -25,22 +25,22 @@ Pestka answers 172 of 172 correctly.
 
 The Arena's large tests and its `perf/` tests, exported as the Arena exports
 them and checked on an Apple M2 Pro: on one worker, as the Arena runs Pestka,
-and on eight, the default; each time is the better of two runs. The
-instructions retired on one worker are what the Arena ranks checkers by.
+and on eight, the default. The instructions retired on one worker are what
+the Arena ranks checkers by.
 The build is `bin/build-pgo` with `-C target-cpu=native`, guided by the
 profile of a check of all of `Init` (see Commands); `init` is the one test
 below that profile was made from.
 
 | Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 8 workers | Peak, 8 workers |
 |---|---|---|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 66.6 G | 8.0 s | 0.8 GB | 4.1 s | 1.1 GB |
-| `std` (98,086) | accepted | 116.6 G | 14 s | 1.3 GB | 6.5 s | 1.8 GB |
-| `reachability` | accepted | 31.0 G | 3.0 s | 0.5 GB | 2.5 s | 0.5 GB |
-| `con-leche` | accepted | 109.0 G | 12 s | 1.2 GB | 6.2 s | 1.6 GB |
-| `cedar` | accepted | 161.2 G | 22 s | 1.4 GB | 9.3 s | 2.0 GB |
-| `cslib` | accepted | 627.7 G | 88 s | 4.1 GB | 33 s | 5.4 GB |
-| `mathlib` (702,040) | accepted | 2.23 T | 350 s | 7.3 GB | 141 s | 9.5 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 68.9 G (14.8 G) | 6.0 s (1.0 s) | 1.0 GB | 5.8 s (1.0 s) | 1.0 GB |
+| `init` (58,170 declarations) | accepted | 60.7 G | 8.1 s | 0.8 GB | 4.0 s | 1.1 GB |
+| `std` (98,086) | accepted | 106.3 G | 14 s | 1.3 GB | 6.8 s | 1.8 GB |
+| `reachability` | accepted | 28.6 G | 2.7 s | 0.5 GB | 2.2 s | 0.5 GB |
+| `con-leche` | accepted | 99.2 G | 11 s | 1.2 GB | 6.0 s | 1.6 GB |
+| `cedar` | accepted | 147.0 G | 20 s | 1.4 GB | 8.0 s | 1.9 GB |
+| `cslib` | accepted | 571.5 G | 85 s | 4.1 GB | 29 s | 5.4 GB |
+| `mathlib` (702,040) | accepted | 2.03 T | 334 s | 7.3 GB | 111 s | 9.5 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 62.9 G (13.6 G) | 5.5 s (1.0 s) | 1.0 GB | 5.3 s (1.0 s) | 1.0 GB |
 
 ### As WebAssembly
 
@@ -50,18 +50,18 @@ LLVM) and run on V8 under Node 26 by `bin/run-wasm`, the Lean Kernel Arena's
 garbage collector, and the module is about 0.4 MB. It gives the same verdict
 as the compiled build on every test here and on the small Arena tests. One
 thread, with the module `bin/build-wasm` makes: Binaryen's `wasm-opt` takes
-4–6% of the instructions off the one Aver emits.
+about 6% of the instructions off the one Aver emits.
 
 | Test | Verdict | Instructions | Time | Peak |
 |---|---|---|---|---|
-| `init` | accepted | 346.6 G | 25 s | 2.5 GB |
-| `std` | accepted | 603.5 G | 44 s | 4.6 GB |
-| `reachability` | accepted | 108.9 G | 7.0 s | 1.7 GB |
-| `con-leche` | accepted | 532.9 G | 37 s | 4.3 GB |
-| `cedar` | accepted | 819.0 G | 61 s | 5.5 GB |
-| `cslib` | accepted | 3.01 T | 233 s | 9.7 GB |
-| `mathlib` | accepted | 11.86 T | 910 s | 11.7 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 267 G (30.3 G) | 17 s (1.7 s) | 2.0 GB |
+| `init` | accepted | 254.0 G | 18 s | 2.7 GB |
+| `std` | accepted | 443.5 G | 31 s | 3.6 GB |
+| `reachability` | accepted | 89.2 G | 5.3 s | 1.6 GB |
+| `con-leche` | accepted | 415.4 G | 29 s | 3.2 GB |
+| `cedar` | accepted | 612.9 G | 45 s | 5.0 GB |
+| `cslib` | accepted | 2.27 T | 163 s | 10.4 GB |
+| `mathlib` | accepted | 9.48 T | 736 s | 12.3 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 231 G (25.1 G) | 14 s (1.4 s) | 2.0 GB |
 
 ## What it does differently
 
