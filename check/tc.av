@@ -2218,13 +2218,15 @@ record MXs
     ms: MS
 
 fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "The machine on closures. An argument or a let value is a term with the environment it was met in, numbered so that it is built at most once; beta and let push such a closure, and a bound variable in head position goes on as its closure. At a constant: a recursor applied to a constructor takes its rule's right-hand side with the other arguments still closures; then, when delta is on, Nat arithmetic on literals and unfolding a definition, again with the arguments as they are. Terms are built only when the head is stuck, for the major premise of a recursor, and for the arguments of quotient rules and Nat arithmetic."
+    ? "The machine on closures. An argument or a let value is a term with the environment it was met in, numbered so that it is built at most once; beta and let push such a closure, and a bound variable in head position goes on as its closure; past the environment it is loose, as in the value of a definition not checked yet, and is stuck, dropped by the environment's length as matTerm drops it. At a constant: a recursor applied to a constructor takes its rule's right-hand side with the other arguments still closures; then, when delta is on, Nat arithmetic on literals and unfolding a definition, again with the arguments as they are. Terms are built only when the head is stuck, for the major premise of a recursor, and for the arguments of quotient rules and Nat arithmetic."
     match t
         Expr.App(_, f, a) -> lcore(st, f, env, List.prepend(closure(a, env, ms.next), stack), MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
         Expr.Lam(_, _, body) -> match stack
             [c, ..rest] -> lcore(st, body, List.prepend(c, env), rest, ms, delta, cheapRec, cheapProj)
             [] -> Result.Ok(RE(e = matTerm(t, env, ms).e, st = st))
-        Expr.BVar(i) -> lclo(st, nthClo(env, i), stack, ms, delta, cheapRec, cheapProj)
+        Expr.BVar(i) -> match List.drop(env, i)
+            [c, .._] -> lclo(st, c, stack, ms, delta, cheapRec, cheapProj)
+            [] -> Result.Ok(RE(e = lstuck(MX(e = Core.Exprs.bvar(i - List.len(env)), ms = ms), stack), st = st))
         Expr.Let(_, _, v, body) -> lcore(st, body, List.prepend(closure(v, env, ms.next), env), stack, MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
         Expr.FVar(id) -> lvar(st, t, Check.State.localValue(st.lctx, id), stack, ms, delta, cheapRec, cheapProj)
         Expr.Const(_, n, ls) -> lconst(st, t, ls, Check.State.lookup(st, n), stack, ms, delta, cheapRec, cheapProj)
@@ -2234,6 +2236,7 @@ fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool,
 verify lcore
     resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])], [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.natLit(1)
     resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), [], [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.natLit(5)
+    resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(1)), [], [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(1))
 
 fn lclo(st: St, c: Clo, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "A closure in head position: its term, in its own environment."
