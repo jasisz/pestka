@@ -11,7 +11,7 @@ module Subst
         "and binder depth, so a subterm shared many times in a DAG is rebuilt"
         "once per depth, not once per path to it. Smaller nodes are cheaper"
         "to rebuild than to look up."
-    exposes [Op, apply, instantiate, instantiateRev, instantiate1, lift, lower, abstractFVars, instLevelParams, hasLooseBVar]
+    exposes [Op, apply, instantiate, instantiateRev, instantiate1, lift, lower, abstractFVars, instLevelParams, hasLooseBVar, hasLoose]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Univ]
     effects []
 
@@ -518,3 +518,28 @@ fn looseAt(e: Expr, i: Int) -> Bool
 verify looseAt
     looseAt(Core.Exprs.bvar(2), 2) => true
     looseAt(Core.Exprs.bvar(1), 2) => false
+
+fn hasLoose(e: Expr) -> Bool
+    ? "Whether any bound variable occurs loose in e, found by walking it: the exact answer where a stored range is saturated and only bounds the true one."
+    looseFrom(e, 0)
+
+verify hasLoose
+    hasLoose(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)) => false
+    hasLoose(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(1), Binder.Default)) => true
+
+fn looseFrom(e: Expr, off: Int) -> Bool
+    ? "hasLoose with off binders passed: a bound variable at or past off is loose. A subterm whose stored range is within off is skipped."
+    match Core.Exprs.within(e, off)
+        true -> false
+        false -> match e
+            Expr.BVar(j) -> j >= off
+            Expr.App(_, f, a) -> Bool.or(looseFrom(f, off), looseFrom(a, off))
+            Expr.Lam(_, t, b) -> Bool.or(looseFrom(t, off), looseFrom(b, off + 1))
+            Expr.Pi(_, t, b) -> Bool.or(looseFrom(t, off), looseFrom(b, off + 1))
+            Expr.Let(_, t, v, b) -> Bool.or(looseFrom(t, off), Bool.or(looseFrom(v, off), looseFrom(b, off + 1)))
+            Expr.Proj(_, _, _, x) -> looseFrom(x, off)
+            _ -> false
+
+verify looseFrom
+    looseFrom(Core.Exprs.bvar(2), 2) => true
+    looseFrom(Core.Exprs.bvar(1), 2) => false

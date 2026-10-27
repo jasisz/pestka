@@ -57,9 +57,11 @@ verify check
     check(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0)) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
 
 fn infer(st: St, e: Expr, only: Bool) -> Result<RE, Fail>
-    ? "Cached inference; terms with loose bound variables are refused."
+    ? "Cached inference; terms with loose bound variables are refused. A stored range of 16383 or more may be saturated, an upper bound only (a variable 16382 binders deep closed by them all keeps it), so the term is then walked for the exact answer."
     match Core.Exprs.looseRange(e) > 0
-        true -> Result.Err(bad("the type checker met a loose bound variable"))
+        true -> match Bool.and(Core.Exprs.looseRange(e) >= 16383, Bool.not(Core.Subst.hasLoose(e)))
+            true -> inferCached(st, e, only, cachedType(st, e, only))
+            false -> Result.Err(bad("the type checker met a loose bound variable"))
         false -> inferCached(st, e, only, cachedType(st, e, only))
 
 verify infer

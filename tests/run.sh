@@ -25,4 +25,17 @@ for dir in export/wellformed:0 export/malformed:1 export/illtyped:1 export/unsup
     fi
   done
 done
+# A theorem over 16382 binders, its innermost variable one past the 16383 a
+# node's stored loose range saturates at: generated, as the export is 2.4 MB.
+deep=$(mktemp) || exit 1
+python3 "$root/tests/gen_deep_binder_export.py" 16382 "$deep"
+"$root/bin/capped" 2000 20 "$bin" "$deep" >/dev/null 2>&1
+got=$?
+rm -f "$deep"
+if [ "$got" -eq 0 ]; then
+  echo "ok   generated/deep-binder-16382"
+else
+  echo "FAIL generated/deep-binder-16382: status $got, expected 0"
+  fail=1
+fi
 exit $fail
