@@ -246,7 +246,22 @@ bin/build-pgo TRAIN.ndjson # the same, guided by a profile of checking TRAIN
 .build/target/release/main FILE.ndjson [WORKERS [old|next|both]]
 tests/run.sh               # every export under tests/export against its expected status
 tests/arena.sh DIR         # the small Lean Kernel Arena tests, each under bin/capped
+python3 tests/soundness.py corpus DIR --exclude '*/perf/*' --max-bytes 4000000
+                                             # compare old/next or arbitrary kernels
+python3 tests/soundness.py mutate FILE # guaranteed-invalid mutations; neither core may accept
 ```
+
+`tests/soundness.py` accepts repeated `--kernel 'NAME=COMMAND {file}'`
+arguments, so Pestka can be compared with any checker that uses the Arena exit
+codes. Add `--require-verdict NAME` for commands such as `aver run`: an exit
+without an `accepted`, `rejected:` or `declined:` line is then a runner error,
+not a kernel verdict. Reports retain bounded command output for diagnostics,
+with no path of the machine they ran on: a program is named by its path in
+the repository or by its name, an input by its path from the directory
+holding the one given, the home directory as `~`.
+In `mutate` mode it first requires every selected kernel to accept the seed,
+then injects loose bound variables and duplicate universe parameters. An
+invalid export accepted by any kernel is kept under `tests/soundness-findings/`.
 
 `bin/build` uses the `aver` on `PATH`, or the one `AVER` names.
 `bin/build-pgo` builds once with instrumentation, checks TRAIN with it on

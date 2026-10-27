@@ -1,0 +1,171 @@
+{
+  "schema": "pestka-soundness-1",
+  "generated_at": "2026-10-27T08:18:47.170148+00:00",
+  "mode": "corpus",
+  "kernels": [
+    {
+      "name": "pestka-native-old",
+      "argv": [
+        ".build/target/release/main",
+        "{file}",
+        "1",
+        "old"
+      ],
+      "require_verdict": true
+    },
+    {
+      "name": "pestka-native-next",
+      "argv": [
+        ".build/target/release/main",
+        "{file}",
+        "1",
+        "next"
+      ],
+      "require_verdict": true
+    },
+    {
+      "name": "pestka-vm",
+      "argv": [
+        "aver",
+        "run",
+        "main.av",
+        "--module-root",
+        ".",
+        "--",
+        "{file}",
+        "1",
+        "old"
+      ],
+      "require_verdict": true
+    },
+    {
+      "name": "pestka-wasm-gc",
+      "argv": [
+        "aver",
+        "run",
+        "main.av",
+        "--module-root",
+        ".",
+        "--wasm-gc",
+        "--",
+        "{file}",
+        "1",
+        "old"
+      ],
+      "require_verdict": true
+    },
+    {
+      "name": "nanoda-a3ef25a",
+      "argv": [
+        "tests/run-nanoda.sh",
+        "nanoda_bin",
+        "{file}"
+      ],
+      "require_verdict": false
+    },
+    {
+      "name": "sokonanoda-492227c",
+      "argv": [
+        "sokonanoda",
+        "--axiom-allow-all",
+        "--nat-extension",
+        "--string-extension",
+        "{file}"
+      ],
+      "require_verdict": false
+    },
+    {
+      "name": "nanoclo-01c537f",
+      "argv": [
+        "tests/run-nanoda.sh",
+        "nanoclo",
+        "{file}"
+      ],
+      "require_verdict": false
+    },
+    {
+      "name": "nanobruijn-7a04996",
+      "argv": [
+        "tests/run-nanoda.sh",
+        "nanobruijn",
+        "{file}"
+      ],
+      "require_verdict": false
+    },
+    {
+      "name": "con-ron-v4.35",
+      "argv": [
+        "con-ron",
+        "{file}"
+      ],
+      "require_verdict": false
+    }
+  ],
+  "runs": [
+    {
+      "file": "tests/soundness-findings/loose-bvar-hadd-clean.ndjson",
+      "expected": null,
+      "results": {
+        "pestka-native-old": {
+          "code": 124,
+          "status": "timeout",
+          "seconds": 3.004052,
+          "output": "constants 33, declarations 17, names 103, levels 21, expressions 471\n"
+        },
+        "pestka-native-next": {
+          "code": 124,
+          "status": "timeout",
+          "seconds": 3.003722,
+          "output": "constants 33, declarations 17, names 103, levels 21, expressions 471\n"
+        },
+        "pestka-vm": {
+          "code": 124,
+          "status": "timeout",
+          "seconds": 3.006851
+        },
+        "pestka-wasm-gc": {
+          "code": 127,
+          "status": "error",
+          "seconds": 1.587507,
+          "actual_code": 1,
+          "output": "wasm-gc: validation failed — type mismatch: expected (ref null $type), found (ref null $type) (at offset 0x1d518)\n"
+        },
+        "nanoda-a3ef25a": {
+          "code": 101,
+          "status": "exit-101",
+          "seconds": 0.021487,
+          "output": "\nthread 'main' (14351371) panicked at src/tc.rs:550:27:\nno loose bvars allowed in infer\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+        },
+        "sokonanoda-492227c": {
+          "code": 3,
+          "status": "exit-3",
+          "seconds": 0.010543,
+          "output": "internal error: \nthread 'thread_0' (14351374) panicked at src/checker/infer.rs:106:57:\nloose bvar in infer\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n30/33  error   def            0.523ms  outParam\n"
+        },
+        "nanoclo-01c537f": {
+          "code": 101,
+          "status": "exit-101",
+          "seconds": 0.02015,
+          "output": "\nthread '<unnamed>' (14351386) panicked at src/closure.rs:585:9:\nloose bvar: index 0 in environment of length 0 (env id 0)\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\nthread 'main' (14351385) panicked at src/tc.rs:215:18:\nserial check thread panicked while being joined: Any { .. }\n"
+        },
+        "nanobruijn-7a04996": {
+          "code": 101,
+          "status": "exit-101",
+          "seconds": 0.019472,
+          "output": "ExprPtr parse: 471 parser entries → 425 DAG entries, 174 OSNF-shifted, 390 live after compaction, 0 cores with bvar indices >= 64 (0 tail words)\n[0/33 0ms +0ms]\n\nthread 'main-worker' (14351395) panicked at src/util.rs:2151:9:\nlocal_type: dbj_idx=0 >= depth=0\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\nthread 'main' (14351394) panicked at src/main.rs:11:20:\ncalled `Result::unwrap()` on an `Err` value: Any { .. }\n"
+        },
+        "con-ron-v4.35": {
+          "code": 1,
+          "status": "reject",
+          "seconds": 0.031682,
+          "output": "con-ron: rejected: loose bound variable in value [at def outParam, fold position 25] (--verified) t=0.024s\n"
+        }
+      }
+    }
+  ],
+  "summary": {
+    "files": 1,
+    "kernels": 9,
+    "findings": 1
+  }
+}
