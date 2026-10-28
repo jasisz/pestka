@@ -1,0 +1,126 @@
+version = 1
+
+# Expected local layout:
+#   pestycyd.toml
+#   adapters/                  (from this repository)
+#   kernels/official/kernel
+#   kernels/{nanoda,nanoclo,nanobruijn,sokonanoda,mathgraph,kefir}/...
+# Commands already available on PATH need no entry under kernels/.
+
+[defaults]
+timeout = 20.0
+state = ".pestycyd"
+
+# Pestka: native cores, Aver VM, WebAssembly GC, and LLVM coverage.
+[kernels.pestka-old]
+command = ["../.build/target/release/main", "{file}", "1", "old"]
+verdict = "required"
+
+[kernels.pestka-next]
+command = ["../.build/target/release/main", "{file}", "1", "next"]
+verdict = "required"
+
+[kernels.pestka-vm]
+command = ["aver", "run", "../main.av", "--module-root", "..", "--", "{file}", "1", "old"]
+verdict = "required"
+enabled = false
+timeout = 60.0
+
+[kernels.pestka-wasm-gc]
+command = ["aver", "run", "../main.av", "--module-root", "..", "--wasm-gc", "--", "{file}", "1", "old"]
+verdict = "required"
+enabled = false # requires an Aver build with --features wasm
+timeout = 60.0
+
+[kernels.pestka-llvm]
+command = ["../.build-pestycyd/target/release/main", "{file}", "1", "old"]
+verdict = "required"
+enabled = false # build with: adapters/pestka/build-coverage ..
+env = { LLVM_PROFILE_FILE = "{run_dir}/pestycyd-%p-%m.profraw" }
+
+[kernels.pestka-llvm.feedback]
+format = "lines"
+command = ["uv", "run", "pestycyd-llvm-feedback", "../.build-pestycyd/target/release/main", "{run_dir}/*.profraw", "--source-root", "../.build-pestycyd/generated", "--only-source-root"]
+required = true
+
+# Official Lean kernel adapter from Lean Kernel Arena and lean4lean.
+[kernels.official]
+command = ["kernels/official/kernel", "{file}"]
+verdict = "none"
+enabled = false
+
+[kernels.lean4lean]
+command = ["lean4lean", "--import", "{file}"]
+verdict = "none"
+enabled = false
+
+# The Nanoda family. Older CLIs take config JSON and the export on stdin.
+[kernels.nanoda]
+command = ["adapters/nanoda/run", "kernels/nanoda/nanoda_bin", "{file}"]
+env = { NANODA_RAW_STATUS = "1" }
+verdict = "none"
+enabled = false
+
+[kernels.nanoda-arena]
+command = ["adapters/nanoda/run", "kernels/nanoda/nanoda_bin", "{file}"]
+verdict = "none" # maps panics to rejection exactly like the Arena adapter
+enabled = false
+
+[kernels.nanoclo]
+command = ["adapters/nanoda/run", "kernels/nanoclo/nanoclo", "{file}"]
+env = { NANODA_RAW_STATUS = "1" }
+verdict = "none"
+enabled = false
+
+[kernels.nanobruijn]
+command = ["adapters/nanoda/run", "kernels/nanobruijn/nanobruijn", "{file}"]
+env = { NANODA_RAW_STATUS = "1" }
+verdict = "none"
+enabled = false
+
+[kernels.sokonanoda]
+command = ["kernels/sokonanoda/sokonanoda", "--axiom-allow-all", "--nat-extension", "--string-extension", "{file}"]
+verdict = "none"
+enabled = false
+
+# The MathGraph checker is the older config-plus-stdin Sokonanoda fork.
+[kernels.mathgraph]
+command = ["adapters/nanoda/run", "kernels/mathgraph/sokonanoda", "{file}"]
+verdict = "none"
+enabled = false
+
+# Kefir names the input through IN and emits its own JSON result protocol.
+[kernels.kefir]
+command = ["kernels/kefir/kefir", "--axiom-policy=allow-all-declared-axioms"]
+env = { IN = "{file}" }
+verdict = "none"
+enabled = false
+
+# Tenet uses exit 4 for a supported, explicit decline rather than the common 2.
+[kernels.tenet]
+command = ["tenet", "check", "{file}", "--jobs", "1", "--quiet"]
+verdict = "none"
+enabled = false
+
+[kernels.tenet.exit_codes]
+accept = 0
+reject = 1
+decline = 4
+
+# Formally verified con-* checkers. con-agua needs a container that sees the
+# same absolute input path (normally a bind mount of the corpus directory).
+[kernels.con-leche]
+command = ["con-leche", "--jobs=1", "{file}"]
+verdict = "none"
+enabled = false
+
+[kernels.con-ron]
+command = ["con-ron", "--jobs=1", "{file}"]
+verdict = "none"
+enabled = false
+
+[kernels.con-agua]
+command = ["docker", "exec", "pestycyd-con-agua", "checker", "{file}"]
+verdict = "none"
+enabled = false
+

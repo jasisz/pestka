@@ -1,0 +1,6 @@
+{"in":1,"str":{"pre":0,"str":"BoolProp"}}
+{"ie":0,"sort":0}
+{"in":2,"str":{"pre":1,"str":"a"}}
+{"in":3,"str":{"pre":1,"str":"b"}}
+{"const":{"name":1,"us":[]},"ie":1}
+{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[],"name":2,"numFields":0,"numParams":0,"type":1},{"cidx":1,"induct":1,"isUnsafe":false,"levelParams":[],"name":3,"numFields":0,"numParams":0,"type":1}],"recs":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[],"name":4,"numIndices":0,"numMinors":2,"numMotives":1,"numParams":0,"rules":[{"ctor":2,"nfields":0,"rhs":20},{"ctor":3,"nfields":0,"rhs":20}],"type":14}],"types":[{"all":[1],"ctors":[2,3],"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}

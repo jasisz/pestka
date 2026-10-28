@@ -1,0 +1,24 @@
+#!/bin/sh
+# Build one Rust binary with LLVM source coverage into an isolated target dir.
+set -eu
+
+if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
+    echo "usage: $0 CRATE_ROOT BINARY OUTPUT_DIR [MANIFEST]" >&2
+    exit 2
+fi
+
+root=$(cd "$1" && pwd)
+binary=$2
+out=$3
+manifest=${4:-"$root/Cargo.toml"}
+target=${RUST_TARGET:-$(rustc -vV | sed -n 's/^host: //p')}
+
+mkdir -p "$out/build-profiles"
+LLVM_PROFILE_FILE="$out/build-profiles/pestycyd-%p-%m.profraw" \
+RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C instrument-coverage" \
+    cargo build --release --bin "$binary" --manifest-path "$manifest" \
+    --target-dir "$out/target" --target "$target"
+
+mkdir -p "$out/target/release"
+ln -sf "../$target/release/$binary" "$out/target/release/$binary"
+echo "$out/target/release/$binary"
