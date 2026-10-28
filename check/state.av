@@ -67,8 +67,8 @@ verify envEmpty
     envHas(envEmpty(), Core.Names.anon()) => false
 
 fn envGet(env: Env, n: Name) -> Option<Const>
-    ? "The constant named n."
-    envFind(envBucket(env, Core.Names.hashOf(n)), n)
+    ? "The constant named n: every constant is placed before the size."
+    envGetBefore(env, n, env.size)
 
 verify envGet
     envGet(envSet(envEmpty(), Core.Names.anon(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.anon()) => Option.Some(Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false))
@@ -88,24 +88,22 @@ fn envBucket(env: Env, key: Int) -> List<Placed>
 verify envBucket
     envBucket(envEmpty(), 6) => []
 
-fn envFind(bucket: List<Placed>, n: Name) -> Option<Const>
-    ? "The newest constant of the bucket named n."
-    match bucket
-        [] -> Option.None
-        [p, ..rest] -> match p.name == n
-            true -> Option.Some(p.c)
-            false -> envFind(rest, n)
-
-verify envFind
-    envFind([], Core.Names.anon()) => Option.None
-
 fn envGetBefore(env: Env, n: Name, upTo: Int) -> Option<Const>
     ? "The constant named n when it was placed before upTo: the environment as it was when it held upTo constants."
-    envFindBefore(envBucket(env, Core.Names.hashOf(n)), n, upTo)
+    envReadBefore(Map.get(env.byHash, Core.Names.hashOf(n)), n, upTo)
 
 verify envGetBefore
     envGetBefore(sampleEnv(3), sampleName(1), 2) => Option.Some(sampleConst(1))
     envGetBefore(sampleEnv(3), sampleName(2), 2) => Option.None
+
+fn envReadBefore(entry: Option<List<Placed>>, n: Name, upTo: Int) -> Option<Const>
+    ? "Searches the bucket where the map holds it: copying it out cost a list handle and an empty default per read."
+    match entry
+        Option.Some(bucket) -> envFindBefore(bucket, n, upTo)
+        Option.None -> Option.None
+
+verify envReadBefore
+    envReadBefore(Option.None, Core.Names.anon(), 1) => Option.None
 
 fn envFindBefore(bucket: List<Placed>, n: Name, upTo: Int) -> Option<Const>
     ? "The constant of the bucket named n, if placed before upTo."
