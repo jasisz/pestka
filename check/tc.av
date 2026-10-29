@@ -1320,16 +1320,25 @@ fn projResultProp(p: RB, d: Expr) -> Result<RE, Fail>
 verify projResultProp
     projResultProp(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0)) => Result.Err(Fail.Reject("invalid projection"))
 
+decision StateOwnedThroughWhnfCore
+    date = "2026-10-29"
+    reason =
+        "whnfCore went to letVar for a free variable and letVar back to"
+        "whnfCore for its value. The compiled mutual tail call held the state"
+        "behind a reference, as it passed it on unchanged, so every way out"
+        "copied the whole state: a new box and a count raised on each of its"
+        "maps, on one of the most frequent calls. A let variable's chain of"
+        "values is now followed in the local context alone (letChain), and"
+        "whnfCore calls headCore once, with the state its own."
+    chosen = "StateOwnedThroughWhnfCore"
+    rejected = ["LetVarMutual"]
+    impacts = [whnfCore, letChain, headCore]
+
 fn whnfCore(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "Beta, zeta, iota, quotient and projection reduction at the head, without unfolding definitions."
+    ? "Beta, zeta, iota, quotient and projection reduction at the head, without unfolding definitions. A let variable is first replaced by the end of its chain of values (StateOwnedThroughWhnfCore)."
     match e
-        Expr.FVar(id) -> letVar(st, e, Check.State.localValue(st.lctx, id), cheapRec, cheapProj)
-        Expr.App -> match rigidHead(st, Core.Apps.fnOf(e))
-            true -> Result.Ok(RE(e = e, st = st))
-            false -> coreCached(st, e, cheapRec, cheapProj)
-        Expr.Let -> coreCached(st, e, cheapRec, cheapProj)
-        Expr.Proj -> coreCached(st, e, cheapRec, cheapProj)
-        _ -> Result.Ok(RE(e = e, st = st))
+        Expr.FVar -> headCore(st, letChain(st.lctx, e), cheapRec, cheapProj)
+        _ -> headCore(st, e, cheapRec, cheapProj)
 
 verify whnfCore
     resultExpr(whnfCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.natLit(3)), false, false)) => Core.Exprs.natLit(3)
@@ -1355,14 +1364,30 @@ verify rigidHead
     rigidHead(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)) => false
     rigidHead(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(0))) => false
 
-fn letVar(st: St, e: Expr, v: Option<Expr>, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "A let variable reduces to its value."
-    match v
-        Option.Some(x) -> whnfCore(st, x, cheapRec, cheapProj)
-        Option.None -> Result.Ok(RE(e = e, st = st))
+fn letChain(lctx: Locals, e: Expr) -> Expr
+    ? "A let variable's value, and that value's value while it is a let variable too: the first term on the chain that is not a let variable."
+    match e
+        Expr.FVar(id) -> match Check.State.localValue(lctx, id)
+            Option.Some(x) -> letChain(lctx, x)
+            Option.None -> e
+        _ -> e
 
-verify letVar
-    resultExpr(letVar(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Option.None, false, false)) => Core.Exprs.fvar(0)
+verify letChain
+    letChain(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe).lctx, Core.Exprs.fvar(0)) => Core.Exprs.fvar(0)
+    letChain(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe).lctx, Core.Exprs.natLit(2)) => Core.Exprs.natLit(2)
+
+fn headCore(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "whnfCore of a term that is not a let variable: an application under a rigid head is its own, a let, a projection or another application goes through the cache, and anything else is already in whnfCore."
+    match e
+        Expr.App -> match rigidHead(st, Core.Apps.fnOf(e))
+            true -> Result.Ok(RE(e = e, st = st))
+            false -> coreCached(st, e, cheapRec, cheapProj)
+        Expr.Let -> coreCached(st, e, cheapRec, cheapProj)
+        Expr.Proj -> coreCached(st, e, cheapRec, cheapProj)
+        _ -> Result.Ok(RE(e = e, st = st))
+
+verify headCore
+    resultExpr(headCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), false, false)) => Core.Exprs.fvar(0)
 
 fn coreCached(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "Looks in the cache; only full (non-cheap) results are stored."
