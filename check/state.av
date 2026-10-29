@@ -6,7 +6,7 @@ module State
         "scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, paramLevels, cacheGetAt, cachePutAt]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, paramLevels, cacheGetAt, cachePutAt, quotSeen, quotMark]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache, Check.Shapes]
     effects []
 
@@ -32,6 +32,7 @@ record Placed
 record Env
     byHash: Map<Int, List<Placed>>
     size: Int
+    qstated: List<Name>
 
 decision MapEnvironment
     date = "2026-10-22"
@@ -61,7 +62,7 @@ decision PlacedConstants
 
 fn envEmpty() -> Env
     ? "The empty environment."
-    Env(byHash = {}, size = 0)
+    Env(byHash = {}, size = 0, qstated = [])
 
 verify envEmpty
     envHas(envEmpty(), Core.Names.anon()) => false
@@ -160,10 +161,25 @@ fn envSet(env: Env, n: Name, c: Const) -> Env
     key = Core.Names.hashOf(n)
     at = env.size
     b = envBucket(env, key)
-    Env(byHash = Map.set(env.byHash, key, List.prepend(Placed(name = n, c = c, at = at), b)), size = at + 1)
+    Env(byHash = Map.set(env.byHash, key, List.prepend(Placed(name = n, c = c, at = at), b)), size = at + 1, qstated = env.qstated)
 
 verify envSet
     envHas(envSet(envSet(envEmpty(), Core.Names.str(Core.Names.anon(), "a"), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.str(Core.Names.anon(), "b"), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.str(Core.Names.anon(), "a")) => true
+
+fn quotSeen(env: Env, n: Name) -> Bool
+    ? "A quotient record already stated this name: the kernel adds the quotient constants itself, so the environment alone cannot tell a stated record from a derived constant. At most the four names of the package are kept, compared whole."
+    List.contains(env.qstated, n)
+
+verify quotSeen
+    quotSeen(envEmpty(), Core.Names.anon()) => false
+
+fn quotMark(env: Env, n: Name) -> Env
+    ? "Marks the name as stated by a quotient record."
+    Env(byHash = env.byHash, size = env.size, qstated = List.prepend(n, env.qstated))
+
+verify quotMark
+    quotSeen(quotMark(envEmpty(), Core.Names.anon()), Core.Names.anon()) => true
+    quotSeen(quotMark(envEmpty(), Core.Names.str(Core.Names.anon(), "Quot")), Core.Names.str(Core.Names.anon(), "Quot.mk")) => false
 
 record Local
     name: Name

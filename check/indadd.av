@@ -377,13 +377,15 @@ verify sameRules
     sameRules([], []) => true
 
 fn addQuotDecl(env: Env, h: Head, kind: QuotKind) -> Result<Env, Fail>
-    ? "Adds the quotient package if needed, then compares the stated constant with the built one."
+    ? "Adds the quotient package if needed, then compares the stated constant with the built one. A name a quotient record already stated is a duplicate declaration: the environment holds the constants the package derives either way, so statedness is tracked beside it."
     env2 = Check.Quot.addQuot(env)?
-    match Check.State.envGet(env2, h.name)
-        Option.Some(Const.CQuot(g, k)) -> match Bool.and(Bool.and(k == kind, g.params == h.params), g.ty == h.ty)
-            true -> Result.Ok(env2)
-            false -> Result.Err(reject("quotient constant mismatch on '{nm(h.name)}'"))
-        _ -> Result.Err(reject("'{nm(h.name)}' is not a quotient constant"))
+    match Check.State.quotSeen(env2, h.name)
+        true -> Result.Err(reject("'{nm(h.name)}' has already been declared"))
+        false -> match Check.State.envGet(env2, h.name)
+            Option.Some(Const.CQuot(g, k)) -> match Bool.and(Bool.and(k == kind, g.params == h.params), g.ty == h.ty)
+                true -> Result.Ok(Check.State.quotMark(env2, h.name))
+                false -> Result.Err(reject("quotient constant mismatch on '{nm(h.name)}'"))
+            _ -> Result.Err(reject("'{nm(h.name)}' is not a quotient constant"))
 
 verify addQuotDecl
     addQuotDecl(Check.State.envEmpty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), QuotKind.QType) => Result.Err(Fail.Reject("failed to initialize quot module, environment does not have 'Eq' type"))
