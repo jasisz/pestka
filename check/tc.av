@@ -4245,12 +4245,17 @@ decision NoProofReadFromTypes
     impacts = [notProofByHead, typeSays, projSays]
 
 fn notProofByHead(st: St, t: Expr) -> Bool
-    ? "Whether t is surely no proof by the declarations of its head alone. Let t be a constant c at levels applied to exactly as many arguments as c's type has syntactic pis. If the type then ends in a sort, t is a type; if it ends in a constant D applied to as many arguments as D's type has syntactic pis, ending in Sort v, then t's type has sort v at the levels as written in c's type and then at t's levels. Inference finds t's type and its sort just so, peeling those pis without normalizing, and t is a proof exactly when that sort is zero; the arguments of t never enter. Anything else is left to inference."
-    match Core.Apps.fnOf(t)
-        Expr.Const(_, n, ls) -> headSays(st, Check.State.lookup(st, n), ls, Core.Apps.numArgs(t))
-        Expr.FVar(id) -> localSays(st, id, Core.Apps.numArgs(t))
-        Expr.Proj(_, sn, i, _) -> projSays(st, sn, i, Core.Apps.numArgs(t))
-        _ -> false
+    ? "Whether t is surely no proof by its shape and the declarations of its head alone. A sort and a pi are types, whose type is a sort, and a literal is a number or a string, whose type is an inductive type in Type: none is a proof. Let t be a constant c at levels applied to exactly as many arguments as c's type has syntactic pis. If the type then ends in a sort, t is a type; if it ends in a constant D applied to as many arguments as D's type has syntactic pis, ending in Sort v, then t's type has sort v at the levels as written in c's type and then at t's levels. Inference finds t's type and its sort just so, peeling those pis without normalizing, and t is a proof exactly when that sort is zero; the arguments of t never enter. Anything else is left to inference."
+    match t
+        Expr.Sort -> true
+        Expr.Pi -> true
+        Expr.NatLit -> true
+        Expr.StrLit -> true
+        _ -> match Core.Apps.fnOf(t)
+            Expr.Const(_, n, ls) -> headSays(st, Check.State.lookup(st, n), ls, Core.Apps.numArgs(t))
+            Expr.FVar(id) -> localSays(st, id, Core.Apps.numArgs(t))
+            Expr.Proj(_, sn, i, _) -> projSays(st, sn, i, Core.Apps.numArgs(t))
+            _ -> false
 
 verify notProofByHead
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("F"), []), Core.Exprs.sort(Level.Zero))) => true
@@ -4258,6 +4263,10 @@ verify notProofByHead
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("v"), [])) => true
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("p"), [])) => false
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.fvar(0)) => false
+    notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.sort(Level.Zero)) => true
+    notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("P"), []), Core.Exprs.cnst(Check.Lits.name1("P"), []), Binder.Default)) => true
+    notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.natLit(3)) => true
+    notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("P"), []), Core.Exprs.bvar(0), Binder.Default)) => false
 
 fn probeEnv() -> Env
     ? "Test helper: F : Prop -> Type, a family; T : Type and v : T, a value; P : Prop and p : P, a proof."
@@ -5143,9 +5152,9 @@ verify etaStruct
 fn etaStructCore(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
     ? "s must be a full constructor application of a non-recursive structure."
     match Core.Apps.fnOf(s)
-        Expr.Const(_, n, _) -> match Check.State.lookup(st, n)
+        Expr.Const(_, n, ls) -> match Check.State.lookup(st, n)
             Option.Some(Const.CCtor(k)) -> match Bool.and(Core.Apps.numArgs(s) == k.numParams + k.numFields, isNonRecStructure(st, k.induct))
-                true -> etaStructTypes(st, t, s, k)
+                true -> etaStructTypes(st, t, s, k, ls)
                 false -> no(st)
             _ -> no(st)
         _ -> no(st)
@@ -5153,35 +5162,65 @@ fn etaStructCore(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
 verify etaStructCore
     resultBool(etaStructCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => false
 
-fn etaStructTypes(st: St, t: Expr, s: Expr, k: Ctor) -> Result<RB, Fail>
-    ? "Equal types, then each field against the projection of t."
+decision EtaProofFieldsSkipped
+    date = "2026-10-29"
+    reason =
+        "Structure eta compared every field of mk params fields with the"
+        "projection of the other side, proof fields included: each such pair"
+        "went to proof irrelevance, which inferred the projection's type and"
+        "the field's type and compared the two propositions. But the types of"
+        "the two sides were found equal first, so the projection of t in the"
+        "place of field i proves the field's proposition at t's earlier"
+        "projections, the field proves it at the earlier fields, and once"
+        "those are equal the propositions are equal by congruence: proofs of"
+        "one proposition are equal, as ProofArgsSkipped reads it off a"
+        "constant's pis. The fields are now compared beside the constructor's"
+        "pis past its parameters, and a place whose domain is a proposition"
+        "is left out. A probe counted 683 field comparisons on etale, 1.5%"
+        "of the steps with what they called. Instructions retired, one"
+        "worker, Arena builds on Aver a714e917, median of three pairs: etale"
+        "24.31 G to 24.14 G, taylor 20.30 G to 20.16 G, rep14 3.07 G to"
+        "3.01 G, contdiff 17.25 G to 17.21 G, colim 4.36 G to 4.34 G; Init"
+        "59.0 G, std 104.0 G, con-leche 97.4 G and reachability 26.7 G as"
+        "they were, within noise."
+    chosen = "EtaProofFieldsSkipped"
+    rejected = ["EveryFieldCompared"]
+    impacts = [etaStructTypes, fieldsTyped, projections]
+
+fn etaStructTypes(st: St, t: Expr, s: Expr, k: Ctor, ls: List<Level>) -> Result<RB, Fail>
+    ? "Equal types, then each field against the projection of t, proof fields left out (EtaProofFieldsSkipped)."
     it = inferType(st, t)?
     is = inferType(it.st, s)?
     eq = isDefEq(is.st, it.e, is.e)?
     match eq.b
         false -> no(eq.st)
-        true -> fieldsEq(eq.st, t, List.drop(Core.Apps.argsOf(s), k.numParams), k.induct, 0)
+        true -> fieldsTyped(eq.st, projections(k.induct, t, 0, k.numFields), List.drop(Core.Apps.argsOf(s), k.numParams), k, ls, k.head.ty, k.numParams, [])
 
 verify etaStructTypes
-    resultBool(etaStructTypes(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Succ(Level.Zero)), Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), induct = Core.Names.anon(), cidx = 0, numParams = 0, numFields = 0, isUnsafe = false))) => false
+    resultBool(etaStructTypes(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Succ(Level.Zero)), Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), induct = Core.Names.anon(), cidx = 0, numParams = 0, numFields = 0, isUnsafe = false), [])) => false
 
-fn fieldsEq(st: St, t: Expr, fields: List<Expr>, induct: Name, i: Int) -> Result<RB, Fail>
-    ? "Field i against t.i."
-    match fields
-        [] -> yes(st)
-        [x, ..rest] -> fieldNext(isDefEq(st, Core.Exprs.proj(induct, i, t), x)?, t, rest, induct, i)
+fn fieldsTyped(st: St, projs: List<Expr>, fields: List<Expr>, k: Ctor, ls: List<Level>, ty: Expr, params: Int, ctx: List<Expr>) -> Result<RB, Fail>
+    ? "The projections against the fields beside the pis of the constructor's type at the levels ls: past its params parameters, whose domains go into ctx, the fields are compared as the arguments of a constant are (argsTyped), proof fields left out."
+    match params > 0
+        false -> argsTyped(st, projs, fields, k.head, ls, ty, ctx)
+        true -> match ty
+            Expr.Pi(_, d, b) -> fieldsTyped(st, projs, fields, k, ls, b, params - 1, List.prepend(d, ctx))
+            _ -> argsAll(st, projs, fields)
 
-verify fieldsEq
-    resultBool(fieldsEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [], Core.Names.anon(), 0)) => true
+verify fieldsTyped
+    resultBool(fieldsTyped(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), induct = Core.Names.anon(), cidx = 0, numParams = 0, numFields = 0, isUnsafe = false), [], Core.Exprs.sort(Level.Zero), 0, [])) => true
+    resultBool(fieldsTyped(Check.State.fresh(probeEnv(), [], Safety.Safe), [Core.Exprs.fvar(1)], [Core.Exprs.fvar(2)], Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), induct = Core.Names.anon(), cidx = 0, numParams = 1, numFields = 1, isUnsafe = false), [], Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("P"), []), Core.Exprs.sort(Level.Zero), Binder.Default), Binder.Default), 1, [])) => true
+    resultBool(fieldsTyped(Check.State.fresh(probeEnv(), [], Safety.Safe), [Core.Exprs.fvar(1)], [Core.Exprs.fvar(2)], Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), induct = Core.Names.anon(), cidx = 0, numParams = 1, numFields = 1, isUnsafe = false), [], Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("T"), []), Core.Exprs.sort(Level.Zero), Binder.Default), Binder.Default), 1, [])) => false
 
-fn fieldNext(r: RB, t: Expr, rest: List<Expr>, induct: Name, i: Int) -> Result<RB, Fail>
-    ? "Stops at the first unequal field."
-    match r.b
-        true -> fieldsEq(r.st, t, rest, induct, i + 1)
-        false -> no(r.st)
+fn projections(induct: Name, t: Expr, i: Int, n: Int) -> List<Expr>
+    ? "t.i up to t.(n-1)."
+    match i >= n
+        true -> []
+        false -> List.prepend(Core.Exprs.proj(induct, i, t), projections(induct, t, i + 1, n))
 
-verify fieldNext
-    resultBool(fieldNext(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), [], Core.Names.anon(), 0)) => false
+verify projections
+    projections(Core.Names.anon(), Core.Exprs.fvar(0), 0, 2) => [Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(0)), Core.Exprs.proj(Core.Names.anon(), 1, Core.Exprs.fvar(0))]
+    projections(Core.Names.anon(), Core.Exprs.fvar(0), 0, 0) => []
 
 fn stringLitExpansion(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
     ? "A string literal against String.ofList of something: expand the literal."
