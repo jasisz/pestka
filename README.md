@@ -33,14 +33,14 @@ below that profile was made from.
 
 | Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 8 workers | Peak, 8 workers |
 |---|---|---|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 60.7 G | 8.1 s | 0.8 GB | 4.0 s | 1.1 GB |
-| `std` (98,086) | accepted | 106.3 G | 14 s | 1.3 GB | 6.8 s | 1.8 GB |
-| `reachability` | accepted | 28.6 G | 2.7 s | 0.5 GB | 2.2 s | 0.5 GB |
-| `con-leche` | accepted | 99.2 G | 11 s | 1.2 GB | 6.0 s | 1.6 GB |
-| `cedar` | accepted | 147.0 G | 20 s | 1.4 GB | 8.0 s | 1.9 GB |
-| `cslib` | accepted | 571.5 G | 85 s | 4.1 GB | 29 s | 5.4 GB |
-| `mathlib` (702,040) | accepted | 2.03 T | 334 s | 7.3 GB | 111 s | 9.5 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 62.9 G (13.6 G) | 5.5 s (1.0 s) | 1.0 GB | 5.3 s (1.0 s) | 1.0 GB |
+| `init` (58,170 declarations) | accepted | 59.1 G | 8.6 s | 0.8 GB | 4.1 s | 1.1 GB |
+| `std` (98,086) | accepted | 104.0 G | 14 s | 1.3 GB | 6.2 s | 1.7 GB |
+| `reachability` | accepted | 26.8 G | 2.7 s | 0.4 GB | 2.3 s | 0.4 GB |
+| `con-leche` | accepted | 97.5 G | 12 s | 1.2 GB | 6.3 s | 1.6 GB |
+| `cedar` | accepted | 145.0 G | 21 s | 1.4 GB | 9.5 s | 1.9 GB |
+| `cslib` | accepted | 560.3 G | 89 s | 4.0 GB | 34 s | 5.4 GB |
+| `mathlib` (702,040) | accepted | 2.00 T | 357 s | 7.1 GB | 151 s | 9.4 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 59.2 G (12.5 G) | 5.4 s (0.9 s) | 1.0 GB | 4.9 s (0.9 s) | 1.0 GB |
 
 ### As WebAssembly
 
@@ -54,14 +54,14 @@ about 6% of the instructions off the one Aver emits.
 
 | Test | Verdict | Instructions | Time | Peak |
 |---|---|---|---|---|
-| `init` | accepted | 254.0 G | 18 s | 2.7 GB |
-| `std` | accepted | 443.5 G | 31 s | 3.6 GB |
-| `reachability` | accepted | 89.2 G | 5.3 s | 1.6 GB |
-| `con-leche` | accepted | 415.4 G | 29 s | 3.2 GB |
-| `cedar` | accepted | 612.9 G | 45 s | 5.0 GB |
-| `cslib` | accepted | 2.27 T | 163 s | 10.4 GB |
-| `mathlib` | accepted | 9.48 T | 736 s | 12.3 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 231 G (25.1 G) | 14 s (1.4 s) | 2.0 GB |
+| `init` | accepted | 245.7 G | 17 s | 2.5 GB |
+| `std` | accepted | 413.8 G | 29 s | 4.8 GB |
+| `reachability` | accepted | 81.6 G | 4.7 s | 1.7 GB |
+| `con-leche` | accepted | 390.9 G | 26 s | 4.2 GB |
+| `cedar` | accepted | 580.2 G | 41 s | 5.0 GB |
+| `cslib` | accepted | 2.19 T | 159 s | 11.0 GB |
+| `mathlib` | accepted | 9.04 T | 708 s | 13.0 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 224 G (22.6 G) | 14 s (1.3 s) | 2.1 GB |
 
 ## What it does differently
 
