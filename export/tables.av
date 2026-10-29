@@ -119,9 +119,9 @@ verify expr law sameAsSpec
     given i: Int = [0, 2, 65535, 65536, 65537]
     expr(sequential(empty(), 0, n), i) => exprSpec(n, i)
 
-verify expr law laterLineReplaces
+verify expr law firstLineKept
     given i: Int = [0, 4, 5, 6, 9]
-    expr(Result.withDefault(addExpr(sequential(Result.withDefault(addExpr(empty(), 5, Core.Exprs.natLit(100)), empty()), 0, 10), 5, Core.Exprs.natLit(200)), empty()), i) => replacedSpec(i)
+    expr(sequential(Result.withDefault(addExpr(empty(), 5, Core.Exprs.natLit(100)), empty()), 0, 10), i) => keptSpec(i)
 
 fn sequential(t: Tables, k: Int, n: Int) -> Tables
     ? "t with expressions k to n - 1 defined in order, expression j being the literal j: what lean4export writes."
@@ -141,14 +141,14 @@ fn exprSpec(n: Int, i: Int) -> Result<Expr, String>
 verify exprSpec
     exprSpec(1, 1) => Result.Err("unknown expression index 1")
 
-fn replacedSpec(i: Int) -> Result<Expr, String>
-    ? "Expression 5 defined first as 100, then 0 to 9 in order, then 5 again as 200: the last line for an index wins."
+fn keptSpec(i: Int) -> Result<Expr, String>
+    ? "Expression 5 defined first as 100, then 0 to 9 in order: the second line for 5 is refused, so the first one stands, and the rest still read back."
     match i == 5
-        true -> Result.Ok(Core.Exprs.natLit(200))
+        true -> Result.Ok(Core.Exprs.natLit(100))
         false -> Result.Ok(Core.Exprs.natLit(i))
 
-verify replacedSpec
-    replacedSpec(5) => Result.Ok(Core.Exprs.natLit(200))
+verify keptSpec
+    keptSpec(5) => Result.Ok(Core.Exprs.natLit(100))
 
 fn freshChunk() -> Vector<Expr>
     ? "An empty chunk of the dense run: 65536 places."
@@ -178,25 +178,41 @@ verify levels
     levels(empty(), [2], []) => Result.Err("unknown level index 2")
 
 fn addName(t: Tables, i: Int, n: Name) -> Result<Tables, String>
-    ? "Defines name i."
-    Result.Ok(Tables.update(t, names = Map.set(t.names, i, n), nextName = t.nextName + 1))
+    ? "Defines name i. An index already bound, the anonymous name 0 included, is malformed input, as the reference kernel holds it; it is refused rather than overwritten."
+    match Map.has(t.names, i)
+        true -> Result.Err("name index {i} is already bound")
+        false -> Result.Ok(Tables.update(t, names = Map.set(t.names, i, n), nextName = t.nextName + 1))
 
 verify addName
     Result.withDefault(addName(empty(), 1, Core.Names.anon()), empty()).nextName => 2
     Map.has(Result.withDefault(addName(empty(), 7, Core.Names.anon()), empty()).names, 7) => true
+    addName(empty(), 0, Core.Names.anon()) => Result.Err("name index 0 is already bound")
 
 fn addLevel(t: Tables, i: Int, l: Level) -> Result<Tables, String>
-    ? "Defines level i."
-    Result.Ok(Tables.update(t, levels = Map.set(t.levels, i, l), nextLevel = t.nextLevel + 1))
+    ? "Defines level i. An index already bound, level 0 included, is refused as addName refuses one."
+    match Map.has(t.levels, i)
+        true -> Result.Err("level index {i} is already bound")
+        false -> Result.Ok(Tables.update(t, levels = Map.set(t.levels, i, l), nextLevel = t.nextLevel + 1))
 
 verify addLevel
     Result.withDefault(addLevel(empty(), 1, Level.Zero), empty()).nextLevel => 2
+    addLevel(empty(), 0, Level.Zero) => Result.Err("level index 0 is already bound")
 
 fn addExpr(t: Tables, i: Int, e: Expr) -> Result<Tables, String>
-    ? "Defines expression i. lean4export numbers expressions 0, 1, 2 and on, so they go into chunks of a dense run, 16 bytes each; an index out of that order, or defined again, goes into the map, which expr reads first. On mathlib the map alone held 105 million entries, about 4.4 GB, twice that while it grew."
-    match Bool.and(i == t.dense, Bool.not(Map.has(t.exprs, i)))
-        true -> Result.Ok(denseAdd(t, e))
-        false -> Result.Ok(Tables.update(t, exprs = Map.set(t.exprs, i, e), nextExpr = t.nextExpr + 1))
+    ? "Defines expression i. lean4export numbers expressions 0, 1, 2 and on, so they go into chunks of a dense run, 16 bytes each; an index out of that order goes into the map, which expr reads first. On mathlib the map alone held 105 million entries, about 4.4 GB, twice that while it grew. An index already bound is refused, as by addName."
+    match Bool.or(Bool.and(i >= 0, i < t.dense), Map.has(t.exprs, i))
+        true -> Result.Err("expression index {i} is already bound")
+        false -> Result.Ok(exprPlaced(t, i, e))
+
+fn exprPlaced(t: Tables, i: Int, e: Expr) -> Tables
+    ? "t with the unbound expression i: at the end of the dense run when it comes next there, else in the map."
+    match i == t.dense
+        true -> denseAdd(t, e)
+        false -> Tables.update(t, exprs = Map.set(t.exprs, i, e), nextExpr = t.nextExpr + 1)
+
+verify exprPlaced
+    exprPlaced(empty(), 0, Core.Exprs.bvar(0)).dense => 1
+    Map.has(exprPlaced(empty(), 3, Core.Exprs.bvar(0)).exprs, 3) => true
 
 fn denseAdd(t: Tables, e: Expr) -> Tables
     ? "Puts e at the end of the dense run; a full chunk joins the others and a fresh one starts."
@@ -223,6 +239,8 @@ fn withChunk(chunks: Vector<Vector<Expr>>, c: Vector<Expr>) -> Vector<Vector<Exp
 verify addExpr
     Result.withDefault(addExpr(empty(), 0, Core.Exprs.bvar(0)), empty()).nextExpr => 1
     Map.has(Result.withDefault(addExpr(empty(), 5, Core.Exprs.bvar(0)), empty()).exprs, 5) => true
+    addExpr(Result.withDefault(addExpr(empty(), 0, Core.Exprs.bvar(0)), empty()), 0, Core.Exprs.bvar(1)) => Result.Err("expression index 0 is already bound")
+    addExpr(Result.withDefault(addExpr(empty(), 5, Core.Exprs.bvar(0)), empty()), 5, Core.Exprs.bvar(1)) => Result.Err("expression index 5 is already bound")
 
 fn addDecl(t: Tables, d: Decl) -> Tables
     ? "Appends a declaration, newest first, and counts its constants."
