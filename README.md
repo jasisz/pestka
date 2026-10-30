@@ -192,6 +192,16 @@ every combination of the values its `given` lines list, and the claim
 - `localGet` laws (`check/state.av`): the local context, a persistent trie,
   holds what was put, keeps every other variable and finds each declared
   one.
+- Universe levels (`core/univ.av`), against `levelValue`, what a level
+  denotes for an assignment of its parameters: `isGeq law sound` (a
+  level accepted as at least another is so for every assignment),
+  `isEquiv law sound`, `normalize`, `mkMax` and `mkImax law keepsValue`,
+  and `instantiate law sameAsSubstitutedValues`. `aver proof` proves the
+  helpers below them for all inputs (`toOffset`, `mkSucc`, `mkSuccN`,
+  `biggerExplicit law keepsValue`, `isNotZero law atLeastOne`,
+  `normalizesToZero law alwaysZero`, `isExplicit law valueIsDepth`, values
+  never negative); the rest it does not yet, as they turn on `==` between
+  levels or recurse through normal forms.
 
 ```bash
 aver verify . --module-root .                                  # examples and laws

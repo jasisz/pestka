@@ -568,3 +568,191 @@ fn geqOffsets(oa: Offset, ob: Offset) -> Bool
 verify geqOffsets
     geqOffsets(toOffset(Level.Succ(Level.Zero)), toOffset(Level.Zero)) => true
     geqOffsets(toOffset(Level.Param(Core.Names.anon())), toOffset(Level.Param(Core.Names.str(Core.Names.anon(), "v")))) => false
+
+fn levelValue(l: Level, ps: List<Name>, vs: List<Int>) -> Int
+    ? "What a level denotes when parameter ps[i] stands for vs[i]; a parameter without a value is zero."
+    match l
+        Level.Zero -> 0
+        Level.Succ(a) -> levelValue(a, ps, vs) + 1
+        Level.Max(a, b) -> Int.max(levelValue(a, ps, vs), levelValue(b, ps, vs))
+        Level.IMax(a, b) -> imaxValue(levelValue(a, ps, vs), levelValue(b, ps, vs))
+        Level.Param(n) -> paramValue(n, ps, vs)
+
+verify levelValue
+    levelValue(Level.IMax(Level.Succ(Level.Zero), Level.Zero), [], []) => 0
+    levelValue(Level.Max(sampleParam("u"), Level.Succ(Level.Zero)), [Core.Names.str(Core.Names.anon(), "u")], [3]) => 3
+    levelValue(Level.Zero, [], []) => 0
+
+fn imaxValue(a: Int, b: Int) -> Int
+    ? "imax: zero when the right side is, else max."
+    match b == 0
+        true -> 0
+        false -> Int.max(a, b)
+
+verify imaxValue
+    imaxValue(2, 0) => 0
+    imaxValue(2, 1) => 2
+
+fn paramValue(n: Name, ps: List<Name>, vs: List<Int>) -> Int
+    ? "The value paired with n, never below zero; zero when there is none."
+    match ps
+        [] -> 0
+        [p, ..prest] -> match p == n
+            true -> Int.max(firstValue(vs), 0)
+            false -> paramValue(n, prest, List.drop(vs, 1))
+
+verify paramValue
+    paramValue(Core.Names.anon(), [Core.Names.anon()], [-2]) => 0
+    paramValue(Core.Names.anon(), [], []) => 0
+    paramValue(Core.Names.anon(), [Core.Names.str(Core.Names.anon(), "u"), Core.Names.anon()], [1]) => 0
+    paramValue(Core.Names.anon(), [Core.Names.str(Core.Names.anon(), "u"), Core.Names.anon()], [1, 7]) => 7
+
+fn firstValue(vs: List<Int>) -> Int
+    ? "The first value, zero for none."
+    match vs
+        [] -> 0
+        [v, .._] -> v
+
+verify firstValue
+    firstValue([4, 5]) => 4
+    firstValue([]) => 0
+
+fn levelValues(us: List<Level>, ps: List<Name>, vs: List<Int>) -> List<Int>
+    ? "levelValue of each."
+    match us
+        [] -> []
+        [u, ..rest] -> List.prepend(levelValue(u, ps, vs), levelValues(rest, ps, vs))
+
+verify levelValues
+    levelValues([Level.Zero, Level.Succ(Level.Zero)], [], []) => [0, 1]
+    levelValues([], [], []) => []
+
+fn sampleParam(s: String) -> Level
+    ? "The parameter named s, for the laws."
+    Level.Param(Core.Names.str(Core.Names.anon(), s))
+
+verify sampleParam
+    sampleParam("u") => Level.Param(Core.Names.str(Core.Names.anon(), "u"))
+
+verify paramValue law neverNegative
+    given n: Name = [Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "w")]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    paramValue(n, ps, vs) >= 0 => true
+
+verify levelValue law neverNegative
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    using [paramValue.neverNegative]
+    levelValue(l, ps, vs) >= 0 => true
+
+verify toOffset law keepsValue
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    levelValue(toOffset(l).base, ps, vs) + toOffset(l).k => levelValue(l, ps, vs)
+
+verify mkSucc law addsOne
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    levelValue(mkSucc(l), ps, vs) => levelValue(l, ps, vs) + 1
+
+verify mkSuccN law addsK
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given k: Int = [-1, 0, 1, 3]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    when k >= 0
+    levelValue(mkSuccN(l, k), ps, vs) => levelValue(l, ps, vs) + k
+
+verify isExplicit law valueIsDepth
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    when isExplicit(l)
+    induction l
+    levelValue(l, ps, vs) => depth(l)
+
+verify isNotZero law neverZero
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    using [levelValue.neverNegative]
+    Bool.or(Bool.not(isNotZero(l)), levelValue(l, ps, vs) >= 1) => true
+
+verify isNotZero law atLeastOne
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    when isNotZero(l)
+    using [isNotZero.neverZero]
+    levelValue(l, ps, vs) >= 1 => true
+
+verify normalizesToZero law alwaysZero
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    when normalizesToZero(l)
+    induction l
+    levelValue(l, ps, vs) => 0
+
+verify biggerExplicit law keepsValue
+    given a: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given b: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    when Bool.and(isExplicit(a), isExplicit(b))
+    using [isExplicit.valueIsDepth]
+    levelValue(biggerExplicit(a, b), ps, vs) => Int.max(levelValue(a, ps, vs), levelValue(b, ps, vs))
+
+verify mkMax law keepsValue
+    given a: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given b: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    using [biggerExplicit.keepsValue, toOffset.keepsValue, levelValue.neverNegative]
+    levelValue(mkMax(a, b), ps, vs) => Int.max(levelValue(a, ps, vs), levelValue(b, ps, vs))
+
+verify mkImax law keepsValue
+    given a: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given b: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    using [mkMax.keepsValue, isNotZero.atLeastOne, levelValue.neverNegative]
+    levelValue(mkImax(a, b), ps, vs) => imaxValue(levelValue(a, ps, vs), levelValue(b, ps, vs))
+
+verify normalize law keepsValue
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    levelValue(normalize(l), ps, vs) => levelValue(l, ps, vs)
+
+verify isEquiv law sound
+    given a: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given b: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    when isEquiv(a, b)
+    using [normalize.keepsValue]
+    levelValue(a, ps, vs) => levelValue(b, ps, vs)
+
+verify isGeq law sound
+    given a: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given b: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    when isGeq(a, b)
+    using [normalize.keepsValue]
+    levelValue(a, ps, vs) >= levelValue(b, ps, vs) => true
+
+verify instantiate law sameAsSubstitutedValues
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u")], [Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given us: List<Level> = [[Level.Succ(sampleParam("v"))], [Level.Zero, Level.Max(sampleParam("u"), sampleParam("w"))]]
+    given qs: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v"), Core.Names.str(Core.Names.anon(), "w")]]
+    given ws: List<Int> = [[0, 0, 0], [2, 0, 5], [1, 3, 0]]
+    when List.len(ps) == List.len(us)
+    using [mkMax.keepsValue, mkImax.keepsValue]
+    levelValue(instantiate(l, ps, us), qs, ws) => levelValue(l, List.concat(ps, qs), List.concat(levelValues(us, qs, ws), ws))
