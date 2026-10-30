@@ -1,4 +1,5 @@
 <p align="center"><img src="logo.svg" alt="Pestka" width="120"></p>
+<p align="center"><a href="https://github.com/jasisz/aver"><img src="https://img.shields.io/badge/written%20in-Aver-6b4f9e" alt="Written in Aver"></a></p>
 
 # Pestka
 
@@ -199,9 +200,8 @@ aver proof check/lits.av --module-root . --backend aver --check-json
 
 ## Requirements
 
-- **Aver at the commit in [`.aver-version`](.aver-version).** The version
-  string (`0.31.0-dev`) does not move between upstream commits, so the project
-  pins a SHA rather than a number.
+- **Aver at the version in [`.aver-version`](.aver-version)**, a release
+  on crates.io.
 - **Lean** through elan, and `lean4export` built for the same Lean, only to
   produce input files. Pestka itself never runs Lean. The numbers here come
   from exports made as the Lean Kernel Arena makes them: `lean4export`
@@ -213,9 +213,7 @@ aver proof check/lits.av --module-root . --backend aver --check-json
 ### Installing the pinned Aver
 
 ```bash
-git clone https://github.com/jasisz/aver aver
-git -C aver checkout "$(cat .aver-version)"
-cargo install --path aver aver-lang --locked --features wasm
+cargo install aver-lang --version "$(cat .aver-version)" --locked --features wasm
 ```
 
 `--features wasm` adds `--target wasm-gc` and `aver run --wasm-gc`. Add
@@ -290,13 +288,14 @@ Compiled to WebAssembly:
 
 ```bash
 bin/build-wasm                               # wasm-gc, optimized by wasm-opt, into .build-wasm/
-AVER_SRC=AVER-CHECKOUT bin/run-wasm FILE.ndjson
+bin/run-wasm FILE.ndjson
 aver compile main.av --module-root . --target wasip2 -o out/
 aver run main.av --module-root . --wasm-gc -- FILE.ndjson
 ```
 
 `bin/run-wasm` runs the module under Node through Aver's host for wasm-gc
-programs (`tools/wasm-work/run.mjs` of the Aver checkout `AVER_SRC` names),
+programs ([`wasm-host/`](wasm-host), copied from `tools/wasm-work` of the
+Aver release, which the crate leaves out),
 with a heap of up to 14 GB and young-generation semi-spaces of 256 MB. It
 passes on Pestka's exit status only when the verdict line agrees with it and
 exits with 3 otherwise, so a crash of V8 or of the host never reads as a
