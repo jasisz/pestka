@@ -5,7 +5,7 @@ module Tc
         "step. The three call each other (whnf infers types for iota on"
         "structures, equality normalizes, inference checks equality), so"
         "they live in one module. Every function threads the checker state."
-    exposes [RI, LD, inferType, check, valueFits, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel, withFacts, recFacts, majorInduct]
+    exposes [RI, LD, reachesRecursor, inferType, check, valueFits, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel, withFacts, recFacts, majorInduct]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Cache, Check.State, Check.Lits, Core.Hash, Check.Shapes]
     effects []
 
@@ -2365,32 +2365,13 @@ verify natGo
     Result.withDefault(natGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}), false, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn natTryGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, args: MXs, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "Nat arithmetic on the built arguments; a literal result is the answer, otherwise the head unfolds; in a derivation it is stuck instead (NatOpsStuckInDerivations)."
+    ? "Nat arithmetic on the built arguments; a literal result is the answer, otherwise the head unfolds; in a derivation it is stuck instead (DerivedRules)."
     n = reduceNat(st, Core.Apps.mkApps(f, args.es))?
     match n.o
         Option.Some(v) -> Result.Ok(Go(st = n.st, ms = args.ms, run = false, t = v, env = [], rest = []))
         Option.None -> match n.st.fuel >= 0
             true -> Result.Ok(stuckGo(n.st, f, stack, args.ms))
             false -> unfoldGo(n.st, f, c, stack, args.ms, cheapRec, cheapProj)
-
-decision NatOpsStuckInDerivations
-    date = "2026-10-31"
-    reason =
-        "A Nat operation on a literal is computed on the literal, not by"
-        "its definition. A derivation meets the operations with a variable"
-        "for an operand and unfolded them, so a leaf held the operation's"
-        "recursion on that variable; at a call the variable was a literal"
-        "and the recursion ran once per unit of it, past the stack on a"
-        "theorem about characters in Init. In a derivation such an"
-        "operation is stuck, as a free variable is: the leaf keeps it, and"
-        "at a call it meets its literals and is computed on them. For the"
-        "same reason such an operation gets no rule of its own: Nat.div"
-        "with one literal operand went from its rule into its recursion on"
-        "fuel, in Int64.toBitVec_div, instead of stopping where unfolding"
-        "stops."
-    chosen = "NatOpsStuckInDerivations"
-    rejected = ["NatOpsUnfoldedInDerivations"]
-    impacts = [natTryGo, natComputed, deriveGo]
 
 verify natTryGo
     Result.withDefault(natTryGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Option.None, [], MXs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], ms = MS(next = 0, forced = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(3)
@@ -2587,7 +2568,7 @@ fn unfoldOn(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRe
     ? "The unfolding itself, past the fuel of a derivation."
     match f
         Expr.Const(_, _, ls) -> match c
-            Option.Some(Const.CDefn(h, v, _, Safety.Safe)) -> hotGo(st, f, ls, c, h, v, stack, ms, cheapRec, cheapProj)
+            Option.Some(Const.CDefn(h, v, _, Safety.Safe, true)) -> hotGo(st, f, ls, c, h, v, stack, ms, cheapRec, cheapProj)
             _ -> plainGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
         _ -> Result.Ok(wholeGo(st, f, stack, ms))
 
@@ -2604,106 +2585,116 @@ fn plainGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>,
         false -> Result.Ok(bareGo(st, f, c, stack, ms))
 
 verify plainGo
-    Result.withDefault(plainGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(plainGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.natLit(0), env = [], rest = [])).run => false
 
 decision DerivedRules
     date = "2026-10-31"
     reason =
-        "A definition unfolded many times in one declaration is called on"
-        "arguments of the same few shapes, and every call walks the same"
-        "steps from the definition to its weak head normal form. Reduction"
-        "commutes with substitution: if f x1 .. xn reduces to r with the"
-        "xi variables, f a1 .. an reduces to r with the ai put in. So once"
-        "a definition has been unfolded hotAfter times, f is applied to"
-        "fresh variables and brought to weak head normal form; where that"
-        "stops at a recursor waiting on one of the variables, the variable"
-        "is split into each constructor applied to fresh variables, and the"
-        "same done again, three levels deep at most, sixty-four forms in"
-        "all. The tree of constructor patterns with a reduct at each leaf"
-        "is the definition's rule: a call whose arguments, brought to weak"
-        "head normal form where the tree asks, match a path goes straight"
-        "to that leaf, with the arguments and the constructors' fields as"
-        "its environment; any other call unfolds as before. The variables"
-        "have a type that is no type at all, a constant of no name: a step"
-        "that asks a variable's type, as K and structure eta do, finds"
-        "nothing there or stops the derivation, which then gives no rule."
-        "The derivation runs on a checker state of its own, sharing only"
-        "the environment and the local context, so that no cache of the"
-        "declaration's has a second owner while it runs; a leaf keeps no"
-        "free variable of it. Only a safe definition with one to sixteen"
-        "leading lambdas, at its own number of levels, and not a casesOn,"
-        "gets a rule, and no rule is derived inside a derivation. A"
-        "derivation has fuel for 4096 unfoldings: on variables, reduction"
-        "need not end where it ends on values, as through Acc.rec."
+        "Reduction commutes with substitution: if f x1 .. xn reduces to r"
+        "with the xi variables, f a1 .. an reduces to r with the ai put in."
+        "A definition whose value is headed, under its lambdas, by a"
+        "recursor or by a definition that is, applied to a parameter, read"
+        "once as it enters the environment (reachesRecursor), is counted;"
+        "no other definition is looked up at all. One unfolded 256 times in"
+        "a declaration is applied to"
+        "fresh variables and brought to weak head normal form; where a"
+        "recursor in it waits on one of the variables, the variable is"
+        "split into each constructor applied to fresh variables and the"
+        "same done again, three levels deep, sixty-four forms at most. The"
+        "tree is the definition's rule: a call whose arguments, brought to"
+        "weak head normal form where it asks, match a path runs that leaf"
+        "with the arguments and fields as its environment; any other call"
+        "unfolds as before. A definition whose form waits on none of its"
+        "variables gets no rule: such leaves saved nothing on Init and cost"
+        "their derivations. The variables' type is a constant of no name,"
+        "so K and structure eta read nothing from it, and a step that needs"
+        "it ends the derivation without a rule. A derivation has fuel for"
+        "4096 unfoldings, as on variables reduction need not end"
+        "(Acc.rec). A Nat operation the kernel computes on literals is"
+        "stuck in a derivation and gets no rule, since its definition is"
+        "not how a literal reduces: a rule for Nat.div ran its recursion on"
+        "fuel in Int64.toBitVec_div. K-like and structure recursors are not"
+        "split on: they reach their rule without reducing the major premise,"
+        "and a guard would reduce it. A derivation runs on a state of its"
+        "own, so no cache of the declaration gets a second owner; rules"
+        "kept across declarations cost cedar 4% and were left out. One"
+        "worker: reachability 26.8 G to 24.3 G instructions, perf/ 49.7 G"
+        "to 42.2 G, magma-list-deep-n36 12.5 G to 7.2 G."
     chosen = "DerivedRules"
-    rejected = ["UnfoldedAtEveryCall"]
-    impacts = [unfoldGo, hotGo, countGo, deriveGo, deriveRule, explore, blocker, fireGo, guardPick]
-
-fn hotAfter() -> Int
-    ? "How many unfoldings of a definition in one declaration make it hot, so that a rule is derived for it (DerivedRules)."
-    32
-
-verify hotAfter
-    hotAfter() => 32
-
-fn deriveChecked() -> Bool
-    ? "When true, every rule that fires is compared with unfolding: both are brought to weak head normal form, the unfolding with no rule firing in it, and a pair not definitionally equal rejects the declaration. Off in the build that is measured; on for tests of the rules themselves."
-    false
-
-verify deriveChecked
-    deriveChecked() => false
+    rejected = ["UnfoldedAtEveryCall", "LeafRules", "RulesAcrossDeclarations"]
+    impacts = [unfoldGo, hotGo, deriveGo, explore, blocker, guardPick, natTryGo]
 
 fn hotGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, h: Head, v: Expr, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "A safe definition: counted until it is hot, then by its rule when it has one and the call has the arguments the rule takes (DerivedRules)."
-    match hotKept(Map.get(st.hot, Core.Exprs.hashKey(f)), f)
-        Hot.Count(n) -> countGo(st, f, ls, c, h, v, n + 1, stack, ms, cheapRec, cheapProj)
-        Hot.Never -> plainGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
-        Hot.Rule(k, g) -> match List.len(stack) >= k
-            true -> fireGo(st, f, ls, c, k, g, stack, ms, cheapRec, cheapProj)
-            false -> plainGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
+    ? "A safe definition: counted until hot, then by its rule when it has one and the call has the arguments it takes (DerivedRules). Only a rule is checked to be f's own: another constant's count or refusal under the same key only moves f's derivation or leaves it without a rule."
+    match Map.get(st.hot, Core.Exprs.hashKey(f))
+        Option.None -> plainGo(St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, Hot.Count(1)))), f, ls, c, stack, ms, cheapRec, cheapProj)
+        Option.Some((g, x)) -> match x
+            Hot.Count(n) -> match n + 1 >= 256
+                true -> deriveGo(st, f, ls, c, h, v, lamsUpTo(v, 17, 0), stack, ms, cheapRec, cheapProj)
+                false -> plainGo(St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, Hot.Count(n + 1)))), f, ls, c, stack, ms, cheapRec, cheapProj)
+            Hot.Rule(k, r) -> match Bool.and(List.len(stack) >= k, g == f)
+                true -> fireGo(guardPick(st, r, envOf(stack, k, []), ms)?, f, ls, c, k, stack, cheapRec, cheapProj)
+                false -> plainGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
+            Hot.Never -> plainGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
 
 verify hotGo
-    Result.withDefault(hotGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
-
-fn hotKept(o: Option<Tuple<Expr, Hot>>, f: Expr) -> Hot
-    ? "What is known of f: nothing yet is a count of none; an entry of another constant under the same key leaves f without a rule."
-    match o
-        Option.Some((g, x)) -> match g == f
-            true -> x
-            false -> Hot.Never
-        Option.None -> Hot.Count(0)
-
-verify hotKept
-    hotKept(Option.None, Core.Exprs.natLit(1)) => Hot.Count(0)
-    hotKept(Option.Some((Core.Exprs.natLit(2), Hot.Count(3))), Core.Exprs.natLit(1)) => Hot.Never
-
-fn countGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, h: Head, v: Expr, n: Int, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "One more unfolding counted; at hotAfter, the rule is derived, except inside a derivation, where the definition never gets one."
-    key = Core.Exprs.hashKey(f)
-    match n >= hotAfter()
-        false -> plainGo(St.update(st, hot = Map.set(st.hot, key, (f, Hot.Count(n)))), f, ls, c, stack, ms, cheapRec, cheapProj)
-        true -> match Bool.or(st.fuel >= 0, Map.has(st.hot, derivingKey()))
-            true -> plainGo(St.update(st, hot = Map.set(st.hot, key, (f, Hot.Never))), f, ls, c, stack, ms, cheapRec, cheapProj)
-            false -> deriveGo(st, f, ls, c, h, v, lamsUpTo(v, 17, 0), stack, ms, cheapRec, cheapProj)
-
-verify countGo
-    Result.withDefault(countGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), 1, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
-
-fn derivingKey() -> Core.Exprs.Key
-    ? "The key that marks a checker state as the one a derivation runs on."
-    Core.Exprs.key(0)
+    Result.withDefault(hotGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.natLit(0), env = [], rest = [])).run => false
 
 fn deriveGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, h: Head, v: Expr, k: Int, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "The rule of a definition with k leading lambdas, derived on a state of its own (derivingState); what is kept is the rule, or that there is none."
-    match Bool.and(Bool.and(Bool.and(k > 0, k <= 16), Bool.not(natComputed(f))), Bool.and(Bool.not(casesNamed(h.name)), List.len(h.params) == List.len(ls)))
-        false -> plainGo(St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, Hot.Never))), f, ls, c, stack, ms, cheapRec, cheapProj)
-        true -> derivedGo(st, ruleOf(deriveRule(derivingState(st), f, k)), f, ls, c, k, stack, ms, cheapRec, cheapProj)
+    ? "The rule of a definition with one to sixteen leading lambdas, at its own number of levels, neither a casesOn nor a Nat operation computed on literals, kept; none is derived inside a derivation."
+    ok = Bool.and(Bool.and(Bool.and(k > 0, k <= 16), st.fuel < 0), Bool.and(Bool.not(Bool.or(natComputed(f), casesNamed(h.name))), List.len(h.params) == List.len(ls)))
+    hotGo(St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, ruleOf(ok, st, f, k)))), f, ls, c, h, v, stack, ms, cheapRec, cheapProj)
 
 verify deriveGo
-    Result.withDefault(deriveGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), 0, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+    Result.withDefault(deriveGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), 0, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.natLit(0), env = [], rest = [])).run => false
+
+fn ruleOf(ok: Bool, st: St, f: Expr, k: Int) -> Hot
+    ? "When ok, the rule derived on a state of its own (derivingState), if the derivation ends within its bounds; otherwise never one."
+    match ok
+        false -> Hot.Never
+        true -> match deriveRule(derivingState(st), f, k)
+            Result.Ok(d) -> match d.ok
+                true -> Hot.Rule(k, d.node)
+                false -> Hot.Never
+            Result.Err(_) -> Hot.Never
+
+verify ruleOf
+    ruleOf(false, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), 1) => Hot.Never
+
+fn reachesRecursor(env: Env, v: Expr) -> Bool
+    ? "Whether a definition's value, under its lambdas, is headed, through projections, by a recursor or by a definition that is, applied to one of those lambdas' variables: read once as the definition enters the environment. Only such a definition is counted and gets a rule (DerivedRules); any other unfolds as it did without them."
+    n = lamsUpTo(v, 1099511627776, 0)
+    spineReaches(env, peelLams(v, n), n)
+
+verify reachesRecursor
+    reachesRecursor(sampleSt().env, sampleLams(1, sampleNRec(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(0)))) => true
+    reachesRecursor(sampleSt().env, sampleLams(1, sampleNRec(Core.Exprs.natLit(0), Core.Exprs.natLit(0), Core.Exprs.natLit(0)))) => false
+
+fn spineReaches(env: Env, b: Expr, n: Int) -> Bool
+    ? "The head of b, past projections, a recursor or a definition that reaches one, with a variable below n among its arguments."
+    match b
+        Expr.Proj(_, _, _, x) -> spineReaches(env, x, n)
+        _ -> match Core.Apps.fnOf(b)
+            Expr.Const(_, c, _) -> match Check.State.envGet(env, c)
+                Option.Some(Const.CRec(_)) -> anyVar(Core.Apps.argsOf(b), n)
+                Option.Some(Const.CDefn(_, _, _, _, r)) -> Bool.and(r, anyVar(Core.Apps.argsOf(b), n))
+                _ -> false
+            _ -> false
+
+verify spineReaches
+    spineReaches(sampleSt().env, Core.Exprs.bvar(0), 1) => false
+
+fn anyVar(es: List<Expr>, n: Int) -> Bool
+    ? "Whether one of es is a bound variable below n."
+    match es
+        [] -> false
+        [e, ..rest] -> Bool.or(majorVar(e, n), anyVar(rest, n))
+
+verify anyVar
+    anyVar([Core.Exprs.natLit(1), Core.Exprs.bvar(0)], 1) => true
 
 fn natComputed(f: Expr) -> Bool
-    ? "A Nat operation the kernel computes on literals (natArity): its definition is not how it is reduced on them, so a rule from it would run, on a literal, the recursion the computation skips; it gets no rule (NatOpsStuckInDerivations)."
+    ? "A Nat operation the kernel computes on literals (natArity)."
     match f
         Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []) -> Check.Lits.isNatOp(op)
         _ -> false
@@ -2712,32 +2703,12 @@ verify natComputed
     natComputed(Core.Exprs.cnst(Check.Lits.name2("Nat", "div"), [])) => true
     natComputed(Core.Exprs.cnst(Check.Lits.name2("Nat", "pred"), [])) => false
 
-fn ruleOf(r: Result<RD, Fail>) -> Option<Guard>
-    ? "The tree derived, when the derivation finished within its bounds and every leaf is free of its variables; a derivation that failed gives none."
-    match r
-        Result.Ok(d) -> match d.ok
-            true -> Option.Some(d.node)
-            false -> Option.None
-        Result.Err(_) -> Option.None
-
-verify ruleOf
-    ruleOf(Result.Err(Fail.Reject("x"))) => Option.None
-
-fn derivedGo(st: St, o: Option<Guard>, f: Expr, ls: List<Level>, c: Option<Const>, k: Int, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "The rule kept and tried at once, or that there is none kept and the definition unfolded."
-    key = Core.Exprs.hashKey(f)
-    match o
-        Option.Some(g) -> match List.len(stack) >= k
-            true -> fireGo(St.update(st, hot = Map.set(st.hot, key, (f, Hot.Rule(k, g)))), f, ls, c, k, g, stack, ms, cheapRec, cheapProj)
-            false -> plainGo(St.update(st, hot = Map.set(st.hot, key, (f, Hot.Rule(k, g)))), f, ls, c, stack, ms, cheapRec, cheapProj)
-        Option.None -> plainGo(St.update(st, hot = Map.set(st.hot, key, (f, Hot.Never))), f, ls, c, stack, ms, cheapRec, cheapProj)
-
-verify derivedGo
-    Result.withDefault(derivedGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.None, Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, 1, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
-
 fn derivingState(st: St) -> St
-    ? "A checker for a derivation: the environment, the local context and the counter of variables of st, empty caches, and fuel for 4096 unfoldings; a derivation that runs out of it gives no rule, and none is derived inside it."
+    ? "A checker for a derivation: st's environment, local context and counter of variables, empty caches, and fuel for 4096 unfoldings."
     St.update(Check.State.fresh(st.env, st.params, st.safety), upTo = st.upTo, block = st.block, lctx = st.lctx, next = st.next, topLevel = st.topLevel, checkParams = st.checkParams, eager = st.eager, open = st.open, opened = st.opened, keep = st.keep, kinds = st.kinds, fuel = 4096)
+
+verify derivingState
+    derivingState(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).fuel => 4096
 
 record RD
     st: St
@@ -2758,15 +2729,11 @@ record RK
     st: St
     b: Option<Blk>
 
-fn noType() -> Expr
-    ? "The type a derivation's variables have: a constant of no name, which is no type, so that nothing about the variables can be read from it (DerivedRules)."
-    Core.Exprs.cnst(Core.Names.anon(), [])
-
 fn freshVars(st: St, n: Int, acc: List<Int>) -> RV
-    ? "n new variables of noType, never found again; their numbers in the order made."
+    ? "n new variables, never found again, their numbers in the order made; their type is a constant of no name, from which nothing can be read (DerivedRules)."
     match n <= 0
         true -> RV(st = st, ids = List.reverse(acc))
-        false -> freshNext(Check.State.names(st, Core.Names.anon(), noType(), Option.None, Binder.Default), n, acc)
+        false -> freshNext(Check.State.names(st, Core.Names.anon(), Core.Exprs.cnst(Core.Names.anon(), []), Option.None, Binder.Default), n, acc)
 
 verify freshVars
     List.len(freshVars(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 3, []).ids) => 3
@@ -2776,7 +2743,7 @@ fn freshNext(r: RE, n: Int, acc: List<Int>) -> RV
     freshVars(r.st, n - 1, List.prepend(fvarId(r.e), acc))
 
 verify freshNext
-    freshNext(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), noType(), Option.None, Binder.Default), 1, []).ids => [1]
+    freshNext(RE(e = Core.Exprs.fvar(4), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 1, []).ids => [4]
 
 fn fvarsOf(ids: List<Int>) -> List<Expr>
     ? "The variables with these numbers."
@@ -2793,10 +2760,10 @@ fn deriveRule(st: St, f: Expr, k: Int) -> Result<RD, Fail>
     explore(vs.st, f, fvarsOf(vs.ids), vs.ids, 0, 0)
 
 verify deriveRule
-    ruleOf(deriveRule(derivingState(sampleSt()), sampleDbl(), 1)) == Option.None => false
+    Result.withDefault(deriveRule(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), 1), RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, node = Guard.Leaf(Core.Exprs.bvar(0)), count = 0)).ok => false
 
 fn explore(st: St, f: Expr, args: List<Expr>, ids: List<Int>, depth: Int, count: Int) -> Result<RD, Fail>
-    ? "f at args, which hold the variables ids, brought to weak head normal form: a leaf, or, below three levels, a split on the variable a recursor waits on. Past sixty-four forms the derivation gives up."
+    ? "f at args, which hold the variables ids, in weak head normal form: above three levels a split on the variable a recursor waits on, else a leaf with the variables abstracted, the last made innermost. A leaf with another free variable or at the root, or a sixty-fifth form, gives no rule."
     match count >= 64
         true -> Result.Ok(RD(st = st, ok = false, node = Guard.Leaf(f), count = count))
         false -> exploreAt(whnf(st, Core.Apps.mkApps(f, args))?, f, args, ids, depth, count + 1)
@@ -2805,31 +2772,30 @@ verify explore
     Result.withDefault(explore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), [], [], 0, 64), RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, node = Guard.Leaf(Core.Exprs.bvar(0)), count = 0)).ok => false
 
 fn exploreAt(r: RE, f: Expr, args: List<Expr>, ids: List<Int>, depth: Int, count: Int) -> Result<RD, Fail>
-    ? "The form found, split when a recursor in it waits on one of the variables."
+    ? "The form found: split, or a leaf."
     match depth < 3
-        false -> Result.Ok(leafOf(r.st, r.e, ids, count))
         true -> splitAt(blocker(r.st, r.e, ids, 8)?, r.e, f, args, ids, depth, count)
+        false -> splitAt(RK(st = r.st, b = Option.None), r.e, f, args, ids, depth, count)
 
 verify exploreAt
-    Result.withDefault(exploreAt(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(1), [], [], 3, 0), RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, node = Guard.Leaf(Core.Exprs.bvar(0)), count = 0)).node => Guard.Leaf(Core.Exprs.natLit(1))
+    Result.withDefault(exploreAt(RE(e = Core.Exprs.fvar(5), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(1), [], [5], 3, 0), RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = false, node = Guard.Leaf(Core.Exprs.natLit(0)), count = 0)).node => Guard.Leaf(Core.Exprs.bvar(0))
 
-fn leafOf(st: St, e: Expr, ids: List<Int>, count: Int) -> RD
-    ? "A leaf: the form with the variables ids abstracted, the last made the innermost; one with any other free variable left gives no rule."
+fn splitAt(k: RK, e: Expr, f: Expr, args: List<Expr>, ids: List<Int>, depth: Int, count: Int) -> Result<RD, Fail>
+    ? "A branch for each rule of the recursor waiting on a variable; a leaf when none waits."
     b = Core.Subst.abstractFVars(e, ids)
-    RD(st = st, ok = Bool.not(Core.Exprs.hasFVar(b)), node = Guard.Leaf(b), count = count)
+    match k.b
+        Option.Some(x) -> branchesOf(k.st, f, args, ids, depth, count, x, x.rv.rules, [])
+        Option.None -> Result.Ok(RD(st = k.st, ok = Bool.and(depth > 0, Bool.not(Core.Exprs.hasFVar(b))), node = Guard.Leaf(b), count = count))
 
-verify leafOf
-    leafOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(5), [5], 0).node => Guard.Leaf(Core.Exprs.bvar(0))
-    leafOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(6), [5], 0).ok => false
+verify splitAt
+    Result.withDefault(splitAt(RK(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), b = Option.None), Core.Exprs.fvar(6), Core.Exprs.natLit(1), [], [5], 1, 0), RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, node = Guard.Leaf(Core.Exprs.bvar(0)), count = 0)).ok => false
 
 fn blocker(st: St, e: Expr, ids: List<Int>, fuel: Int) -> Result<RK, Fail>
-    ? "The variable among ids that the recursor at the head of e waits on, its major premise brought to weak head normal form; a projection's structure and a major premise that is itself stuck are looked into, fuel times at most."
+    ? "The variable among ids that the recursor at the head of e waits on, its major premise in weak head normal form; a projection's structure and a stuck major premise are looked into, fuel times."
     match fuel <= 0
         true -> Result.Ok(RK(st = st, b = Option.None))
         false -> match Core.Apps.fnOf(e)
-            Expr.Const(_, n, ls) -> match Check.State.lookup(st, n)
-                Option.Some(Const.CRec(rv)) -> recBlock(st, rv, ls, e, ids, fuel)
-                _ -> Result.Ok(RK(st = st, b = Option.None))
+            Expr.Const(_, n, ls) -> recBlock(st, Check.State.lookup(st, n), ls, e, ids, fuel)
             Expr.Proj(_, _, _, x) -> innerBlock(whnf(st, x)?, ids, fuel)
             _ -> Result.Ok(RK(st = st, b = Option.None))
 
@@ -2837,39 +2803,34 @@ verify blocker
     Result.withDefault(blocker(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), [], 8), RK(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), b = Option.None)).b == Option.None => true
 
 fn innerBlock(m: RE, ids: List<Int>, fuel: Int) -> Result<RK, Fail>
-    ? "A stuck term looked into."
-    blocker(m.st, m.e, ids, fuel - 1)
+    ? "A stuck term looked into, or the variable it is."
+    match m.e
+        Expr.FVar(_) -> Result.Ok(RK(st = m.st, b = Option.None))
+        _ -> blocker(m.st, m.e, ids, fuel - 1)
 
 verify innerBlock
     Result.withDefault(innerBlock(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], 8), RK(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), b = Option.None)).b == Option.None => true
 
-decision GuardsAsTheRecursorReduces
-    date = "2026-10-31"
-    reason =
-        "A guard brings an argument to weak head normal form to read its"
-        "constructor, as a recursor does with its major premise, except"
-        "for a K-like recursor, which takes its constructor from the type,"
-        "and a structure's, which takes projections before any reduction"
-        "(lean4#15351). A guard on such a variable would reduce what the"
-        "recursor never reduces, a term of free variables perhaps without"
-        "a weak head normal form; such recursors are not split on."
-    chosen = "GuardsAsTheRecursorReduces"
-    rejected = ["GuardsOnEveryRecursor"]
-    impacts = [recBlock]
-
-fn recBlock(st: St, rv: Rec, ls: List<Level>, e: Expr, ids: List<Int>, fuel: Int) -> Result<RK, Fail>
-    ? "A recursor of one motive and one to eight rules, with its major premise there, and neither K-like nor of a structure: those reach their rule by the type or by projections, without bringing the major premise to weak head normal form, and a guard that did would do work, or never end, where the recursor does not (GuardsAsTheRecursorReduces)."
-    majorIdx = rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices
-    n = List.len(rv.rules)
-    match Bool.and(Bool.and(Bool.and(rv.numMotives == 1, Bool.not(Bool.or(rv.k, rv.majorIsStruct))), Bool.and(n > 0, n <= 8)), Core.Apps.numArgs(e) > majorIdx)
-        false -> Result.Ok(RK(st = st, b = Option.None))
-        true -> majorBlock(whnf(st, nth(Core.Apps.argsOf(e), majorIdx))?, rv, ls, ids, fuel)
+fn recBlock(st: St, c: Option<Const>, ls: List<Level>, e: Expr, ids: List<Int>, fuel: Int) -> Result<RK, Fail>
+    ? "A recursor of one motive and one to eight rules, neither K-like nor of a structure (DerivedRules), with its major premise there: a variable among ids is split on, another stuck major premise looked into."
+    match c
+        Option.Some(Const.CRec(rv)) -> match Bool.and(Bool.and(rv.numMotives == 1, Bool.not(Bool.or(rv.k, rv.majorIsStruct))), Bool.and(List.len(rv.rules) <= 8, Core.Apps.numArgs(e) > majorAt(rv)))
+            true -> majorBlock(whnf(st, nth(Core.Apps.argsOf(e), majorAt(rv)))?, rv, ls, ids, fuel)
+            false -> Result.Ok(RK(st = st, b = Option.None))
+        _ -> Result.Ok(RK(st = st, b = Option.None))
 
 verify recBlock
-    Result.withDefault(recBlock(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), sampleRec(), [], Core.Exprs.natLit(1), [], 8), RK(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), b = Option.None)).b == Option.None => true
+    Result.withDefault(recBlock(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.None, [], Core.Exprs.natLit(1), [], 8), RK(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), b = Option.None)).b == Option.None => true
+
+fn majorAt(rv: Rec) -> Int
+    ? "The place of a recursor's major premise among its arguments."
+    rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices
+
+verify majorAt
+    majorAt(sampleRec()) => 3
 
 fn majorBlock(m: RE, rv: Rec, ls: List<Level>, ids: List<Int>, fuel: Int) -> Result<RK, Fail>
-    ? "A major premise that is one of the variables is the one to split; another stuck one is looked into."
+    ? "A major premise that is one of the variables, or another stuck one looked into."
     match m.e
         Expr.FVar(id) -> match List.contains(ids, id)
             true -> Result.Ok(RK(st = m.st, b = Option.Some(Blk(id = id, rv = rv, ls = ls))))
@@ -2879,41 +2840,24 @@ fn majorBlock(m: RE, rv: Rec, ls: List<Level>, ids: List<Int>, fuel: Int) -> Res
 verify majorBlock
     Result.withDefault(majorBlock(RE(e = Core.Exprs.fvar(7), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), sampleRec(), [], [7], 8), RK(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), b = Option.None)).b == Option.None => false
 
-fn splitAt(k: RK, e: Expr, f: Expr, args: List<Expr>, ids: List<Int>, depth: Int, count: Int) -> Result<RD, Fail>
-    ? "A leaf when nothing waits on a variable; otherwise a branch for each rule of the recursor."
-    match k.b
-        Option.None -> Result.Ok(leafOf(k.st, e, ids, count))
-        Option.Some(b) -> branchesOf(k.st, f, args, ids, depth, count, b, b.rv.rules, [])
-
-verify splitAt
-    Result.withDefault(splitAt(RK(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), b = Option.None), Core.Exprs.natLit(2), Core.Exprs.natLit(1), [], [], 0, 0), RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, node = Guard.Leaf(Core.Exprs.bvar(0)), count = 0)).node => Guard.Leaf(Core.Exprs.natLit(2))
-
 fn branchesOf(st: St, f: Expr, args: List<Expr>, ids: List<Int>, depth: Int, count: Int, b: Blk, rules: List<RecRule>, acc: List<Branch>) -> Result<RD, Fail>
-    ? "The branches of the rules left, in order; the split names the variable by its place from the last made, as the environment of a leaf holds it."
+    ? "A branch per rule left, in order: the variable as its constructor, at the recursor's levels less the motive's, applied to fresh variables for the parameters and fields, explored a level deeper. The split names the variable by its place from the last made, as a leaf's environment holds it."
     match rules
         [] -> Result.Ok(RD(st = st, ok = true, node = Guard.Split(List.len(ids) - 1 - posOf(ids, b.id, 0), List.reverse(acc)), count = count))
-        [r, ..rest] -> branchNext(branchOf(st, f, args, ids, depth, count, b, r)?, f, args, ids, depth, b, r, rest, acc)
+        [r, ..rest] -> branchOf(freshVars(st, b.rv.numParams + r.nfields, []), Core.Exprs.cnst(r.ctor, ctorLevels(b.rv, b.ls)), f, args, ids, depth, count, b, rest, acc)
 
 verify branchesOf
-    Result.withDefault(branchesOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), [], [0], 0, 0, Blk(id = 0, rv = sampleRec(), ls = [Level.Succ(Level.Zero)]), [], []), RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, node = Guard.Leaf(Core.Exprs.bvar(0)), count = 0)).node => Guard.Split(0, [])
+    Result.withDefault(branchesOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), [], [0], 0, 0, Blk(id = 0, rv = sampleRec(), ls = []), [], []), RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = false, node = Guard.Leaf(Core.Exprs.bvar(0)), count = 0)).node => Guard.Split(0, [])
 
-fn branchOf(st: St, f: Expr, args: List<Expr>, ids: List<Int>, depth: Int, count: Int, b: Blk, r: RecRule) -> Result<RD, Fail>
-    ? "The variable as the rule's constructor applied to fresh variables for the parameters and fields, explored one level deeper."
-    vs = freshVars(st, b.rv.numParams + r.nfields, [])
-    t = Core.Apps.mkApps(Core.Exprs.cnst(r.ctor, ctorLevels(b.rv, b.ls)), fvarsOf(vs.ids))
-    explore(vs.st, f, substAll(args, b.id, t), List.concat(ids, vs.ids), depth + 1, count)
-
-verify branchOf
-    Result.withDefault(branchOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), [], [], 0, 64, Blk(id = 0, rv = sampleRec(), ls = [Level.Succ(Level.Zero)]), RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0))), RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, node = Guard.Leaf(Core.Exprs.bvar(0)), count = 0)).ok => false
-
-fn branchNext(d: RD, f: Expr, args: List<Expr>, ids: List<Int>, depth: Int, b: Blk, r: RecRule, rest: List<RecRule>, acc: List<Branch>) -> Result<RD, Fail>
-    ? "One branch more, or the derivation given up."
+fn branchOf(vs: RV, c: Expr, f: Expr, args: List<Expr>, ids: List<Int>, depth: Int, count: Int, b: Blk, rest: List<RecRule>, acc: List<Branch>) -> Result<RD, Fail>
+    ? "One branch, then the rest; a branch that gives no rule ends the derivation."
+    d = explore(vs.st, f, substAll(args, b.id, Core.Apps.mkApps(c, fvarsOf(vs.ids))), List.concat(ids, vs.ids), depth + 1, count)?
     match d.ok
         false -> Result.Ok(d)
-        true -> branchesOf(d.st, f, args, ids, depth, d.count, b, rest, List.prepend(Branch(ctor = r.ctor, levels = ctorLevels(b.rv, b.ls), nargs = b.rv.numParams + r.nfields, node = d.node), acc))
+        true -> branchesOf(d.st, f, args, ids, depth, d.count, b, rest, List.prepend(Branch(ctor = Option.withDefault(Core.Apps.constName(c), Core.Names.anon()), levels = ctorLevels(b.rv, b.ls), nargs = List.len(vs.ids), node = d.node), acc))
 
-verify branchNext
-    branchNext(RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = false, node = Guard.Leaf(Core.Exprs.bvar(0)), count = 0), Core.Exprs.natLit(1), [], [], 0, Blk(id = 0, rv = sampleRec(), ls = [Level.Succ(Level.Zero)]), RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0)), [], []) == Result.Ok(RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = false, node = Guard.Leaf(Core.Exprs.bvar(0)), count = 0)) => true
+verify branchOf
+    Result.withDefault(branchOf(RV(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ids = []), Core.Exprs.natLit(1), Core.Exprs.natLit(1), [], [], 0, 64, Blk(id = 0, rv = sampleRec(), ls = []), [], []), RD(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, node = Guard.Leaf(Core.Exprs.bvar(0)), count = 0)).ok => false
 
 fn ctorLevels(rv: Rec, ls: List<Level>) -> List<Level>
     ? "The constructor's levels from the recursor's: without the motive's level when it has one."
@@ -2951,26 +2895,23 @@ record GP
     body: Expr
     env: List<Clo>
 
-fn fireGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, k: Int, g: Guard, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "The rule on the first k arguments: a leaf whose patterns they match runs with them and the fields as its environment, the arguments after them waiting; otherwise the definition unfolds."
-    p = guardPick(st, g, envOf(stack, k, []), ms)?
+fn fireGo(p: GP, f: Expr, ls: List<Level>, c: Option<Const>, k: Int, stack: List<Clo>, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
+    ? "A leaf whose patterns the first k arguments match runs with them and the fields as its environment, the arguments after them waiting; otherwise the definition unfolds."
     match p.ok
+        true -> Result.Ok(Go(st = p.st, ms = p.ms, run = true, t = p.body, env = p.env, rest = List.drop(stack, k)))
         false -> plainGo(p.st, f, ls, c, stack, p.ms, cheapRec, cheapProj)
-        true -> match deriveChecked()
-            false -> Result.Ok(Go(st = p.st, ms = p.ms, run = true, t = p.body, env = p.env, rest = List.drop(stack, k)))
-            true -> firedChecked(p, f, ls, c, k, stack, cheapRec, cheapProj)
 
 verify fireGo
-    Result.withDefault(fireGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, 1, Guard.Leaf(Core.Exprs.bvar(0)), [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).env => [Clo.Clo(-1, Core.Exprs.natLit(4), [])]
+    Result.withDefault(fireGo(GP(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), ok = true, body = Core.Exprs.bvar(0), env = []), Core.Exprs.natLit(1), [], Option.None, 0, [], false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = false, t = Core.Exprs.natLit(0), env = [], rest = [])).t => Core.Exprs.bvar(0)
 
 fn guardPick(st: St, g: Guard, binds: List<Clo>, ms: MS) -> Result<GP, Fail>
-    ? "Down the tree: at a split, the variable's closure built and brought to weak head normal form picks the branch of its constructor, whose fields join the environment; a literal of Nat is zero or the successor of the literal below."
+    ? "Down the tree: at a split, the variable's closure built and in weak head normal form picks the branch of its constructor, whose arguments join the environment; a literal of Nat is zero or the successor of the literal below."
     match g
         Guard.Leaf(b) -> Result.Ok(GP(st = st, ms = ms, ok = true, body = b, env = binds))
         Guard.Split(i, bs) -> splitPick(st, bs, binds, matClo(nthClo(binds, i), ms))
 
 verify guardPick
-    Result.withDefault(guardPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Guard.Leaf(Core.Exprs.bvar(0)), [], MS(next = 0, forced = {})), GP(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), ok = true, body = Core.Exprs.bvar(0), env = [])).body => Core.Exprs.bvar(0)
+    Result.withDefault(guardPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Guard.Leaf(Core.Exprs.bvar(0)), [], MS(next = 0, forced = {})), GP(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), ok = false, body = Core.Exprs.natLit(0), env = [])).ok => true
 
 fn splitPick(st: St, bs: List<Branch>, binds: List<Clo>, x: MX) -> Result<GP, Fail>
     ? "The built argument in weak head normal form."
@@ -2979,10 +2920,10 @@ fn splitPick(st: St, bs: List<Branch>, binds: List<Clo>, x: MX) -> Result<GP, Fa
         Expr.NatLit(n) -> branchPick(w.st, findBranch(bs, litCtor(n)), [], litArgs(n), binds, x.ms)
         _ -> match Core.Apps.fnOf(w.e)
             Expr.Const(_, n, ls) -> branchPick(w.st, findBranch(bs, n), ls, Core.Apps.argsOf(w.e), binds, x.ms)
-            _ -> Result.Ok(GP(st = w.st, ms = x.ms, ok = false, body = w.e, env = []))
+            _ -> branchPick(w.st, Option.None, [], [], binds, x.ms)
 
 verify splitPick
-    Result.withDefault(splitPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], MX(e = Core.Exprs.natLit(0), ms = MS(next = 0, forced = {}))), GP(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), ok = true, body = Core.Exprs.bvar(0), env = [])).ok => false
+    Result.withDefault(splitPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], MX(e = Core.Exprs.natLit(0), ms = MS(next = 0, forced = {}))), GP(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), ok = true, body = Core.Exprs.natLit(0), env = [])).ok => false
 
 fn branchPick(st: St, o: Option<Branch>, ls: List<Level>, args: List<Expr>, binds: List<Clo>, ms: MS) -> Result<GP, Fail>
     ? "The branch of the constructor, when its levels are the same as written and it has all its arguments."
@@ -2993,7 +2934,7 @@ fn branchPick(st: St, o: Option<Branch>, ls: List<Level>, args: List<Expr>, bind
         Option.None -> Result.Ok(GP(st = st, ms = ms, ok = false, body = Core.Exprs.bvar(0), env = []))
 
 verify branchPick
-    Result.withDefault(branchPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.Some(Branch(ctor = Check.Lits.natZero, levels = [], nargs = 0, node = Guard.Leaf(Core.Exprs.natLit(9)))), [], [], [], MS(next = 0, forced = {})), GP(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), ok = true, body = Core.Exprs.bvar(0), env = [])).body => Core.Exprs.natLit(9)
+    Result.withDefault(branchPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.Some(Branch(ctor = Check.Lits.natZero, levels = [], nargs = 0, node = Guard.Leaf(Core.Exprs.natLit(9)))), [], [], [], MS(next = 0, forced = {})), GP(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), ok = false, body = Core.Exprs.natLit(0), env = [])).body => Core.Exprs.natLit(9)
 
 fn findBranch(bs: List<Branch>, n: Name) -> Option<Branch>
     ? "The branch of the constructor named n."
@@ -3005,29 +2946,6 @@ fn findBranch(bs: List<Branch>, n: Name) -> Option<Branch>
 
 verify findBranch
     findBranch([], Check.Lits.natZero) => Option.None
-
-fn firedChecked(p: GP, f: Expr, ls: List<Level>, c: Option<Const>, k: Int, stack: List<Clo>, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "deriveChecked: the leaf and the unfolding, with no rule firing in it, each to weak head normal form, compared."
-    a = lcore(p.st, p.body, p.env, List.drop(stack, k), p.ms, true, false, false)?
-    rules = a.st.hot
-    u = plainGo(St.update(a.st, hot = Map.set({}, derivingKey(), (Core.Exprs.sort(Level.Zero), Hot.Never))), f, ls, c, stack, p.ms, cheapRec, cheapProj)?
-    b = goWhnf(u)?
-    eq = isDefEq(St.update(b.st, hot = rules), a.e, b.e)?
-    match eq.b
-        true -> Result.Ok(Go(st = eq.st, ms = p.ms, run = true, t = p.body, env = p.env, rest = List.drop(stack, k)))
-        false -> Result.Err(Fail.Reject("derived rule disagrees with unfolding"))
-
-verify firedChecked
-    Result.withDefault(firedChecked(GP(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), ok = true, body = Core.Exprs.bvar(0), env = []), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, 0, [], false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => true
-
-fn goWhnf(g: Go) -> Result<RE, Fail>
-    ? "Where the machine goes, run to the end."
-    match g.run
-        true -> lcore(g.st, g.t, g.env, g.rest, g.ms, true, false, false)
-        false -> Result.Ok(RE(e = lstuck(MX(e = g.t, ms = g.ms), g.rest), st = g.st))
-
-verify goWhnf
-    resultExpr(goWhnf(Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = false, t = Core.Exprs.natLit(3), env = [], rest = []))) => Core.Exprs.natLit(3)
 
 fn bareGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS) -> Go
     ? "A constant without levels: a value takes the waiting arguments; anything else is stuck."
@@ -3650,14 +3568,14 @@ verify inlinedAt
 fn matcherInto(st: St, e: Expr, c: Option<Const>, ls: List<Level>, fuel: Int) -> Option<Expr>
     ? "The matcher's value at the levels takes e's arguments."
     match c
-        Option.Some(Const.CDefn(h, v, _, Safety.Safe)) -> match Bool.and(List.len(h.params) == List.len(ls), lamsUpTo(v, Core.Apps.numArgs(e) + 1, 0) <= Core.Apps.numArgs(e))
+        Option.Some(Const.CDefn(h, v, _, Safety.Safe, _)) -> match Bool.and(List.len(h.params) == List.len(ls), lamsUpTo(v, Core.Apps.numArgs(e) + 1, 0) <= Core.Apps.numArgs(e))
             true -> Option.Some(inlined(st, atomBetas(beta(Core.Subst.instLevelParams(v, h.params, ls), Core.Apps.argsOf(e), [])), fuel - 1))
             false -> Option.None
         _ -> Option.None
 
 verify matcherInto
     matcherInto(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), Option.None, [], 4) => Option.None
-    matcherInto(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("m"), []), Core.Exprs.bvar(3)), Option.Some(Const.CDefn(Head(name = Check.Lits.name1("m"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.bvar(0)), Binder.Default), Hints.Abbrev, Safety.Safe)), [], 4) => Option.Some(Core.Exprs.bvar(3))
+    matcherInto(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name1("m"), []), Core.Exprs.bvar(3)), Option.Some(Const.CDefn(Head(name = Check.Lits.name1("m"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.bvar(0)), Binder.Default), Hints.Abbrev, Safety.Safe, false)), [], 4) => Option.Some(Core.Exprs.bvar(3))
 
 fn matcherNamed(n: Name) -> Bool
     ? "A name a matcher has, match_ and its number."
@@ -4224,7 +4142,7 @@ verify natSecond
     resultOpt(natSecond(RE(e = Core.Exprs.natLit(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), "mul", 3)) => Option.Some(Core.Exprs.natLit(6))
 
 fn sampleRec() -> Rec
-    ? "Test fixture: the recursor of N, an inductive type with zero and succ, at one level for its motive."
+    ? "Test fixture: the recursor of N, with zero and succ, at one level for its motive."
     Rec(head = Head(name = Check.Lits.name2("N", "rec"), params = [Check.Lits.name1("u")], ty = Core.Exprs.sort(Level.Zero)), all = [Check.Lits.name1("N")], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 2, rules = [RecRule(ctor = Check.Lits.name2("N", "zero"), nfields = 0, rhs = sampleLams(3, Core.Exprs.bvar(1))), RecRule(ctor = Check.Lits.name2("N", "succ"), nfields = 1, rhs = sampleLams(4, Core.Apps.mkApps(Core.Exprs.bvar(1), [Core.Exprs.bvar(0), Core.Apps.mkApps(Core.Exprs.cnst(Check.Lits.name2("N", "rec"), [Level.Param(Check.Lits.name1("u"))]), [Core.Exprs.bvar(3), Core.Exprs.bvar(2), Core.Exprs.bvar(1), Core.Exprs.bvar(0)])])))], k = false, isUnsafe = false, major = Check.Lits.name1("N"), majorIsStruct = false, elimAnySort = true)
 
 verify sampleRec
@@ -4246,114 +4164,66 @@ fn sampleNRec(z: Expr, s: Expr, major: Expr) -> Expr
 verify sampleNRec
     Core.Apps.numArgs(sampleNRec(Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => 4
 
-fn sampleSucc(e: Expr) -> Expr
-    ? "Test fixture: N.succ e."
-    Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("N", "succ"), []), e)
-
-verify sampleSucc
-    Core.Apps.numArgs(sampleSucc(Core.Exprs.bvar(0))) => 1
-
 fn sampleNumeral(n: Int) -> Expr
     ? "Test fixture: N.succ n times on N.zero."
     match n <= 0
         true -> Core.Exprs.cnst(Check.Lits.name2("N", "zero"), [])
-        false -> sampleSucc(sampleNumeral(n - 1))
+        false -> Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("N", "succ"), []), sampleNumeral(n - 1))
 
 verify sampleNumeral
-    sampleNumeral(1) => sampleSucc(Core.Exprs.cnst(Check.Lits.name2("N", "zero"), []))
+    Core.Apps.numArgs(sampleNumeral(1)) => 1
 
 fn sampleDbl() -> Expr
-    ? "Test fixture: dbl, doubling by the recursor."
+    ? "Test fixture: dbl n = N.rec zero (fun _ ih => succ (succ ih)) n."
     Core.Exprs.cnst(Check.Lits.name1("dbl"), [])
 
 verify sampleDbl
     sampleDbl() == samplePred2() => false
 
 fn samplePred2() -> Expr
-    ? "Test fixture: pred2, the predecessor of the predecessor, by the recursor twice."
+    ? "Test fixture: pred2 n = N.rec zero (fun m _ => N.rec zero (fun k _ => k) m) n, split two levels deep."
     Core.Exprs.cnst(Check.Lits.name1("pred2"), [])
 
 verify samplePred2
     samplePred2() == sampleDbl() => false
 
-fn sampleNEnv() -> Env
-    ? "Test fixture: N, its constructors and recursor; dbl n = N.rec zero (fun _ ih => succ (succ ih)) n; pred2 n = N.rec zero (fun m _ => N.rec zero (fun k _ => k) m) n."
+fn sampleSt() -> St
+    ? "Test fixture: a checker over N, its constructors and recursor, dbl and pred2."
     n = Check.Lits.name1("N")
     zero = Check.Lits.name2("N", "zero")
     succ = Check.Lits.name2("N", "succ")
+    z = Core.Exprs.cnst(zero, [])
     e1 = Check.State.envSet(Check.State.envEmpty(), n, Const.CInduct(IndType(head = Head(name = n, params = [], ty = Core.Exprs.sort(Level.Succ(Level.Zero))), numParams = 0, numIndices = 0, all = [n], ctors = [zero, succ], numNested = 0, isRec = true, isUnsafe = false, isReflexive = false)))
     e2 = Check.State.envSet(e1, zero, Const.CCtor(Ctor(head = Head(name = zero, params = [], ty = Core.Exprs.cnst(n, [])), induct = n, cidx = 0, numParams = 0, numFields = 0, isUnsafe = false)))
     e3 = Check.State.envSet(e2, succ, Const.CCtor(Ctor(head = Head(name = succ, params = [], ty = Core.Exprs.cnst(n, [])), induct = n, cidx = 1, numParams = 0, numFields = 1, isUnsafe = false)))
     e4 = Check.State.envSet(e3, Check.Lits.name2("N", "rec"), Const.CRec(sampleRec()))
-    dbl = sampleLams(1, sampleNRec(Core.Exprs.cnst(zero, []), sampleLams(2, sampleSucc(sampleSucc(Core.Exprs.bvar(0)))), Core.Exprs.bvar(0)))
-    pred2 = sampleLams(1, sampleNRec(Core.Exprs.cnst(zero, []), sampleLams(2, sampleNRec(Core.Exprs.cnst(zero, []), sampleLams(2, Core.Exprs.bvar(1)), Core.Exprs.bvar(1))), Core.Exprs.bvar(0)))
-    e5 = Check.State.envSet(e4, Check.Lits.name1("dbl"), Const.CDefn(Head(name = Check.Lits.name1("dbl"), params = [], ty = Core.Exprs.sort(Level.Zero)), dbl, Hints.Regular(1), Safety.Safe))
-    Check.State.envSet(e5, Check.Lits.name1("pred2"), Const.CDefn(Head(name = Check.Lits.name1("pred2"), params = [], ty = Core.Exprs.sort(Level.Zero)), pred2, Hints.Regular(1), Safety.Safe))
-
-verify sampleNEnv
-    Check.State.envSize(sampleNEnv()) => 6
-
-fn sampleSt() -> St
-    ? "Test fixture: a checker over sampleNEnv."
-    Check.State.fresh(sampleNEnv(), [], Safety.Safe)
+    e5 = Check.State.envSet(e4, Check.Lits.name1("dbl"), Const.CDefn(Head(name = Check.Lits.name1("dbl"), params = [], ty = Core.Exprs.sort(Level.Zero)), sampleLams(1, sampleNRec(z, sampleLams(2, sampleNumeralOn(2, Core.Exprs.bvar(0))), Core.Exprs.bvar(0))), Hints.Regular(1), Safety.Safe, true))
+    Check.State.fresh(Check.State.envSet(e5, Check.Lits.name1("pred2"), Const.CDefn(Head(name = Check.Lits.name1("pred2"), params = [], ty = Core.Exprs.sort(Level.Zero)), sampleLams(1, sampleNRec(z, sampleLams(2, sampleNRec(z, sampleLams(2, Core.Exprs.bvar(1)), Core.Exprs.bvar(1))), Core.Exprs.bvar(0))), Hints.Regular(1), Safety.Safe, true)), [], Safety.Safe)
 
 verify sampleSt
-    sampleSt().next => 0
+    Check.State.envSize(sampleSt().env) => 6
 
-fn withRule(st: St, f: Expr, k: Int) -> St
-    ? "Test helper: st with the rule derived for f, of k arguments, kept; st as it is when none is derived."
-    match ruleOf(deriveRule(derivingState(st), f, k))
-        Option.Some(g) -> St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, Hot.Rule(k, g))))
-        Option.None -> st
+fn sampleNumeralOn(n: Int, e: Expr) -> Expr
+    ? "Test fixture: N.succ n times on e."
+    match n <= 0
+        true -> e
+        false -> Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("N", "succ"), []), sampleNumeralOn(n - 1, e))
+
+verify sampleNumeralOn
+    sampleNumeralOn(0, Core.Exprs.bvar(0)) => Core.Exprs.bvar(0)
+
+fn withRule(st: St, f: Expr, rule: Bool) -> St
+    ? "Test helper: st with the rule derived for f, of one argument, kept, or with f never to get one."
+    St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, ruleOf(rule, st, f, 1))))
 
 verify withRule
-    hasRule(withRule(sampleSt(), sampleDbl(), 1), sampleDbl()) => true
-    hasRule(withRule(sampleSt(), samplePred2(), 1), samplePred2()) => true
-
-fn withoutRule(st: St, f: Expr) -> St
-    ? "Test helper: st where f never gets a rule."
-    St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, Hot.Never)))
-
-verify withoutRule
-    hasRule(withoutRule(sampleSt(), sampleDbl()), sampleDbl()) => false
-
-fn hasRule(st: St, f: Expr) -> Bool
-    ? "Test helper: whether a rule is kept for f, one that splits on its argument."
-    match hotKept(Map.get(st.hot, Core.Exprs.hashKey(f)), f)
-        Hot.Rule(_, g) -> match g
-            Guard.Split(_, bs) -> List.len(bs) == 2
-            Guard.Leaf(_) -> false
-        _ -> false
-
-verify hasRule
-    hasRule(sampleSt(), sampleDbl()) => false
-
-fn succDepth(r: Result<RE, Fail>, fuel: Int) -> Int
-    ? "Test helper: how many N.succ a term in weak head normal form has down to N.zero, each argument brought to weak head normal form in turn; -1000 for anything else."
-    match r
-        Result.Err -> -1000
-        Result.Ok(x) -> match Core.Apps.fnOf(x.e) == Core.Exprs.cnst(Check.Lits.name2("N", "zero"), [])
-            true -> 0
-            false -> match Bool.and(fuel > 0, Bool.and(Core.Apps.fnOf(x.e) == Core.Exprs.cnst(Check.Lits.name2("N", "succ"), []), Core.Apps.numArgs(x.e) == 1))
-                true -> 1 + succDepth(whnf(x.st, nth(Core.Apps.argsOf(x.e), 0)), fuel - 1)
-                false -> -1000
-
-verify succDepth
-    succDepth(whnf(sampleSt(), sampleNumeral(3)), 10) => 3
-
-verify withRule law sameAsUnfolding
-    given n: Int = [0, 1, 2, 3, 4, 7]
-    given f: Expr = [sampleDbl(), samplePred2()]
-    succDepth(whnf(withRule(sampleSt(), f, 1), Core.Exprs.app(f, sampleNumeral(n))), 40) => succDepth(whnf(withoutRule(sampleSt(), f), Core.Exprs.app(f, sampleNumeral(n))), 40)
+    Map.get(withRule(sampleSt(), sampleDbl(), true).hot, Core.Exprs.hashKey(sampleDbl())) == Option.Some((sampleDbl(), Hot.Never)) => false
+    Map.get(withRule(sampleSt(), samplePred2(), true).hot, Core.Exprs.hashKey(samplePred2())) == Option.Some((samplePred2(), Hot.Never)) => false
 
 verify withRule law sameWhnf
     given n: Int = [0, 1, 2, 3, 4, 7]
     given f: Expr = [sampleDbl(), samplePred2()]
-    resultExpr(whnf(withRule(sampleSt(), f, 1), Core.Exprs.app(f, sampleNumeral(n)))) => resultExpr(whnf(withoutRule(sampleSt(), f), Core.Exprs.app(f, sampleNumeral(n))))
-
-verify succDepth law rulesOnTheirOwn
-    given n: Int = [0, 1, 2, 5]
-    succDepth(whnf(sampleSt(), Core.Exprs.app(sampleDbl(), sampleNumeral(n))), 40) => 2 * n
+    resultExpr(whnf(withRule(sampleSt(), f, true), Core.Exprs.app(f, sampleNumeral(n)))) => resultExpr(whnf(withRule(sampleSt(), f, false), Core.Exprs.app(f, sampleNumeral(n))))
 
 fn resultExpr(r: Result<RE, Fail>) -> Expr
     ? "Test helper: the expression of a successful result."
@@ -5453,7 +5323,7 @@ verify tryArgs
 
 fn dropFirst() -> Const
     ? "A sample regular definition that ignores its argument: fun x => 0."
-    Const.CDefn(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(0), Binder.Default), Hints.Regular(1), Safety.Safe)
+    Const.CDefn(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(0), Binder.Default), Hints.Regular(1), Safety.Safe, false)
 
 verify dropFirst
     Check.State.hintsOf(dropFirst()) => Hints.Regular(1)

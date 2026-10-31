@@ -2256,7 +2256,7 @@ verify isRegular
 
 fn dropFirst() -> Const
     ? "A sample regular definition that ignores its argument: fun x => 0."
-    Const.CDefn(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(0), Binder.Default), Hints.Regular(1), Safety.Safe)
+    Const.CDefn(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(0), Binder.Default), Hints.Regular(1), Safety.Safe, false)
 
 verify dropFirst
     Check.State.hintsOf(dropFirst()) => Hints.Regular(1)

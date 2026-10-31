@@ -16,7 +16,7 @@ type Fail
 
 type Const
     CAxiom(Head, Bool)
-    CDefn(Head, Expr, Hints, Safety)
+    CDefn(Head, Expr, Hints, Safety, Bool)
     CThm(Head, Expr)
     COpaque(Head, Expr, Bool)
     CQuot(Head, QuotKind)
@@ -263,7 +263,7 @@ fn headOf(c: Const) -> Head
     ? "Name, parameters and type of any constant."
     match c
         Const.CAxiom(h, _) -> h
-        Const.CDefn(h, _, _, _) -> h
+        Const.CDefn(h, _, _, _, _) -> h
         Const.CThm(h, _) -> h
         Const.COpaque(h, _, _) -> h
         Const.CQuot(h, _) -> h
@@ -278,7 +278,7 @@ fn isUnsafe(c: Const) -> Bool
     ? "Whether the constant is unsafe."
     match c
         Const.CAxiom(_, u) -> u
-        Const.CDefn(_, _, _, s) -> s == Safety.Unsafe
+        Const.CDefn(_, _, _, s, _) -> s == Safety.Unsafe
         Const.COpaque(_, _, u) -> u
         Const.CInduct(i) -> i.isUnsafe
         Const.CCtor(k) -> k.isUnsafe
@@ -291,7 +291,7 @@ verify isUnsafe
 fn isPartial(c: Const) -> Bool
     ? "Whether the constant is a partial definition."
     match c
-        Const.CDefn(_, _, _, s) -> s == Safety.Partial
+        Const.CDefn(_, _, _, s, _) -> s == Safety.Partial
         _ -> false
 
 verify isPartial
@@ -300,7 +300,7 @@ verify isPartial
 fn valueOf(c: Const) -> Option<Expr>
     ? "The value delta reduction may unfold: definitions and theorems, never opaque constants."
     match c
-        Const.CDefn(_, v, _, _) -> Option.Some(v)
+        Const.CDefn(_, v, _, _, _) -> Option.Some(v)
         Const.CThm(_, v) -> Option.Some(v)
         _ -> Option.None
 
@@ -310,7 +310,7 @@ verify valueOf
 fn hintsOf(c: Const) -> Hints
     ? "Reducibility hints; everything but a definition counts as opaque."
     match c
-        Const.CDefn(_, _, h, _) -> h
+        Const.CDefn(_, _, h, _, _) -> h
         _ -> Hints.Opaque
 
 verify hintsOf

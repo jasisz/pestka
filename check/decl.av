@@ -484,7 +484,7 @@ fn prepared(env: Env, d: Decl) -> Result<Addition, Fail>
             true -> Result.Ok(Addition.Skipped)
             false -> deferred(env, h, Option.None, false, Const.CAxiom(h, false))
         Decl.Defn(h, v, hints, safety, _) -> match safety
-            Safety.Safe -> deferred(env, h, Option.Some(v), false, Const.CDefn(h, v, hints, safety))
+            Safety.Safe -> deferred(env, h, Option.Some(v), false, Const.CDefn(h, v, hints, safety, Check.Tc.reachesRecursor(env, v)))
             _ -> Result.Ok(Addition.Skipped)
         Decl.Thm(h, v, _) -> deferred(env, h, Option.Some(v), true, Const.CThm(h, v))
         Decl.Opaq(h, v, unsafe, _) -> match unsafe
