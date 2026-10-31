@@ -4,9 +4,11 @@ module Shapes
         "casesOn by, found once for a constant at its levels and kept in the"
         "checker's state for the rest of the declaration: where its major"
         "premise and minor premises sit among its arguments, and each minor"
-        "premise's body under its fields."
-    exposes [Shape, CasesOn, SparseOn, MinorOn]
-    depends [Core.Exprs, Core.Decls]
+        "premise's body under its fields. And what the machine knows of a"
+        "definition it unfolds often: how often it has, and the rule derived"
+        "for it, a tree of constructor patterns with a reduct at each leaf."
+    exposes [Shape, CasesOn, SparseOn, MinorOn, Hot, Guard, Branch]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls]
     effects []
 
 record CasesOn
@@ -30,3 +32,18 @@ record MinorOn
     nf: Int
     hyps: Int
     body: Expr
+
+type Hot
+    Count(Int)
+    Never
+    Rule(Int, Guard)
+
+type Guard
+    Leaf(Expr)
+    Split(Int, List<Branch>)
+
+record Branch
+    ctor: Name
+    levels: List<Level>
+    nargs: Int
+    node: Guard
