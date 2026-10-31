@@ -2365,11 +2365,32 @@ verify natGo
     Result.withDefault(natGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}), false, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn natTryGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, args: MXs, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "Nat arithmetic on the built arguments; a literal result is the answer, otherwise the head unfolds."
+    ? "Nat arithmetic on the built arguments; a literal result is the answer, otherwise the head unfolds; in a derivation it is stuck instead (NatOpsStuckInDerivations)."
     n = reduceNat(st, Core.Apps.mkApps(f, args.es))?
     match n.o
         Option.Some(v) -> Result.Ok(Go(st = n.st, ms = args.ms, run = false, t = v, env = [], rest = []))
-        Option.None -> unfoldGo(n.st, f, c, stack, args.ms, cheapRec, cheapProj)
+        Option.None -> match n.st.fuel >= 0
+            true -> Result.Ok(stuckGo(n.st, f, stack, args.ms))
+            false -> unfoldGo(n.st, f, c, stack, args.ms, cheapRec, cheapProj)
+
+decision NatOpsStuckInDerivations
+    date = "2026-10-31"
+    reason =
+        "A Nat operation on a literal is computed on the literal, not by"
+        "its definition. A derivation meets the operations with a variable"
+        "for an operand and unfolded them, so a leaf held the operation's"
+        "recursion on that variable; at a call the variable was a literal"
+        "and the recursion ran once per unit of it, past the stack on a"
+        "theorem about characters in Init. In a derivation such an"
+        "operation is stuck, as a free variable is: the leaf keeps it, and"
+        "at a call it meets its literals and is computed on them. For the"
+        "same reason such an operation gets no rule of its own: Nat.div"
+        "with one literal operand went from its rule into its recursion on"
+        "fuel, in Int64.toBitVec_div, instead of stopping where unfolding"
+        "stops."
+    chosen = "NatOpsStuckInDerivations"
+    rejected = ["NatOpsUnfoldedInDerivations"]
+    impacts = [natTryGo, natComputed, deriveGo]
 
 verify natTryGo
     Result.withDefault(natTryGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Option.None, [], MXs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], ms = MS(next = 0, forced = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(3)
@@ -2556,11 +2577,22 @@ verify stuckGo
 
 fn unfoldGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "The constant f, found as c: at universe levels through its shape and the unfolding cache; without levels its value as written, through the cache only when a matcher heads its body (MatchersInlined). A safe definition goes by its rule once it has one (DerivedRules). A definition's value takes the waiting arguments as they are; anything else is stuck. At universe levels, the lambdas the arguments meet come off the value as written, and only what is under them gets the levels (DomainsDropped)."
+    match st.fuel < 0
+        true -> unfoldOn(st, f, c, stack, ms, cheapRec, cheapProj)
+        false -> match st.fuel == 0
+            true -> Result.Err(Fail.Decline("derivation out of fuel"))
+            false -> unfoldOn(St.update(st, fuel = st.fuel - 1), f, c, stack, ms, cheapRec, cheapProj)
+
+fn unfoldOn(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
+    ? "The unfolding itself, past the fuel of a derivation."
     match f
         Expr.Const(_, _, ls) -> match c
             Option.Some(Const.CDefn(h, v, _, Safety.Safe)) -> hotGo(st, f, ls, c, h, v, stack, ms, cheapRec, cheapProj)
             _ -> plainGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
         _ -> Result.Ok(wholeGo(st, f, stack, ms))
+
+verify unfoldOn
+    Result.withDefault(unfoldOn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 verify unfoldGo
     Result.withDefault(unfoldGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
@@ -2600,7 +2632,9 @@ decision DerivedRules
         "declaration's has a second owner while it runs; a leaf keeps no"
         "free variable of it. Only a safe definition with one to sixteen"
         "leading lambdas, at its own number of levels, and not a casesOn,"
-        "gets a rule, and no rule is derived inside a derivation."
+        "gets a rule, and no rule is derived inside a derivation. A"
+        "derivation has fuel for 4096 unfoldings: on variables, reduction"
+        "need not end where it ends on values, as through Acc.rec."
     chosen = "DerivedRules"
     rejected = ["UnfoldedAtEveryCall"]
     impacts = [unfoldGo, hotGo, countGo, deriveGo, deriveRule, explore, blocker, fireGo, guardPick]
@@ -2648,7 +2682,7 @@ fn countGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, h: Head, v: Expr,
     key = Core.Exprs.hashKey(f)
     match n >= hotAfter()
         false -> plainGo(St.update(st, hot = Map.set(st.hot, key, (f, Hot.Count(n)))), f, ls, c, stack, ms, cheapRec, cheapProj)
-        true -> match Map.has(st.hot, derivingKey())
+        true -> match Bool.or(st.fuel >= 0, Map.has(st.hot, derivingKey()))
             true -> plainGo(St.update(st, hot = Map.set(st.hot, key, (f, Hot.Never))), f, ls, c, stack, ms, cheapRec, cheapProj)
             false -> deriveGo(st, f, ls, c, h, v, lamsUpTo(v, 17, 0), stack, ms, cheapRec, cheapProj)
 
@@ -2661,12 +2695,22 @@ fn derivingKey() -> Core.Exprs.Key
 
 fn deriveGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, h: Head, v: Expr, k: Int, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "The rule of a definition with k leading lambdas, derived on a state of its own (derivingState); what is kept is the rule, or that there is none."
-    match Bool.and(Bool.and(k > 0, k <= 16), Bool.and(Bool.not(casesNamed(h.name)), List.len(h.params) == List.len(ls)))
+    match Bool.and(Bool.and(Bool.and(k > 0, k <= 16), Bool.not(natComputed(f))), Bool.and(Bool.not(casesNamed(h.name)), List.len(h.params) == List.len(ls)))
         false -> plainGo(St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, Hot.Never))), f, ls, c, stack, ms, cheapRec, cheapProj)
         true -> derivedGo(st, ruleOf(deriveRule(derivingState(st), f, k)), f, ls, c, k, stack, ms, cheapRec, cheapProj)
 
 verify deriveGo
     Result.withDefault(deriveGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), 0, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+
+fn natComputed(f: Expr) -> Bool
+    ? "A Nat operation the kernel computes on literals (natArity): its definition is not how it is reduced on them, so a rule from it would run, on a literal, the recursion the computation skips; it gets no rule (NatOpsStuckInDerivations)."
+    match f
+        Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []) -> Check.Lits.isNatOp(op)
+        _ -> false
+
+verify natComputed
+    natComputed(Core.Exprs.cnst(Check.Lits.name2("Nat", "div"), [])) => true
+    natComputed(Core.Exprs.cnst(Check.Lits.name2("Nat", "pred"), [])) => false
 
 fn ruleOf(r: Result<RD, Fail>) -> Option<Guard>
     ? "The tree derived, when the derivation finished within its bounds and every leaf is free of its variables; a derivation that failed gives none."
@@ -2692,8 +2736,8 @@ verify derivedGo
     Result.withDefault(derivedGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.None, Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, 1, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn derivingState(st: St) -> St
-    ? "A checker for a derivation: the environment, the local context and the counter of variables of st, empty caches, and the mark that no rule is derived in it."
-    St.update(Check.State.fresh(st.env, st.params, st.safety), upTo = st.upTo, block = st.block, lctx = st.lctx, next = st.next, topLevel = st.topLevel, checkParams = st.checkParams, eager = st.eager, open = st.open, opened = st.opened, keep = st.keep, kinds = st.kinds, hot = Map.set({}, derivingKey(), (Core.Exprs.sort(Level.Zero), Hot.Never)))
+    ? "A checker for a derivation: the environment, the local context and the counter of variables of st, empty caches, and fuel for 4096 unfoldings; a derivation that runs out of it gives no rule, and none is derived inside it."
+    St.update(Check.State.fresh(st.env, st.params, st.safety), upTo = st.upTo, block = st.block, lctx = st.lctx, next = st.next, topLevel = st.topLevel, checkParams = st.checkParams, eager = st.eager, open = st.open, opened = st.opened, keep = st.keep, kinds = st.kinds, fuel = 4096)
 
 record RD
     st: St
@@ -2799,11 +2843,25 @@ fn innerBlock(m: RE, ids: List<Int>, fuel: Int) -> Result<RK, Fail>
 verify innerBlock
     Result.withDefault(innerBlock(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], 8), RK(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), b = Option.None)).b == Option.None => true
 
+decision GuardsAsTheRecursorReduces
+    date = "2026-10-31"
+    reason =
+        "A guard brings an argument to weak head normal form to read its"
+        "constructor, as a recursor does with its major premise, except"
+        "for a K-like recursor, which takes its constructor from the type,"
+        "and a structure's, which takes projections before any reduction"
+        "(lean4#15351). A guard on such a variable would reduce what the"
+        "recursor never reduces, a term of free variables perhaps without"
+        "a weak head normal form; such recursors are not split on."
+    chosen = "GuardsAsTheRecursorReduces"
+    rejected = ["GuardsOnEveryRecursor"]
+    impacts = [recBlock]
+
 fn recBlock(st: St, rv: Rec, ls: List<Level>, e: Expr, ids: List<Int>, fuel: Int) -> Result<RK, Fail>
-    ? "A recursor of one motive and one to eight rules, with its major premise there."
+    ? "A recursor of one motive and one to eight rules, with its major premise there, and neither K-like nor of a structure: those reach their rule by the type or by projections, without bringing the major premise to weak head normal form, and a guard that did would do work, or never end, where the recursor does not (GuardsAsTheRecursorReduces)."
     majorIdx = rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices
     n = List.len(rv.rules)
-    match Bool.and(Bool.and(rv.numMotives == 1, Bool.and(n > 0, n <= 8)), Core.Apps.numArgs(e) > majorIdx)
+    match Bool.and(Bool.and(Bool.and(rv.numMotives == 1, Bool.not(Bool.or(rv.k, rv.majorIsStruct))), Bool.and(n > 0, n <= 8)), Core.Apps.numArgs(e) > majorIdx)
         false -> Result.Ok(RK(st = st, b = Option.None))
         true -> majorBlock(whnf(st, nth(Core.Apps.argsOf(e), majorIdx))?, rv, ls, ids, fuel)
 
