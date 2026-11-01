@@ -6,7 +6,7 @@ module Items
         "subterm stays shared. mdata is transparent to the kernel and"
         "resolves to the expression it wraps."
     exposes [nameLine, levelLine, exprLine, appAt, binderAt, nameStrAt, nameNumAt, succAdded, paramAdded, levelsRead, sortAt, constAt, letAt]
-    depends [Json.Line, Json.Access, Core.Names, Core.Levels, Core.Exprs, Export.Tables]
+    depends [Json.Line, Json.Access, Core.Names, Core.Levels, Core.Univ, Core.Exprs, Export.Tables]
     effects []
 
 fn otherKey(fs: List<Tuple<String, J>>, index: String) -> String
@@ -81,7 +81,7 @@ verify levelLine
 fn succAdded(t: Tables, i: Int, k: Int) -> Result<Tables, String>
     ? "Level i is the successor of level k. The tables are read before they are passed on, so that the update has them alone and changes their maps in place."
     l = Export.Tables.level(t, k)?
-    Export.Tables.addLevel(t, i, Level.Succ(l))
+    Export.Tables.addLevel(t, i, Core.Univ.normalize(Level.Succ(l)))
 
 verify succAdded
     Result.withDefault(succAdded(Export.Tables.empty(), 1, 0), Export.Tables.empty()).nextLevel => 2
@@ -112,11 +112,28 @@ fn levelsRead(t: Tables, i: Int, a: Int, b: Int, isMax: Bool) -> Result<Tables, 
 verify levelsRead
     levelsRead(Export.Tables.empty(), 1, 0, 7, true) => Result.Err("unknown level index 7")
 
+decision LevelsNormalized
+    date = "2026-11-01"
+    reason =
+        "The elaborator writes equivalent levels in different ways, max u v"
+        "here and max v u there, so terms equal up to levels went past the"
+        "syntactic check to the slow path, where isEquiv normalizes both"
+        "sides again at every comparison. Every succ, max and imax level is"
+        "now put in normal form once, as it is read; normalize keeps a"
+        "level's value for every assignment, so nothing the checker decides"
+        "changes. Normalizing levels made by instantiating parameters as well"
+        "cost more than it found (etale +5%). Instructions retired, one"
+        "worker, plain build: Init 68.71 G to 68.50 G, std 120.36 G to"
+        "119.72 G, con-leche 112.49 G to 112.35 G, etale unchanged."
+    chosen = "LevelsNormalized"
+    rejected = ["LevelsAsWritten", "InstantiatedNormalized"]
+    impacts = [succAdded, levelPairOf]
+
 fn levelPairOf(t: Tables, i: Int, a: Level, b: Level, isMax: Bool) -> Result<Tables, String>
     ? "Builds the max or imax node."
     match isMax
-        true -> Export.Tables.addLevel(t, i, Level.Max(a, b))
-        false -> Export.Tables.addLevel(t, i, Level.IMax(a, b))
+        true -> Export.Tables.addLevel(t, i, Core.Univ.normalize(Level.Max(a, b)))
+        false -> Export.Tables.addLevel(t, i, Core.Univ.normalize(Level.IMax(a, b)))
 
 verify levelPairOf
     Result.withDefault(levelPairOf(Export.Tables.empty(), 1, Level.Zero, Level.Zero, false), Export.Tables.empty()).nextLevel => 2
