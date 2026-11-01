@@ -3994,10 +3994,66 @@ fn eqProj(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
                 true -> eqProjAfter(lazyDeltaProj(st, c1, c2, s1, i1)?, tn, sn)
                 false -> eqRewhnf(st, tn, sn)
             _ -> eqRewhnf(st, tn, sn)
-        _ -> eqRewhnf(st, tn, sn)
+        _ -> eqProjApp(st, tn, sn)
 
 verify eqProj
     resultBool(eqProj(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)))) => true
+
+decision ProjectionAppsCompared
+    date = "2026-11-01"
+    reason =
+        "After lazy delta, pairs that whnfCore must take again are mostly"
+        "applications of a projection, s.i a, whose structure is reduced"
+        "only now; on etale 28 thousand of them have the same projection on"
+        "both sides, and nearly all such pairs are equal. Like bare"
+        "projections, they now compare heads and arguments first, and fall"
+        "back to whnfCore when that fails. Instructions retired, PGO, one"
+        "worker: mathlib 1987.6 G to 1921.8 G, etale 24.35 G to 23.56 G,"
+        "Init 60.01 G to 59.38 G, std 105.45 G to 104.85 G, con-leche"
+        "99.17 G to 98.27 G, cedar 146.19 G to 145.31 G."
+    chosen = "ProjectionAppsCompared"
+    rejected = ["ProjectionAppsReduced"]
+    impacts = [eqProj, eqProjApp]
+
+fn eqProjApp(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Applications of the same projection, as projections themselves are compared: equal heads and equal arguments settle it before the projections are reduced."
+    match Bool.and(sameProjHead(Core.Apps.fnOf(tn), Core.Apps.fnOf(sn)), Core.Apps.numArgs(tn) == Core.Apps.numArgs(sn))
+        true -> eqProjAppHeads(isDefEq(st, Core.Apps.fnOf(tn), Core.Apps.fnOf(sn))?, tn, sn)
+        false -> eqRewhnf(st, tn, sn)
+
+verify eqProjApp
+    resultBool(eqProjApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.natLit(2)), Core.Exprs.app(Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.natLit(2)))) => true
+    resultBool(eqProjApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.natLit(2)), Core.Exprs.app(Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.natLit(3)))) => false
+
+fn sameProjHead(a: Expr, b: Expr) -> Bool
+    ? "The same field of the same structure."
+    match a
+        Expr.Proj(_, s1, i1, _) -> match b
+            Expr.Proj(_, s2, i2, _) -> Bool.and(s1 == s2, i1 == i2)
+            _ -> false
+        _ -> false
+
+verify sameProjHead
+    sameProjHead(Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(2))) => true
+    sameProjHead(Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 1, Core.Exprs.fvar(1))) => false
+
+fn eqProjAppHeads(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Equal heads: the arguments next."
+    match r.b
+        true -> eqProjAppArgs(defEqArgs(r.st, tn, sn, [])?, tn, sn)
+        false -> eqRewhnf(r.st, tn, sn)
+
+verify eqProjAppHeads
+    resultBool(eqProjAppHeads(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => false
+
+fn eqProjAppArgs(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Equal arguments settle it; otherwise go on."
+    match r.b
+        true -> yes(r.st)
+        false -> eqRewhnf(r.st, tn, sn)
+
+verify eqProjAppArgs
+    resultBool(eqProjAppArgs(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => true
 
 fn eqProjAfter(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Equal structures settle it; otherwise go on."
