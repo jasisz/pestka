@@ -22,7 +22,7 @@ written in Aver, by an AI agent under human guidance.
 ## Status
 
 On the small Lean Kernel Arena tests (all but `perf/` and the large corpora)
-Pestka answers 172 of 172 correctly.
+Pestka answers 179 of 179 correctly.
 
 The Arena's large tests and its `perf/` tests, exported as the Arena exports
 them and checked on an Apple M2 Pro: on one worker, as the Arena runs Pestka,
@@ -34,14 +34,14 @@ below that profile was made from.
 
 | Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 8 workers | Peak, 8 workers |
 |---|---|---|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 59.1 G | 8.6 s | 0.8 GB | 4.1 s | 1.1 GB |
-| `std` (98,086) | accepted | 104.0 G | 14 s | 1.3 GB | 6.2 s | 1.7 GB |
-| `reachability` | accepted | 26.8 G | 2.7 s | 0.4 GB | 2.3 s | 0.4 GB |
-| `con-leche` | accepted | 97.5 G | 12 s | 1.2 GB | 6.3 s | 1.6 GB |
-| `cedar` | accepted | 145.0 G | 21 s | 1.4 GB | 9.5 s | 1.9 GB |
-| `cslib` | accepted | 560.3 G | 89 s | 4.0 GB | 34 s | 5.4 GB |
-| `mathlib` (702,040) | accepted | 2.00 T | 357 s | 7.1 GB | 151 s | 9.4 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 59.2 G (12.5 G) | 5.4 s (0.9 s) | 1.0 GB | 4.9 s (0.9 s) | 1.0 GB |
+| `init` (58,170 declarations) | accepted | 58.3 G | 7.3 s | 0.7 GB | 3.8 s | 1.0 GB |
+| `std` (98,086) | accepted | 102.9 G | 13 s | 1.1 GB | 5.8 s | 1.6 GB |
+| `reachability` | accepted | 23.6 G | 2.2 s | 0.4 GB | 1.7 s | 0.4 GB |
+| `con-leche` | accepted | 96.3 G | 11 s | 1.1 GB | 5.7 s | 1.5 GB |
+| `cedar` | accepted | 143.5 G | 19 s | 1.3 GB | 7.7 s | 1.8 GB |
+| `cslib` | accepted | 543.0 G | 81 s | 3.7 GB | 30 s | 4.9 GB |
+| `mathlib` (702,040) | accepted | 1.89 T | 313 s | 6.5 GB | 119 s | 8.6 GB |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 42.0 G (7.0 G) | 3.6 s (0.5 s) | 0.9 GB | 3.5 s (0.5 s) | 0.9 GB |
 
 ### As WebAssembly
 
@@ -155,6 +155,17 @@ The checker follows the reference kernel's algorithm. What is its own:
   recursor and a casesOn need found once, these and the machine's shorter
   loop cut about a third of the instructions on the `perf/` tests and a
   quarter on `reachability`, measured on one Aver.
+- **Hot recursive definitions get rules.** Reduction commutes with
+  substitution: what `f x1 … xn` reduces to on variables, `f a1 … an`
+  reduces to with the arguments put in. A definition that reaches a
+  recursor and unfolds 32 times in a declaration is reduced once on fresh
+  variables and split on the constructors its recursor waits on, three
+  levels deep; the tree of patterns and reducts is its rule for the rest of
+  the run. A call whose arguments match a path skips the unfolding, the
+  matcher and the course-of-values table of structural recursion. A rule
+  that saves no more than one unfolding per form is not kept. This cut 12%
+  of the instructions on `reachability`, 16% on the `perf/` tests and up to
+  1% on the large tests.
 - **Deep binders are not copied.** Opening a binder substitutes its variable
   into the body, as the reference does; past 128 open binders, bodies are
   inferred under their variables as they are instead, so deep nesting does
