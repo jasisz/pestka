@@ -2595,7 +2595,7 @@ decision DerivedRules
         "A definition whose value is headed, under its lambdas, by a"
         "recursor or by a definition that is, applied to a parameter, read"
         "once as it enters the environment (reachesRecursor), is counted;"
-        "no other definition is looked up at all. One unfolded 256 times in"
+        "no other definition is looked up at all. One unfolded 32 times in"
         "a declaration is applied to"
         "fresh variables and brought to weak head normal form; where a"
         "recursor in it waits on one of the variables, the variable is"
@@ -2616,26 +2616,56 @@ decision DerivedRules
         "fuel in Int64.toBitVec_div. K-like and structure recursors are not"
         "split on: they reach their rule without reducing the major premise,"
         "and a guard would reduce it. A derivation runs on a state of its"
-        "own, so no cache of the declaration gets a second owner; rules"
-        "kept across declarations cost cedar 4% and were left out. One"
-        "worker: reachability 26.8 G to 24.3 G instructions, perf/ 49.7 G"
-        "to 42.2 G, magma-list-deep-n36 12.5 G to 7.2 G."
+        "own, so no cache of the declaration gets a second owner. A rule"
+        "holds wherever the definition does, so it is kept across"
+        "declarations (RulesCarried). One worker, built as the Arena builds:"
+        "reachability 26.89 G to 23.67 G instructions, perf/ 49.92 G to"
+        "41.88 G, magma-list-deep-n36 12.52 G to 7.04 G, mathlib 1898.3 G"
+        "to 1891.8 G, Init 58.60 G to 58.18 G, std 103.20 G to 102.75 G,"
+        "con-leche 97.03 G to 96.21 G, cedar 143.65 G to 143.27 G."
     chosen = "DerivedRules"
-    rejected = ["UnfoldedAtEveryCall", "LeafRules", "RulesAcrossDeclarations"]
+    rejected = ["UnfoldedAtEveryCall", "LeafRules"]
     impacts = [unfoldGo, hotGo, deriveGo, explore, blocker, guardPick, natTryGo]
 
+decision RulesCarried
+    date = "2026-11-02"
+    reason =
+        "A rule was derived again in every declaration where its definition"
+        "got hot, and each declaration counted 256 unfoldings before it had"
+        "one. A rule is a fact about the definition alone, so derived rules"
+        "and refusals are now kept in a map of their own carried from one"
+        "declaration to the next, while the counts stay in the declaration."
+        "A definition is derived once, at its first 32 unfoldings in a"
+        "declaration. Carrying the counts too had cost cedar 4%. Against"
+        "rules derived per declaration at 256 (PGO, one worker):"
+        "reachability 24.62 G to 23.67 G, Init 58.59 G to 58.18 G, std"
+        "103.26 G to 102.75 G, con-leche 97.16 G to 96.21 G, cedar 143.96 G"
+        "to 143.27 G, mathlib 1890.8 G to 1891.8 G. perf/shared-subterm"
+        "grew from 0.26 G to 0.34 G."
+    chosen = "RulesCarried"
+    rejected = ["RulesPerDeclaration", "CountsCarried"]
+    impacts = [hotGo, countedGo, deriveGo]
+
 fn hotGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, h: Head, v: Expr, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "A safe definition: counted until hot, then by its rule when it has one and the call has the arguments it takes (DerivedRules). Only a rule is checked to be f's own: another constant's count or refusal under the same key only moves f's derivation or leaves it without a rule."
-    match Map.get(st.hot, Core.Exprs.hashKey(f))
-        Option.None -> plainGo(St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, Hot.Count(1)))), f, ls, c, stack, ms, cheapRec, cheapProj)
+    ? "A safe definition: by its rule when it has one, derived in this declaration or an earlier one (RulesCarried), and the call has the arguments it takes; else counted until hot (DerivedRules). Only a rule is checked to be f's own: another constant's count or refusal under the same key only moves f's derivation or leaves it without a rule."
+    match Map.get(st.rules, Core.Exprs.hashKey(f))
         Option.Some((g, x)) -> match x
-            Hot.Count(n) -> match n + 1 >= 256
-                true -> deriveGo(st, f, ls, c, h, v, lamsUpTo(v, 17, 0), stack, ms, cheapRec, cheapProj)
-                false -> plainGo(St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, Hot.Count(n + 1)))), f, ls, c, stack, ms, cheapRec, cheapProj)
             Hot.Rule(k, r) -> match Bool.and(List.len(stack) >= k, g == f)
                 true -> fireGo(guardPick(st, r, envOf(stack, k, []), ms)?, f, ls, c, k, stack, cheapRec, cheapProj)
                 false -> plainGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
-            Hot.Never -> plainGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
+            _ -> plainGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
+        Option.None -> countedGo(st, f, ls, c, h, v, stack, ms, cheapRec, cheapProj)
+
+fn countedGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, h: Head, v: Expr, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
+    ? "A definition with no rule yet, counted in this declaration until hot, then derived."
+    match Map.get(st.hot, Core.Exprs.hashKey(f))
+        Option.Some((_, Hot.Count(n))) -> match n + 1 >= 32
+            true -> deriveGo(st, f, ls, c, h, v, lamsUpTo(v, 17, 0), stack, ms, cheapRec, cheapProj)
+            false -> plainGo(St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, Hot.Count(n + 1)))), f, ls, c, stack, ms, cheapRec, cheapProj)
+        _ -> plainGo(St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, Hot.Count(1)))), f, ls, c, stack, ms, cheapRec, cheapProj)
+
+verify countedGo
+    Result.withDefault(countedGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.natLit(0), env = [], rest = [])).run => false
 
 verify hotGo
     Result.withDefault(hotGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.natLit(0), env = [], rest = [])).run => false
@@ -2643,7 +2673,7 @@ verify hotGo
 fn deriveGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, h: Head, v: Expr, k: Int, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "The rule of a definition with one to sixteen leading lambdas, at its own number of levels, neither a casesOn nor a Nat operation computed on literals, kept; none is derived inside a derivation."
     ok = Bool.and(Bool.and(Bool.and(k > 0, k <= 16), st.fuel < 0), Bool.and(Bool.not(Bool.or(natComputed(f), casesNamed(h.name))), List.len(h.params) == List.len(ls)))
-    hotGo(St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, ruleOf(ok, st, f, k)))), f, ls, c, h, v, stack, ms, cheapRec, cheapProj)
+    hotGo(St.update(st, rules = Map.set(st.rules, Core.Exprs.hashKey(f), (f, ruleOf(ok, st, f, k)))), f, ls, c, h, v, stack, ms, cheapRec, cheapProj)
 
 verify deriveGo
     Result.withDefault(deriveGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), 0, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.natLit(0), env = [], rest = [])).run => false
