@@ -4259,12 +4259,26 @@ verify sampleNumeralOn
     sampleNumeralOn(0, Core.Exprs.bvar(0)) => Core.Exprs.bvar(0)
 
 fn withRule(st: St, f: Expr, rule: Bool) -> St
-    ? "Test helper: st with the rule derived for f, of one argument, kept, or with f never to get one."
-    St.update(st, hot = Map.set(st.hot, Core.Exprs.hashKey(f), (f, ruleOf(rule, st, f, 1))))
+    ? "Test helper: st with the rule derived for f, of one argument, kept where calls look for it, whether or not it saves anything (RulesThatSave is not asked); or with f never to get one."
+    St.update(st, rules = Map.set(st.rules, Core.Exprs.hashKey(f), (f, forcedRule(rule, st, f))))
 
 verify withRule
-    Map.get(withRule(sampleSt(), sampleDbl(), true).hot, Core.Exprs.hashKey(sampleDbl())) == Option.Some((sampleDbl(), Hot.Never)) => false
-    Map.get(withRule(sampleSt(), samplePred2(), true).hot, Core.Exprs.hashKey(samplePred2())) == Option.Some((samplePred2(), Hot.Never)) => false
+    Map.get(withRule(sampleSt(), sampleDbl(), true).rules, Core.Exprs.hashKey(sampleDbl())) == Option.Some((sampleDbl(), Hot.Never)) => false
+    Map.get(withRule(sampleSt(), samplePred2(), true).rules, Core.Exprs.hashKey(samplePred2())) == Option.Some((samplePred2(), Hot.Never)) => false
+    Map.get(withRule(sampleSt(), sampleDbl(), false).rules, Core.Exprs.hashKey(sampleDbl())) => Option.Some((sampleDbl(), Hot.Never))
+
+fn forcedRule(ok: Bool, st: St, f: Expr) -> Hot
+    ? "Test helper: the rule of one argument derived for f whenever the derivation ends within its bounds."
+    match ok
+        false -> Hot.Never
+        true -> match deriveRule(derivingState(st), f, 1)
+            Result.Ok(d) -> match d.ok
+                true -> Hot.Rule(1, d.node)
+                false -> Hot.Never
+            Result.Err(_) -> Hot.Never
+
+verify forcedRule
+    forcedRule(false, sampleSt(), sampleDbl()) => Hot.Never
 
 verify withRule law sameWhnf
     given n: Int = [0, 1, 2, 3, 4, 7]
