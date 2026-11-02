@@ -3,9 +3,7 @@ module Main
         "Pestka's command line: read one lean4export file and give a verdict."
         "The verdict is the last line printed: accepted, rejected: <why> or"
         "declined: <why>. main returns the exit status: 0 accepted, 1 rejected,"
-        "2 declined. An optional third argument picks the core: old (the"
-        "default), next, or both, which checks every deferred declaration"
-        "with each and rejects at the first where their answers differ."
+        "2 declined."
     depends [Core.Names, Check.State, Check.Decl, Export.Stream, Export.Tables]
     effects [Args.get, Console.print, Disk.readBytesAt]
 
@@ -18,7 +16,7 @@ fn main() -> Int
     ! [Args.get, Console.print, Disk.readBytesAt]
     args = Args.get()
     o = input(args)
-    v = report(o, workersIn(args), coreIn(args))
+    v = report(o, workersIn(args))
     v.code
 
 fn input(args: List<String>) -> Outcome
@@ -27,29 +25,17 @@ fn input(args: List<String>) -> Outcome
     match args
         [path] -> Export.Stream.readFile(path, 8)
         [path, n] -> Export.Stream.readFile(path, workersOf(n))
-        [path, n, _] -> Export.Stream.readFile(path, workersOf(n))
-        _ -> Outcome.Declined("usage: pestka FILE.ndjson [WORKERS [old|next|both]]")
+        _ -> Outcome.Declined("usage: pestka FILE.ndjson [WORKERS]")
 
 fn workersIn(args: List<String>) -> Int
     ? "The workers the arguments ask for; eight by default."
     match args
         [_, n] -> workersOf(n)
-        [_, n, _] -> workersOf(n)
         _ -> 8
 
 verify workersIn
     workersIn(["f", "3"]) => 3
     workersIn(["f"]) => 8
-
-fn coreIn(args: List<String>) -> Core
-    ? "The core the arguments pick; the first by default."
-    match args
-        [_, _, c] -> coreOf(c)
-        _ -> Core.Old
-
-verify coreIn
-    coreIn(["f", "1", "next"]) => Core.Next
-    coreIn(["f"]) => Core.Old
 
 fn workersOf(n: String) -> Int
     ? "The number of workers asked for, at least one; anything unreadable means eight."
@@ -62,31 +48,19 @@ verify workersOf
     workersOf("0") => 1
     workersOf("x") => 8
 
-fn coreOf(c: String) -> Core
-    ? "The core asked for; anything else is the first core."
-    match c
-        "next" -> Core.Next
-        "both" -> Core.Both
-        _ -> Core.Old
-
-verify coreOf
-    coreOf("both") => Core.Both
-    coreOf("next") => Core.Next
-    coreOf("x") => Core.Old
-
-fn report(o: Outcome, workers: Int, core: Core) -> Verdict
+fn report(o: Outcome, workers: Int) -> Verdict
     ? "Prints the verdict."
     ! [Console.print]
     match o
         Outcome.Rejected(why) -> Verdict(code = rejected(why), held = Option.None)
         Outcome.Declined(why) -> Verdict(code = declined(why), held = Option.None)
-        Outcome.Read(t) -> summary(t, workers, core)
+        Outcome.Read(t) -> summary(t, workers)
 
-fn summary(p: Parsed, workers: Int, core: Core) -> Verdict
+fn summary(p: Parsed, workers: Int) -> Verdict
     ? "Counts of what the file defines, then the checking verdict, with what checking found."
     ! [Console.print]
     Console.print("constants {p.constants}, declarations {List.len(p.decls)}, names {p.names}, levels {p.levels}, expressions {p.exprs}")
-    c = Check.Decl.checkHeld(p.decls, workers, core)
+    c = Check.Decl.checkHeld(p.decls, workers)
     Verdict(code = verdict(c.run), held = Option.Some(c))
 
 fn verdict(r: Result<Run, Fail>) -> Int

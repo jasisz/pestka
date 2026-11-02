@@ -173,14 +173,6 @@ The checker follows the reference kernel's algorithm. What is its own:
 - **Laws** state the properties the optimizations rely on and are checked
   with the code; see below.
 
-## Next
-
-A second core lives in `next/`: values as terms with their environment and
-free variables as de Bruijn levels, so that entering a binder copies
-nothing. It answers as the first does, and `both` checks every deferred
-declaration with each and rejects at the first where their answers differ,
-but in Aver it is slower than the first core, which is the one used.
-
 ## Laws
 
 Besides examples, some `verify` blocks state laws: an equation checked on
@@ -262,12 +254,12 @@ Compiled to Rust, which is the build meant for large inputs:
 ```bash
 bin/build                  # aver compile + cargo build --release into .build/
 bin/build-pgo TRAIN.ndjson # the same, guided by a profile of checking TRAIN
-.build/target/release/main FILE.ndjson [WORKERS [old|next|both]]
+.build/target/release/main FILE.ndjson [WORKERS]
 tests/run.sh               # every export under tests/export against its expected status
 tests/arena.sh DIR         # the small Lean Kernel Arena tests, each under bin/capped
 python3 tests/soundness.py corpus DIR --exclude '*/perf/*' --max-bytes 4000000
-                                             # compare old/next or arbitrary kernels
-python3 tests/soundness.py mutate FILE # guaranteed-invalid mutations; neither core may accept
+                                             # compare Pestka with other kernels
+python3 tests/soundness.py mutate FILE # guaranteed-invalid mutations; no kernel may accept
 ```
 
 `tests/soundness.py` accepts repeated `--kernel 'NAME=COMMAND {file}'`
@@ -289,10 +281,7 @@ rustc flags to both builds (the Arena gives `-C target-cpu=native`). It needs
 `llvm-profdata`, from rustup's `llvm-tools` component. A profile of a check
 of `init-prelude` alone cuts 12–15% of the instructions on every test above,
 those far from it included; one of all of `Init` cuts another 1–1.5% on the
-tests it was not made from (`std`, `con-leche`, `cedar`, `mathlib`). The third
-argument picks the core: `old` (the default), `next` (the second core, in
-`next/`, being built), or `both`, which checks every deferred declaration
-with each and rejects at the first where their answers differ.
+tests it was not made from (`std`, `con-leche`, `cedar`, `mathlib`).
 
 Pestka builds the environment in file order, checking inductive types and
 the quotient package as it meets them, and then checks the types and

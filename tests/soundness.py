@@ -5,7 +5,7 @@ Kernel commands are argv templates.  ``{file}`` is replaced with the input
 path, so no shell is involved.  Example:
 
     tests/soundness.py corpus arena-tests \
-      --kernel 'pestka=.build/target/release/main {file} 1 old' \
+      --kernel 'pestka=.build/target/release/main {file} 1' \
       --kernel 'nanoda=nanoda {file}'
 
 The mutation mode starts from exports accepted by every selected kernel.  It
@@ -112,8 +112,7 @@ def parse_kernel(text: str) -> Kernel:
 def default_kernels() -> list[Kernel]:
     binary = Path(__file__).resolve().parents[1] / ".build/target/release/main"
     return [
-        Kernel("pestka-old", (str(binary), "{file}", "1", "old"), True),
-        Kernel("pestka-next", (str(binary), "{file}", "1", "next"), True),
+        Kernel("pestka", (str(binary), "{file}", "1"), True),
     ]
 
 
