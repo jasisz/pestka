@@ -2627,6 +2627,22 @@ decision DerivedRules
     rejected = ["UnfoldedAtEveryCall", "LeafRules"]
     impacts = [unfoldGo, hotGo, deriveGo, explore, blocker, guardPick, natTryGo]
 
+decision RulesThatSave
+    date = "2026-11-02"
+    reason =
+        "A definition that is a recursor on its argument, as N.add in"
+        "perf/shared-subterm, got a rule that replaced exactly one unfolding"
+        "and one recursor step, and paid for picking its branch: building"
+        "the argument and bringing it to weak head normal form, nested as"
+        "deep as the argument was. A rule is now kept only when its"
+        "derivation unfolded more than once per form it met. One worker,"
+        "no profile: shared-subterm 0.355 G to 0.280 G instructions"
+        "(0.274 G without rules), std 119.64 G to 119.48 G, reachability"
+        "27.95 G to 27.91 G, magma-list-deep-n36 unchanged."
+    chosen = "RulesThatSave"
+    rejected = ["EveryRuleKept"]
+    impacts = [ruleOf]
+
 decision RulesCarried
     date = "2026-11-02"
     reason =
@@ -2679,11 +2695,11 @@ verify deriveGo
     Result.withDefault(deriveGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), 0, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.natLit(0), env = [], rest = [])).run => false
 
 fn ruleOf(ok: Bool, st: St, f: Expr, k: Int) -> Hot
-    ? "When ok, the rule derived on a state of its own (derivingState), if the derivation ends within its bounds; otherwise never one."
+    ? "When ok, the rule derived on a state of its own (derivingState), if the derivation ends within its bounds and unfolded more than once per form it met; otherwise never one (RulesThatSave)."
     match ok
         false -> Hot.Never
         true -> match deriveRule(derivingState(st), f, k)
-            Result.Ok(d) -> match d.ok
+            Result.Ok(d) -> match Bool.and(d.ok, 4096 - d.st.fuel > d.count)
                 true -> Hot.Rule(k, d.node)
                 false -> Hot.Never
             Result.Err(_) -> Hot.Never
