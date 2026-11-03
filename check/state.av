@@ -631,8 +631,15 @@ fn localPut(m: Locals, id: Int, rest: Int, l: Local) -> Locals
         Locals.NoLocals -> Locals.OneLocal(id, rest, l)
         Locals.OneLocal(k, krest, old) -> match k == id
             true -> Locals.OneLocal(id, rest, l)
-            false -> localPut(Locals.SomeLocals(setLocals(Vector.new(16, Locals.NoLocals), Bits.and(krest, 15), Locals.OneLocal(k, Int.div(krest, 16), old))), id, rest, l)
-        Locals.SomeLocals(v) -> Locals.SomeLocals(setLocals(v, Bits.and(rest, 15), localPut(Option.withDefault(Vector.get(v, Bits.and(rest, 15)), Locals.NoLocals), id, Int.div(rest, 16), l)))
+            false -> putIn(setLocals(Vector.new(16, Locals.NoLocals), Bits.and(krest, 15), Locals.OneLocal(k, Int.div(krest, 16), old)), id, rest, l)
+        Locals.SomeLocals(v) -> putIn(v, id, rest, l)
+
+fn putIn(v: Vector<Locals>, id: Int, rest: Int, l: Local) -> Locals
+    ? "The node of the children v with the local put into the child at the id's next digit. A split leaf's children come here as they are: a node made of them only to be matched again was an allocation per split (1.6 M on mathlib)."
+    Locals.SomeLocals(setLocals(v, Bits.and(rest, 15), localPut(Option.withDefault(Vector.get(v, Bits.and(rest, 15)), Locals.NoLocals), id, Int.div(rest, 16), l)))
+
+verify putIn
+    localGet(putIn(Vector.new(16, Locals.NoLocals), 5, 5, sampleLocal(1)), 5, 5) => Option.Some(sampleLocal(1))
 
 verify localPut
     localGet(localPut(localPut(Locals.NoLocals, 0, 0, sampleLocal(0)), 0, 0, sampleLocal(2)), 0, 0) => Option.Some(sampleLocal(2))
