@@ -212,7 +212,7 @@ verify openKeyed
 
 fn openCached(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "An open term's type is cached under the term applied to st.opened, the variables of the binders open around it past the depth where bodies stop being copied, as one application spine (see deepBody). env is its innermost part, so the spine fixes what every loose bound variable of e stands for, and the key is found by its hash and compared from the pointer in: a lookup costs the same however many binders are open. A term shared under the same binders, as a DAG shares it, is found again. The key keeps e's loose bound variables, so it is never a term that is checked."
-    around = st.opened
+    around = aroundOf(st.opened)
     match openHit(st, e, around, only)
         Option.Some(t) -> Result.Ok(RE(e = t, st = st))
         Option.None -> Result.Ok(rememberOpen(inferCore(st, e, env, only)?, Core.Exprs.app(e, around), only))
@@ -716,12 +716,22 @@ verify bodyType
 fn deepBody(st: St, e: Expr, rev: List<Expr>, k: Int, only: Bool) -> Result<RE, Fail>
     ? "A body inferred under its variables as it is. st.opened gets the k variables just opened, the outermost first, as arguments, one node each, and is put back after: around the first body this deep it holds no variable, so it always holds the variables of rev, the innermost last, after those of any closed term this stretch went into, which only make a key narrower. The open-term cache keys on it."
     was = st.open
-    around = st.opened
-    r = inferIn(St.update(st, open = was + k, opened = Core.Apps.mkApps(around, List.reverse(List.take(rev, k)))), e, rev, only)?
-    Result.Ok(RE(e = r.e, st = St.update(r.st, open = was, opened = around)))
+    before = st.opened
+    r = inferIn(St.update(st, open = was + k, opened = Option.Some(Core.Apps.mkApps(aroundOf(before), List.reverse(List.take(rev, k))))), e, rev, only)?
+    Result.Ok(RE(e = r.e, st = St.update(r.st, open = was, opened = before)))
 
 verify deepBody
     resultExpr(deepBody(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.natLit(7), Option.None, Binder.Default).st, Core.Exprs.bvar(0), [Core.Exprs.fvar(1)], 1, false)) => Core.Exprs.natLit(7)
+
+fn aroundOf(opened: Option<Expr>) -> Expr
+    ? "The spine of the variables open past the depth where bodies stop being copied: before the first body that deep, a head with no variable on it. The head is made only here: made with every checker, it was a term per declaration that nearly no declaration looked at (0.7 M on mathlib)."
+    match opened
+        Option.Some(a) -> a
+        Option.None -> Core.Exprs.sort(Level.Zero)
+
+verify aroundOf
+    aroundOf(Option.None) => Core.Exprs.sort(Level.Zero)
+    aroundOf(Option.Some(Core.Exprs.natLit(1))) => Core.Exprs.natLit(1)
 
 fn openAgain(r: RE, open: Int) -> Result<RE, Fail>
     ? "The count of open binders as it was before the body."
