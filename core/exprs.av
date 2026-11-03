@@ -189,6 +189,16 @@ verify fromInt
     fromInt(-1) => Result.Err("word out of range")
     fromInt(4611686018427387904) => Result.Err("word out of range")
 
+fn wordFrom(r: Result<Word, String>) -> Word
+    ? "A word from fromInt called on packed metadata, which is always in range; anything else would read as the word that claims every variable, flag and range. The constructors call fromInt themselves, so that it sees the machine word they make."
+    match r
+        Result.Ok(w) -> w
+        Result.Err(_) -> Word(value = 2147483647)
+
+verify wordFrom
+    wordFrom(Result.Ok(Word(value = 7))) => Word(value = 7)
+    wordFrom(Result.Err("x")) => Word(value = 2147483647)
+
 fn word(n: Int) -> Word
     ? "A word from packed metadata, which is always in range; anything else would read as the word that claims every variable, flag and range, which only ever makes traversals look further."
     match fromInt(n)
@@ -302,7 +312,7 @@ fn binderWord(tag: Tag, t: Expr, b: Expr) -> Word
     ? "The word of a node that binds one variable over b: the body's range seen from outside the binder."
     wt = wordOf(t).value
     wb = wordOf(b).value
-    word((Int.mod((tag.value * 1000003 + Int.div(wt, 2147483648)) * 1000003 + Int.div(wb, 2147483648) * 1000033, 2147483647) * 64 + Int.min(Bits.and(Int.div(wt, 33554432), 63) + Bits.and(Int.div(wb, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(wt, wb), 33538048) + Int.max(Bits.and(wt, 16383), Int.max(Bits.and(wb, 16383) - 1, 0) + Int.div(Bits.and(wb, 16383), 16383)))
+    wordFrom(fromInt((Int.mod((tag.value * 1000003 + Int.div(wt, 2147483648)) * 1000003 + Int.div(wb, 2147483648) * 1000033, 2147483647) * 64 + Int.min(Bits.and(Int.div(wt, 33554432), 63) + Bits.and(Int.div(wb, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(wt, wb), 33538048) + Int.max(Bits.and(wt, 16383), Int.max(Bits.and(wb, 16383) - 1, 0) + Int.div(Bits.and(wb, 16383), 16383))))
 
 verify binderWord
     binderWord(Tag(value = 5), sort(Level.Zero), bvar(3)).value == pack(binderMeta(5, sort(Level.Zero), bvar(3))) => true
@@ -338,7 +348,7 @@ fn letE(n: Name, t: Expr, v: Expr, b: Expr) -> Expr
     wt = wordOf(t).value
     wv = wordOf(v).value
     wb = wordOf(b).value
-    Expr.Let(word((Int.mod(Int.mod((7000021 + Int.div(wt, 2147483648)) * 1000003 + Int.div(wv, 2147483648), 2147483647) * 1000003 + Int.div(wb, 2147483648) * 1000033, 2147483647) * 64 + Int.min(Bits.and(Int.div(wt, 33554432), 63) + Bits.and(Int.div(wv, 33554432), 63) + Bits.and(Int.div(wb, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(Bits.or(wt, wv), wb), 33538048) + Int.max(Int.max(Bits.and(wt, 16383), Bits.and(wv, 16383)), Int.max(Bits.and(wb, 16383) - 1, 0) + Int.div(Bits.and(wb, 16383), 16383))), t, v, b)
+    Expr.Let(wordFrom(fromInt((Int.mod(Int.mod((7000021 + Int.div(wt, 2147483648)) * 1000003 + Int.div(wv, 2147483648), 2147483647) * 1000003 + Int.div(wb, 2147483648) * 1000033, 2147483647) * 64 + Int.min(Bits.and(Int.div(wt, 33554432), 63) + Bits.and(Int.div(wv, 33554432), 63) + Bits.and(Int.div(wb, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(Bits.or(wt, wv), wb), 33538048) + Int.max(Int.max(Bits.and(wt, 16383), Bits.and(wv, 16383)), Int.max(Bits.and(wb, 16383) - 1, 0) + Int.div(Bits.and(wb, 16383), 16383)))), t, v, b)
 
 verify letE law packsLetMeta
     given i: Int = 0..6
@@ -447,7 +457,7 @@ verify leafWordOf
 fn bvarWord(i: Int) -> Word
     ? "A bound variable's word: mix(1, i) as its hash, its index and one as its range. An index below 2^40 is spelled out on the machine word."
     match indexOf(i)
-        Result.Ok(x) -> word(Int.mod(1000003 + x.value, 2147483647) * 2147483648 + 33554432 + Int.min(x.value + 1, 16383))
+        Result.Ok(x) -> wordFrom(fromInt(Int.mod(1000003 + x.value, 2147483647) * 2147483648 + 33554432 + Int.min(x.value + 1, 16383)))
         Result.Err(_) -> leafWord(Core.Hash.mix(1, i), Int.min(i + 1, 16383), 0, 0)
 
 verify bvarWord law sameAsLeaf
@@ -457,7 +467,7 @@ verify bvarWord law sameAsLeaf
 fn fvarWord(i: Int) -> Word
     ? "A free variable's word: mix(11, i) as its hash, its bits (varsOfId: the low ten, all ten when none is set) in place. A number below 2^40 is spelled out on the machine word."
     match indexOf(i)
-        Result.Ok(x) -> word(Int.mod(11000033 + x.value, 2147483647) * 2147483648 + 33554432 + (Bits.and(x.value, 1023) + 1023 * Int.div(1024 - Bits.and(x.value, 1023), 1024)) * 16384)
+        Result.Ok(x) -> wordFrom(fromInt(Int.mod(11000033 + x.value, 2147483647) * 2147483648 + 33554432 + (Bits.and(x.value, 1023) + 1023 * Int.div(1024 - Bits.and(x.value, 1023), 1024)) * 16384))
         Result.Err(_) -> leafWord(Core.Hash.mix(11, i), 0, varsOfId(i), 0)
 
 verify fvarWord law sameAsLeaf
@@ -492,7 +502,7 @@ decision SecondPartWeighted
 
 fn joined(tag: Tag, wf: Word, wa: Word) -> Word
     ? "The word of a node over two parts, from theirs alone: the hashes mixed after the tag (mix2, spelled out so that it stays on the machine word), sizes added and capped, variable bits and parameter flags or-ed, the larger range. A saturated range stays saturated."
-    word((Int.mod((tag.value * 1000003 + Int.div(wf.value, 2147483648)) * 1000003 + Int.div(wa.value, 2147483648) * 1000033, 2147483647) * 64 + Int.min(Bits.and(Int.div(wf.value, 33554432), 63) + Bits.and(Int.div(wa.value, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(wf.value, wa.value), 33538048) + Int.max(Bits.and(wf.value, 16383), Bits.and(wa.value, 16383)))
+    wordFrom(fromInt((Int.mod((tag.value * 1000003 + Int.div(wf.value, 2147483648)) * 1000003 + Int.div(wa.value, 2147483648) * 1000033, 2147483647) * 64 + Int.min(Bits.and(Int.div(wf.value, 33554432), 63) + Bits.and(Int.div(wa.value, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(wf.value, wa.value), 33538048) + Int.max(Bits.and(wf.value, 16383), Bits.and(wa.value, 16383))))
 
 verify joined
     unpack(joined(Tag(value = 4), wordOf(bvar(0)), wordOf(bvar(3))).value).range => 4
