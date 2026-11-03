@@ -4033,6 +4033,50 @@ verify whnfCoreM
     resultExpr(whnfCoreM(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), false, false)) => Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1))
     resultExpr(whnfCoreM(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), Core.Exprs.bvar(0)), false, true)) => Core.Exprs.natLit(1)
 
+decision CoreResultsKept
+    date = "2026-11-03"
+    reason =
+        "After lazy delta, definitional equality took whnfCore with"
+        "projections reduced fully on both sides (eqRewhnf), and while one"
+        "side unfolded, on an application of a projection on the other"
+        "(tryUnfoldProjApp); the machine ran each time and kept nothing,"
+        "though the reference kernel remembers every full whnf_core. Half"
+        "of these runs repeated an input run before: on etale 24 thousand"
+        "of 48 thousand projections and 23 thousand of 61 thousand"
+        "applications under a projection or a recursor, on Init 26 of 49"
+        "thousand and 61 of 251 thousand. The results now go into the"
+        "cache of whnfCore's full results. Instructions retired, PGO, one"
+        "worker: etale 22.14 G to 21.92 G, taylor 18.46 G to 18.30 G,"
+        "contdiff 15.81 G to 15.65 G, colim 4.153 G to 4.140 G,"
+        "reachability 22.21 G to 22.20 G, Init 54.60 G to 54.14 G."
+    chosen = "CoreResultsKept"
+    rejected = ["CoreResultsRerun"]
+    impacts = [whnfCoreKept, coreKept, eqRewhnf, tryUnfoldProjApp]
+
+fn whnfCoreKept(st: St, e: Expr) -> Result<RE, Fail>
+    ? "whnfCoreM with projections reduced fully, its result remembered for the declaration in the same cache as whnfCore's full results, as the reference kernel remembers every full whnf_core (CoreResultsKept). A term the machine cannot change comes back as it is, without a lookup."
+    match e
+        Expr.App -> match rigidHead(st, Core.Apps.fnOf(e))
+            true -> Result.Ok(RE(e = e, st = st))
+            false -> coreKept(st, e)
+        Expr.Let -> coreKept(st, e)
+        Expr.Proj -> coreKept(st, e)
+        _ -> whnfCoreM(st, e, false, false)
+
+verify whnfCoreKept
+    resultExpr(whnfCoreKept(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)))) => Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1))
+    resultExpr(whnfCoreKept(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), Core.Exprs.bvar(0)))) => Core.Exprs.natLit(1)
+
+fn coreKept(st: St, e: Expr) -> Result<RE, Fail>
+    ? "The machine's full result for e from the cache, or run now and stored."
+    match Check.State.cacheGet(st.coreCache, e)
+        Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+        Option.None -> coreStore(mcached(st, e, false, false)?, e, false)
+
+verify coreKept
+    resultExpr(coreKept(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(0)))) => Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(0))
+    Core.Cache.size(Result.withDefault(coreKept(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(0))), RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).st.coreCache) => 1
+
 fn mcached(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "Runs the machine. Its results are not cached: keeping every intermediate result is what the machine saves, and on reduction-heavy proofs the cache cost gigabytes."
     mcore(st, e, [], [], cheapRec, cheapProj)
@@ -4591,9 +4635,9 @@ verify eqProjAfter
     resultBool(eqProjAfter(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => true
 
 fn eqRewhnf(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "whnfCore again, now normalizing projections fully; anything new starts over."
-    a = whnfCoreM(st, tn, false, false)?
-    b = whnfCoreM(a.st, sn, false, false)?
+    ? "whnfCore again, now normalizing projections fully, its results kept for the declaration (CoreResultsKept); anything new starts over."
+    a = whnfCoreKept(st, tn)?
+    b = whnfCoreKept(a.st, sn)?
     match Bool.or(a.e != tn, b.e != sn)
         true -> defEqCore(b.st, a.e, b.e)
         false -> eqFinal(b.st, tn, sn)
@@ -5545,9 +5589,9 @@ verify afterStep
     resultStatus(afterStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => 1
 
 fn tryUnfoldProjApp(st: St, e: Expr) -> Result<RO, Fail>
-    ? "e headed by a projection, if whnfCore changes it."
+    ? "e headed by a projection, if whnfCore changes it; the result is kept (CoreResultsKept)."
     match Core.Apps.fnOf(e)
-        Expr.Proj -> changed(whnfCoreM(st, e, false, false)?, e)
+        Expr.Proj -> changed(whnfCoreKept(st, e)?, e)
         _ -> Result.Ok(RO(o = Option.None, st = st))
 
 verify tryUnfoldProjApp
