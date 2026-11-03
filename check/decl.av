@@ -143,7 +143,7 @@ verify checkHeld
     List.len(checkHeld([], 2).held) => 2
 
 fn keepFor(workers: Int) -> Int
-    ? "How many hashes a map carried across declarations keeps before it is emptied (a quarter of it for definitions' values at levels). Every worker keeps maps of its own, and mathlib on eight workers already peaks near 13 GB; one worker alone keeps four times as much. Twice as much took mathlib from 10467.3 G to 10336.7 G instructions and its peak from 8.28 GB to 8.90 GB; twice that, once terms were smaller, from 5124.6 G to 5010.4 G and from 7.91 GB to 8.89 GB."
+    ? "How many hashes a map carried across declarations keeps before it is emptied: the unit of the limits carried sets, four of it for the checked types, two for equal pairs (LimitsFromReuseDistances). Every worker keeps maps of its own, and mathlib on eight workers already peaks near 13 GB; one worker alone keeps four times as much. Twice as much took mathlib from 10467.3 G to 10336.7 G instructions and its peak from 8.28 GB to 8.90 GB; twice that, once terms were smaller, from 5124.6 G to 5010.4 G and from 7.91 GB to 8.89 GB."
     match workers > 1
         true -> 65536
         false -> 262144
@@ -339,10 +339,51 @@ fn jobChecks(j: Job, st0: St) -> Result<Facts, Fail>
 verify jobChecks
     jobChecks(Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => Result.Err(Fail.Reject("declaration type mismatch"))
 
+decision LimitsFromReuseDistances
+    date = "2026-11-03"
+    reason =
+        "Every map carried across declarations was emptied past one limit,"
+        "the unfolding cache past a quarter of it. A counting run of mathlib"
+        "measured for each cache the distance, in entries put since, between"
+        "an entry and every later use of its key: a use within the entry's"
+        "life is a hit, a use after the map was emptied computes the result"
+        "again, and the instructions of such a computation were sampled."
+        "An entry put when the map holds s entries lives limit - s puts, so a"
+        "use at distance d is realized with probability 1 - d / limit, and"
+        "the model says what a limit buys: the uses it realizes times what"
+        "they cost to compute again, less the entries it keeps alive. The"
+        "cache of checked types: 112 M hits, 4.8 M outermost uses of keys"
+        "already dropped, at distances of 2^17 to 2^22 puts, 19.5 k"
+        "instructions each to compute again (94 G in all, 4% of mathlib),"
+        "848 instructions to drop an entry and about 470 bytes to keep one."
+        "Four times its limit realizes 1.5 M of them, 18 G by the model, for"
+        "0.4 GB more at the peak. The unfolding cache: 1.4 M such uses at"
+        "2^15 to 2^20, 32 k instructions each (45 G), 5.5 k instructions to"
+        "drop an entry; its limit four times larger, the unit itself,"
+        "realizes 0.55 M of them, 17 G by the model. Equal pairs: 1.4 M uses"
+        "of dropped pairs worth 69 k each, most of them past any limit;"
+        "twice the unit realizes 50 k, 3 G by the model, and the pairs share"
+        "their terms with the other caches, so they cost almost no memory."
+        "Measured under PGO on one worker, mathlib: the two caches four"
+        "times larger 1772.6 G to 1728.4 G instructions (-2.5%), peak 6.55 GB"
+        "to 7.59 GB; equal pairs twice the unit alone 1762.3 G for 0.15 GB,"
+        "all three together 1724.4 G (-2.7%) at 7.58 GB. Every other cache"
+        "returns less than 7 G per GB kept: the variables cost 2 KB an entry"
+        "and the open caches go with them, the constant types at levels"
+        "3.9 KB, whnf 1.8 KB; and eight times the unit for the checked types"
+        "would take another 0.9 GB for 13 G more by the model. Two"
+        "generations of half the limit, an entry living between half and"
+        "the whole of it, would realize most of what twice the limit does at"
+        "the memory of the limit itself, for a second lookup on every miss,"
+        "40 M on the checked types alone."
+    chosen = "LimitsFromReuseDistances"
+    rejected = ["OneLimit", "TwoGenerations"]
+    impacts = [carried, keepFor]
+
 fn carried(st: St) -> Facts
-    ? "What checking takes from a declaration to the next: the facts about closed terms; the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration; and, since a free variable is made of its type and value and how many of its kind are open around it (CountedVariables), the variables made so far with their context, and what was found by inference, checking, reduction and comparison about terms holding them, which holds wherever the same variables appear. What was found by checking terms with a universe parameter is kept under the declaration's parameters (ParamsInTheKey). Each map is emptied past its limit; when the variables are, their context and every map that may hold a variable go with them, so no kept result names a variable that is gone."
+    ? "What checking takes from a declaration to the next: the facts about closed terms; the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration; and, since a free variable is made of its type and value and how many of its kind are open around it (CountedVariables), the variables made so far with their context, and what was found by inference, checking, reduction and comparison about terms holding them, which holds wherever the same variables appear. What was found by checking terms with a universe parameter is kept under the declaration's parameters (ParamsInTheKey). Each map is emptied past its limit, a multiple of the unit set by what its entries are used again at and cost to keep (LimitsFromReuseDistances); when the variables are, their context and every map that may hold a variable go with them, so no kept result names a variable that is gone."
     full = Core.Cache.size(st.vars) > st.keep
-    Facts(closed = st.closed, unfolds = bounded(st.unfoldCache, Int.div(st.keep, 4)), types = bounded(st.levelTypes, st.keep), vars = bounded(st.vars, st.keep), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = openKept(st.inferCache, full, st.keep), checkCache = openKept(st.checkCache, full, st.keep), whnfCache = openKept(st.whnfCache, full, st.keep), coreCache = openKept(st.coreCache, full, st.keep), eqOk = openKept(st.eqOk, full, st.keep), eqFail = openKept(st.eqFail, full, st.keep), eqNo = openKept(st.eqNo, full, st.keep), rules = st.rules)
+    Facts(closed = st.closed, unfolds = bounded(st.unfoldCache, st.keep), types = bounded(st.levelTypes, st.keep), vars = bounded(st.vars, st.keep), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = openKept(st.inferCache, full, st.keep), checkCache = openKept(st.checkCache, full, 4 * st.keep), whnfCache = openKept(st.whnfCache, full, st.keep), coreCache = openKept(st.coreCache, full, st.keep), eqOk = openKept(st.eqOk, full, 2 * st.keep), eqFail = openKept(st.eqFail, full, st.keep), eqNo = openKept(st.eqNo, full, st.keep), rules = st.rules)
 
 fn openKept(m: Map<Core.Exprs.Key, Bucket>, full: Bool, limit: Int) -> Map<Core.Exprs.Key, Bucket>
     ? "A map that may hold free variables: emptied with the variables, else past its own limit."
@@ -366,7 +407,7 @@ verify carried
     Core.Cache.size(carried(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).unfolds) => 0
 
 fn bounded(m: Map<Core.Exprs.Key, Bucket>, limit: Int) -> Map<Core.Exprs.Key, Bucket>
-    ? "A map carried across declarations, emptied once it passes limit hashes: kept for the whole run, values instantiated at levels once took mathlib past 14 GB and constant types took it there again on one worker, while most entries are asked for again within a few declarations."
+    ? "A map carried across declarations, emptied once it passes limit hashes: kept for the whole run, values instantiated at levels once took mathlib past 14 GB and constant types took it there again on one worker, while most entries are asked for again within a few declarations (LimitsFromReuseDistances)."
     match Core.Cache.size(m) > limit
         true -> Core.Cache.empty()
         false -> m
