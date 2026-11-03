@@ -11,7 +11,7 @@ module Subst
         "and binder depth, so a subterm shared many times in a DAG is rebuilt"
         "once per depth, not once per path to it. Smaller nodes are cheaper"
         "to rebuild than to look up."
-    exposes [Op, apply, instantiate, instantiateRev, instantiate1, lift, lower, abstractFVars, instLevelParams, hasLooseBVar, hasLoose]
+    exposes [Op, apply, instantiate, instantiateRev, instantiate1, lift, lower, abstractFVars, instLevelParams, sameParams, hasLooseBVar, hasLoose]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Univ]
     effects []
 
@@ -398,7 +398,7 @@ fn sameParams(ps: List<Name>, us: List<Level>) -> Bool
     match ps
         [] -> List.len(us) == 0
         [p, ..prest] -> match us
-            [u, ..urest] -> match u == Level.Param(p)
+            [u, ..urest] -> match isParam(u, p)
                 true -> sameParams(prest, urest)
                 false -> false
             [] -> false
@@ -408,6 +408,17 @@ verify sameParams
     sameParams([Core.Names.anon()], [Level.Zero]) => false
     sameParams([], []) => true
     sameParams([Core.Names.anon()], []) => false
+
+fn isParam(u: Level, p: Name) -> Bool
+    ? "Whether the level is the parameter p, read where it is: comparing it with a parameter built for the comparison allocated a level for every parameter of every instantiation (7 M on mathlib, all dropped at once)."
+    match u
+        Level.Param(q) -> q == p
+        _ -> false
+
+verify isParam
+    isParam(Level.Param(Core.Names.anon()), Core.Names.anon()) => true
+    isParam(Level.Succ(Level.Param(Core.Names.anon())), Core.Names.anon()) => false
+    isParam(Level.Param(Core.Names.str(Core.Names.anon(), "u")), Core.Names.anon()) => false
 
 fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Skips terms without parameters; compound nodes go through the memo."

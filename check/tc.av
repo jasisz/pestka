@@ -3476,7 +3476,7 @@ fn casesBody(st: St, h: Head, n: Int, v: Expr) -> Option<CasesOn>
     body = peelLams(v, n)
     match Core.Apps.fnOf(body)
         Expr.Const(_, r, rls) -> match Check.State.lookup(st, r)
-            Option.Some(Const.CRec(rv)) -> casesFits(rv, rls == Check.State.paramLevels(h.params), n, Core.Apps.argsOf(body))
+            Option.Some(Const.CRec(rv)) -> casesFits(rv, Core.Subst.sameParams(h.params, rls), n, Core.Apps.argsOf(body))
             _ -> Option.None
         _ -> Option.None
 
