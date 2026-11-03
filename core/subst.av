@@ -260,8 +260,19 @@ fn substituted(i: Int, offset: Int, n: Int, subst: List<Expr>, pick: Int) -> Exp
     match i < offset
         true -> Core.Exprs.bvar(i)
         false -> match i < offset + n
-            true -> lift(nth(subst, pick), 0, offset)
+            true -> lifted(nth(subst, pick), offset)
             false -> Core.Exprs.bvar(i - n)
+
+fn lifted(v: Expr, offset: Int) -> Expr
+    ? "v put in under offset binders: as it is when closed, which its word says and nearly every value put in is, else lifted over them. Lifting a closed value finds it untouched too, but only after an operation is made and the term asked about again."
+    match Core.Exprs.isClosed(v)
+        true -> v
+        false -> lift(v, 0, offset)
+
+verify lifted
+    lifted(Core.Exprs.fvar(3), 2) => Core.Exprs.fvar(3)
+    lifted(Core.Exprs.bvar(0), 2) => Core.Exprs.bvar(2)
+    lifted(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(1)), 1) => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.fvar(1))
 
 verify substituted
     substituted(0, 1, 1, [Core.Exprs.fvar(1)], 0) => Core.Exprs.bvar(0)
