@@ -178,11 +178,22 @@ fn mkImax(a: Level, b: Level) -> Level
         true -> mkMax(a, b)
         false -> match isZero(b)
             true -> b
-            false -> match Bool.or(isZero(a), a == Level.Succ(Level.Zero))
+            false -> match Bool.or(isZero(a), isOne(a))
                 true -> b
                 false -> match a == b
                     true -> a
                     false -> Level.IMax(a, b)
+
+fn isOne(l: Level) -> Bool
+    ? "Whether the level is the numeral 1, read where it is: comparing it with a 1 built for the comparison allocated a level on every imax rebuilt."
+    match l
+        Level.Succ(Level.Zero) -> true
+        _ -> false
+
+verify isOne
+    isOne(Level.Succ(Level.Zero)) => true
+    isOne(Level.Succ(Level.Succ(Level.Zero))) => false
+    isOne(Level.Zero) => false
 
 verify mkImax
     mkImax(Level.Param(Core.Names.anon()), Level.Zero) => Level.Zero
