@@ -167,15 +167,15 @@ verify names
     names(empty(), [0, 0], []) => Result.Ok([Core.Names.anon(), Core.Names.anon()])
     names(empty(), [3], []) => Result.Err("unknown name index 3")
 
-fn levels(t: Tables, ids: List<Int>, acc: List<Level>) -> Result<List<Level>, String>
-    ? "Several levels by index, in order."
+fn levels(t: Tables, ids: List<Int>) -> Result<List<Level>, String>
+    ? "Several levels by index, in order, each prepended to the rest (LevelsAsCells)."
     match ids
-        [] -> Result.Ok(List.reverse(acc))
-        [i, ..rest] -> levels(t, rest, List.prepend(level(t, i)?, acc))
+        [] -> Result.Ok([])
+        [i, ..rest] -> Result.Ok(List.prepend(level(t, i)?, levels(t, rest)?))
 
 verify levels
-    levels(empty(), [0], []) => Result.Ok([Level.Zero])
-    levels(empty(), [2], []) => Result.Err("unknown level index 2")
+    levels(empty(), [0]) => Result.Ok([Level.Zero])
+    levels(empty(), [2]) => Result.Err("unknown level index 2")
 
 fn addName(t: Tables, i: Int, n: Name) -> Result<Tables, String>
     ? "Defines name i. An index already bound, the anonymous name 0 included, is malformed input, as the reference kernel holds it; it is refused rather than overwritten."
