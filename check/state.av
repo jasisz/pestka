@@ -6,7 +6,7 @@ module State
         "scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, paramLevels, cacheGetAt, cachePutAt, quotSeen, quotMark]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, Memory, Limits, limitsOf, unbounded, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, paramLevels, cacheGetAt, cachePutAt, quotSeen, quotMark]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache, Check.Shapes]
     effects []
 
@@ -23,6 +23,75 @@ type Const
     CInduct(IndType)
     CCtor(Ctor)
     CRec(Rec)
+
+type Memory
+    Fast
+    Low
+
+decision LowMemoryMode
+    date = "2026-11-04"
+    reason =
+        "Pestka holds every expression of the export until the process"
+        "ends: on mathlib 105 M nodes, 3.4 GB, and reading alone peaks at"
+        "4.7 GB with the index tables; with the caches at the limits their"
+        "reuse distances pay for, one worker peaks at 7.6 GB. A run that"
+        "must fit in less chooses the low-memory mode (--low-memory): the"
+        "caches stop at smaller limits, the facts about closed terms, kept"
+        "for the whole run otherwise, past a limit too. The limits were"
+        "swept on mathlib: the unit for the checked types costs nothing"
+        "that a quarter would save, every other cache at a quarter and the"
+        "variables at an eighth bring the peak down to what reading alone"
+        "takes, 4.7 GB, and halving more would save nothing. Under PGO,"
+        "one worker: mathlib 1726.0 G and 7.59 GB to 1871.5 G (+8.4%) and"
+        "4.71 GB, the wall the same (295 s to 294 s); on eight workers"
+        "13 GB to 5.4 GB; Init 51.4 G and 0.98 GB to 56.6 G and 0.51 GB;"
+        "etale 21.4 G and 0.84 GB to 22.2 G and 0.46 GB; taylor 17.7 G and"
+        "0.65 GB to 18.4 G and 0.38 GB; run.sh 48 ok and the 179 Arena"
+        "tests correct in both modes. Halfway, the variables at a quarter"
+        "and the rest at a half, costs 6% for 5.3 GB."
+        "The memory that would matter is the values of theorems,"
+        "75 M of mathlib's nodes: a mode that read them apart from their"
+        "declarations and let each go once checked was tried, and declined"
+        "Init and etale, since Lean's kernel unfolds theorems where it"
+        "reduces a proof (Acc.inv under WellFounded.fixF_eq, Iff.mpr and"
+        "Localization.mk_eq_mk_iff under Localization.rec), small values"
+        "kept or not; a value let go cannot be had back without reading the"
+        "file again. The default stays the fast mode: the Arena ranks by"
+        "instructions, and the memory it allows is not the limit."
+    chosen = "LowMemoryMode"
+    rejected = ["OneModeWithSmallerLimits", "TheoremValuesFreed"]
+    impacts = [limitsOf]
+
+record Limits
+    vars: Int
+    check: Int
+    infer: Int
+    whnf: Int
+    core: Int
+    eqOk: Int
+    eqFail: Int
+    eqNo: Int
+    unfold: Int
+    types: Int
+    closed: Int
+
+fn limitsOf(unit: Int, memory: Memory) -> Limits
+    ? "How many hashes each map carried across declarations keeps before it is emptied, from the unit a worker gets. The fast mode keeps the multiples the reuse distances pay for (LimitsFromReuseDistances) and the facts about closed terms for the whole run. The low-memory mode keeps the checked types at the unit, whose entries are the cheapest to keep and the dearest to lose, a quarter of it for the inferred types, reduction results, equal pairs, constant types at levels and closed terms, and an eighth for the variables, with which the open caches go, the pairs found different and the unfolding cache (LowMemoryMode)."
+    match memory
+        Memory.Fast -> Limits(vars = unit, check = 4 * unit, infer = unit, whnf = unit, core = unit, eqOk = 2 * unit, eqFail = unit, eqNo = unit, unfold = unit, types = unit, closed = unbounded())
+        Memory.Low -> Limits(vars = Int.div(unit, 8), check = unit, infer = Int.div(unit, 4), whnf = Int.div(unit, 4), core = Int.div(unit, 4), eqOk = Int.div(unit, 4), eqFail = Int.div(unit, 8), eqNo = Int.div(unit, 8), unfold = Int.div(unit, 8), types = Int.div(unit, 4), closed = Int.div(unit, 4))
+
+verify limitsOf
+    limitsOf(65536, Memory.Fast).check => 262144
+    limitsOf(65536, Memory.Low).vars => 8192
+    limitsOf(65536, Memory.Low).closed => 16384
+
+fn unbounded() -> Int
+    ? "A limit no map reaches: 2^60 hashes."
+    1152921504606846976
+
+verify unbounded
+    unbounded() > 0 => true
 
 record Placed
     name: Name
@@ -217,7 +286,7 @@ record St
     closed: Map<Core.Exprs.Key, Bucket>
     open: Int
     opened: Option<Expr>
-    keep: Int
+    limits: Limits
     kinds: List<Int>
     paramsTag: Expr
     shapes: Map<Core.Exprs.Key, Tuple<Expr, Shape>>
@@ -239,7 +308,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), stepCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Option.None, keep = 65536, kinds = [], paramsTag = paramsTagOf(params), shapes = {}, hot = {}, rules = {}, fuel = -1)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), stepCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Option.None, limits = limitsOf(65536, Memory.Fast), kinds = [], paramsTag = paramsTagOf(params), shapes = {}, hot = {}, rules = {}, fuel = -1)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0

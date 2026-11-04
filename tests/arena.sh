@@ -15,11 +15,12 @@ mb=${2:-2000}
 secs=${3:-20}
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin="${PESTKA_BIN:-$root/.build/target/release/main}"
+# PESTKA_ARGS adds arguments before the file, for example --low-memory.
 ok=0; declined=0; wrong=0; crashed=0
 for kind in good bad; do
   [ "$kind" = good ] && want=0 || want=1
   for f in $(find "$dir/$kind" -name '*.ndjson' -not -path '*/perf/*' -size -4000k | sort); do
-    "$root/bin/capped" "$mb" "$secs" "$bin" "$f" >/dev/null 2>&1
+    "$root/bin/capped" "$mb" "$secs" "$bin" $PESTKA_ARGS "$f" >/dev/null 2>&1
     got=$?
     name=${f#"$dir"/}
     if [ "$got" -eq "$want" ]; then

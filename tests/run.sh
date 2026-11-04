@@ -10,12 +10,13 @@
 # invalid, against 1 (rejected).
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin="${PESTKA_BIN:-$root/.build/target/release/main}"
+# PESTKA_ARGS adds arguments before the file, for example --low-memory.
 fail=0
 for dir in export/wellformed:0 export/malformed:1 export/illtyped:1 export/unsupported:2 soundness-findings:1; do
   name=${dir%%:*}
   want=${dir##*:}
   for f in "$root"/tests/"$name"/*.ndjson; do
-    "$root/bin/capped" 2000 20 "$bin" "$f" >/dev/null 2>&1
+    "$root/bin/capped" 2000 20 "$bin" $PESTKA_ARGS "$f" >/dev/null 2>&1
     got=$?
     if [ "$got" -eq "$want" ]; then
       echo "ok   ${name#export/}/$(basename "$f")"
@@ -29,7 +30,7 @@ done
 # node's stored loose range saturates at: generated, as the export is 2.4 MB.
 deep=$(mktemp) || exit 1
 python3 "$root/tests/gen_deep_binder_export.py" 16382 "$deep"
-"$root/bin/capped" 2000 20 "$bin" "$deep" >/dev/null 2>&1
+"$root/bin/capped" 2000 20 "$bin" $PESTKA_ARGS "$deep" >/dev/null 2>&1
 got=$?
 rm -f "$deep"
 if [ "$got" -eq 0 ]; then

@@ -39,7 +39,7 @@ record Admitted
 record Chunk
     env: Env
     jobs: List<Job>
-    keep: Int
+    limits: Limits
 
 record Facts
     closed: Map<Core.Exprs.Key, Bucket>
@@ -98,25 +98,25 @@ fn dropLate(jobs: List<Job>, limit: Int, acc: List<Job>) -> List<Job>
 verify dropLate
     dropLate([], 0, []) => []
 
-fn chunks(jobs: List<Job>, env: Env, keep: Int, size: Int, cur: List<Job>, n: Int, acc: List<Chunk>) -> List<Chunk>
+fn chunks(jobs: List<Job>, env: Env, limits: Limits, size: Int, cur: List<Job>, n: Int, acc: List<Chunk>) -> List<Chunk>
     ? "Consecutive runs of size jobs, in file order, each with the whole environment; neighbours in a file share the most, which keeps the per-chunk caches useful."
     match jobs
         [] -> match cur
             [] -> List.reverse(acc)
-            _ -> List.reverse(List.prepend(Chunk(env = env, jobs = List.reverse(cur), keep = keep), acc))
+            _ -> List.reverse(List.prepend(Chunk(env = env, jobs = List.reverse(cur), limits = limits), acc))
         [j, ..rest] -> match n + 1 >= size
-            true -> chunks(rest, env, keep, size, [], 0, List.prepend(Chunk(env = env, jobs = List.reverse(List.prepend(j, cur)), keep = keep), acc))
-            false -> chunks(rest, env, keep, size, List.prepend(j, cur), n + 1, acc)
+            true -> chunks(rest, env, limits, size, [], 0, List.prepend(Chunk(env = env, jobs = List.reverse(List.prepend(j, cur)), limits = limits), acc))
+            false -> chunks(rest, env, limits, size, List.prepend(j, cur), n + 1, acc)
 
 verify chunks
-    chunks([], Check.State.envEmpty(), 65536, 4, [], 0, []) => []
+    chunks([], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 4, [], 0, []) => []
 
-fn checkParallel(decls: List<Decl>, workers: Int) -> Result<Run, Fail>
+fn checkParallel(decls: List<Decl>, workers: Int, memory: Memory) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations on workers at once: runs of 16 consecutive declarations are dealt to the workers in turn, which evens out their loads, and each worker checks its runs in file order."
-    checkHeld(decls, workers).run
+    checkHeld(decls, workers, memory).run
 
 verify checkParallel
-    checkParallel([], 4) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
+    checkParallel([], 4, Memory.Fast) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
 
 decision FactsHeldToExit
     date = "2026-10-24"
@@ -133,14 +133,22 @@ decision FactsHeldToExit
     rejected = ["FreedAtTheEnd"]
     impacts = [checkHeld, groupLoop, Checked]
 
-fn checkHeld(decls: List<Decl>, workers: Int) -> Checking
-    ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit)."
+fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory) -> Checking
+    ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit); the maps carried are bounded as the memory mode says (LowMemoryMode)."
     a = admit(decls)
-    cs = runWorkers(deal(chunks(due(a), a.run.env, keepFor(workers), 16, [], 0, []), workers, 0, emptyGroups(workers, [])))
+    cs = runWorkers(deal(chunks(due(a), a.run.env, limitsFor(workers, memory), 16, [], 0, []), workers, 0, emptyGroups(workers, [])))
     Checking(run = combine(a, cs), held = cs)
 
 verify checkHeld
-    List.len(checkHeld([], 2).held) => 2
+    List.len(checkHeld([], 2, Memory.Fast).held) => 2
+
+fn limitsFor(workers: Int, memory: Memory) -> Limits
+    ? "The limits of the maps a worker carries across declarations, from the unit the number of workers sets and the memory mode."
+    Check.State.limitsOf(keepFor(workers), memory)
+
+verify limitsFor
+    limitsFor(1, Memory.Fast).vars => 262144
+    limitsFor(8, Memory.Low).vars => 8192
 
 fn keepFor(workers: Int) -> Int
     ? "How many hashes a map carried across declarations keeps before it is emptied: the unit of the limits carried sets, four of it for the checked types, two for equal pairs (LimitsFromReuseDistances). Every worker keeps maps of its own, and mathlib on eight workers already peaks near 13 GB; one worker alone keeps four times as much. Twice as much took mathlib from 10467.3 G to 10336.7 G instructions and its peak from 8.28 GB to 8.90 GB; twice that, once terms were smaller, from 5124.6 G to 5010.4 G and from 7.91 GB to 8.89 GB."
@@ -180,7 +188,7 @@ fn addAt(groups: List<List<Chunk>>, k: Int, c: Chunk, before: List<List<Chunk>>)
             false -> addAt(rest, k - 1, c, List.prepend(g, before))
 
 verify addAt
-    addAt([[], []], 1, Chunk(env = Check.State.envEmpty(), jobs = [], keep = 65536), []) => [[], [Chunk(env = Check.State.envEmpty(), jobs = [], keep = 65536)]]
+    addAt([[], []], 1, Chunk(env = Check.State.envEmpty(), jobs = [], limits = Check.State.limitsOf(65536, Memory.Fast)), []) => [[], [Chunk(env = Check.State.envEmpty(), jobs = [], limits = Check.State.limitsOf(65536, Memory.Fast))]]
 
 fn reverseEach(groups: List<List<Chunk>>, acc: List<List<Chunk>>) -> List<List<Chunk>>
     ? "Each group back in file order."
@@ -227,35 +235,35 @@ fn groupLoop(g: List<Chunk>, kept: Facts, count: Int) -> Checked
     ? "Run after run."
     match g
         [] -> Checked(failure = Option.None, at = 0, count = count, kept = kept)
-        [c, ..rest] -> chunkLoop(c.jobs, c.env, c.keep, rest, kept, count)
+        [c, ..rest] -> chunkLoop(c.jobs, c.env, c.limits, rest, kept, count)
 
 verify groupLoop
     groupLoop([], noFacts(), 2).count => 2
 
 fn checkChunk(c: Chunk) -> Checked
     ? "Checks one run of deferred declarations with facts of its own; the first failure is reported with its place in the file."
-    chunkLoop(c.jobs, c.env, c.keep, [], noFacts(), 0)
+    chunkLoop(c.jobs, c.env, c.limits, [], noFacts(), 0)
 
 verify checkChunk
-    checkChunk(Chunk(env = Check.State.envEmpty(), jobs = [], keep = 65536)) => Checked(failure = Option.None, at = 0, count = 0, kept = noFacts())
+    checkChunk(Chunk(env = Check.State.envEmpty(), jobs = [], limits = Check.State.limitsOf(65536, Memory.Fast))) => Checked(failure = Option.None, at = 0, count = 0, kept = noFacts())
 
-fn chunkLoop(jobs: List<Job>, env: Env, keep: Int, more: List<Chunk>, kept: Facts, count: Int) -> Checked
+fn chunkLoop(jobs: List<Job>, env: Env, limits: Limits, more: List<Chunk>, kept: Facts, count: Int) -> Checked
     ? "One job after another, then the next run, until one fails. Each job gets the facts kept from the ones before it; they are moved into its checker here, in the loop that owns them, so that every map reaches the checker with one owner and is updated in place."
     match jobs
         [] -> groupLoop(more, kept, count)
-        [j, ..rest] -> chunkNext(jobChecks(j, St.update(checkerFor(env, j), keep = keep, closed = kept.closed, unfoldCache = kept.unfolds, levelTypes = kept.types, vars = kept.vars, lctx = kept.lctx, next = kept.next, topLevel = kept.topLevel, inferCache = kept.inferCache, checkCache = kept.checkCache, whnfCache = kept.whnfCache, coreCache = kept.coreCache, eqOk = kept.eqOk, eqFail = kept.eqFail, eqNo = kept.eqNo, rules = kept.rules)), j, env, keep, rest, more, count)
+        [j, ..rest] -> chunkNext(jobChecks(j, St.update(checkerFor(env, j), limits = limits, closed = kept.closed, unfoldCache = kept.unfolds, levelTypes = kept.types, vars = kept.vars, lctx = kept.lctx, next = kept.next, topLevel = kept.topLevel, inferCache = kept.inferCache, checkCache = kept.checkCache, whnfCache = kept.whnfCache, coreCache = kept.coreCache, eqOk = kept.eqOk, eqFail = kept.eqFail, eqNo = kept.eqNo, rules = kept.rules)), j, env, limits, rest, more, count)
 
 verify chunkLoop
-    chunkLoop([], Check.State.envEmpty(), 65536, [], noFacts(), 3).count => 3
+    chunkLoop([], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), [], noFacts(), 3).count => 3
 
-fn chunkNext(r: Result<Facts, Fail>, j: Job, env: Env, keep: Int, rest: List<Job>, more: List<Chunk>, count: Int) -> Checked
+fn chunkNext(r: Result<Facts, Fail>, j: Job, env: Env, limits: Limits, rest: List<Job>, more: List<Chunk>, count: Int) -> Checked
     ? "Goes on, or stops with the named failure and its position."
     match r
-        Result.Ok(kept) -> chunkLoop(rest, env, keep, more, kept, count + 1)
+        Result.Ok(kept) -> chunkLoop(rest, env, limits, more, kept, count + 1)
         Result.Err(e) -> Checked(failure = Option.Some(failNamed(e, j.head.name)), at = j.pos, count = count, kept = noFacts())
 
 verify chunkNext
-    chunkNext(Result.Err(Fail.Reject("bad")), Job(pos = 4, upTo = 0, head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), Check.State.envEmpty(), 65536, [], [], 0) => Checked(failure = Option.Some(Fail.Reject("x: bad")), at = 4, count = 0, kept = noFacts())
+    chunkNext(Result.Err(Fail.Reject("bad")), Job(pos = 4, upTo = 0, head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), [], [], 0) => Checked(failure = Option.Some(Fail.Reject("x: bad")), at = 4, count = 0, kept = noFacts())
 
 fn combine(a: Admitted, results: List<Checked>) -> Result<Run, Fail>
     ? "The first failure in file order across the chunks and the building; otherwise the run with every deferred declaration counted."
@@ -381,9 +389,9 @@ decision LimitsFromReuseDistances
     impacts = [carried, keepFor]
 
 fn carried(st: St) -> Facts
-    ? "What checking takes from a declaration to the next: the facts about closed terms; the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration; and, since a free variable is made of its type and value and how many of its kind are open around it (CountedVariables), the variables made so far with their context, and what was found by inference, checking, reduction and comparison about terms holding them, which holds wherever the same variables appear. What was found by checking terms with a universe parameter is kept under the declaration's parameters (ParamsInTheKey). Each map is emptied past its limit, a multiple of the unit set by what its entries are used again at and cost to keep (LimitsFromReuseDistances); when the variables are, their context and every map that may hold a variable go with them, so no kept result names a variable that is gone."
-    full = Core.Cache.size(st.vars) > st.keep
-    Facts(closed = st.closed, unfolds = bounded(st.unfoldCache, st.keep), types = bounded(st.levelTypes, st.keep), vars = bounded(st.vars, st.keep), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = openKept(st.inferCache, full, st.keep), checkCache = openKept(st.checkCache, full, 4 * st.keep), whnfCache = openKept(st.whnfCache, full, st.keep), coreCache = openKept(st.coreCache, full, st.keep), eqOk = openKept(st.eqOk, full, 2 * st.keep), eqFail = openKept(st.eqFail, full, st.keep), eqNo = openKept(st.eqNo, full, st.keep), rules = st.rules)
+    ? "What checking takes from a declaration to the next: the facts about closed terms; the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration; and, since a free variable is made of its type and value and how many of its kind are open around it (CountedVariables), the variables made so far with their context, and what was found by inference, checking, reduction and comparison about terms holding them, which holds wherever the same variables appear. What was found by checking terms with a universe parameter is kept under the declaration's parameters (ParamsInTheKey). Each map is emptied past its limit, a multiple of the unit set by what its entries are used again at and cost to keep (LimitsFromReuseDistances), the closed terms only in the low-memory mode (LowMemoryMode); when the variables are, their context and every map that may hold a variable go with them, so no kept result names a variable that is gone."
+    full = Core.Cache.size(st.vars) > st.limits.vars
+    Facts(closed = bounded(st.closed, st.limits.closed), unfolds = bounded(st.unfoldCache, st.limits.unfold), types = bounded(st.levelTypes, st.limits.types), vars = bounded(st.vars, st.limits.vars), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = openKept(st.inferCache, full, st.limits.infer), checkCache = openKept(st.checkCache, full, st.limits.check), whnfCache = openKept(st.whnfCache, full, st.limits.whnf), coreCache = openKept(st.coreCache, full, st.limits.core), eqOk = openKept(st.eqOk, full, st.limits.eqOk), eqFail = openKept(st.eqFail, full, st.limits.eqFail), eqNo = openKept(st.eqNo, full, st.limits.eqNo), rules = st.rules)
 
 fn openKept(m: Map<Core.Exprs.Key, Bucket>, full: Bool, limit: Int) -> Map<Core.Exprs.Key, Bucket>
     ? "A map that may hold free variables: emptied with the variables, else past its own limit."

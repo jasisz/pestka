@@ -2761,7 +2761,7 @@ verify natComputed
 
 fn derivingState(st: St) -> St
     ? "A checker for a derivation: st's environment, local context and counter of variables, empty caches, and fuel for 4096 unfoldings."
-    St.update(Check.State.fresh(st.env, st.params, st.safety), upTo = st.upTo, block = st.block, lctx = st.lctx, next = st.next, topLevel = st.topLevel, checkParams = st.checkParams, eager = st.eager, open = st.open, opened = st.opened, keep = st.keep, kinds = st.kinds, fuel = 4096)
+    St.update(Check.State.fresh(st.env, st.params, st.safety), upTo = st.upTo, block = st.block, lctx = st.lctx, next = st.next, topLevel = st.topLevel, checkParams = st.checkParams, eager = st.eager, open = st.open, opened = st.opened, limits = st.limits, kinds = st.kinds, fuel = 4096)
 
 verify derivingState
     derivingState(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).fuel => 4096
