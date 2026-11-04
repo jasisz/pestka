@@ -157,15 +157,15 @@ fn freshChunk() -> Vector<Expr>
 verify expr
     expr(empty(), 0) => Result.Err("unknown expression index 0")
 
-fn names(t: Tables, ids: List<Int>, acc: List<Name>) -> Result<List<Name>, String>
-    ? "Several names by index, in order."
+fn names(t: Tables, ids: List<Int>) -> Result<List<Name>, String>
+    ? "Several names by index, in order, each prepended to the rest, as a constant's levels are (LevelsAsCells): a declaration's universe parameters are walked at every instantiation of it."
     match ids
-        [] -> Result.Ok(List.reverse(acc))
-        [i, ..rest] -> names(t, rest, List.prepend(name(t, i)?, acc))
+        [] -> Result.Ok([])
+        [i, ..rest] -> Result.Ok(List.prepend(name(t, i)?, names(t, rest)?))
 
 verify names
-    names(empty(), [0, 0], []) => Result.Ok([Core.Names.anon(), Core.Names.anon()])
-    names(empty(), [3], []) => Result.Err("unknown name index 3")
+    names(empty(), [0, 0]) => Result.Ok([Core.Names.anon(), Core.Names.anon()])
+    names(empty(), [3]) => Result.Err("unknown name index 3")
 
 fn levels(t: Tables, ids: List<Int>) -> Result<List<Level>, String>
     ? "Several levels by index, in order, each prepended to the rest (LevelsAsCells)."
