@@ -132,8 +132,8 @@ verify go
 fn visit(op: Op, e: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Variables are rewritten directly; compound nodes go through the memo."
     match e
-        Expr.BVar(i) -> SR(e = bvarCase(op, i, offset), memo = memo)
-        Expr.FVar(id) -> SR(e = fvarCase(op, id, offset), memo = memo)
+        Expr.BVar(_, i) -> SR(e = bvarCase(op, i, offset), memo = memo)
+        Expr.FVar(_, id) -> SR(e = fvarCase(op, id, offset), memo = memo)
         _ -> match Core.Exprs.isSmall(e)
             true -> SR(e = small(op, e, offset), memo = memo)
             false -> memoed(op, e, offset, memo, Core.Exprs.keyAt(e, offset))
@@ -146,8 +146,8 @@ fn small(op: Op, e: Expr, offset: Int) -> Expr
     match untouched(op, e, offset)
         true -> e
         false -> match e
-            Expr.BVar(i) -> bvarCase(op, i, offset)
-            Expr.FVar(id) -> fvarCase(op, id, offset)
+            Expr.BVar(_, i) -> bvarCase(op, i, offset)
+            Expr.FVar(_, id) -> fvarCase(op, id, offset)
             Expr.App(_, f, a) -> Core.Exprs.app(small(op, f, offset), small(op, a, offset))
             Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), small(op, t, offset), small(op, b, offset + 1), Binder.Default)
             Expr.Pi(_, t, b) -> Core.Exprs.pi(Core.Names.anon(), small(op, t, offset), small(op, b, offset + 1), Binder.Default)
@@ -320,8 +320,8 @@ verify position
 fn applySpec(op: Op, e: Expr, offset: Int) -> Expr
     ? "The operation by plain recursion, with no skipping by metadata and no memo: what apply must give."
     match e
-        Expr.BVar(i) -> bvarCase(op, i, offset)
-        Expr.FVar(id) -> fvarCase(op, id, offset)
+        Expr.BVar(_, i) -> bvarCase(op, i, offset)
+        Expr.FVar(_, id) -> fvarCase(op, id, offset)
         Expr.App(_, f, a) -> Core.Exprs.app(applySpec(op, f, offset), applySpec(op, a, offset))
         Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), applySpec(op, t, offset), applySpec(op, b, offset + 1), Binder.Default)
         Expr.Pi(_, t, b) -> Core.Exprs.pi(Core.Names.anon(), applySpec(op, t, offset), applySpec(op, b, offset + 1), Binder.Default)
@@ -425,7 +425,7 @@ fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Core.Exprs.Key, Tuple
     match Core.Exprs.hasParam(e)
         false -> SR(e = e, memo = memo)
         true -> match e
-            Expr.Sort(l) -> SR(e = Core.Exprs.sort(Core.Univ.instantiate(l, ps, us)), memo = memo)
+            Expr.Sort(_, l) -> SR(e = Core.Exprs.sort(Core.Univ.instantiate(l, ps, us)), memo = memo)
             Expr.Const(_, n, ls) -> SR(e = Core.Exprs.cnst(n, levelsOf(ls, ps, us)), memo = memo)
             _ -> match Core.Exprs.isSmall(e)
                 true -> SR(e = lsmall(e, ps, us), memo = memo)
@@ -439,7 +439,7 @@ fn lsmall(e: Expr, ps: List<Name>, us: List<Level>) -> Expr
     match Core.Exprs.hasParam(e)
         false -> e
         true -> match e
-            Expr.Sort(l) -> Core.Exprs.sort(Core.Univ.instantiate(l, ps, us))
+            Expr.Sort(_, l) -> Core.Exprs.sort(Core.Univ.instantiate(l, ps, us))
             Expr.Const(_, n, ls) -> Core.Exprs.cnst(n, levelsOf(ls, ps, us))
             Expr.App(_, f, a) -> Core.Exprs.app(lsmall(f, ps, us), lsmall(a, ps, us))
             Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), lsmall(t, ps, us), lsmall(b, ps, us), Binder.Default)
@@ -546,7 +546,7 @@ fn looseAt(e: Expr, i: Int) -> Bool
     match Core.Exprs.within(e, i)
         true -> false
         false -> match e
-            Expr.BVar(j) -> j == i
+            Expr.BVar(_, j) -> j == i
             Expr.App(_, f, a) -> Bool.or(looseAt(f, i), looseAt(a, i))
             Expr.Lam(_, t, b) -> Bool.or(looseAt(t, i), looseAt(b, i + 1))
             Expr.Pi(_, t, b) -> Bool.or(looseAt(t, i), looseAt(b, i + 1))
@@ -571,7 +571,7 @@ fn looseFrom(e: Expr, off: Int) -> Bool
     match Core.Exprs.within(e, off)
         true -> false
         false -> match e
-            Expr.BVar(j) -> j >= off
+            Expr.BVar(_, j) -> j >= off
             Expr.App(_, f, a) -> Bool.or(looseFrom(f, off), looseFrom(a, off))
             Expr.Lam(_, t, b) -> Bool.or(looseFrom(t, off), looseFrom(b, off + 1))
             Expr.Pi(_, t, b) -> Bool.or(looseFrom(t, off), looseFrom(b, off + 1))

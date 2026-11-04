@@ -104,6 +104,25 @@ decision ReadersByWord
     rejected = ["LeafFirst"]
     impacts = [wordOf, looseRange, varsOf, hasFVar, hasParam]
 
+decision LeavesCarryWords
+    date = "2026-11-04"
+    reason =
+        "A bound or free variable and a universe had no word: every reader"
+        "made one on the spot, a hash mixed and packed, and for a universe"
+        "its level hashed again. They are made rarely and read all the time,"
+        "as the part of every application built over them: on etale 0.16 M"
+        "bound variables, 0.21 M free ones and 0.16 M universes were made, and"
+        "their words were made 4.1 M, 8.4 M and 0.8 M times. Now each carries"
+        "the word its constructor makes, as a compound node and a constant"
+        "do, and only a literal's is made when read. A bound variable at"
+        "16382 or deeper reads its range as saturated, an upper bound, as a"
+        "compound node over it does. One worker, PGO: etale 20.94 G to"
+        "19.89 G instructions, Init 51.57 G to 50.12 G, mathlib 1718.7 G to"
+        "1630.6 G (peak 7.35 GB to 7.40 GB)."
+    chosen = "LeavesCarryWords"
+    rejected = ["LeafWordsMadeWhenRead"]
+    impacts = [bvar, fvar, sort, packedOf, leafWordOf]
+
 decision KeysAsMachineWords
     date = "2026-10-25"
     reason =
@@ -167,9 +186,9 @@ record Key
     value: Int
 
 type Expr
-    BVar(Int)
-    FVar(Int)
-    Sort(Level)
+    BVar(Word, Int)
+    FVar(Word, Int)
+    Sort(Word, Level)
     Const(Word, Name, List<Level>)
     App(Word, Expr, Expr)
     Lam(Word, Expr, Expr)
@@ -266,22 +285,29 @@ verify indexOf
     indexOf(1099511627776) => Result.Err("index out of range")
 
 fn bvar(i: Int) -> Expr
-    ? "Bound variable by de Bruijn index."
-    Expr.BVar(i)
+    ? "Bound variable by de Bruijn index, carrying its word (LeavesCarryWords)."
+    Expr.BVar(bvarWord(i), i)
 
 verify bvar
     looseRange(bvar(2)) => 3
 
 fn fvar(i: Int) -> Expr
-    ? "Free variable of the local context."
-    Expr.FVar(i)
+    ? "Free variable of the local context, carrying its word (LeavesCarryWords)."
+    Expr.FVar(fvarWord(i), i)
 
 verify fvar
     hasFVar(fvar(0)) => true
 
 fn sort(l: Level) -> Expr
-    ? "A universe."
-    Expr.Sort(l)
+    ? "A universe, carrying its word (LeavesCarryWords)."
+    Expr.Sort(sortWord(l), l)
+
+fn sortWord(l: Level) -> Word
+    ? "A universe's word: its level's hash and whether a parameter occurs in it."
+    leafWord(Core.Hash.mix(2, Core.Levels.hashOf(l)), 0, 0, flag(Core.Levels.hasParam(l)))
+
+verify sortWord
+    sortWord(Level.Zero) == leafWord(Core.Hash.mix(2, 2), 0, 0, 0) => true
 
 verify sort
     looseRange(sort(Level.Zero)) => 0
@@ -385,9 +411,9 @@ verify proj
 fn metaOf(e: Expr) -> Meta
     ? "Metadata of any node; leaves compute theirs on the spot."
     match e
-        Expr.BVar(i) -> Meta(hash = Core.Hash.mix(1, i), range = i + 1, vars = 0, params = false, size = 1)
-        Expr.FVar(i) -> Meta(hash = Core.Hash.mix(11, i), range = 0, vars = varsOfId(i), params = false, size = 1)
-        Expr.Sort(l) -> Meta(hash = Core.Hash.mix(2, Core.Levels.hashOf(l)), range = 0, vars = 0, params = Core.Levels.hasParam(l), size = 1)
+        Expr.BVar(_, i) -> Meta(hash = Core.Hash.mix(1, i), range = i + 1, vars = 0, params = false, size = 1)
+        Expr.FVar(_, i) -> Meta(hash = Core.Hash.mix(11, i), range = 0, vars = varsOfId(i), params = false, size = 1)
+        Expr.Sort(_, l) -> Meta(hash = Core.Hash.mix(2, Core.Levels.hashOf(l)), range = 0, vars = 0, params = Core.Levels.hasParam(l), size = 1)
         Expr.Const(m, _, _) -> metaIn(m)
         Expr.App(m, _, _) -> metaIn(m)
         Expr.Lam(m, _, _) -> metaIn(m)
@@ -439,9 +465,9 @@ verify wordOf
 fn leafWordOf(e: Expr) -> Word
     ? "A leaf's word, made on the spot; a node that carries its word gives that."
     match e
-        Expr.BVar(i) -> bvarWord(i)
-        Expr.FVar(i) -> fvarWord(i)
-        Expr.Sort(l) -> leafWord(Core.Hash.mix(2, Core.Levels.hashOf(l)), 0, 0, flag(Core.Levels.hasParam(l)))
+        Expr.BVar(m, _) -> m
+        Expr.FVar(m, _) -> m
+        Expr.Sort(m, _) -> m
         Expr.Const(m, _, _) -> m
         Expr.App(m, _, _) -> m
         Expr.Lam(m, _, _) -> m
@@ -566,8 +592,11 @@ verify under
     under(16383) => 16383
 
 fn packedOf(e: Expr) -> Option<Word>
-    ? "The packed metadata of a compound node or a constant, or none for another leaf, whose metadata is computed on the spot."
+    ? "The packed metadata a node carries: every node but a literal, whose metadata is computed on the spot (LeavesCarryWords)."
     match e
+        Expr.BVar(m, _) -> Option.Some(m)
+        Expr.FVar(m, _) -> Option.Some(m)
+        Expr.Sort(m, _) -> Option.Some(m)
         Expr.Const(m, _, _) -> Option.Some(m)
         Expr.App(m, _, _) -> Option.Some(m)
         Expr.Lam(m, _, _) -> Option.Some(m)
@@ -577,7 +606,7 @@ fn packedOf(e: Expr) -> Option<Word>
         _ -> Option.None
 
 verify packedOf
-    packedOf(bvar(0)) => Option.None
+    packedOf(natLit(0)) => Option.None
     packedOf(app(bvar(0), bvar(0))) == Option.None => false
 
 fn hashOf(e: Expr) -> Int
@@ -632,7 +661,7 @@ verify looseRange
 fn leafRange(e: Expr) -> Int
     ? "A leaf's loose range: a bound variable's index and one, nothing for another leaf."
     match e
-        Expr.BVar(i) -> i + 1
+        Expr.BVar(_, i) -> i + 1
         _ -> 0
 
 fn within(e: Expr, n: Int) -> Bool
@@ -693,7 +722,7 @@ verify leafParam
 fn leafParam(e: Expr) -> Bool
     ? "Whether a leaf holds a universe parameter: only a sort can."
     match e
-        Expr.Sort(l) -> Core.Levels.hasParam(l)
+        Expr.Sort(_, l) -> Core.Levels.hasParam(l)
         _ -> false
 
 verify hasParam
@@ -817,7 +846,7 @@ fn varsOf(e: Expr) -> Int
 fn leafVars(e: Expr) -> Int
     ? "A leaf's variable bits: a free variable's own, none for another leaf."
     match e
-        Expr.FVar(i) -> varsOfId(i)
+        Expr.FVar(_, i) -> varsOfId(i)
         _ -> 0
 
 verify leafVars

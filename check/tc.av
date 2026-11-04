@@ -164,9 +164,9 @@ verify remember
 fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "One inference step by the shape of e, whose loose bound variables stand for the free variables in env, the innermost first."
     match e
-        Expr.BVar(i) -> boundType(st, List.drop(env, i))
-        Expr.FVar(id) -> Result.Ok(RE(e = Check.State.localType(st.lctx, id)?, st = st))
-        Expr.Sort(l) -> inferSort(st, l, only)
+        Expr.BVar(_, i) -> boundType(st, List.drop(env, i))
+        Expr.FVar(_, id) -> Result.Ok(RE(e = Check.State.localType(st.lctx, id)?, st = st))
+        Expr.Sort(_, l) -> inferSort(st, l, only)
         Expr.Const(_, n, ls) -> inferConst(st, e, n, ls, only)
         Expr.App(_, f, a) -> inferApp(st, e, f, a, env, only)
         Expr.Lam -> lamLoop(st, e, env, [], only)
@@ -439,7 +439,7 @@ verify keptType
 fn fvarId(e: Expr) -> Int
     ? "The number of a free variable."
     match e
-        Expr.FVar(id) -> id
+        Expr.FVar(_, id) -> id
         _ -> -1
 
 verify fvarId
@@ -468,7 +468,7 @@ verify bodyOf
 fn sortLevel(e: Expr) -> Level
     ? "The level of a sort."
     match e
-        Expr.Sort(l) -> l
+        Expr.Sort(_, l) -> l
         _ -> Level.Zero
 
 verify sortLevel
@@ -896,7 +896,7 @@ verify fitsWithin
 fn fitsWithinNode(t: Expr, d: Expr, subst: List<Expr>, off: Int, left: Int) -> Int
     ? "fitsWithin one node of d down, as fitsNode, the budget passed from part to part."
     match d
-        Expr.BVar(i) -> match fitsVar(t, i, subst, off)
+        Expr.BVar(_, i) -> match fitsVar(t, i, subst, off)
             true -> left
             false -> -1
         Expr.App(_, f, a) -> match t
@@ -934,7 +934,7 @@ verify fitSample
 fn fitsNode(t: Expr, d: Expr, subst: List<Expr>, off: Int) -> Bool
     ? "fitsUnder one node of d down: a bound variable takes its argument or drops by the substitution's length, a compound node compares its parts."
     match d
-        Expr.BVar(i) -> fitsVar(t, i, subst, off)
+        Expr.BVar(_, i) -> fitsVar(t, i, subst, off)
         Expr.App(_, f, a) -> match t
             Expr.App(_, g, b) -> Bool.and(fitsUnder(g, f, subst, off), fitsUnder(b, a, subst, off))
             _ -> false
@@ -1134,7 +1134,7 @@ fn cheapDone(e: Expr, f: Expr, args: List<Expr>, i: Int) -> Expr
     match Core.Exprs.isClosed(f)
         true -> Core.Apps.mkApps(f, List.drop(args, i))
         false -> match f
-            Expr.BVar(j) -> Core.Apps.mkApps(nth(args, i - j - 1), List.drop(args, i))
+            Expr.BVar(_, j) -> Core.Apps.mkApps(nth(args, i - j - 1), List.drop(args, i))
             _ -> e
 
 verify cheapDone
@@ -1361,7 +1361,7 @@ fn rigidHead(st: St, f: Expr) -> Bool
             Option.Some(Const.CRec) -> false
             Option.Some(Const.CQuot) -> false
             _ -> true
-        Expr.FVar(id) -> Check.State.localValue(st.lctx, id) == Option.None
+        Expr.FVar(_, id) -> Check.State.localValue(st.lctx, id) == Option.None
         Expr.Sort -> true
         Expr.Pi -> true
         Expr.NatLit -> true
@@ -1377,7 +1377,7 @@ verify rigidHead
 fn letChain(lctx: Locals, e: Expr) -> Expr
     ? "A let variable's value, and that value's value while it is a let variable too: the first term on the chain that is not a let variable."
     match e
-        Expr.FVar(id) -> match Check.State.localValue(lctx, id)
+        Expr.FVar(_, id) -> match Check.State.localValue(lctx, id)
             Option.Some(x) -> letChain(lctx, x)
             Option.None -> e
         _ -> e
@@ -2034,7 +2034,7 @@ fn whnf(st: St, e: Expr) -> Result<RE, Fail>
         Expr.Pi -> Result.Ok(RE(e = e, st = st))
         Expr.NatLit -> Result.Ok(RE(e = e, st = st))
         Expr.StrLit -> Result.Ok(RE(e = e, st = st))
-        Expr.FVar(id) -> match Check.State.localValue(st.lctx, id)
+        Expr.FVar(_, id) -> match Check.State.localValue(st.lctx, id)
             Option.None -> Result.Ok(RE(e = e, st = st))
             Option.Some -> whnfCached(st, e)
         _ -> whnfCached(st, e)
@@ -2221,7 +2221,7 @@ fn deltaRigid(st: St, f: Expr) -> Bool
                 Option.Some(Const.CAxiom) -> true
                 Option.Some(Const.COpaque) -> true
                 _ -> false
-        Expr.FVar(id) -> Check.State.localValue(st.lctx, id) == Option.None
+        Expr.FVar(_, id) -> Check.State.localValue(st.lctx, id) == Option.None
         Expr.Sort -> true
         Expr.Pi -> true
         Expr.NatLit -> true
@@ -2261,11 +2261,11 @@ fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool,
         Expr.Lam(_, _, body) -> match stack
             [c, ..rest] -> lcore(st, body, List.prepend(c, env), rest, ms, delta, cheapRec, cheapProj)
             [] -> Result.Ok(RE(e = matTerm(t, env, ms).e, st = st))
-        Expr.BVar(i) -> match List.drop(env, i)
+        Expr.BVar(_, i) -> match List.drop(env, i)
             [c, .._] -> lclo(st, c, stack, ms, delta, cheapRec, cheapProj)
             [] -> Result.Ok(RE(e = lstuck(MX(e = Core.Exprs.bvar(i - List.len(env)), ms = ms), stack), st = st))
         Expr.Let(_, _, v, body) -> lcore(st, body, List.prepend(closure(v, env, ms.next), env), stack, MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
-        Expr.FVar(id) -> lvar(st, t, Check.State.localValue(st.lctx, id), stack, ms, delta, cheapRec, cheapProj)
+        Expr.FVar(_, id) -> lvar(st, t, Check.State.localValue(st.lctx, id), stack, ms, delta, cheapRec, cheapProj)
         Expr.Const(_, n, ls) -> lconst(st, t, ls, Check.State.lookup(st, n), stack, ms, delta, cheapRec, cheapProj)
         Expr.Proj(_, s, i, x) -> lproject(st, s, i, matTerm(x, env, ms), stack, delta, cheapRec, cheapProj)
         _ -> Result.Ok(RE(e = lstuck(matTerm(t, env, ms), stack), st = st))
@@ -2861,7 +2861,7 @@ verify blocker
 fn innerBlock(m: RE, ids: List<Int>, fuel: Int) -> Result<RK, Fail>
     ? "A stuck term looked into, or the variable it is."
     match m.e
-        Expr.FVar(_) -> Result.Ok(RK(st = m.st, b = Option.None))
+        Expr.FVar(_, _) -> Result.Ok(RK(st = m.st, b = Option.None))
         _ -> blocker(m.st, m.e, ids, fuel - 1)
 
 verify innerBlock
@@ -2888,7 +2888,7 @@ verify majorAt
 fn majorBlock(m: RE, rv: Rec, ls: List<Level>, ids: List<Int>, fuel: Int) -> Result<RK, Fail>
     ? "A major premise that is one of the variables, or another stuck one looked into."
     match m.e
-        Expr.FVar(id) -> match List.contains(ids, id)
+        Expr.FVar(_, id) -> match List.contains(ids, id)
             true -> Result.Ok(RK(st = m.st, b = Option.Some(Blk(id = id, rv = rv, ls = ls))))
             false -> Result.Ok(RK(st = m.st, b = Option.None))
         _ -> blocker(m.st, m.e, ids, fuel - 1)
@@ -3363,7 +3363,7 @@ verify nthMinor
 fn majorVar(e: Expr, n: Int) -> Bool
     ? "Whether e is one of the n lambdas' variables."
     match e
-        Expr.BVar(i) -> i < n
+        Expr.BVar(_, i) -> i < n
         _ -> false
 
 verify majorVar
@@ -3373,7 +3373,7 @@ verify majorVar
 fn bvarIndex(e: Expr) -> Int
     ? "A bound variable's index."
     match e
-        Expr.BVar(i) -> i
+        Expr.BVar(_, i) -> i
         _ -> 0
 
 verify bvarIndex
@@ -3742,10 +3742,10 @@ fn allAtoms(es: List<Expr>) -> Bool
     match es
         [] -> true
         [x, ..rest] -> match x
-            Expr.BVar(_) -> allAtoms(rest)
-            Expr.FVar(_) -> allAtoms(rest)
+            Expr.BVar(_, _) -> allAtoms(rest)
+            Expr.FVar(_, _) -> allAtoms(rest)
             Expr.Const(_, _, _) -> allAtoms(rest)
-            Expr.Sort(_) -> allAtoms(rest)
+            Expr.Sort(_, _) -> allAtoms(rest)
             Expr.NatLit(_) -> allAtoms(rest)
             _ -> false
 
@@ -3812,7 +3812,7 @@ decision VariableIsItsClosure
 fn closure(a: Expr, env: List<Clo>, id: Int) -> Clo
     ? "a as a closure over env; a term with no loose bound variable needs no environment, and is its own value; a variable of env is its closure there, built at most once under that closure's number (VariableIsItsClosure)."
     match a
-        Expr.BVar(i) -> varClosure(List.drop(env, i), a, env, id)
+        Expr.BVar(_, i) -> varClosure(List.drop(env, i), a, env, id)
         _ -> match Core.Exprs.isClosed(a)
             true -> Clo.Clo(-1, a, [])
             false -> Clo.Clo(id, a, env)
@@ -3907,7 +3907,7 @@ verify lgo
 fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
     ? "A variable takes its closure's value; a large compound node is counted, and goes through the memo once the walk has met four of them (MemoAfterAPrefix)."
     match e
-        Expr.BVar(i) -> lbvar(List.drop(env, i - off), i, env, ms, memo)
+        Expr.BVar(_, i) -> lbvar(List.drop(env, i - off), i, env, ms, memo)
         _ -> match Core.Exprs.isSmall(e)
             true -> lbuild(e, off, env, ms, memo)
             false -> match memo.met < 4
@@ -4062,7 +4062,7 @@ fn whnfCoreM(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fai
             false -> mcached(st, e, cheapRec, cheapProj)
         Expr.Let -> mcached(st, e, cheapRec, cheapProj)
         Expr.Proj -> mcached(st, e, cheapRec, cheapProj)
-        Expr.FVar(id) -> lvar(st, e, Check.State.localValue(st.lctx, id), [], MS(next = 0, forced = {}), false, cheapRec, cheapProj)
+        Expr.FVar(_, id) -> lvar(st, e, Check.State.localValue(st.lctx, id), [], MS(next = 0, forced = {}), false, cheapRec, cheapProj)
         _ -> Result.Ok(RE(e = e, st = st))
 
 verify whnfCoreM
@@ -4584,8 +4584,8 @@ verify sameConst
 fn sameFVar(t: Expr, s: Expr) -> Bool
     ? "The same free variable."
     match t
-        Expr.FVar(a) -> match s
-            Expr.FVar(b) -> a == b
+        Expr.FVar(_, a) -> match s
+            Expr.FVar(_, b) -> a == b
             _ -> false
         _ -> false
 
@@ -4811,8 +4811,8 @@ fn quickKinds(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
         Expr.Pi -> match s
             Expr.Pi -> bindingEq(st, t, s, false)
             _ -> Result.Ok(RI(i = 0, st = st))
-        Expr.Sort(a) -> match s
-            Expr.Sort(b) -> Result.Ok(RI(i = tri(Core.Univ.isEquiv(a, b)), st = st))
+        Expr.Sort(_, a) -> match s
+            Expr.Sort(_, b) -> Result.Ok(RI(i = tri(Core.Univ.isEquiv(a, b)), st = st))
             _ -> Result.Ok(RI(i = 0, st = st))
         Expr.NatLit(a) -> match s
             Expr.NatLit(b) -> Result.Ok(RI(i = tri(a == b), st = st))
@@ -4940,7 +4940,7 @@ fn notProofByHead(st: St, t: Expr) -> Bool
         Expr.StrLit -> true
         _ -> match Core.Apps.fnOf(t)
             Expr.Const(_, n, ls) -> headSays(st, Check.State.lookup(st, n), ls, Core.Apps.numArgs(t))
-            Expr.FVar(id) -> localSays(st, id, Core.Apps.numArgs(t))
+            Expr.FVar(_, id) -> localSays(st, id, Core.Apps.numArgs(t))
             Expr.Proj(_, sn, i, _) -> projSays(st, sn, i, Core.Apps.numArgs(t))
             _ -> false
 
@@ -5002,8 +5002,8 @@ fn familySays(st: St, ty: Expr, k: Int, ps: List<Name>, ls: List<Level>, d: Expr
     ? "The family d of the term's type, applied to m arguments: a constant whose type past m pis ends in a sort, a variable bound by one of the k pis of ty, or a free variable, whose type is so; the sort must not be zero at the levels. A type variable is the usual case: HAdd.hAdd ends in its γ, which is bound with Type u (NoProofByTypeVariables)."
     match d
         Expr.Const(_, dn, dls) -> sortSays(ps, ls, dls, Check.State.lookup(st, dn), m)
-        Expr.BVar(j) -> sortNotZero(peelAfter(piDomain(ty, k - 1 - j), m), ps, ls)
-        Expr.FVar(id) -> localSortSays(st, id, m)
+        Expr.BVar(_, j) -> sortNotZero(peelAfter(piDomain(ty, k - 1 - j), m), ps, ls)
+        Expr.FVar(_, id) -> localSortSays(st, id, m)
         _ -> false
 
 verify familySays
@@ -5049,7 +5049,7 @@ fn fieldFamilySays(st: St, cty: Expr, n: Int, d: Expr, m: Int, f: Expr, a: Int) 
     ? "The family f, applied to a arguments, of the field's type: a constant, or a variable bound by one of the m pis of d or by one of the n pis of cty before the field."
     match f
         Expr.Const(_, dn, dls) -> neverZeroFamily(Check.State.lookup(st, dn), dls, a)
-        Expr.BVar(j) -> match j < m
+        Expr.BVar(_, j) -> match j < m
             true -> neverZeroSort(peelAfter(piDomain(d, m - 1 - j), a))
             false -> neverZeroSort(peelAfter(piDomain(cty, n - 1 - (j - m)), a))
         _ -> false
@@ -5063,7 +5063,7 @@ fn neverZeroFamily(c: Option<Const>, dls: List<Level>, a: Int) -> Bool
     match c
         Option.Some(x) -> match List.len(Check.State.headOf(x).params) == List.len(dls)
             true -> match peelPis(Check.State.headOf(x).ty, a)
-                Option.Some(Expr.Sort(w)) -> Core.Univ.isNotZero(Core.Univ.instantiate(w, Check.State.headOf(x).params, dls))
+                Option.Some(Expr.Sort(_, w)) -> Core.Univ.isNotZero(Core.Univ.instantiate(w, Check.State.headOf(x).params, dls))
                 _ -> false
             false -> false
         Option.None -> false
@@ -5074,7 +5074,7 @@ verify neverZeroFamily
 fn neverZeroSort(e: Option<Expr>) -> Bool
     ? "A sort that is never zero, whatever the levels."
     match e
-        Option.Some(Expr.Sort(v)) -> Core.Univ.isNotZero(v)
+        Option.Some(Expr.Sort(_, v)) -> Core.Univ.isNotZero(v)
         _ -> false
 
 verify neverZeroSort
@@ -5108,7 +5108,7 @@ verify piDomain
 fn sortNotZero(e: Option<Expr>, ps: List<Name>, ls: List<Level>) -> Bool
     ? "A sort whose level is not zero once the parameters ps are ls."
     match e
-        Option.Some(Expr.Sort(v)) -> Bool.not(Core.Univ.normalizesToZero(Core.Univ.instantiate(v, ps, ls)))
+        Option.Some(Expr.Sort(_, v)) -> Bool.not(Core.Univ.normalizesToZero(Core.Univ.instantiate(v, ps, ls)))
         _ -> false
 
 verify sortNotZero
@@ -5121,7 +5121,7 @@ fn sortSays(ps: List<Name>, ls: List<Level>, dls: List<Level>, dc: Option<Const>
     match dc
         Option.Some(c) -> match List.len(Check.State.headOf(c).params) == List.len(dls)
             true -> match peelPis(Check.State.headOf(c).ty, m)
-                Option.Some(Expr.Sort(v)) -> Bool.not(Core.Univ.normalizesToZero(Core.Univ.instantiate(Core.Univ.instantiate(v, Check.State.headOf(c).params, dls), ps, ls)))
+                Option.Some(Expr.Sort(_, v)) -> Bool.not(Core.Univ.normalizesToZero(Core.Univ.instantiate(Core.Univ.instantiate(v, Check.State.headOf(c).params, dls), ps, ls)))
                 _ -> false
             false -> false
         Option.None -> false
@@ -5483,7 +5483,7 @@ verify isProposition
 fn headIsProp(st: St, h: Head, ls: List<Level>, f: Expr, m: Int, ctx: List<Expr>) -> Bool
     ? "The head f of the type, applied to m arguments: its own type past m pis must be a sort zero at the levels."
     match f
-        Expr.BVar(j) -> sortIsZero(peelAfter(nthDomain(ctx, j), m), h.params, ls)
+        Expr.BVar(_, j) -> sortIsZero(peelAfter(nthDomain(ctx, j), m), h.params, ls)
         Expr.Const(_, n, dls) -> constIsProp(Check.State.lookup(st, n), dls, m, h, ls)
         _ -> false
 
@@ -5495,7 +5495,7 @@ fn constIsProp(c: Option<Const>, dls: List<Level>, m: Int, h: Head, ls: List<Lev
     match c
         Option.Some(x) -> match List.len(Check.State.headOf(x).params) == List.len(dls)
             true -> match peelPis(Check.State.headOf(x).ty, m)
-                Option.Some(Expr.Sort(v)) -> Core.Univ.normalizesToZero(Core.Univ.instantiate(Core.Univ.instantiate(v, Check.State.headOf(x).params, dls), h.params, ls))
+                Option.Some(Expr.Sort(_, v)) -> Core.Univ.normalizesToZero(Core.Univ.instantiate(Core.Univ.instantiate(v, Check.State.headOf(x).params, dls), h.params, ls))
                 _ -> false
             false -> false
         Option.None -> false
@@ -5527,7 +5527,7 @@ verify nthDomain
 fn sortIsZero(e: Option<Expr>, ps: List<Name>, ls: List<Level>) -> Bool
     ? "A sort whose level is zero once the parameters ps are ls."
     match e
-        Option.Some(Expr.Sort(v)) -> Core.Univ.normalizesToZero(Core.Univ.instantiate(v, ps, ls))
+        Option.Some(Expr.Sort(_, v)) -> Core.Univ.normalizesToZero(Core.Univ.instantiate(v, ps, ls))
         _ -> false
 
 verify sortIsZero
