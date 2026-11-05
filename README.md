@@ -274,7 +274,12 @@ In `mutate` mode it first requires every selected kernel to accept the seed,
 then injects loose bound variables and duplicate universe parameters. An
 invalid export accepted by any kernel is kept under `tests/soundness-findings/`.
 
-`bin/build` uses the `aver` on `PATH`, or the one `AVER` names.
+`bin/build` uses the `aver` on `PATH`, or the one `AVER` names, and passes
+`AVER_FLAGS` on to `aver compile`. `AVER_FLAGS=--single-thread` builds
+Pestka for one thread: the workers then run one after another, and Aver
+counts references with plain instructions instead of atomic ones (needs an
+Aver with `--single-thread`). That is the build for one worker, as the Arena
+runs it; the default build keeps its workers on threads of their own.
 `bin/build-pgo` builds once with instrumentation, checks TRAIN with it on
 one worker, and builds again with the profile that run left; `FLAGS` adds
 rustc flags to both builds (the Arena gives `-C target-cpu=native`). It needs

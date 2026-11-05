@@ -4,11 +4,13 @@
 # the release build in .build/target then uses what that run measured.
 # FLAGS holds further rustc flags for both builds (for example
 # "-C target-cpu=native"). Needs llvm-profdata, on PATH or from rustup's
-# llvm-tools component.
+# llvm-tools component. AVER_FLAGS holds further flags for aver compile, as
+# for bin/build.
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 train=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-"${AVER:-aver}" compile "$root/main.av" --module-root "$root" -o "$root/.build" >/dev/null
+# shellcheck disable=SC2086 # AVER_FLAGS is a list of flags
+"${AVER:-aver}" compile "$root/main.av" --module-root "$root" -o "$root/.build" $AVER_FLAGS >/dev/null
 cd "$root/.build"
 prof="$root/.build/pgo"
 rm -rf "$prof"
