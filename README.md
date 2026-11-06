@@ -255,8 +255,8 @@ Compiled to Rust, which is the build meant for large inputs:
 bin/build                  # aver compile + cargo build --release into .build/
 bin/build-pgo TRAIN.ndjson # the same, guided by a profile of checking TRAIN
 .build/target/release/main [--low-memory] FILE.ndjson [WORKERS]
-tests/run.sh               # every export under tests/export against its expected status
-tests/arena.sh DIR         # the small Lean Kernel Arena tests, each under bin/capped
+tests/run.sh               # every export under tests/export against its expected status, in file order and with --reorder-always
+tests/arena.sh DIR         # the small Lean Kernel Arena tests, each under bin/capped, in both orders
 python3 tests/soundness.py corpus DIR --exclude '*/perf/*' --max-bytes 4000000
                                              # compare Pestka with other kernels
 python3 tests/soundness.py mutate FILE # guaranteed-invalid mutations; no kernel may accept
@@ -296,6 +296,17 @@ verdict is the first failure in file order, as in a strictly sequential
 check. Reading shares out the same way: the lines are parsed on the workers
 in rounds and go into the tables in file order, each round while the next
 one is parsed.
+
+When each worker has more declarations than its caches hold (`mathlib` on
+one worker), the deferred declarations are checked grouped by the first
+component of their names, so that declarations about the same things meet
+the facts they share before those are let go (decision `CheckedByNamespace`
+in `check/decl.av`). That is sound only when every declaration names
+constants placed before it, which the reader makes sure of as it reads
+(`NamesPlacedWhereRead` in `export/tables.av`); otherwise the file order
+stays. `--reorder-always` is a tool for tests: it groups on any file the
+reader allows it on, however small, so that `tests/run.sh` and
+`tests/arena.sh` check every file in both orders.
 
 The VM is far slower on large files; use it for `verify` and small inputs.
 

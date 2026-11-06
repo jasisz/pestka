@@ -138,16 +138,18 @@ decision CheckedByNamespace
     rejected = ["FileOrderAlways", "OrderedBySharedKeys", "TermsWalkedBeforeChecking"]
     impacts = [orderFor, ordered, chunkLoop, chunkNext]
 
-fn orderFor(jobs: List<Job>, workers: Int, placed: Bool) -> List<Job>
-    ? "File order while each worker has no more declarations than the unit of its limits, where the maps carried are emptied a few times at most and grouping costs more than it keeps, or when some declaration names a constant not placed before it; otherwise grouped by namespace (CheckedByNamespace). Mathlib's 702040 declarations on one worker pass 262144; Init's 58170, std's 101286 and cedar's 143203 do not, nor any of these on eight workers."
-    match List.len(jobs) > Int.max(workers, 1) * keepFor(workers)
+fn orderFor(jobs: List<Job>, workers: Int, placed: Bool, always: Bool) -> List<Job>
+    ? "File order while each worker has no more declarations than the unit of its limits, where the maps carried are emptied a few times at most and grouping costs more than it keeps, or when some declaration names a constant not placed before it; otherwise grouped by namespace (CheckedByNamespace). Mathlib's 702040 declarations on one worker pass 262144; Init's 58170, std's 101286 and cedar's 143203 do not, nor any of these on eight workers. always, for tests, groups whatever the count, still only when every name was placed."
+    match Bool.or(always, List.len(jobs) > Int.max(workers, 1) * keepFor(workers))
         false -> jobs
         true -> match placed
             true -> ordered(jobs)
             false -> jobs
 
 verify orderFor
-    orderFor([], 1, true) => []
+    orderFor([], 1, true, false) => []
+    List.len(orderFor([Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "b"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Job(pos = 1, upTo = 1, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "a"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)], 1, true, true)) => 2
+    orderFor([Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "b"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Job(pos = 1, upTo = 1, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "a"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)], 1, true, true) == orderFor([Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "b"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Job(pos = 1, upTo = 1, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "a"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)], 1, true, false) => false
 
 fn ordered(jobs: List<Job>) -> List<Job>
     ? "The deferred declarations grouped by the first component of their names, groups in the order of that component and file order within each, so that declarations about the same things are checked one after another and the facts one finds are still kept when the next asks for them (CheckedByNamespace)."
@@ -257,7 +259,7 @@ verify keyOf
 
 fn checkParallel(decls: List<Decl>, workers: Int, memory: Memory) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations on workers at once: runs of 16 consecutive declarations are dealt to the workers in turn, which evens out their loads, and each worker checks its runs in file order."
-    checkHeld(decls, workers, memory, false).run
+    checkHeld(decls, workers, memory, false, false).run
 
 verify checkParallel
     checkParallel([], 4, Memory.Fast) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
@@ -277,14 +279,14 @@ decision FactsHeldToExit
     rejected = ["FreedAtTheEnd"]
     impacts = [checkHeld, groupLoop, Checked]
 
-fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool) -> Checking
-    ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit); the maps carried are bounded as the memory mode says (LowMemoryMode)."
+fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always: Bool) -> Checking
+    ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit); the maps carried are bounded as the memory mode says (LowMemoryMode); always groups by namespace whatever the count, for tests (CheckedByNamespace)."
     a = admit(decls)
-    cs = runWorkers(deal(chunks(orderFor(due(a), workers, placed), a.run.env, limitsFor(workers, memory), 16, [], 0, []), workers, 0, emptyGroups(workers, [])))
+    cs = runWorkers(deal(chunks(orderFor(due(a), workers, placed, always), a.run.env, limitsFor(workers, memory), 16, [], 0, []), workers, 0, emptyGroups(workers, [])))
     Checking(run = combine(a, cs), held = cs)
 
 verify checkHeld
-    List.len(checkHeld([], 2, Memory.Fast, false).held) => 2
+    List.len(checkHeld([], 2, Memory.Fast, false, false).held) => 2
 
 fn limitsFor(workers: Int, memory: Memory) -> Limits
     ? "The limits of the maps a worker carries across declarations, from the unit the number of workers sets and the memory mode."

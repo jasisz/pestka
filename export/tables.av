@@ -248,15 +248,17 @@ verify addExpr
 
 fn addDecl(t: Tables, d: Decl) -> Tables
     ? "Appends a declaration, newest first, and counts its constants; the constants named since the last declaration must be placed before it or, for an inductive block, be its own (NamesPlacedWhereRead)."
-    own = declNames(d)
-    ok = pendingPlaced(t.pending, t.known, ownForBlock(d, own))
-    Tables.update(t, decls = List.prepend(d, t.decls), constants = t.constants + Core.Decls.constantCount(d), known = knownWith(t.known, d, own), pending = [], allPlaced = Bool.and(t.allPlaced, ok))
+    places = placedBy(d)
+    ok = pendingPlaced(t.pending, t.known, ownForBlock(d, places))
+    Tables.update(t, decls = List.prepend(d, t.decls), constants = t.constants + Core.Decls.constantCount(d), known = placeAll(t.known, places), pending = [], allPlaced = Bool.and(t.allPlaced, ok))
 
 verify addDecl
     addDecl(empty(), Decl.Induct([], [], [])).constants => 0
     addDecl(noted(empty(), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), [])), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), false)).allPlaced => false
     addDecl(addDecl(empty(), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), false)), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "y"), params = [], ty = Core.Exprs.sort(Level.Zero)), false)).allPlaced => true
     List.len(addDecl(empty(), Decl.Induct([], [], [])).decls) => 1
+    addDecl(noted(empty(), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), [])), Decl.Induct([IndType(head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = true, isReflexive = false)], [], [])).allPlaced => false
+    addDecl(noted(empty(), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), [])), Decl.Induct([IndType(head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false)], [], [])).allPlaced => true
 
 decision NamesPlacedWhereRead
     date = "2026-11-06"
@@ -274,10 +276,17 @@ decision NamesPlacedWhereRead
         "expressions whose lines came before its own, and each of those"
         "named only constants placed before the declaration that followed"
         "the line, which is no later than this one. A name of a declaration"
-        "Pestka skips is never placed, as it is never in the environment."
+        "Pestka skips is never placed, as it is never in the environment,"
+        "and an unsafe block's names are not its own to name either: else a"
+        "line naming such a name passes, a safe declaration of the same name"
+        "comes later, and checked out of order the earlier declaration uses"
+        "it. Every name placed is in the environment once the declaration is"
+        "added: the stated types, constructors and recursors of a block must"
+        "equal derived ones, a quotient adds its whole package, and a name"
+        "declared twice stops the building there."
     chosen = "NamesPlacedWhereRead"
     rejected = ["TermsWalkedBeforeChecking"]
-    impacts = [addExpr, addDecl, noted]
+    impacts = [addExpr, addDecl, noted, placedBy, ownForBlock]
 
 natName: Name = Core.Names.str(Core.Names.anon(), "Nat")
 litNames: List<Name> = [Core.Names.str(Core.Names.anon(), "Nat"), Core.Names.str(Core.Names.anon(), "String"), Core.Names.str(Core.Names.str(Core.Names.anon(), "String"), "ofList"), Core.Names.str(Core.Names.anon(), "List"), Core.Names.str(Core.Names.anon(), "Char"), Core.Names.str(Core.Names.str(Core.Names.anon(), "Char"), "ofNat")]
@@ -365,23 +374,24 @@ fn recNames(xs: List<Rec>, acc: List<Name>) -> List<Name>
 verify recNames
     recNames([], []) => []
 
-fn ownForBlock(d: Decl, own: List<Name>) -> List<Name>
-    ? "The names a declaration's own expressions may name besides those placed: an inductive block's own, nothing for any other."
+fn ownForBlock(d: Decl, places: List<Name>) -> List<Name>
+    ? "The names a declaration's own expressions may name besides those placed before it: those an inductive block places itself, nothing for any other."
     match d
-        Decl.Induct(_, _, _) -> own
+        Decl.Induct(_, _, _) -> places
         _ -> []
 
 verify ownForBlock
     ownForBlock(Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false), [Core.Names.anon()]) => []
 
-fn knownWith(known: Map<Name, Bool>, d: Decl, own: List<Name>) -> Map<Name, Bool>
-    ? "The names placed after d: its own, unless Pestka skips it as unsafe or partial."
+fn placedBy(d: Decl) -> List<Name>
+    ? "The names d places in the environment: its own, or none when Pestka skips it as unsafe or partial, so that a skipped block's own names are neither placed nor its own to name (NamesPlacedWhereRead)."
     match skipped(d)
-        true -> known
-        false -> placeAll(known, own)
+        true -> []
+        false -> declNames(d)
 
-verify knownWith
-    Map.has(knownWith({}, Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true), [Core.Names.anon()]), Core.Names.anon()) => false
+verify placedBy
+    placedBy(Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true)) => []
+    placedBy(Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)) => [Core.Names.anon()]
 
 fn placeAll(known: Map<Name, Bool>, ns: List<Name>) -> Map<Name, Bool>
     ? "Every name placed."
