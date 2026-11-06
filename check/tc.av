@@ -161,10 +161,28 @@ fn remember(r: RE, e: Expr, only: Bool) -> RE
 verify remember
     Core.Cache.size(remember(RE(e = Core.Exprs.bvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), true).st.inferCache) => 1
 
+decision VariablesReadInPlace
+    date = "2026-11-06"
+    reason =
+        "A bound variable was looked up by dropping the environment down to"
+        "it and handing the rest to a helper that read its head: compiled, a"
+        "new handle on the rest of the list, counted and dropped again, for"
+        "every variable that inference, closure building and the machine's"
+        "read-back met. Matched where it is dropped, the head of List.drop is"
+        "read in place, with no new list, as long as no arm keeps the list"
+        "itself; varClosure, whose arm past the environment keeps it, takes"
+        "it under a second name for that. One worker, PGO: etale 18.85 G to"
+        "18.76 G instructions, Init 48.18 G to 48.03 G."
+    chosen = "VariablesReadInPlace"
+    rejected = ["DropThenHelper"]
+    impacts = [inferCore, varClosure, lvisit]
+
 fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "One inference step by the shape of e, whose loose bound variables stand for the free variables in env, the innermost first."
     match e
-        Expr.BVar(_, i) -> boundType(st, List.drop(env, i))
+        Expr.BVar(_, i) -> match List.drop(env, i)
+            [x, .._] -> Result.Ok(RE(e = Check.State.localType(st.lctx, fvarId(x))?, st = st))
+            [] -> Result.Err(bad("the type checker met a loose bound variable"))
         Expr.FVar(_, id) -> Result.Ok(RE(e = Check.State.localType(st.lctx, id)?, st = st))
         Expr.Sort(_, l) -> inferSort(st, l, only)
         Expr.Const(_, n, ls) -> inferConst(st, e, n, ls, only)
@@ -177,17 +195,9 @@ fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
         Expr.Proj(_, s, i, x) -> inferProj(st, s, i, x, env, only)
 
 verify inferCore
+    inferCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [], true) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
     inferCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.strLit("a"), [], true) => Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.name1("String"), []), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
     resultExpr(inferCore(Check.State.names(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.natLit(7), Option.None, Binder.Default).st, Core.Exprs.bvar(0), [Core.Exprs.fvar(0)], true)) => Core.Exprs.natLit(7)
-
-fn boundType(st: St, rest: List<Expr>) -> Result<RE, Fail>
-    ? "The type of the free variable a bound variable stands for; with none, the variable is loose."
-    match rest
-        [] -> Result.Err(bad("the type checker met a loose bound variable"))
-        [x, .._] -> Result.Ok(RE(e = Check.State.localType(st.lctx, fvarId(x))?, st = st))
-
-verify boundType
-    boundType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), []) => Result.Err(Fail.Reject("the type checker met a loose bound variable"))
 
 fn inferIn(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "Inference under binders, used past the depth where bodies stop being copied: the loose bound variables of e stand for the free variables in env, the innermost first. Checking walks a body as it is. Inference alone puts the variables in, since it is asked about terms that reduction built, which find the types of their parts only in that form. A closed part goes the usual way."
@@ -3812,24 +3822,25 @@ decision VariableIsItsClosure
 fn closure(a: Expr, env: List<Clo>, id: Int) -> Clo
     ? "a as a closure over env; a term with no loose bound variable needs no environment, and is its own value; a variable of env is its closure there, built at most once under that closure's number (VariableIsItsClosure)."
     match a
-        Expr.BVar(_, i) -> varClosure(List.drop(env, i), a, env, id)
+        Expr.BVar(_, i) -> varClosure(env, i, a, env, id)
         _ -> match Core.Exprs.isClosed(a)
             true -> Clo.Clo(-1, a, [])
             false -> Clo.Clo(id, a, env)
 
-fn varClosure(from: List<Clo>, a: Expr, env: List<Clo>, id: Int) -> Clo
-    ? "The closure a variable stands for, or, past the environment, the variable itself over it as before."
-    match from
+fn varClosure(from: List<Clo>, i: Int, a: Expr, env: List<Clo>, id: Int) -> Clo
+    ? "The closure variable i stands for, read in place in from (VariablesReadInPlace), or, past it, the variable itself over env as before. from and env are the same list: the arm that keeps env reads no element of from, so the head is read without a new list."
+    match List.drop(from, i)
         [c, .._] -> c
         [] -> Clo.Clo(id, a, env)
 
 verify varClosure
-    varClosure([Clo.Clo(-1, Core.Exprs.natLit(2), [])], Core.Exprs.bvar(0), [], 3) => Clo.Clo(-1, Core.Exprs.natLit(2), [])
-    varClosure([], Core.Exprs.bvar(4), [], 3) => Clo.Clo(3, Core.Exprs.bvar(4), [])
+    varClosure([Clo.Clo(-1, Core.Exprs.natLit(2), [])], 0, Core.Exprs.bvar(0), [], 3) => Clo.Clo(-1, Core.Exprs.natLit(2), [])
+    varClosure([], 4, Core.Exprs.bvar(4), [], 3) => Clo.Clo(3, Core.Exprs.bvar(4), [])
 
 verify closure
     closure(Core.Exprs.natLit(1), [Clo.Clo(-1, Core.Exprs.natLit(2), [])], 5) => Clo.Clo(-1, Core.Exprs.natLit(1), [])
     closure(Core.Exprs.bvar(0), [Clo.Clo(7, Core.Exprs.bvar(1), [])], 5) => Clo.Clo(7, Core.Exprs.bvar(1), [])
+    closure(Core.Exprs.bvar(4), [], 3) => Clo.Clo(3, Core.Exprs.bvar(4), [])
 
 fn closedAll(xs: List<Expr>, acc: List<Clo>) -> List<Clo>
     ? "Built terms as closures, in order."
@@ -3907,7 +3918,9 @@ verify lgo
 fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
     ? "A variable takes its closure's value; a large compound node is counted, and goes through the memo once the walk has met four of them (MemoAfterAPrefix)."
     match e
-        Expr.BVar(_, i) -> lbvar(List.drop(env, i - off), i, env, ms, memo)
+        Expr.BVar(_, i) -> match List.drop(env, i - off)
+            [c, .._] -> lvalue(matClo(c, ms), memo)
+            [] -> LS(e = Core.Exprs.bvar(i - List.len(env)), ms = ms, memo = memo)
         _ -> match Core.Exprs.isSmall(e)
             true -> lbuild(e, off, env, ms, memo)
             false -> match memo.met < 4
@@ -3916,15 +3929,7 @@ fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
 
 verify lvisit
     lvisit(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.natLit(2)
-
-fn lbvar(from: List<Clo>, i: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
-    ? "The variable's closure, built on first use. A value has no loose bound variable, so it needs no lifting; a variable past the environment drops by its length."
-    match from
-        [c, .._] -> lvalue(matClo(c, ms), memo)
-        [] -> LS(e = Core.Exprs.bvar(i - List.len(env)), ms = ms, memo = memo)
-
-verify lbvar
-    lbvar([], 3, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.bvar(2)
+    lvisit(Core.Exprs.bvar(3), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.bvar(2)
 
 fn lvalue(x: MX, memo: Memo) -> LS
     ? "A built value with the walk's memo."
