@@ -7,8 +7,8 @@ module Exprs
         "a tree, capped, so that traversals know when memoizing pays), packed"
         "into one word below 2^62 so that every node stays small, computed once"
         "by the constructors here and never by callers."
-    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, appHash3, key, keyAt, hashKey, looseRange, within, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
-    exposes opaque [Word, Tag, Index, Key]
+    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, appHash3, key, keyAt, hashKey, looseRange, within, withinDepth, depthOf, depthZero, deeper, depthValue, keyAtDepth, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
+    exposes opaque [Word, Tag, Index, Key, Depth]
     depends [Core.Hash, Core.Names, Core.Levels]
     effects []
 
@@ -185,6 +185,9 @@ record Index
 record Key
     value: Int
 
+record Depth
+    value: Int
+
 type Expr
     BVar(Word, Int)
     FVar(Word, Int)
@@ -255,6 +258,52 @@ fn keyOf(n: Int) -> Result<Key, String>
 verify keyOf
     keyOf(-1) => Result.Err("key out of range")
     keyOf(4611686018427387904) => Result.Err("key out of range")
+
+fn depthOf(n: Int) -> Result<Depth, String>
+    ? "A binder depth as a machine word: below 2^40, as every depth a traversal reaches is."
+    match Bool.and(n >= 0, n < 1099511627776)
+        true -> Result.Ok(Depth(value = n))
+        false -> Result.Err("depth out of range")
+
+verify depthOf
+    depthOf(-1) => Result.Err("depth out of range")
+    depthOf(1099511627776) => Result.Err("depth out of range")
+
+fn depthZero() -> Depth
+    ? "No binders."
+    Depth(value = 0)
+
+fn deeper(d: Depth) -> Depth
+    ? "One binder deeper; a depth of 2^40 binders is never reached, and would stay where it is."
+    match depthOf(d.value + 1)
+        Result.Ok(x) -> x
+        Result.Err(_) -> d
+
+verify deeper
+    depthValue(deeper(depthZero())) => 1
+
+fn depthValue(d: Depth) -> Int
+    ? "The depth as a number."
+    d.value
+
+fn withinDepth(e: Expr, d: Depth) -> Bool
+    ? "within(e, d) on the machine word of d."
+    match packedOf(e)
+        Option.Some(w) -> match Bits.and(w.value, 16383) == 16383
+            true -> false
+            false -> Bits.and(w.value, 16383) <= d.value
+        Option.None -> leafRange(e) <= d.value
+
+verify withinDepth
+    withinDepth(bvar(0), deeper(depthZero())) => true
+    withinDepth(bvar(1), deeper(depthZero())) => false
+
+fn keyAtDepth(e: Expr, d: Depth) -> Key
+    ? "keyAt on a depth."
+    key(d.value * 2147483648 + hashOf(e))
+
+verify keyAtDepth
+    keyAtDepth(bvar(0), deeper(depthZero())) == keyAt(bvar(0), 1) => true
 
 fn key(n: Int) -> Key
     ? "A key from an Int in range; anything else is key 0, which only makes a lookup compare with another node and miss."
