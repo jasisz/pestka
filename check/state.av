@@ -76,15 +76,38 @@ record Limits
     closed: Int
 
 fn limitsOf(unit: Int, memory: Memory) -> Limits
-    ? "How many hashes each map carried across declarations keeps before it is emptied, from the unit a worker gets. The fast mode keeps the multiples the reuse distances pay for (LimitsFromReuseDistances) and the facts about closed terms for the whole run. The low-memory mode keeps the checked types at the unit, whose entries are the cheapest to keep and the dearest to lose, a quarter of it for the inferred types, reduction results, equal pairs, constant types at levels and closed terms, and an eighth for the variables, with which the open caches go, the pairs found different and the unfolding cache (LowMemoryMode)."
+    ? "How many hashes each map carried across declarations keeps before it is emptied, from the unit a worker gets. The fast mode keeps the multiples the reuse distances pay for (LimitsFromReuseDistances), three quarters of them since declarations are checked by namespace (LimitsAfterOrdering), and the facts about closed terms for the whole run. The low-memory mode keeps the checked types at the unit, whose entries are the cheapest to keep and the dearest to lose, a quarter of it for the inferred types, reduction results, equal pairs, constant types at levels and closed terms, and an eighth for the variables, with which the open caches go, the pairs found different and the unfolding cache (LowMemoryMode)."
     match memory
-        Memory.Fast -> Limits(vars = unit, check = 4 * unit, infer = unit, whnf = unit, core = unit, eqOk = 2 * unit, eqFail = unit, eqNo = unit, unfold = unit, types = unit, closed = unbounded())
+        Memory.Fast -> Limits(vars = Int.div(3 * unit, 4), check = 3 * unit, infer = Int.div(3 * unit, 4), whnf = Int.div(3 * unit, 4), core = Int.div(3 * unit, 4), eqOk = Int.div(3 * unit, 2), eqFail = Int.div(3 * unit, 4), eqNo = Int.div(3 * unit, 4), unfold = Int.div(3 * unit, 4), types = Int.div(3 * unit, 4), closed = unbounded())
         Memory.Low -> Limits(vars = Int.div(unit, 8), check = unit, infer = Int.div(unit, 4), whnf = Int.div(unit, 4), core = Int.div(unit, 4), eqOk = Int.div(unit, 4), eqFail = Int.div(unit, 8), eqNo = Int.div(unit, 8), unfold = Int.div(unit, 8), types = Int.div(unit, 4), closed = Int.div(unit, 4))
 
 verify limitsOf
-    limitsOf(65536, Memory.Fast).check => 262144
+    limitsOf(65536, Memory.Fast).check => 196608
+    limitsOf(65536, Memory.Fast).eqOk => 98304
+    limitsOf(65536, Memory.Fast).infer => 49152
     limitsOf(65536, Memory.Low).vars => 8192
     limitsOf(65536, Memory.Low).closed => 16384
+
+decision LimitsAfterOrdering
+    date = "2026-11-06"
+    reason =
+        "Checked one namespace after another (CheckedByNamespace), a"
+        "declaration meets the entries of its neighbours while they are still"
+        "kept, so each map buys less per byte than it did in file order."
+        "Measured again under PGO on one worker, mathlib, against the limits"
+        "of LimitsFromReuseDistances (1311.6 G and 1311.9 G instructions, peak"
+        "8.03 GB): every limit at three quarters 1317.5 G and 1316.2 G at"
+        "7.19 GB (+0.4% for 0.84 GB less); every limit halved 1332.0 G at"
+        "6.40 GB; the checked types halved 1312.0 G and 1318.9 G at 7.84 GB;"
+        "three quarters with the checked types halved 1322.5 G at 7.07 GB;"
+        "the unfolding cache twice as large 1300.9 G and 1306.4 G at 8.97 GB;"
+        "the checked types and equal pairs twice as large 1301.8 G at 9.10 GB;"
+        "and five maps larger at once 1295.8 G and 1292.6 G at 11.35 GB. A GB"
+        "now buys 0.4 to 0.8% where it bought 1 to 3%, and three quarters"
+        "keeps mathlib below its peak on the Arena before ordering."
+    chosen = "LimitsAfterOrdering"
+    rejected = ["LimitsFromReuseDistances", "HalfLimits", "LargerLimits"]
+    impacts = [limitsOf]
 
 fn unbounded() -> Int
     ? "A limit no map reaches: 2^60 hashes."
