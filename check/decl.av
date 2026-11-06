@@ -111,9 +111,153 @@ fn chunks(jobs: List<Job>, env: Env, limits: Limits, size: Int, cur: List<Job>, 
 verify chunks
     chunks([], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 4, [], 0, []) => []
 
+decision CheckedByNamespace
+    date = "2026-11-06"
+    reason =
+        "A worker keeps what it found across declarations in maps emptied"
+        "past their limits, and on mathlib most entries are asked for again"
+        "only after the map they were in was emptied. Declarations about the"
+        "same things share one namespace but lie far apart in the file;"
+        "checked one namespace after another, they meet the facts they share"
+        "before those are let go. The facts carried hold in a later"
+        "declaration only when its environment holds every constant they"
+        "used (sharedPair): in file order the environment only grows, in"
+        "another order a declaration naming a constant placed after it"
+        "could find a fact about it instead of the unknown constant. So the"
+        "order is changed only when the reader found every declaration naming"
+        "constants placed before it alone (NamesPlacedWhereRead), which a"
+        "fact about its own terms then uses too, and the earliest failure in"
+        "the file is still the one reported."
+        "Below the unit of the limits per worker the maps are emptied a few"
+        "times at most, and the order stays. Mathlib, one worker,"
+        "instructions retired: 1475.9 G and 1476.8 G to 1347.9 G and 1343.5 G,"
+        "peak 8.2 GB to 8.6 GB; Init and etale unchanged. A walk of every"
+        "type and value before checking, to know the names placed, cost"
+        "195 G of that (TermsWalkedBeforeChecking)."
+    chosen = "CheckedByNamespace"
+    rejected = ["FileOrderAlways", "OrderedBySharedKeys", "TermsWalkedBeforeChecking"]
+    impacts = [orderFor, ordered, chunkLoop, chunkNext]
+
+fn orderFor(jobs: List<Job>, workers: Int, placed: Bool) -> List<Job>
+    ? "File order while each worker has no more declarations than the unit of its limits, where the maps carried are emptied a few times at most and grouping costs more than it keeps, or when some declaration names a constant not placed before it; otherwise grouped by namespace (CheckedByNamespace). Mathlib's 702040 declarations on one worker pass 262144; Init's 58170, std's 101286 and cedar's 143203 do not, nor any of these on eight workers."
+    match List.len(jobs) > Int.max(workers, 1) * keepFor(workers)
+        false -> jobs
+        true -> match placed
+            true -> ordered(jobs)
+            false -> jobs
+
+verify orderFor
+    orderFor([], 1, true) => []
+
+fn ordered(jobs: List<Job>) -> List<Job>
+    ? "The deferred declarations grouped by the first component of their names, groups in the order of that component and file order within each, so that declarations about the same things are checked one after another and the facts one finds are still kept when the next asks for them (CheckedByNamespace)."
+    unkeyed(sortKeyed(keyed(jobs, [])), [])
+
+verify ordered
+    ordered([]) => []
+
+fn keyed(jobs: List<Job>, acc: List<Tuple<String, Job>>) -> List<Tuple<String, Job>>
+    ? "Each job with its group, in the jobs' order."
+    match jobs
+        [] -> List.reverse(acc)
+        [j, ..rest] -> keyed(rest, List.prepend((groupOf(j.head.name), j), acc))
+
+verify keyed
+    keyed([], []) => []
+
+fn unkeyed(xs: List<Tuple<String, Job>>, acc: List<Job>) -> List<Job>
+    ? "The jobs without their groups, in order."
+    match xs
+        [] -> List.reverse(acc)
+        [(_, j), ..rest] -> unkeyed(rest, List.prepend(j, acc))
+
+verify unkeyed
+    unkeyed([], []) => []
+
+fn groupOf(n: Name) -> String
+    ? "The first component of a name of two components or more; the empty string for a name of one."
+    match n
+        Name.Anon -> ""
+        Name.Str(pre, _, _) -> rootOf(pre)
+        Name.Num(pre, _, _) -> rootOf(pre)
+
+verify groupOf
+    groupOf(Core.Names.str(Core.Names.str(Core.Names.str(Core.Names.anon(), "Nat"), "add"), "comm")) => "Nat"
+    groupOf(Core.Names.str(Core.Names.anon(), "x")) => ""
+
+fn rootOf(n: Name) -> String
+    ? "The first component of a name, empty for the empty name."
+    match n
+        Name.Anon -> ""
+        Name.Str(Name.Anon, s, _) -> s
+        Name.Num(Name.Anon, i, _) -> String.fromInt(i)
+        Name.Str(pre, _, _) -> rootOf(pre)
+        Name.Num(pre, _, _) -> rootOf(pre)
+
+verify rootOf
+    rootOf(Core.Names.str(Core.Names.str(Core.Names.anon(), "Nat"), "add")) => "Nat"
+    rootOf(Core.Names.anon()) => ""
+
+fn sortKeyed(xs: List<Tuple<String, Job>>) -> List<Tuple<String, Job>>
+    ? "A stable merge sort by group."
+    mergeAll(singles(xs, []))
+
+verify sortKeyed
+    sortKeyed([]) => []
+
+fn singles(xs: List<Tuple<String, Job>>, acc: List<List<Tuple<String, Job>>>) -> List<List<Tuple<String, Job>>>
+    ? "Every element a run of its own, in order."
+    match xs
+        [] -> List.reverse(acc)
+        [x, ..rest] -> singles(rest, List.prepend([x], acc))
+
+verify singles
+    singles([], []) => []
+
+fn mergeAll(runs: List<List<Tuple<String, Job>>>) -> List<Tuple<String, Job>>
+    ? "Merges neighbouring runs until one is left."
+    match runs
+        [] -> []
+        [r] -> r
+        _ -> mergeAll(mergePairs(runs, []))
+
+verify mergeAll
+    mergeAll([]) => []
+
+fn mergePairs(runs: List<List<Tuple<String, Job>>>, acc: List<List<Tuple<String, Job>>>) -> List<List<Tuple<String, Job>>>
+    ? "The first run merged with the second, the third with the fourth, and so on."
+    match runs
+        [] -> List.reverse(acc)
+        [r] -> List.reverse(List.prepend(r, acc))
+        [a, b, ..rest] -> mergePairs(rest, List.prepend(merge(a, b, []), acc))
+
+verify mergePairs
+    mergePairs([], []) => []
+
+fn merge(a: List<Tuple<String, Job>>, b: List<Tuple<String, Job>>, acc: List<Tuple<String, Job>>) -> List<Tuple<String, Job>>
+    ? "Two sorted runs as one, the first's element first on a tie."
+    match a
+        [] -> List.concat(List.reverse(acc), b)
+        [x, ..ra] -> match b
+            [] -> List.concat(List.reverse(acc), a)
+            [y, ..rb] -> match keyOf(y) < keyOf(x)
+                true -> merge(a, rb, List.prepend(y, acc))
+                false -> merge(ra, b, List.prepend(x, acc))
+
+verify merge
+    merge([], [], []) => []
+
+fn keyOf(x: Tuple<String, Job>) -> String
+    ? "The group of a keyed job."
+    match x
+        (k, _) -> k
+
+verify keyOf
+    keyOf(("a", Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false))) => "a"
+
 fn checkParallel(decls: List<Decl>, workers: Int, memory: Memory) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations on workers at once: runs of 16 consecutive declarations are dealt to the workers in turn, which evens out their loads, and each worker checks its runs in file order."
-    checkHeld(decls, workers, memory).run
+    checkHeld(decls, workers, memory, false).run
 
 verify checkParallel
     checkParallel([], 4, Memory.Fast) => Result.Ok(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0))
@@ -133,14 +277,14 @@ decision FactsHeldToExit
     rejected = ["FreedAtTheEnd"]
     impacts = [checkHeld, groupLoop, Checked]
 
-fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory) -> Checking
+fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool) -> Checking
     ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit); the maps carried are bounded as the memory mode says (LowMemoryMode)."
     a = admit(decls)
-    cs = runWorkers(deal(chunks(due(a), a.run.env, limitsFor(workers, memory), 16, [], 0, []), workers, 0, emptyGroups(workers, [])))
+    cs = runWorkers(deal(chunks(orderFor(due(a), workers, placed), a.run.env, limitsFor(workers, memory), 16, [], 0, []), workers, 0, emptyGroups(workers, [])))
     Checking(run = combine(a, cs), held = cs)
 
 verify checkHeld
-    List.len(checkHeld([], 2, Memory.Fast).held) => 2
+    List.len(checkHeld([], 2, Memory.Fast, false).held) => 2
 
 fn limitsFor(workers: Int, memory: Memory) -> Limits
     ? "The limits of the maps a worker carries across declarations, from the unit the number of workers sets and the memory mode."
@@ -219,7 +363,7 @@ verify halves
 
 fn checkGroup(g: List<Chunk>) -> Checked
     ? "One worker: its runs in file order with the facts kept across declarations, stopping at the first failure."
-    groupLoop(g, noFacts(), 0)
+    groupLoop(g, noFacts(), 0, Option.None, 0)
 
 verify checkGroup
     checkGroup([]) => Checked(failure = Option.None, at = 0, count = 0, kept = noFacts())
@@ -231,39 +375,41 @@ fn noFacts() -> Facts
 verify noFacts
     Core.Cache.size(noFacts().unfolds) => 0
 
-fn groupLoop(g: List<Chunk>, kept: Facts, count: Int) -> Checked
-    ? "Run after run."
+fn groupLoop(g: List<Chunk>, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Checked
+    ? "Run after run; fail is the failure found so far, at its position in the file."
     match g
-        [] -> Checked(failure = Option.None, at = 0, count = count, kept = kept)
-        [c, ..rest] -> chunkLoop(c.jobs, c.env, c.limits, rest, kept, count)
+        [] -> Checked(failure = fail, at = at, count = count, kept = kept)
+        [c, ..rest] -> chunkLoop(c.jobs, c.env, c.limits, rest, kept, count, fail, at)
 
 verify groupLoop
-    groupLoop([], noFacts(), 2).count => 2
+    groupLoop([], noFacts(), 2, Option.None, 0).count => 2
 
 fn checkChunk(c: Chunk) -> Checked
     ? "Checks one run of deferred declarations with facts of its own; the first failure is reported with its place in the file."
-    chunkLoop(c.jobs, c.env, c.limits, [], noFacts(), 0)
+    chunkLoop(c.jobs, c.env, c.limits, [], noFacts(), 0, Option.None, 0)
 
 verify checkChunk
     checkChunk(Chunk(env = Check.State.envEmpty(), jobs = [], limits = Check.State.limitsOf(65536, Memory.Fast))) => Checked(failure = Option.None, at = 0, count = 0, kept = noFacts())
 
-fn chunkLoop(jobs: List<Job>, env: Env, limits: Limits, more: List<Chunk>, kept: Facts, count: Int) -> Checked
+fn chunkLoop(jobs: List<Job>, env: Env, limits: Limits, more: List<Chunk>, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Checked
     ? "One job after another, then the next run, until one fails. Each job gets the facts kept from the ones before it; they are moved into its checker here, in the loop that owns them, so that every map reaches the checker with one owner and is updated in place."
     match jobs
-        [] -> groupLoop(more, kept, count)
-        [j, ..rest] -> chunkNext(jobChecks(j, St.update(checkerFor(env, j), limits = limits, closed = kept.closed, unfoldCache = kept.unfolds, levelTypes = kept.types, vars = kept.vars, lctx = kept.lctx, next = kept.next, topLevel = kept.topLevel, inferCache = kept.inferCache, checkCache = kept.checkCache, whnfCache = kept.whnfCache, coreCache = kept.coreCache, eqOk = kept.eqOk, eqFail = kept.eqFail, eqNo = kept.eqNo, rules = kept.rules)), j, env, limits, rest, more, count)
+        [] -> groupLoop(more, kept, count, fail, at)
+        [j, ..rest] -> match Bool.and(fail != Option.None, j.pos > at)
+            true -> chunkLoop(rest, env, limits, more, kept, count, fail, at)
+            false -> chunkNext(jobChecks(j, St.update(checkerFor(env, j), limits = limits, closed = kept.closed, unfoldCache = kept.unfolds, levelTypes = kept.types, vars = kept.vars, lctx = kept.lctx, next = kept.next, topLevel = kept.topLevel, inferCache = kept.inferCache, checkCache = kept.checkCache, whnfCache = kept.whnfCache, coreCache = kept.coreCache, eqOk = kept.eqOk, eqFail = kept.eqFail, eqNo = kept.eqNo, rules = kept.rules)), j, env, limits, rest, more, count, fail, at)
 
 verify chunkLoop
-    chunkLoop([], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), [], noFacts(), 3).count => 3
+    chunkLoop([], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), [], noFacts(), 3, Option.None, 0).count => 3
 
-fn chunkNext(r: Result<Facts, Fail>, j: Job, env: Env, limits: Limits, rest: List<Job>, more: List<Chunk>, count: Int) -> Checked
-    ? "Goes on, or stops with the named failure and its position."
+fn chunkNext(r: Result<Facts, Fail>, j: Job, env: Env, limits: Limits, rest: List<Job>, more: List<Chunk>, count: Int, fail: Option<Fail>, at: Int) -> Checked
+    ? "Goes on after a failure too, now with the named failure and its position, checking only declarations placed before it: the runs are not in file order, and the earliest failure is the one reported."
     match r
-        Result.Ok(kept) -> chunkLoop(rest, env, limits, more, kept, count + 1)
-        Result.Err(e) -> Checked(failure = Option.Some(failNamed(e, j.head.name)), at = j.pos, count = count, kept = noFacts())
+        Result.Ok(kept) -> chunkLoop(rest, env, limits, more, kept, count + 1, fail, at)
+        Result.Err(e) -> chunkLoop(rest, env, limits, more, noFacts(), count, Option.Some(failNamed(e, j.head.name)), j.pos)
 
 verify chunkNext
-    chunkNext(Result.Err(Fail.Reject("bad")), Job(pos = 4, upTo = 0, head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), [], [], 0) => Checked(failure = Option.Some(Fail.Reject("x: bad")), at = 4, count = 0, kept = noFacts())
+    chunkNext(Result.Err(Fail.Reject("bad")), Job(pos = 4, upTo = 0, head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), [], [], 0, Option.None, 0) => Checked(failure = Option.Some(Fail.Reject("x: bad")), at = 4, count = 0, kept = noFacts())
 
 fn combine(a: Admitted, results: List<Checked>) -> Result<Run, Fail>
     ? "The first failure in file order across the chunks and the building; otherwise the run with every deferred declaration counted."
