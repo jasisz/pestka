@@ -2771,7 +2771,7 @@ verify natComputed
 
 fn derivingState(st: St) -> St
     ? "A checker for a derivation: st's environment, local context and counter of variables, empty caches, and fuel for 4096 unfoldings."
-    St.update(Check.State.fresh(st.env, st.params, st.safety), upTo = st.upTo, block = st.block, lctx = st.lctx, next = st.next, topLevel = st.topLevel, checkParams = st.checkParams, eager = st.eager, open = st.open, opened = st.opened, limits = st.limits, kinds = st.kinds, fuel = 4096)
+    St.update(Check.State.fresh(st.env, st.params, st.safety), upTo = st.upTo, block = st.block, lctx = st.lctx, next = st.next, topLevel = st.topLevel, checkParams = st.checkParams, eager = st.eager, open = st.open, opened = st.opened, limits = st.limits, kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, fuel = 4096)
 
 verify derivingState
     derivingState(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).fuel => 4096
@@ -4834,9 +4834,9 @@ verify quickKinds
 
 fn bindingEq(st: St, t: Expr, s: Expr, isLam: Bool) -> Result<RI, Fail>
     ? "Binders compare domain by domain, then bodies under shared variables, which are closed again after, however the comparison ended. The answer is recorded as isDefEq records one, though it is found on the quick path: the same pair met again is not opened again."
-    ks = st.kinds
+    open = st.kindsOpen
     b = bindLoop(st, t, s, [], isLam)?
-    r = remembered(RB(b = b.b, st = St.update(b.st, kinds = ks)), t, s)?
+    r = remembered(RB(b = b.b, st = Check.State.closeVars(b.st, b.st.kindsOpen - open)), t, s)?
     Result.Ok(RI(i = tri(r.b), st = r.st))
 
 verify bindingEq

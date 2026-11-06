@@ -288,6 +288,8 @@ record St
     opened: Option<Expr>
     limits: Limits
     kinds: List<Int>
+    kindCounts: Map<Core.Exprs.Key, Int>
+    kindsOpen: Int
     paramsTag: Expr
     shapes: Map<Core.Exprs.Key, Tuple<Expr, Shape>>
     hot: Map<Core.Exprs.Key, Tuple<Expr, Hot>>
@@ -308,7 +310,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), stepCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Option.None, limits = limitsOf(65536, Memory.Fast), kinds = [], paramsTag = paramsTagOf(params), shapes = {}, hot = {}, rules = {}, fuel = -1)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), stepCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Option.None, limits = limitsOf(65536, Memory.Fast), kinds = [], kindCounts = {}, kindsOpen = 0, paramsTag = paramsTagOf(params), shapes = {}, hot = {}, rules = {}, fuel = -1)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0
@@ -508,12 +510,14 @@ verify names
     names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).st.next => 1
 
 fn namesAt(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder) -> RE
-    ? "The free variable of a binder opened now, as CountedVariables decides: the one already made for its type and value with as many variables of the same kind open, else a new one; with more than 1023 variables open, a fresh one, so that counting stays short in deep nests. It counts as open until closeVars closes it. The kinds open are read before the state is passed on, so that the maps it holds keep one owner."
+    ? "The free variable of a binder opened now, as CountedVariables decides: the one already made for its type and value with as many variables of the same kind open, else a new one; with more than 1023 variables open, a fresh one. The number open of its kind is kept, not counted (KindsCounted). It counts as open until closeVars closes it. The kinds open are read before the state is passed on, so that the maps it holds keep one owner."
     kind = kindOf(ty, value)
+    k = Core.Exprs.key(kind)
     ks = List.prepend(kind, st.kinds)
-    count = countKind(st.kinds, kind, 0, 1023)
+    had = Option.withDefault(Map.get(st.kindCounts, k), 0)
+    count = openCount(st.kindsOpen, had)
     r = namesCounted(st, n, ty, value, bi, count)
-    RE(e = r.e, st = St.update(r.st, kinds = ks))
+    RE(e = r.e, st = St.update(r.st, kinds = ks, kindCounts = Map.set(r.st.kindCounts, k, had + 1), kindsOpen = r.st.kindsOpen + 1))
 
 verify namesAt
     namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).e => Core.Exprs.fvar(1)
@@ -566,6 +570,67 @@ verify kindOf
     kindOf(Core.Exprs.natLit(1), Option.None) == kindOf(Core.Exprs.natLit(1), Option.Some(Core.Exprs.natLit(1))) => false
     kindOf(Core.Exprs.natLit(1), Option.None) == kindOf(Core.Exprs.natLit(2), Option.None) => false
 
+decision KindsCounted
+    date = "2026-11-06"
+    reason =
+        "A binder opened counted the open variables of its kind by walking"
+        "the list of kinds open, up to 1023 of them, so a nest of binders cost"
+        "its depth squared. Now the state keeps, beside that list, how many"
+        "of each kind are open and how many in all: opening reads and bumps"
+        "one count, closing n variables walks the n kinds closed and takes"
+        "each off its count. The count is the one the walk gave, -1 with"
+        "more than 1023 open, so every variable is the one it was and no"
+        "cache sees another term. Nests are shallow on the corpora (six"
+        "kinds walked per binder on Init, at most 143), so it gains little:"
+        "one worker, PGO, etale 18.76 G to 18.74 G instructions, Init"
+        "48.03 G to 47.95 G."
+    chosen = "KindsCounted"
+    rejected = ["KindsWalked"]
+    impacts = [namesAt, closeVars, openCount, uncount, St]
+
+fn openCount(open: Int, had: Int) -> Int
+    ? "The count namesAt keys a variable by: how many of its kind are open, or -1 with more than 1023 open in all, as counting the list with a budget of 1023 gave (countKind)."
+    match open > 1023
+        true -> -1
+        false -> had
+
+verify openCount
+    openCount(3, 2) => 2
+    openCount(1023, 5) => 5
+    openCount(1024, 5) => -1
+
+fn countedOf(st: St, kind: Int) -> Int
+    ? "The count namesAt reads for a kind."
+    openCount(st.kindsOpen, Option.withDefault(Map.get(st.kindCounts, Core.Exprs.key(kind)), 0))
+
+verify countedOf law sameAsWalked
+    given a: Int = 0..6
+    given c: Int = 0..4
+    given t: Int = 0..2
+    countedOf(closeVars(openedSample(fresh(envEmpty(), [], Safety.Safe), a), c), kindOf(kindSample(t), Option.None)) => countKind(closeVars(openedSample(fresh(envEmpty(), [], Safety.Safe), a), c).kinds, kindOf(kindSample(t), Option.None), 0, 1023)
+
+fn kindSample(t: Int) -> Expr
+    ? "Types of variables for the law sameAsWalked."
+    match t
+        0 -> Core.Exprs.sort(Level.Zero)
+        1 -> Core.Exprs.natLit(1)
+        _ -> Core.Exprs.natLit(2)
+
+verify kindSample
+    kindSample(0) == kindSample(1) => false
+
+fn openedSample(st: St, a: Int) -> St
+    ? "A state with a variables opened, their types taken from kindSample in turn, and the two opened after the first closed again."
+    match a <= 0
+        true -> st
+        false -> match a == 3
+            true -> openedSample(closeVars(namesAt(st, Core.Names.anon(), kindSample(Int.mod(a, 3)), Option.None, Binder.Default).st, 2), a - 1)
+            false -> openedSample(namesAt(st, Core.Names.anon(), kindSample(Int.mod(a, 3)), Option.None, Binder.Default).st, a - 1)
+
+verify openedSample
+    openedSample(fresh(envEmpty(), [], Safety.Safe), 4).kindsOpen => 2
+    List.len(openedSample(fresh(envEmpty(), [], Safety.Safe), 4).kinds) => 2
+
 fn countKind(ks: List<Int>, kind: Int, acc: Int, budget: Int) -> Int
     ? "How many of the open variables are of this kind, or -1 when more than budget are open. Two kinds may share a hash, which only counts more."
     match ks
@@ -582,9 +647,31 @@ verify countKind
     countKind([3, 5, 3], 3, 0, 2) => -1
 
 fn closeVars(st: St, n: Int) -> St
-    ? "Closes the n variables opened last. The kinds are read before the state is updated, so that the maps it holds keep one owner."
-    ks = List.drop(st.kinds, n)
-    St.update(st, kinds = ks)
+    ? "Closes the n variables opened last, each taken off the count of its kind (KindsCounted). The kinds are read before the state is updated, so that the maps it holds keep one owner."
+    ks = st.kinds
+    closing = Int.max(Int.min(n, st.kindsOpen), 0)
+    St.update(st, kinds = List.drop(ks, n), kindCounts = uncount(st.kindCounts, ks, closing), kindsOpen = st.kindsOpen - closing)
+
+fn uncount(counts: Map<Core.Exprs.Key, Int>, ks: List<Int>, n: Int) -> Map<Core.Exprs.Key, Int>
+    ? "Takes the first n kinds of ks off their counts; a count that reaches 0 is removed."
+    match n <= 0
+        true -> counts
+        false -> match ks
+            [] -> counts
+            [k, ..rest] -> uncount(uncountOne(counts, Core.Exprs.key(k)), rest, n - 1)
+
+verify uncount
+    uncount(Map.set({}, Core.Exprs.key(3), 2), [3, 3], 1) => Map.set({}, Core.Exprs.key(3), 1)
+    uncount(Map.set({}, Core.Exprs.key(3), 2), [3, 3], 2) => {}
+
+fn uncountOne(counts: Map<Core.Exprs.Key, Int>, k: Core.Exprs.Key) -> Map<Core.Exprs.Key, Int>
+    ? "One kind off its count."
+    match Option.withDefault(Map.get(counts, k), 0) <= 1
+        true -> Map.remove(counts, k)
+        false -> Map.set(counts, k, Option.withDefault(Map.get(counts, k), 0) - 1)
+
+verify uncountOne
+    uncountOne(Map.set({}, Core.Exprs.key(3), 1), Core.Exprs.key(3)) => {}
 
 verify closeVars
     closeVars(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, 1).kinds => []
