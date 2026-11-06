@@ -66,7 +66,8 @@ about 6% of the instructions off the one Aver emits.
 
 ## What it does differently
 
-The checker follows the reference kernel's algorithm. What is its own:
+The checker follows the reference kernel's algorithm, substitution-based and
+without NbE, to see how far that algorithm can be pushed. What is its own:
 
 - **It is written in Aver**, a pure functional language compiled to Rust:
   the checker's state is a value passed from function to function. A state
@@ -123,9 +124,9 @@ The checker follows the reference kernel's algorithm. What is its own:
   premise is brought to its constructor and that constructor's minor premise
   takes the fields. Computations by `decide` meet one per number and list
   they take apart; this cut about 5% on the `perf/` tests.
-- **What a worker finds is kept across declarations.** Each worker meets its
-  declarations in file order, so every constant a result rests on is still
-  there in the next one. It carries its variables and their context, and the
+- **What a worker finds is kept across declarations.** Every constant a
+  result rests on is placed before the declarations that use it, so it is
+  still there in the next one. It carries its variables and their context, and the
   results of inference, checking, reduction and comparison, about closed
   terms and, with variables named as above, open ones too; what checking
   found about a term with a universe parameter is kept under the
@@ -133,6 +134,14 @@ The checker follows the reference kernel's algorithm. What is its own:
   A constant's type and a definition's value at universe levels depend only
   on the levels as written, and are kept as well. Every cache has a limit and
   is emptied past it.
+- **Declarations are checked grouped by namespace.** When a worker has more
+  declarations than its caches hold, it checks them grouped by the first
+  component of their names, so that declarations about the same things
+  meet what they share while it is still kept; `mathlib` takes about 9%
+  fewer instructions. The reader makes sure every declaration names only
+  constants placed before it, the condition for what is kept to hold in any
+  order; an export that does not keeps the file order. A failure is still
+  reported at its place in the file.
 - **Failures are kept too.** Within a declaration, pairs found
   definitionally different are remembered as well as pairs found equal: its
   free variables each have one type and value, so the answer for a pair does
