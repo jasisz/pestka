@@ -23,6 +23,11 @@ Give it a [lean4export](https://github.com/leanprover/lean4export) file and it
 checks the declarations, down to universe levels, reduction and recursors.
 Lean itself is not involved in the check.
 
+Pestka follows the reference kernel's substitution-based approach.
+**It does not use normalization by evaluation (NbE).** The experiment is
+how far you can push that algorithm with better sharing, caching and
+reduction.
+
 It checks **all of mathlib**: 702,040 declarations in the recorded export.
 The same Aver source also compiles to **WebAssembly**, where it checks the
 same corpus under V8. On the small Lean Kernel Arena suite, the recorded
@@ -108,9 +113,6 @@ environment. If an inductive block cannot be checked, the final result is
 `declined`, never `accepted`.
 
 ## A few things inside
-
-Pestka follows the reference kernel's substitution-based algorithm, exploring
-how far it can go without normalization by evaluation (NbE).
 
 **Variables can be reused across proofs.** A fresh name every time a binder
 opens makes equivalent terms look different to a cache. Pestka identifies
