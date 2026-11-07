@@ -99,7 +99,7 @@ verify dropLate
     dropLate([], 0, []) => []
 
 fn chunks(jobs: List<Job>, env: Env, limits: Limits, size: Int, cur: List<Job>, n: Int, acc: List<Chunk>) -> List<Chunk>
-    ? "Consecutive runs of size jobs, in file order, each with the whole environment; neighbours in a file share the most, which keeps the per-chunk caches useful."
+    ? "Consecutive runs of size jobs, in the order checked, each with the whole environment; neighbours share the most, which keeps the per-chunk caches useful."
     match jobs
         [] -> match cur
             [] -> List.reverse(acc)
@@ -282,11 +282,41 @@ decision FactsHeldToExit
 fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always: Bool) -> Checking
     ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit); the maps carried are bounded as the memory mode says (LowMemoryMode); always groups by namespace whatever the count, for tests (CheckedByNamespace)."
     a = admit(decls)
-    cs = runWorkers(deal(chunks(orderFor(due(a), workers, placed, always), a.run.env, limitsFor(workers, memory), 16, [], 0, []), workers, 0, emptyGroups(workers, [])))
+    jobs = orderFor(due(a), workers, placed, always)
+    cs = runWorkers(deal(chunks(jobs, a.run.env, limitsFor(workers, memory), runSize(List.len(jobs), workers), [], 0, []), workers, 0, emptyGroups(workers, [])))
     Checking(run = combine(a, cs), held = cs)
 
 verify checkHeld
     List.len(checkHeld([], 2, Memory.Fast, false, false).held) => 2
+
+fn runSize(n: Int, workers: Int) -> Int
+    ? "How many declarations one run holds: four runs per worker, at least 16, so that a worker checks long stretches of the same namespaces (WorkersByNamespace)."
+    w = Int.max(workers, 1) * 4
+    Int.max(16, Result.withDefault(Int.div(n + w - 1, w), 16))
+
+verify runSize
+    runSize(0, 1) => 16
+    runSize(702040, 8) => 21939
+    runSize(100, 4) => 16
+
+decision WorkersByNamespace
+    date = "2026-11-07"
+    reason =
+        "Runs of 16 declarations were dealt to the workers in turn, so a"
+        "namespace, once grouped (CheckedByNamespace), was spread over every"
+        "worker, each with maps of its own, and none of them met the facts"
+        "it shared. Four runs per worker keep long stretches of a namespace"
+        "on one worker and still let a worker whose stretch is cheap take"
+        "more of the rest. One worker checks every run in turn with the"
+        "same maps, so its work does not change. Mathlib, instructions"
+        "retired and wall: four workers 1573.4 G, 132 s to 1464.2 G and"
+        "1458.7 G, 111 s and 102 s; eight workers 1637.6 G, 119 s to"
+        "1474.8 G and 1467.6 G, 89 s and 77 s. One run per worker took the"
+        "fewest instructions, 1456.1 G on four, but 145 s, the costliest"
+        "stretch alone; two and eight runs per worker were between."
+    chosen = "FourRunsPerWorker"
+    rejected = ["RunsOfSixteen", "OneRunPerWorker", "TwoRunsPerWorker", "EightRunsPerWorker"]
+    impacts = [runSize, deal, checkHeld]
 
 fn limitsFor(workers: Int, memory: Memory) -> Limits
     ? "The limits of the maps a worker carries across declarations, from the unit the number of workers sets and the memory mode."
