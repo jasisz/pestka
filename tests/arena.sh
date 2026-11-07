@@ -9,19 +9,23 @@
 #
 # Prints one line per file not answered correctly, then the totals. A good
 # file must be accepted (0) and a bad one rejected (1); a decline (2) is
-# counted apart, as the Arena does.
+# counted apart, as the Arena does. Every file runs twice, the second time
+# with --reorder-always (out of file order wherever the reader allows it);
+# the totals count both runs.
 dir=${1:?usage: tests/arena.sh DIR [MB] [SECONDS]}
 mb=${2:-2000}
 secs=${3:-20}
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin="${PESTKA_BIN:-$root/.build/target/release/main}"
+# PESTKA_ARGS adds arguments before the file, for example --low-memory.
 ok=0; declined=0; wrong=0; crashed=0
+for mode in "" --reorder-always; do
 for kind in good bad; do
   [ "$kind" = good ] && want=0 || want=1
   for f in $(find "$dir/$kind" -name '*.ndjson' -not -path '*/perf/*' -size -4000k | sort); do
-    "$root/bin/capped" "$mb" "$secs" "$bin" "$f" >/dev/null 2>&1
+    "$root/bin/capped" "$mb" "$secs" "$bin" $PESTKA_ARGS $mode "$f" >/dev/null 2>&1
     got=$?
-    name=${f#"$dir"/}
+    name=${f#"$dir"/}${mode:+" [$mode]"}
     if [ "$got" -eq "$want" ]; then
       ok=$((ok + 1))
     elif [ "$got" -eq 2 ]; then
@@ -32,5 +36,6 @@ for kind in good bad; do
       crashed=$((crashed + 1)); echo "CRASH    $name: status $got"
     fi
   done
+done
 done
 echo "correct $ok, declined $declined, wrong $wrong, crashed or capped $crashed"

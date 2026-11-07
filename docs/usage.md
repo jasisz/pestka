@@ -47,9 +47,9 @@ Compiled to Rust, which is the build meant for large inputs:
 ```bash
 bin/build                  # aver compile + cargo build --release into .build/
 bin/build-pgo TRAIN.ndjson # the same, guided by a profile of checking TRAIN
-.build/target/release/main FILE.ndjson [WORKERS]
-tests/run.sh               # every export under tests/export against its expected status
-tests/arena.sh DIR         # the small Lean Kernel Arena tests, each under bin/capped
+.build/target/release/main [--low-memory] FILE.ndjson [WORKERS]
+tests/run.sh               # fixtures in file order and with --reorder-always
+tests/arena.sh DIR         # small Arena tests, in both orders, under bin/capped
 python3 tests/soundness.py corpus DIR --exclude '*/perf/*' --max-bytes 4000000
                                              # compare Pestka with other kernels
 python3 tests/soundness.py mutate FILE # guaranteed-invalid mutations; no kernel may accept
@@ -67,7 +67,12 @@ In `mutate` mode it first requires every selected kernel to accept the seed,
 then injects loose bound variables and duplicate universe parameters. An
 invalid export accepted by any kernel is kept under `tests/soundness-findings/`.
 
-`bin/build` uses the `aver` on `PATH`, or the one `AVER` names.
+`bin/build` uses the `aver` on `PATH`, or the one `AVER` names, and passes
+`AVER_FLAGS` on to `aver compile`. `AVER_FLAGS=--single-thread` builds
+Pestka for one thread: the workers then run one after another, and Aver
+counts references with plain instructions instead of atomic ones (needs an
+Aver with `--single-thread`). That is the build for one worker, as the Arena
+runs it; the default build keeps its workers on threads of their own.
 `bin/build-pgo` builds once with instrumentation, checks TRAIN with it on
 one worker, and builds again with the profile that run left; `FLAGS` adds
 rustc flags to both builds (the Arena gives `-C target-cpu=native`). It needs
@@ -85,7 +90,55 @@ check. Reading shares out the same way: the lines are parsed on the workers
 in rounds and go into the tables in file order, each round while the next
 one is parsed.
 
+When each worker has more declarations than its caches hold (`mathlib` on
+one worker), the deferred declarations are checked grouped by the first
+component of their names, so that declarations about the same things meet
+the facts they share before those are let go (decision `CheckedByNamespace`
+in `check/decl.av`). That is sound only when every declaration names
+constants placed before it, which the reader makes sure of as it reads
+(`NamesPlacedWhereRead` in `export/tables.av`); otherwise the file order
+stays. `--reorder-always` is a tool for tests: it groups on any file the
+reader allows it on, however small, so that `tests/run.sh` and
+`tests/arena.sh` check every file in both orders.
+
 The VM is far slower on large files; use it for `verify` and small inputs.
+
+### Low-memory mode
+
+`--low-memory` trades instructions for memory: the caches a worker carries
+across declarations stop at smaller limits, and the facts about closed
+terms, kept for the whole run otherwise, are emptied past a limit too. The
+limits were chosen by what a cost model of the caches says each GB kept
+returns, then swept on `mathlib` until the peak reached what reading
+alone takes (decision `LowMemoryMode` in `check/state.av`). PGO build,
+one worker unless said. These measurements were recorded before the later
+namespace-ordering and cache-limit changes:
+
+| Test | Default | `--low-memory` |
+|---|---|---|
+| `mathlib` | 1726 G, 7.6 GB, 295 s | 1871 G (+8.4%), 4.7 GB, 294 s |
+| `mathlib`, 8 workers | 13.0 GB | 5.4 GB, 99 s |
+| `init` | 51.4 G, 0.98 GB | 56.6 G (+10%), 0.51 GB |
+| `etale` | 21.4 G, 0.84 GB | 22.2 G (+3.8%), 0.46 GB |
+
+What the mode cannot shrink is the environment. Pestka holds every
+expression of the export until the process ends; on `mathlib` reading
+alone peaks at 4.7 GB, of which the 105 M expression nodes are 3.4 GB, the
+index table that reading needs 0.8 GB and the names 0.3 GB. Three quarters
+of the nodes are the values of theorems, which nothing reads once the
+theorem is checked, except that Lean's kernel, and so Pestka, unfolds a
+theorem where it reduces a proof: `Init` unfolds `Acc.inv` under
+`WellFounded.fixF_eq`, `etale` `Iff.mpr` and `Localization.mk_eq_mk_iff`
+under `Localization.rec`. A mode that let theorem values go once checked
+was tried and declined both files. Going below the environment would take
+reading and checking a chunk at a time, with a first pass over the file to
+learn where each expression is used last, or a denser representation of
+stored terms.
+
+`tests/run.sh` and `tests/arena.sh` take `PESTKA_ARGS`, so
+`PESTKA_ARGS=--low-memory sh tests/run.sh` runs them in this mode.
+
+### WebAssembly
 
 Compiled to WebAssembly:
 

@@ -6,7 +6,7 @@ module State
         "scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, paramLevels, cacheGetAt, cachePutAt, quotSeen, quotMark]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, Memory, Limits, limitsOf, unbounded, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, paramLevels, cacheGetAt, cachePutAt, quotSeen, quotMark]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache, Check.Shapes]
     effects []
 
@@ -23,6 +23,98 @@ type Const
     CInduct(IndType)
     CCtor(Ctor)
     CRec(Rec)
+
+type Memory
+    Fast
+    Low
+
+decision LowMemoryMode
+    date = "2026-11-04"
+    reason =
+        "Pestka holds every expression of the export until the process"
+        "ends: on mathlib 105 M nodes, 3.4 GB, and reading alone peaks at"
+        "4.7 GB with the index tables; with the caches at the limits their"
+        "reuse distances pay for, one worker peaks at 7.6 GB. A run that"
+        "must fit in less chooses the low-memory mode (--low-memory): the"
+        "caches stop at smaller limits, the facts about closed terms, kept"
+        "for the whole run otherwise, past a limit too. The limits were"
+        "swept on mathlib: the unit for the checked types costs nothing"
+        "that a quarter would save, every other cache at a quarter and the"
+        "variables at an eighth bring the peak down to what reading alone"
+        "takes, 4.7 GB, and halving more would save nothing. Under PGO,"
+        "one worker: mathlib 1726.0 G and 7.59 GB to 1871.5 G (+8.4%) and"
+        "4.71 GB, the wall the same (295 s to 294 s); on eight workers"
+        "13 GB to 5.4 GB; Init 51.4 G and 0.98 GB to 56.6 G and 0.51 GB;"
+        "etale 21.4 G and 0.84 GB to 22.2 G and 0.46 GB; taylor 17.7 G and"
+        "0.65 GB to 18.4 G and 0.38 GB; run.sh 48 ok and the 179 Arena"
+        "tests correct in both modes. Halfway, the variables at a quarter"
+        "and the rest at a half, costs 6% for 5.3 GB."
+        "The memory that would matter is the values of theorems,"
+        "75 M of mathlib's nodes: a mode that read them apart from their"
+        "declarations and let each go once checked was tried, and declined"
+        "Init and etale, since Lean's kernel unfolds theorems where it"
+        "reduces a proof (Acc.inv under WellFounded.fixF_eq, Iff.mpr and"
+        "Localization.mk_eq_mk_iff under Localization.rec), small values"
+        "kept or not; a value let go cannot be had back without reading the"
+        "file again. The default stays the fast mode: the Arena ranks by"
+        "instructions, and the memory it allows is not the limit."
+    chosen = "LowMemoryMode"
+    rejected = ["OneModeWithSmallerLimits", "TheoremValuesFreed"]
+    impacts = [limitsOf]
+
+record Limits
+    vars: Int
+    check: Int
+    infer: Int
+    whnf: Int
+    core: Int
+    eqOk: Int
+    eqFail: Int
+    eqNo: Int
+    unfold: Int
+    types: Int
+    closed: Int
+
+fn limitsOf(unit: Int, memory: Memory) -> Limits
+    ? "How many hashes each map carried across declarations keeps before it is emptied, from the unit a worker gets. The fast mode keeps the multiples the reuse distances pay for (LimitsFromReuseDistances), three quarters of them since declarations are checked by namespace (LimitsAfterOrdering), and the facts about closed terms for the whole run. The low-memory mode keeps the checked types at the unit, whose entries are the cheapest to keep and the dearest to lose, a quarter of it for the inferred types, reduction results, equal pairs, constant types at levels and closed terms, and an eighth for the variables, with which the open caches go, the pairs found different and the unfolding cache (LowMemoryMode)."
+    match memory
+        Memory.Fast -> Limits(vars = Int.div(3 * unit, 4), check = 3 * unit, infer = Int.div(3 * unit, 4), whnf = Int.div(3 * unit, 4), core = Int.div(3 * unit, 4), eqOk = Int.div(3 * unit, 2), eqFail = Int.div(3 * unit, 4), eqNo = Int.div(3 * unit, 4), unfold = Int.div(3 * unit, 4), types = Int.div(3 * unit, 4), closed = unbounded())
+        Memory.Low -> Limits(vars = Int.div(unit, 8), check = unit, infer = Int.div(unit, 4), whnf = Int.div(unit, 4), core = Int.div(unit, 4), eqOk = Int.div(unit, 4), eqFail = Int.div(unit, 8), eqNo = Int.div(unit, 8), unfold = Int.div(unit, 8), types = Int.div(unit, 4), closed = Int.div(unit, 4))
+
+verify limitsOf
+    limitsOf(65536, Memory.Fast).check => 196608
+    limitsOf(65536, Memory.Fast).eqOk => 98304
+    limitsOf(65536, Memory.Fast).infer => 49152
+    limitsOf(65536, Memory.Low).vars => 8192
+    limitsOf(65536, Memory.Low).closed => 16384
+
+decision LimitsAfterOrdering
+    date = "2026-11-06"
+    reason =
+        "Checked one namespace after another (CheckedByNamespace), a"
+        "declaration meets the entries of its neighbours while they are still"
+        "kept, so each map buys less per byte than it did in file order."
+        "Measured again under PGO on one worker, mathlib, against the limits"
+        "of LimitsFromReuseDistances (1311.6 G and 1311.9 G instructions, peak"
+        "8.03 GB): every limit at three quarters 1317.5 G and 1316.2 G at"
+        "7.19 GB (+0.4% for 0.84 GB less); every limit halved 1332.0 G at"
+        "6.40 GB; the checked types halved 1312.0 G and 1318.9 G at 7.84 GB;"
+        "three quarters with the checked types halved 1322.5 G at 7.07 GB;"
+        "the unfolding cache twice as large 1300.9 G and 1306.4 G at 8.97 GB;"
+        "the checked types and equal pairs twice as large 1301.8 G at 9.10 GB;"
+        "and five maps larger at once 1295.8 G and 1292.6 G at 11.35 GB. A GB"
+        "now buys 0.4 to 0.8% where it bought 1 to 3%, and three quarters"
+        "keeps mathlib below its peak on the Arena before ordering."
+    chosen = "LimitsAfterOrdering"
+    rejected = ["LimitsFromReuseDistances", "HalfLimits", "LargerLimits"]
+    impacts = [limitsOf]
+
+fn unbounded() -> Int
+    ? "A limit no map reaches: 2^60 hashes."
+    1152921504606846976
+
+verify unbounded
+    unbounded() > 0 => true
 
 record Placed
     name: Name
@@ -216,9 +308,11 @@ record St
     levelTypes: Map<Core.Exprs.Key, Bucket>
     closed: Map<Core.Exprs.Key, Bucket>
     open: Int
-    opened: Expr
-    keep: Int
+    opened: Option<Expr>
+    limits: Limits
     kinds: List<Int>
+    kindCounts: Map<Core.Exprs.Key, Int>
+    kindsOpen: Int
     paramsTag: Expr
     shapes: Map<Core.Exprs.Key, Tuple<Expr, Shape>>
     hot: Map<Core.Exprs.Key, Tuple<Expr, Hot>>
@@ -239,7 +333,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), stepCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Core.Exprs.sort(Level.Zero), keep = 65536, kinds = [], paramsTag = paramsTagOf(params), shapes = {}, hot = {}, rules = {}, fuel = -1)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), stepCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Option.None, limits = limitsOf(65536, Memory.Fast), kinds = [], kindCounts = {}, kindsOpen = 0, paramsTag = paramsTagOf(params), shapes = {}, hot = {}, rules = {}, fuel = -1)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0
@@ -439,12 +533,14 @@ verify names
     names(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.bvar(0), Option.None, Binder.Default).st.next => 1
 
 fn namesAt(st: St, n: Name, ty: Expr, value: Option<Expr>, bi: Binder) -> RE
-    ? "The free variable of a binder opened now, as CountedVariables decides: the one already made for its type and value with as many variables of the same kind open, else a new one; with more than 1023 variables open, a fresh one, so that counting stays short in deep nests. It counts as open until closeVars closes it. The kinds open are read before the state is passed on, so that the maps it holds keep one owner."
+    ? "The free variable of a binder opened now, as CountedVariables decides: the one already made for its type and value with as many variables of the same kind open, else a new one; with more than 1023 variables open, a fresh one. The number open of its kind is kept, not counted (KindsCounted). It counts as open until closeVars closes it. The kinds open are read before the state is passed on, so that the maps it holds keep one owner."
     kind = kindOf(ty, value)
+    k = Core.Exprs.key(kind)
     ks = List.prepend(kind, st.kinds)
-    count = countKind(st.kinds, kind, 0, 1023)
+    had = Option.withDefault(Map.get(st.kindCounts, k), 0)
+    count = openCount(st.kindsOpen, had)
     r = namesCounted(st, n, ty, value, bi, count)
-    RE(e = r.e, st = St.update(r.st, kinds = ks))
+    RE(e = r.e, st = St.update(r.st, kinds = ks, kindCounts = Map.set(r.st.kindCounts, k, had + 1), kindsOpen = r.st.kindsOpen + 1))
 
 verify namesAt
     namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).e => Core.Exprs.fvar(1)
@@ -497,6 +593,67 @@ verify kindOf
     kindOf(Core.Exprs.natLit(1), Option.None) == kindOf(Core.Exprs.natLit(1), Option.Some(Core.Exprs.natLit(1))) => false
     kindOf(Core.Exprs.natLit(1), Option.None) == kindOf(Core.Exprs.natLit(2), Option.None) => false
 
+decision KindsCounted
+    date = "2026-11-06"
+    reason =
+        "A binder opened counted the open variables of its kind by walking"
+        "the list of kinds open, up to 1023 of them, so a nest of binders cost"
+        "its depth squared. Now the state keeps, beside that list, how many"
+        "of each kind are open and how many in all: opening reads and bumps"
+        "one count, closing n variables walks the n kinds closed and takes"
+        "each off its count. The count is the one the walk gave, -1 with"
+        "more than 1023 open, so every variable is the one it was and no"
+        "cache sees another term. Nests are shallow on the corpora (six"
+        "kinds walked per binder on Init, at most 143), so it gains little:"
+        "one worker, PGO, etale 18.76 G to 18.74 G instructions, Init"
+        "48.03 G to 47.95 G."
+    chosen = "KindsCounted"
+    rejected = ["KindsWalked"]
+    impacts = [namesAt, closeVars, openCount, uncount, St]
+
+fn openCount(open: Int, had: Int) -> Int
+    ? "The count namesAt keys a variable by: how many of its kind are open, or -1 with more than 1023 open in all, as counting the list with a budget of 1023 gave (countKind)."
+    match open > 1023
+        true -> -1
+        false -> had
+
+verify openCount
+    openCount(3, 2) => 2
+    openCount(1023, 5) => 5
+    openCount(1024, 5) => -1
+
+fn countedOf(st: St, kind: Int) -> Int
+    ? "The count namesAt reads for a kind."
+    openCount(st.kindsOpen, Option.withDefault(Map.get(st.kindCounts, Core.Exprs.key(kind)), 0))
+
+verify countedOf law sameAsWalked
+    given a: Int = 0..6
+    given c: Int = 0..4
+    given t: Int = 0..2
+    countedOf(closeVars(openedSample(fresh(envEmpty(), [], Safety.Safe), a), c), kindOf(kindSample(t), Option.None)) => countKind(closeVars(openedSample(fresh(envEmpty(), [], Safety.Safe), a), c).kinds, kindOf(kindSample(t), Option.None), 0, 1023)
+
+fn kindSample(t: Int) -> Expr
+    ? "Types of variables for the law sameAsWalked."
+    match t
+        0 -> Core.Exprs.sort(Level.Zero)
+        1 -> Core.Exprs.natLit(1)
+        _ -> Core.Exprs.natLit(2)
+
+verify kindSample
+    kindSample(0) == kindSample(1) => false
+
+fn openedSample(st: St, a: Int) -> St
+    ? "A state with a variables opened, their types taken from kindSample in turn, and the two opened after the first closed again."
+    match a <= 0
+        true -> st
+        false -> match a == 3
+            true -> openedSample(closeVars(namesAt(st, Core.Names.anon(), kindSample(Int.mod(a, 3)), Option.None, Binder.Default).st, 2), a - 1)
+            false -> openedSample(namesAt(st, Core.Names.anon(), kindSample(Int.mod(a, 3)), Option.None, Binder.Default).st, a - 1)
+
+verify openedSample
+    openedSample(fresh(envEmpty(), [], Safety.Safe), 4).kindsOpen => 2
+    List.len(openedSample(fresh(envEmpty(), [], Safety.Safe), 4).kinds) => 2
+
 fn countKind(ks: List<Int>, kind: Int, acc: Int, budget: Int) -> Int
     ? "How many of the open variables are of this kind, or -1 when more than budget are open. Two kinds may share a hash, which only counts more."
     match ks
@@ -513,9 +670,31 @@ verify countKind
     countKind([3, 5, 3], 3, 0, 2) => -1
 
 fn closeVars(st: St, n: Int) -> St
-    ? "Closes the n variables opened last. The kinds are read before the state is updated, so that the maps it holds keep one owner."
-    ks = List.drop(st.kinds, n)
-    St.update(st, kinds = ks)
+    ? "Closes the n variables opened last, each taken off the count of its kind (KindsCounted). The kinds are read before the state is updated, so that the maps it holds keep one owner."
+    ks = st.kinds
+    closing = Int.max(Int.min(n, st.kindsOpen), 0)
+    St.update(st, kinds = List.drop(ks, n), kindCounts = uncount(st.kindCounts, ks, closing), kindsOpen = st.kindsOpen - closing)
+
+fn uncount(counts: Map<Core.Exprs.Key, Int>, ks: List<Int>, n: Int) -> Map<Core.Exprs.Key, Int>
+    ? "Takes the first n kinds of ks off their counts; a count that reaches 0 is removed."
+    match n <= 0
+        true -> counts
+        false -> match ks
+            [] -> counts
+            [k, ..rest] -> uncount(uncountOne(counts, Core.Exprs.key(k)), rest, n - 1)
+
+verify uncount
+    uncount(Map.set({}, Core.Exprs.key(3), 2), [3, 3], 1) => Map.set({}, Core.Exprs.key(3), 1)
+    uncount(Map.set({}, Core.Exprs.key(3), 2), [3, 3], 2) => {}
+
+fn uncountOne(counts: Map<Core.Exprs.Key, Int>, k: Core.Exprs.Key) -> Map<Core.Exprs.Key, Int>
+    ? "One kind off its count."
+    match Option.withDefault(Map.get(counts, k), 0) <= 1
+        true -> Map.remove(counts, k)
+        false -> Map.set(counts, k, Option.withDefault(Map.get(counts, k), 0) - 1)
+
+verify uncountOne
+    uncountOne(Map.set({}, Core.Exprs.key(3), 1), Core.Exprs.key(3)) => {}
 
 verify closeVars
     closeVars(namesAt(fresh(envEmpty(), [], Safety.Safe), Core.Names.anon(), Core.Exprs.sort(Level.Zero), Option.None, Binder.Default).st, 1).kinds => []
@@ -631,8 +810,15 @@ fn localPut(m: Locals, id: Int, rest: Int, l: Local) -> Locals
         Locals.NoLocals -> Locals.OneLocal(id, rest, l)
         Locals.OneLocal(k, krest, old) -> match k == id
             true -> Locals.OneLocal(id, rest, l)
-            false -> localPut(Locals.SomeLocals(setLocals(Vector.new(16, Locals.NoLocals), Bits.and(krest, 15), Locals.OneLocal(k, Int.div(krest, 16), old))), id, rest, l)
-        Locals.SomeLocals(v) -> Locals.SomeLocals(setLocals(v, Bits.and(rest, 15), localPut(Option.withDefault(Vector.get(v, Bits.and(rest, 15)), Locals.NoLocals), id, Int.div(rest, 16), l)))
+            false -> putIn(setLocals(Vector.new(16, Locals.NoLocals), Bits.and(krest, 15), Locals.OneLocal(k, Int.div(krest, 16), old)), id, rest, l)
+        Locals.SomeLocals(v) -> putIn(v, id, rest, l)
+
+fn putIn(v: Vector<Locals>, id: Int, rest: Int, l: Local) -> Locals
+    ? "The node of the children v with the local put into the child at the id's next digit. A split leaf's children come here as they are: a node made of them only to be matched again was an allocation per split (1.6 M on mathlib)."
+    Locals.SomeLocals(setLocals(v, Bits.and(rest, 15), localPut(Option.withDefault(Vector.get(v, Bits.and(rest, 15)), Locals.NoLocals), id, Int.div(rest, 16), l)))
+
+verify putIn
+    localGet(putIn(Vector.new(16, Locals.NoLocals), 5, 5, sampleLocal(1)), 5, 5) => Option.Some(sampleLocal(1))
 
 verify localPut
     localGet(localPut(localPut(Locals.NoLocals, 0, 0, sampleLocal(0)), 0, 0, sampleLocal(2)), 0, 0) => Option.Some(sampleLocal(2))

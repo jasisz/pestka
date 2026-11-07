@@ -7,8 +7,8 @@ module Exprs
         "a tree, capped, so that traversals know when memoizing pays), packed"
         "into one word below 2^62 so that every node stays small, computed once"
         "by the constructors here and never by callers."
-    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, appHash3, key, keyAt, hashKey, looseRange, within, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
-    exposes opaque [Word, Tag, Index, Key]
+    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, appHash3, key, keyAt, hashKey, looseRange, within, withinDepth, depthOf, depthZero, deeper, depthValue, keyAtDepth, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
+    exposes opaque [Word, Tag, Index, Key, Depth]
     depends [Core.Hash, Core.Names, Core.Levels]
     effects []
 
@@ -104,6 +104,25 @@ decision ReadersByWord
     rejected = ["LeafFirst"]
     impacts = [wordOf, looseRange, varsOf, hasFVar, hasParam]
 
+decision LeavesCarryWords
+    date = "2026-11-04"
+    reason =
+        "A bound or free variable and a universe had no word: every reader"
+        "made one on the spot, a hash mixed and packed, and for a universe"
+        "its level hashed again. They are made rarely and read all the time,"
+        "as the part of every application built over them: on etale 0.16 M"
+        "bound variables, 0.21 M free ones and 0.16 M universes were made, and"
+        "their words were made 4.1 M, 8.4 M and 0.8 M times. Now each carries"
+        "the word its constructor makes, as a compound node and a constant"
+        "do, and only a literal's is made when read. A bound variable at"
+        "16382 or deeper reads its range as saturated, an upper bound, as a"
+        "compound node over it does. One worker, PGO: etale 20.94 G to"
+        "19.89 G instructions, Init 51.57 G to 50.12 G, mathlib 1718.7 G to"
+        "1630.6 G (peak 7.35 GB to 7.40 GB)."
+    chosen = "LeavesCarryWords"
+    rejected = ["LeafWordsMadeWhenRead"]
+    impacts = [bvar, fvar, sort, packedOf, leafWordOf]
+
 decision KeysAsMachineWords
     date = "2026-10-25"
     reason =
@@ -166,10 +185,13 @@ record Index
 record Key
     value: Int
 
+record Depth
+    value: Int
+
 type Expr
-    BVar(Int)
-    FVar(Int)
-    Sort(Level)
+    BVar(Word, Int)
+    FVar(Word, Int)
+    Sort(Word, Level)
     Const(Word, Name, List<Level>)
     App(Word, Expr, Expr)
     Lam(Word, Expr, Expr)
@@ -237,6 +259,52 @@ verify keyOf
     keyOf(-1) => Result.Err("key out of range")
     keyOf(4611686018427387904) => Result.Err("key out of range")
 
+fn depthOf(n: Int) -> Result<Depth, String>
+    ? "A binder depth as a machine word: below 2^40, as every depth a traversal reaches is."
+    match Bool.and(n >= 0, n < 1099511627776)
+        true -> Result.Ok(Depth(value = n))
+        false -> Result.Err("depth out of range")
+
+verify depthOf
+    depthOf(-1) => Result.Err("depth out of range")
+    depthOf(1099511627776) => Result.Err("depth out of range")
+
+fn depthZero() -> Depth
+    ? "No binders."
+    Depth(value = 0)
+
+fn deeper(d: Depth) -> Depth
+    ? "One binder deeper; a depth of 2^40 binders is never reached, and would stay where it is."
+    match depthOf(d.value + 1)
+        Result.Ok(x) -> x
+        Result.Err(_) -> d
+
+verify deeper
+    depthValue(deeper(depthZero())) => 1
+
+fn depthValue(d: Depth) -> Int
+    ? "The depth as a number."
+    d.value
+
+fn withinDepth(e: Expr, d: Depth) -> Bool
+    ? "within(e, d) on the machine word of d."
+    match packedOf(e)
+        Option.Some(w) -> match Bits.and(w.value, 16383) == 16383
+            true -> false
+            false -> Bits.and(w.value, 16383) <= d.value
+        Option.None -> leafRange(e) <= d.value
+
+verify withinDepth
+    withinDepth(bvar(0), deeper(depthZero())) => true
+    withinDepth(bvar(1), deeper(depthZero())) => false
+
+fn keyAtDepth(e: Expr, d: Depth) -> Key
+    ? "keyAt on a depth."
+    key(d.value * 2147483648 + hashOf(e))
+
+verify keyAtDepth
+    keyAtDepth(bvar(0), deeper(depthZero())) == keyAt(bvar(0), 1) => true
+
 fn key(n: Int) -> Key
     ? "A key from an Int in range; anything else is key 0, which only makes a lookup compare with another node and miss."
     match keyOf(n)
@@ -266,22 +334,29 @@ verify indexOf
     indexOf(1099511627776) => Result.Err("index out of range")
 
 fn bvar(i: Int) -> Expr
-    ? "Bound variable by de Bruijn index."
-    Expr.BVar(i)
+    ? "Bound variable by de Bruijn index, carrying its word (LeavesCarryWords)."
+    Expr.BVar(bvarWord(i), i)
 
 verify bvar
     looseRange(bvar(2)) => 3
 
 fn fvar(i: Int) -> Expr
-    ? "Free variable of the local context."
-    Expr.FVar(i)
+    ? "Free variable of the local context, carrying its word (LeavesCarryWords)."
+    Expr.FVar(fvarWord(i), i)
 
 verify fvar
     hasFVar(fvar(0)) => true
 
 fn sort(l: Level) -> Expr
-    ? "A universe."
-    Expr.Sort(l)
+    ? "A universe, carrying its word (LeavesCarryWords)."
+    Expr.Sort(sortWord(l), l)
+
+fn sortWord(l: Level) -> Word
+    ? "A universe's word: its level's hash and whether a parameter occurs in it."
+    leafWord(Core.Hash.mix(2, Core.Levels.hashOf(l)), 0, 0, flag(Core.Levels.hasParam(l)))
+
+verify sortWord
+    sortWord(Level.Zero) == leafWord(Core.Hash.mix(2, 2), 0, 0, 0) => true
 
 verify sort
     looseRange(sort(Level.Zero)) => 0
@@ -312,7 +387,10 @@ fn binderWord(tag: Tag, t: Expr, b: Expr) -> Word
     ? "The word of a node that binds one variable over b: the body's range seen from outside the binder."
     wt = wordOf(t).value
     wb = wordOf(b).value
-    wordFrom(fromInt((Int.mod((tag.value * 1000003 + Int.div(wt, 2147483648)) * 1000003 + Int.div(wb, 2147483648) * 1000033, 2147483647) * 64 + Int.min(Bits.and(Int.div(wt, 33554432), 63) + Bits.and(Int.div(wb, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(wt, wb), 33538048) + Int.max(Bits.and(wt, 16383), Int.max(Bits.and(wb, 16383) - 1, 0) + Int.div(Bits.and(wb, 16383), 16383))))
+    x = (tag.value * 1000003 + Int.div(wt, 2147483648)) * 1000003 + Int.div(wb, 2147483648) * 1000033
+    r = Bits.and(x, 2147483647) + Bits.shiftRight(x, 31)
+    h = Bits.and(r + Bits.shiftRight(r + 1, 31), 2147483647)
+    wordFrom(fromInt((h * 64 + Int.min(Bits.and(Int.div(wt, 33554432), 63) + Bits.and(Int.div(wb, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(wt, wb), 33538048) + Int.max(Bits.and(wt, 16383), Int.max(Bits.and(wb, 16383) - 1, 0) + Int.div(Bits.and(wb, 16383), 16383))))
 
 verify binderWord
     binderWord(Tag(value = 5), sort(Level.Zero), bvar(3)).value == pack(binderMeta(5, sort(Level.Zero), bvar(3))) => true
@@ -348,7 +426,13 @@ fn letE(n: Name, t: Expr, v: Expr, b: Expr) -> Expr
     wt = wordOf(t).value
     wv = wordOf(v).value
     wb = wordOf(b).value
-    Expr.Let(wordFrom(fromInt((Int.mod(Int.mod((7000021 + Int.div(wt, 2147483648)) * 1000003 + Int.div(wv, 2147483648), 2147483647) * 1000003 + Int.div(wb, 2147483648) * 1000033, 2147483647) * 64 + Int.min(Bits.and(Int.div(wt, 33554432), 63) + Bits.and(Int.div(wv, 33554432), 63) + Bits.and(Int.div(wb, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(Bits.or(wt, wv), wb), 33538048) + Int.max(Int.max(Bits.and(wt, 16383), Bits.and(wv, 16383)), Int.max(Bits.and(wb, 16383) - 1, 0) + Int.div(Bits.and(wb, 16383), 16383)))), t, v, b)
+    x1 = (7000021 + Int.div(wt, 2147483648)) * 1000003 + Int.div(wv, 2147483648)
+    r1 = Bits.and(x1, 2147483647) + Bits.shiftRight(x1, 31)
+    h1 = Bits.and(r1 + Bits.shiftRight(r1 + 1, 31), 2147483647)
+    x2 = h1 * 1000003 + Int.div(wb, 2147483648) * 1000033
+    r2 = Bits.and(x2, 2147483647) + Bits.shiftRight(x2, 31)
+    h2 = Bits.and(r2 + Bits.shiftRight(r2 + 1, 31), 2147483647)
+    Expr.Let(wordFrom(fromInt((h2 * 64 + Int.min(Bits.and(Int.div(wt, 33554432), 63) + Bits.and(Int.div(wv, 33554432), 63) + Bits.and(Int.div(wb, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(Bits.or(wt, wv), wb), 33538048) + Int.max(Int.max(Bits.and(wt, 16383), Bits.and(wv, 16383)), Int.max(Bits.and(wb, 16383) - 1, 0) + Int.div(Bits.and(wb, 16383), 16383)))), t, v, b)
 
 verify letE law packsLetMeta
     given i: Int = 0..6
@@ -385,9 +469,9 @@ verify proj
 fn metaOf(e: Expr) -> Meta
     ? "Metadata of any node; leaves compute theirs on the spot."
     match e
-        Expr.BVar(i) -> Meta(hash = Core.Hash.mix(1, i), range = i + 1, vars = 0, params = false, size = 1)
-        Expr.FVar(i) -> Meta(hash = Core.Hash.mix(11, i), range = 0, vars = varsOfId(i), params = false, size = 1)
-        Expr.Sort(l) -> Meta(hash = Core.Hash.mix(2, Core.Levels.hashOf(l)), range = 0, vars = 0, params = Core.Levels.hasParam(l), size = 1)
+        Expr.BVar(_, i) -> Meta(hash = Core.Hash.mix(1, i), range = i + 1, vars = 0, params = false, size = 1)
+        Expr.FVar(_, i) -> Meta(hash = Core.Hash.mix(11, i), range = 0, vars = varsOfId(i), params = false, size = 1)
+        Expr.Sort(_, l) -> Meta(hash = Core.Hash.mix(2, Core.Levels.hashOf(l)), range = 0, vars = 0, params = Core.Levels.hasParam(l), size = 1)
         Expr.Const(m, _, _) -> metaIn(m)
         Expr.App(m, _, _) -> metaIn(m)
         Expr.Lam(m, _, _) -> metaIn(m)
@@ -439,9 +523,9 @@ verify wordOf
 fn leafWordOf(e: Expr) -> Word
     ? "A leaf's word, made on the spot; a node that carries its word gives that."
     match e
-        Expr.BVar(i) -> bvarWord(i)
-        Expr.FVar(i) -> fvarWord(i)
-        Expr.Sort(l) -> leafWord(Core.Hash.mix(2, Core.Levels.hashOf(l)), 0, 0, flag(Core.Levels.hasParam(l)))
+        Expr.BVar(m, _) -> m
+        Expr.FVar(m, _) -> m
+        Expr.Sort(m, _) -> m
         Expr.Const(m, _, _) -> m
         Expr.App(m, _, _) -> m
         Expr.Lam(m, _, _) -> m
@@ -457,22 +541,44 @@ verify leafWordOf
 fn bvarWord(i: Int) -> Word
     ? "A bound variable's word: mix(1, i) as its hash, its index and one as its range. An index below 2^40 is spelled out on the machine word."
     match indexOf(i)
-        Result.Ok(x) -> wordFrom(fromInt(Int.mod(1000003 + x.value, 2147483647) * 2147483648 + 33554432 + Int.min(x.value + 1, 16383)))
+        Result.Ok(x) -> bvarWordAt(x)
         Result.Err(_) -> leafWord(Core.Hash.mix(1, i), Int.min(i + 1, 16383), 0, 0)
 
 verify bvarWord law sameAsLeaf
-    given i: Int = [0, 1, 16382, 16383, 1099511627775, 1099511627776, -3]
+    given i: Int = [0, 1, 16382, 16383, 2147483646 - 1000003, 2147483647 - 1000003, 4294967294 - 1000003, 1099511627775, 1099511627776, -3]
     bvarWord(i) => leafWord(Core.Hash.mix(1, i), Int.min(i + 1, 16383), 0, 0)
 
 fn fvarWord(i: Int) -> Word
     ? "A free variable's word: mix(11, i) as its hash, its bits (varsOfId: the low ten, all ten when none is set) in place. A number below 2^40 is spelled out on the machine word."
     match indexOf(i)
-        Result.Ok(x) -> wordFrom(fromInt(Int.mod(11000033 + x.value, 2147483647) * 2147483648 + 33554432 + (Bits.and(x.value, 1023) + 1023 * Int.div(1024 - Bits.and(x.value, 1023), 1024)) * 16384))
+        Result.Ok(x) -> fvarWordAt(x)
         Result.Err(_) -> leafWord(Core.Hash.mix(11, i), 0, varsOfId(i), 0)
 
 verify fvarWord law sameAsLeaf
-    given i: Int = [0, 1, 1023, 1024, 3 * 1024 + 4, 1099511627775, 1099511627776]
+    given i: Int = [0, 1, 1023, 1024, 3 * 1024 + 4, 2147483646 - 11000033, 2147483647 - 11000033, 4294967294 - 11000033, 1099511627775, 1099511627776]
     fvarWord(i) => leafWord(Core.Hash.mix(11, i), 0, varsOfId(i), 0)
+
+fn bvarWordAt(x: Index) -> Word
+    ? "bvarWord of an index below 2^40, on the machine word: mix(1, i) reduced as mix reduces (MersenneFolds)."
+    y = 1000003 + x.value
+    r = Bits.and(y, 2147483647) + Bits.shiftRight(y, 31)
+    h = Bits.and(r + Bits.shiftRight(r + 1, 31), 2147483647)
+    wordFrom(fromInt(h * 2147483648 + 33554432 + Int.min(x.value + 1, 16383)))
+
+verify bvarWordAt
+    bvarWordAt(Index(value = 2147483647 - 1000003)) => leafWord(0, 16383, 0, 0)
+    bvarWordAt(Index(value = 2147483646 - 1000003)) => leafWord(2147483646, 16383, 0, 0)
+
+fn fvarWordAt(x: Index) -> Word
+    ? "fvarWord of a number below 2^40, on the machine word: mix(11, i) reduced as mix reduces (MersenneFolds)."
+    y = 11000033 + x.value
+    r = Bits.and(y, 2147483647) + Bits.shiftRight(y, 31)
+    h = Bits.and(r + Bits.shiftRight(r + 1, 31), 2147483647)
+    wordFrom(fromInt(h * 2147483648 + 33554432 + (Bits.and(x.value, 1023) + 1023 * Int.div(1024 - Bits.and(x.value, 1023), 1024)) * 16384))
+
+verify fvarWordAt
+    fvarWordAt(Index(value = 2147483647 - 11000033)) => leafWord(0, 0, varsOfId(2147483647 - 11000033), 0)
+    fvarWordAt(Index(value = 2147483646 - 11000033)) => leafWord(2147483646, 0, varsOfId(2147483646 - 11000033), 0)
 
 fn leafWord(hash: Int, range: Int, vars: Int, params: Int) -> Word
     ? "The word of a node of tree size 1, from its parts as pack lays them out."
@@ -500,9 +606,39 @@ decision SecondPartWeighted
     rejected = ["PartsWeighedAlike"]
     impacts = [joined, appMeta, binderWord, letE, proj]
 
+decision MersenneFolds
+    date = "2026-11-06"
+    reason =
+        "Every node built reduced its hash modulo the prime 2^31 - 1 with a"
+        "remainder, which compiles to a multiplication by a reciprocal, shifts"
+        "and a correction for negative numbers: about eleven instructions on"
+        "each application, binder, let, and on every key made without"
+        "building. Since 2^31 is 1 modulo 2^31 - 1, a sum x below 2^53 is"
+        "congruent to its low 31 bits plus the rest, r below 2^32; one more"
+        "step, adding the carry of r + 1 and masking, gives the remainder"
+        "itself (folded, law sameAsRemainder). The constructors and the keys"
+        "spell those steps out on the machine word. The hashes are the ones"
+        "the remainder gave, so no cache sees another key. One worker, PGO:"
+        "etale 19.14 G to 18.85 G instructions, Init 48.81 G to 48.18 G."
+    chosen = "MersenneFolds"
+    rejected = ["Remainder", "MultiplyShift"]
+    impacts = [joined, binderWord, letE, bvarWordAt, fvarWordAt, pairHash, appHash, appHash3]
+
+fn folded(x: Int) -> Int
+    ? "x modulo 2^31 - 1 for x from 0 below 2^53, by two folds: 2^31 is 1 modulo the prime, so the low 31 bits plus the rest is congruent to x and below 2^32, and adding the carry of that plus one and masking takes the prime off once if it is reached (MersenneFolds). The constructors spell it out."
+    r = Bits.and(x, 2147483647) + Bits.shiftRight(x, 31)
+    Bits.and(r + Bits.shiftRight(r + 1, 31), 2147483647)
+
+verify folded law sameAsRemainder
+    given x: Int = [0, 1, 2147483646, 2147483647, 2147483648, 4294967293, 4294967294, 4294967295, 2147483647 * 2147483647, 2147483647 * 2147483648 - 1, 9007199254740991, 9007199254740990, 2147483647 * 4194303, 2147483647 * 4194303 - 1, 2147483647 * 4194304 - 1, 123456789012345]
+    folded(x) => Int.mod(x, 2147483647)
+
 fn joined(tag: Tag, wf: Word, wa: Word) -> Word
-    ? "The word of a node over two parts, from theirs alone: the hashes mixed after the tag (mix2, spelled out so that it stays on the machine word), sizes added and capped, variable bits and parameter flags or-ed, the larger range. A saturated range stays saturated."
-    wordFrom(fromInt((Int.mod((tag.value * 1000003 + Int.div(wf.value, 2147483648)) * 1000003 + Int.div(wa.value, 2147483648) * 1000033, 2147483647) * 64 + Int.min(Bits.and(Int.div(wf.value, 33554432), 63) + Bits.and(Int.div(wa.value, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(wf.value, wa.value), 33538048) + Int.max(Bits.and(wf.value, 16383), Bits.and(wa.value, 16383))))
+    ? "The word of a node over two parts, from theirs alone: the hashes mixed after the tag (mix2, spelled out so that it stays on the machine word, its remainder folded: MersenneFolds), sizes added and capped, variable bits and parameter flags or-ed, the larger range. A saturated range stays saturated."
+    x = (tag.value * 1000003 + Int.div(wf.value, 2147483648)) * 1000003 + Int.div(wa.value, 2147483648) * 1000033
+    r = Bits.and(x, 2147483647) + Bits.shiftRight(x, 31)
+    h = Bits.and(r + Bits.shiftRight(r + 1, 31), 2147483647)
+    wordFrom(fromInt((h * 64 + Int.min(Bits.and(Int.div(wf.value, 33554432), 63) + Bits.and(Int.div(wa.value, 33554432), 63) + 1, 63)) * 33554432 + Bits.and(Bits.or(wf.value, wa.value), 33538048) + Int.max(Bits.and(wf.value, 16383), Bits.and(wa.value, 16383))))
 
 verify joined
     unpack(joined(Tag(value = 4), wordOf(bvar(0)), wordOf(bvar(3))).value).range => 4
@@ -566,8 +702,11 @@ verify under
     under(16383) => 16383
 
 fn packedOf(e: Expr) -> Option<Word>
-    ? "The packed metadata of a compound node or a constant, or none for another leaf, whose metadata is computed on the spot."
+    ? "The packed metadata a node carries: every node but a literal, whose metadata is computed on the spot (LeavesCarryWords)."
     match e
+        Expr.BVar(m, _) -> Option.Some(m)
+        Expr.FVar(m, _) -> Option.Some(m)
+        Expr.Sort(m, _) -> Option.Some(m)
         Expr.Const(m, _, _) -> Option.Some(m)
         Expr.App(m, _, _) -> Option.Some(m)
         Expr.Lam(m, _, _) -> Option.Some(m)
@@ -577,7 +716,7 @@ fn packedOf(e: Expr) -> Option<Word>
         _ -> Option.None
 
 verify packedOf
-    packedOf(bvar(0)) => Option.None
+    packedOf(natLit(0)) => Option.None
     packedOf(app(bvar(0), bvar(0))) == Option.None => false
 
 fn hashOf(e: Expr) -> Int
@@ -593,7 +732,9 @@ fn pairHash(a: Expr, b: Expr) -> Int
     ? "One key for an unordered pair: the two hashes mixed, the smaller first, read and mixed on the machine word."
     ha = Int.div(wordOf(a).value, 2147483648)
     hb = Int.div(wordOf(b).value, 2147483648)
-    Int.mod(Int.min(ha, hb) * 1000003 + Int.max(ha, hb), 2147483647)
+    x = Int.min(ha, hb) * 1000003 + Int.max(ha, hb)
+    r = Bits.and(x, 2147483647) + Bits.shiftRight(x, 31)
+    Bits.and(r + Bits.shiftRight(r + 1, 31), 2147483647)
 
 verify pairHash law sameAsMix
     given i: Int = 0..6
@@ -602,7 +743,9 @@ verify pairHash law sameAsMix
 
 fn appHash(f: Expr, a: Expr) -> Int
     ? "The hash app(f, a) would have, without building it: mix2(4, ...) as joined makes it, on the machine word."
-    Int.mod((4000012 + Int.div(wordOf(f).value, 2147483648)) * 1000003 + Int.div(wordOf(a).value, 2147483648) * 1000033, 2147483647)
+    x = (4000012 + Int.div(wordOf(f).value, 2147483648)) * 1000003 + Int.div(wordOf(a).value, 2147483648) * 1000033
+    r = Bits.and(x, 2147483647) + Bits.shiftRight(x, 31)
+    Bits.and(r + Bits.shiftRight(r + 1, 31), 2147483647)
 
 verify appHash law sameAsBuilt
     given i: Int = 0..6
@@ -611,8 +754,12 @@ verify appHash law sameAsBuilt
 
 fn appHash3(f: Expr, a: Expr, t: Expr) -> Int
     ? "The hash app(app(f, a), t) would have, without building either node."
-    h = Int.mod((4000012 + Int.div(wordOf(f).value, 2147483648)) * 1000003 + Int.div(wordOf(a).value, 2147483648) * 1000033, 2147483647)
-    Int.mod((4000012 + h) * 1000003 + Int.div(wordOf(t).value, 2147483648) * 1000033, 2147483647)
+    x1 = (4000012 + Int.div(wordOf(f).value, 2147483648)) * 1000003 + Int.div(wordOf(a).value, 2147483648) * 1000033
+    r1 = Bits.and(x1, 2147483647) + Bits.shiftRight(x1, 31)
+    h1 = Bits.and(r1 + Bits.shiftRight(r1 + 1, 31), 2147483647)
+    x2 = (4000012 + h1) * 1000003 + Int.div(wordOf(t).value, 2147483648) * 1000033
+    r2 = Bits.and(x2, 2147483647) + Bits.shiftRight(x2, 31)
+    Bits.and(r2 + Bits.shiftRight(r2 + 1, 31), 2147483647)
 
 verify appHash3 law sameAsBuilt
     given i: Int = 0..6
@@ -632,7 +779,7 @@ verify looseRange
 fn leafRange(e: Expr) -> Int
     ? "A leaf's loose range: a bound variable's index and one, nothing for another leaf."
     match e
-        Expr.BVar(i) -> i + 1
+        Expr.BVar(_, i) -> i + 1
         _ -> 0
 
 fn within(e: Expr, n: Int) -> Bool
@@ -693,7 +840,7 @@ verify leafParam
 fn leafParam(e: Expr) -> Bool
     ? "Whether a leaf holds a universe parameter: only a sort can."
     match e
-        Expr.Sort(l) -> Core.Levels.hasParam(l)
+        Expr.Sort(_, l) -> Core.Levels.hasParam(l)
         _ -> false
 
 verify hasParam
@@ -817,7 +964,7 @@ fn varsOf(e: Expr) -> Int
 fn leafVars(e: Expr) -> Int
     ? "A leaf's variable bits: a free variable's own, none for another leaf."
     match e
-        Expr.FVar(i) -> varsOfId(i)
+        Expr.FVar(_, i) -> varsOfId(i)
         _ -> 0
 
 verify leafVars

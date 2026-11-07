@@ -62,7 +62,7 @@ verify localFor
 fn fvarId(e: Expr) -> Int
     ? "The number of a free variable, or -1."
     match e
-        Expr.FVar(id) -> id
+        Expr.FVar(_, id) -> id
         _ -> -1
 
 verify fvarId

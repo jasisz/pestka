@@ -192,7 +192,7 @@ verify natParsed
 fn constOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
     ? "A constant with its universe levels."
     n = Export.Tables.name(t, Json.Access.int(o, "name")?)?
-    Result.Ok(Core.Exprs.cnst(n, Export.Tables.levels(t, Json.Access.ints(o, "us")?, [])?))
+    Result.Ok(Core.Exprs.cnst(n, Export.Tables.levels(t, Json.Access.ints(o, "us")?)?))
 
 verify constOf
     constOf(Export.Tables.empty(), [("name", J.JInt(0)), ("us", J.JArr([]))]) => Result.Ok(Core.Exprs.cnst(Core.Names.anon(), []))
@@ -208,7 +208,7 @@ verify sortAt
 fn constAt(t: Tables, ie: Int, n: Int, us: List<Int>) -> Result<Tables, String>
     ? "Defines expression ie as constant n at levels us, as a const line does."
     name = Export.Tables.name(t, n)?
-    e = Core.Exprs.cnst(name, Export.Tables.levels(t, us, [])?)
+    e = Core.Exprs.cnst(name, Export.Tables.levels(t, us)?)
     Export.Tables.addExpr(t, ie, e)
 
 verify constAt

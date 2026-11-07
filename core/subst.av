@@ -11,7 +11,7 @@ module Subst
         "and binder depth, so a subterm shared many times in a DAG is rebuilt"
         "once per depth, not once per path to it. Smaller nodes are cheaper"
         "to rebuild than to look up."
-    exposes [Op, apply, instantiate, instantiateRev, instantiate1, lift, lower, abstractFVars, instLevelParams, hasLooseBVar, hasLoose]
+    exposes [Op, apply, instantiate, instantiateRev, instantiate1, lift, lower, abstractFVars, instLevelParams, sameParams, hasLooseBVar, hasLoose]
     depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Univ]
     effects []
 
@@ -87,28 +87,53 @@ verify idsBits
     idsBits([1025, 2050], 0) => 3
     idsBits([], 0) => 0
 
-fn untouched(op: Op, e: Expr, offset: Int) -> Bool
+fn untouched(op: Op, e: Expr, offset: Core.Exprs.Depth) -> Bool
     ? "Whether the operation cannot change e at this depth."
     match op
-        Op.Inst -> Core.Exprs.within(e, offset)
-        Op.InstRev -> Core.Exprs.within(e, offset)
-        Op.Lift(s, _) -> Core.Exprs.within(e, s + offset)
-        Op.Lower(s, _) -> Core.Exprs.within(e, s + offset)
+        Op.Inst -> Core.Exprs.withinDepth(e, offset)
+        Op.InstRev -> Core.Exprs.withinDepth(e, offset)
+        Op.Lift(s, _) -> Core.Exprs.within(e, s + Core.Exprs.depthValue(offset))
+        Op.Lower(s, _) -> Core.Exprs.within(e, s + Core.Exprs.depthValue(offset))
         Op.Abstract(_, _, bits) -> Bits.and(Core.Exprs.varsOf(e), bits) == 0
 
 verify untouched
-    untouched(Op.Lift(0, 1), Core.Exprs.sort(Level.Zero), 0) => true
-    untouched(Op.Inst([], 0), Core.Exprs.bvar(0), 0) => false
+    untouched(Op.Lift(0, 1), Core.Exprs.sort(Level.Zero), Core.Exprs.depthZero()) => true
+    untouched(Op.Inst([], 0), Core.Exprs.bvar(0), Core.Exprs.depthZero()) => false
 
 record SR
     e: Expr
     memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>
 
+decision DepthAsMachineWord
+    date = "2026-11-06"
+    reason =
+        "The traversal carried its binder depth as an Int, and every node it"
+        "visited compared the depth with the node's loose range, added one"
+        "under a binder and put the depth into the memo key on the general"
+        "number, with its checks for a boxed operand. A depth is now a Depth,"
+        "a refinement over Int below 2^40 that compiled Aver holds as a"
+        "machine word, as a variable's Index is; an offset past that, which"
+        "no term reaches, takes the plain recursion. One worker, PGO:"
+        "etale 19.29 G to 19.14 G instructions, Init 49.21 G to 48.81 G,"
+        "mathlib 1479.4 G to 1468.7 G."
+    chosen = "DepthAsMachineWord"
+    rejected = ["DepthAsInt"]
+    impacts = [apply, applyAt, go, visit, small, memoed, build, untouched]
+
 fn apply(op: Op, e: Expr, offset: Int) -> Expr
+    ? "Applies op to e under offset binders, as a depth on the machine word; an offset past any depth goes by the plain recursion."
+    match Core.Exprs.depthOf(offset)
+        Result.Ok(d) -> applyAt(op, e, d)
+        Result.Err(_) -> done(applySpec(op, e, offset))
+
+fn applyAt(op: Op, e: Expr, offset: Core.Exprs.Depth) -> Expr
     ? "Applies op to e under offset binders; a term too small for the memo goes without one. small is called as the argument of done, not in tail position, so that it does not join a cycle of tail calls through lift."
     match Core.Exprs.isSmall(e)
         true -> done(small(op, e, offset))
         false -> go(op, e, offset, {}).e
+
+verify applyAt
+    applyAt(Op.Lift(0, 1), Core.Exprs.bvar(0), Core.Exprs.depthZero()) => Core.Exprs.bvar(1)
 
 fn done(e: Expr) -> Expr
     ? "The term as it is."
@@ -120,53 +145,53 @@ verify done
 verify apply
     apply(Op.Lift(0, 1), Core.Exprs.bvar(0), 1) => Core.Exprs.bvar(0)
 
-fn go(op: Op, e: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
+fn go(op: Op, e: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Skips what op cannot touch; otherwise visits."
     match untouched(op, e, offset)
         true -> SR(e = e, memo = memo)
         false -> visit(op, e, offset, memo)
 
 verify go
-    go(Op.Lift(0, 1), Core.Exprs.bvar(0), 0, {}).e => Core.Exprs.bvar(1)
+    go(Op.Lift(0, 1), Core.Exprs.bvar(0), Core.Exprs.depthZero(), {}).e => Core.Exprs.bvar(1)
 
-fn visit(op: Op, e: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
+fn visit(op: Op, e: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Variables are rewritten directly; compound nodes go through the memo."
     match e
-        Expr.BVar(i) -> SR(e = bvarCase(op, i, offset), memo = memo)
-        Expr.FVar(id) -> SR(e = fvarCase(op, id, offset), memo = memo)
+        Expr.BVar(_, i) -> SR(e = bvarCase(op, i, Core.Exprs.depthValue(offset)), memo = memo)
+        Expr.FVar(_, id) -> SR(e = fvarCase(op, id, Core.Exprs.depthValue(offset)), memo = memo)
         _ -> match Core.Exprs.isSmall(e)
             true -> SR(e = small(op, e, offset), memo = memo)
-            false -> memoed(op, e, offset, memo, Core.Exprs.keyAt(e, offset))
+            false -> memoed(op, e, offset, memo, Core.Exprs.keyAtDepth(e, offset))
 
 verify visit
-    visit(Op.Abstract([3], 1, 3), Core.Exprs.fvar(3), 0, {}).e => Core.Exprs.bvar(0)
+    visit(Op.Abstract([3], 1, 3), Core.Exprs.fvar(3), Core.Exprs.depthZero(), {}).e => Core.Exprs.bvar(0)
 
-fn small(op: Op, e: Expr, offset: Int) -> Expr
+fn small(op: Op, e: Expr, offset: Core.Exprs.Depth) -> Expr
     ? "op on a term of fewer than 32 tree nodes, whose parts are all smaller: plain recursion that skips what op cannot touch, with no memo to carry, since only nodes of 32 or more are remembered."
     match untouched(op, e, offset)
         true -> e
         false -> match e
-            Expr.BVar(i) -> bvarCase(op, i, offset)
-            Expr.FVar(id) -> fvarCase(op, id, offset)
+            Expr.BVar(_, i) -> bvarCase(op, i, Core.Exprs.depthValue(offset))
+            Expr.FVar(_, id) -> fvarCase(op, id, Core.Exprs.depthValue(offset))
             Expr.App(_, f, a) -> Core.Exprs.app(small(op, f, offset), small(op, a, offset))
-            Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), small(op, t, offset), small(op, b, offset + 1), Binder.Default)
-            Expr.Pi(_, t, b) -> Core.Exprs.pi(Core.Names.anon(), small(op, t, offset), small(op, b, offset + 1), Binder.Default)
-            Expr.Let(_, t, v, b) -> Core.Exprs.letE(Core.Names.anon(), small(op, t, offset), small(op, v, offset), small(op, b, offset + 1))
+            Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), small(op, t, offset), small(op, b, Core.Exprs.deeper(offset)), Binder.Default)
+            Expr.Pi(_, t, b) -> Core.Exprs.pi(Core.Names.anon(), small(op, t, offset), small(op, b, Core.Exprs.deeper(offset)), Binder.Default)
+            Expr.Let(_, t, v, b) -> Core.Exprs.letE(Core.Names.anon(), small(op, t, offset), small(op, v, offset), small(op, b, Core.Exprs.deeper(offset)))
             Expr.Proj(_, s, i, x) -> Core.Exprs.proj(s, i, small(op, x, offset))
             _ -> e
 
 verify small
-    small(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.sort(Level.Zero)), 0) => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.sort(Level.Zero))
-    small(Op.Inst([Core.Exprs.fvar(5)], 1), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Binder.Default), 0) => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.fvar(5), Core.Exprs.fvar(5), Binder.Default)
+    small(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.sort(Level.Zero)), Core.Exprs.depthZero()) => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.sort(Level.Zero))
+    small(Op.Inst([Core.Exprs.fvar(5)], 1), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Binder.Default), Core.Exprs.depthZero()) => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.fvar(5), Core.Exprs.fvar(5), Binder.Default)
 
-fn memoed(op: Op, e: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, key: Core.Exprs.Key) -> SR
+fn memoed(op: Op, e: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, key: Core.Exprs.Key) -> SR
     ? "A node already rebuilt at this depth is reused."
     match hit(Map.get(memo, key), e)
         Option.Some(r) -> SR(e = r, memo = memo)
         Option.None -> remember(build(op, e, offset, memo), e, key)
 
 verify memoed
-    memoed(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), 0, {}, Core.Exprs.hashKey(Core.Exprs.bvar(7))).e => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(1))
+    memoed(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), Core.Exprs.depthZero(), {}, Core.Exprs.hashKey(Core.Exprs.bvar(7))).e => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(1))
 
 fn remember(r: SR, e: Expr, key: Core.Exprs.Key) -> SR
     ? "Records a rebuilt node; an older entry with the same key is replaced, which only costs a later recomputation."
@@ -187,7 +212,7 @@ verify hit
 verify remember
     Map.len(remember(SR(e = Core.Exprs.bvar(1), memo = {}), Core.Exprs.bvar(0), Core.Exprs.hashKey(Core.Exprs.bvar(3))).memo) => 1
 
-fn build(op: Op, e: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
+fn build(op: Op, e: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Rebuilds one node, going one binder deeper in binding positions."
     match e
         Expr.App(_, f, a) -> buildApp(op, f, a, offset, memo)
@@ -198,45 +223,45 @@ fn build(op: Op, e: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Exp
         _ -> SR(e = e, memo = memo)
 
 verify build
-    build(Op.Lift(0, 1), Core.Exprs.sort(Level.Zero), 0, {}).e => Core.Exprs.sort(Level.Zero)
+    build(Op.Lift(0, 1), Core.Exprs.sort(Level.Zero), Core.Exprs.depthZero(), {}).e => Core.Exprs.sort(Level.Zero)
 
-fn buildApp(op: Op, f: Expr, a: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
+fn buildApp(op: Op, f: Expr, a: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Function, then argument."
     rf = go(op, f, offset, memo)
     ra = go(op, a, offset, rf.memo)
     SR(e = Core.Exprs.app(rf.e, ra.e), memo = ra.memo)
 
 verify buildApp
-    buildApp(Op.Lift(0, 2), Core.Exprs.bvar(0), Core.Exprs.bvar(1), 0, {}).e => Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(3))
+    buildApp(Op.Lift(0, 2), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Exprs.depthZero(), {}).e => Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(3))
 
-fn buildBinder(op: Op, n: Name, t: Expr, b: Expr, bi: Binder, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, isLam: Bool) -> SR
+fn buildBinder(op: Op, n: Name, t: Expr, b: Expr, bi: Binder, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, isLam: Bool) -> SR
     ? "Domain at this depth, body one deeper."
     rt = go(op, t, offset, memo)
-    rb = go(op, b, offset + 1, rt.memo)
+    rb = go(op, b, Core.Exprs.deeper(offset), rt.memo)
     match isLam
         true -> SR(e = Core.Exprs.lam(n, rt.e, rb.e, bi), memo = rb.memo)
         false -> SR(e = Core.Exprs.pi(n, rt.e, rb.e, bi), memo = rb.memo)
 
 verify buildBinder
-    buildBinder(Op.Lift(0, 1), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default, 0, {}, true).e => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.bvar(0), Binder.Default)
+    buildBinder(Op.Lift(0, 1), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default, Core.Exprs.depthZero(), {}, true).e => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.bvar(0), Binder.Default)
 
-fn buildLet(op: Op, n: Name, t: Expr, v: Expr, b: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
+fn buildLet(op: Op, n: Name, t: Expr, v: Expr, b: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Type and value at this depth, body one deeper."
     rt = go(op, t, offset, memo)
     rv = go(op, v, offset, rt.memo)
-    rb = go(op, b, offset + 1, rv.memo)
+    rb = go(op, b, Core.Exprs.deeper(offset), rv.memo)
     SR(e = Core.Exprs.letE(n, rt.e, rv.e, rb.e), memo = rb.memo)
 
 verify buildLet
-    buildLet(Op.Lift(0, 1), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(1), 0, {}).e => Core.Exprs.letE(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.bvar(1), Core.Exprs.bvar(2))
+    buildLet(Op.Lift(0, 1), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Exprs.depthZero(), {}).e => Core.Exprs.letE(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.bvar(1), Core.Exprs.bvar(2))
 
-fn buildProj(op: Op, s: Name, i: Int, x: Expr, offset: Int, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
+fn buildProj(op: Op, s: Name, i: Int, x: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "The projected structure."
     r = go(op, x, offset, memo)
     SR(e = Core.Exprs.proj(s, i, r.e), memo = r.memo)
 
 verify buildProj
-    buildProj(Op.Lift(0, 1), Core.Names.anon(), 0, Core.Exprs.bvar(0), 0, {}).e => Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.bvar(1))
+    buildProj(Op.Lift(0, 1), Core.Names.anon(), 0, Core.Exprs.bvar(0), Core.Exprs.depthZero(), {}).e => Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.bvar(1))
 
 fn bvarCase(op: Op, i: Int, offset: Int) -> Expr
     ? "What a bound variable becomes."
@@ -320,8 +345,8 @@ verify position
 fn applySpec(op: Op, e: Expr, offset: Int) -> Expr
     ? "The operation by plain recursion, with no skipping by metadata and no memo: what apply must give."
     match e
-        Expr.BVar(i) -> bvarCase(op, i, offset)
-        Expr.FVar(id) -> fvarCase(op, id, offset)
+        Expr.BVar(_, i) -> bvarCase(op, i, offset)
+        Expr.FVar(_, id) -> fvarCase(op, id, offset)
         Expr.App(_, f, a) -> Core.Exprs.app(applySpec(op, f, offset), applySpec(op, a, offset))
         Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), applySpec(op, t, offset), applySpec(op, b, offset + 1), Binder.Default)
         Expr.Pi(_, t, b) -> Core.Exprs.pi(Core.Names.anon(), applySpec(op, t, offset), applySpec(op, b, offset + 1), Binder.Default)
@@ -398,7 +423,7 @@ fn sameParams(ps: List<Name>, us: List<Level>) -> Bool
     match ps
         [] -> List.len(us) == 0
         [p, ..prest] -> match us
-            [u, ..urest] -> match u == Level.Param(p)
+            [u, ..urest] -> match isParam(u, p)
                 true -> sameParams(prest, urest)
                 false -> false
             [] -> false
@@ -409,13 +434,24 @@ verify sameParams
     sameParams([], []) => true
     sameParams([Core.Names.anon()], []) => false
 
+fn isParam(u: Level, p: Name) -> Bool
+    ? "Whether the level is the parameter p, read where it is: comparing it with a parameter built for the comparison allocated a level for every parameter of every instantiation (7 M on mathlib, all dropped at once)."
+    match u
+        Level.Param(q) -> q == p
+        _ -> false
+
+verify isParam
+    isParam(Level.Param(Core.Names.anon()), Core.Names.anon()) => true
+    isParam(Level.Succ(Level.Param(Core.Names.anon())), Core.Names.anon()) => false
+    isParam(Level.Param(Core.Names.str(Core.Names.anon(), "u")), Core.Names.anon()) => false
+
 fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Skips terms without parameters; compound nodes go through the memo."
     match Core.Exprs.hasParam(e)
         false -> SR(e = e, memo = memo)
         true -> match e
-            Expr.Sort(l) -> SR(e = Core.Exprs.sort(Core.Univ.instantiate(l, ps, us)), memo = memo)
-            Expr.Const(_, n, ls) -> SR(e = Core.Exprs.cnst(n, levelsOf(ls, ps, us, [])), memo = memo)
+            Expr.Sort(_, l) -> SR(e = Core.Exprs.sort(Core.Univ.instantiate(l, ps, us)), memo = memo)
+            Expr.Const(_, n, ls) -> SR(e = Core.Exprs.cnst(n, levelsOf(ls, ps, us)), memo = memo)
             _ -> match Core.Exprs.isSmall(e)
                 true -> SR(e = lsmall(e, ps, us), memo = memo)
                 false -> lmemoed(e, ps, us, memo, Core.Exprs.hashKey(e))
@@ -428,8 +464,8 @@ fn lsmall(e: Expr, ps: List<Name>, us: List<Level>) -> Expr
     match Core.Exprs.hasParam(e)
         false -> e
         true -> match e
-            Expr.Sort(l) -> Core.Exprs.sort(Core.Univ.instantiate(l, ps, us))
-            Expr.Const(_, n, ls) -> Core.Exprs.cnst(n, levelsOf(ls, ps, us, []))
+            Expr.Sort(_, l) -> Core.Exprs.sort(Core.Univ.instantiate(l, ps, us))
+            Expr.Const(_, n, ls) -> Core.Exprs.cnst(n, levelsOf(ls, ps, us))
             Expr.App(_, f, a) -> Core.Exprs.app(lsmall(f, ps, us), lsmall(a, ps, us))
             Expr.Lam(_, t, b) -> Core.Exprs.lam(Core.Names.anon(), lsmall(t, ps, us), lsmall(b, ps, us), Binder.Default)
             Expr.Pi(_, t, b) -> Core.Exprs.pi(Core.Names.anon(), lsmall(t, ps, us), lsmall(b, ps, us), Binder.Default)
@@ -496,14 +532,31 @@ fn lproj(r: SR, s: Name, i: Int) -> SR
 verify lproj
     lproj(SR(e = Core.Exprs.bvar(0), memo = {}), Core.Names.anon(), 0).e => Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.bvar(0))
 
-fn levelsOf(ls: List<Level>, ps: List<Name>, us: List<Level>, acc: List<Level>) -> List<Level>
-    ? "Instantiates every level of a constant."
+decision LevelsAsCells
+    date = "2026-11-04"
+    reason =
+        "A constant's levels were collected newest first and reversed, here"
+        "and where the reader builds them, and a reversed list is a flat one:"
+        "a node, a shared vector and its buffer, three allocations for one or"
+        "two levels, and every later walk of it (its hash and parameter flag"
+        "when the constant is built, the comparison of two constants, the"
+        "next instantiation) stepped a view in and out of a count. Each level"
+        "is now prepended to the rest made first, so the list is cells, walked"
+        "with its rest lent. One worker, PGO: etale 21.48 G to 21.10 G"
+        "instructions, Init unchanged, mathlib 1733.6 G to 1720.1 G, peak"
+        "7.61 GB to 7.38 GB."
+    chosen = "LevelsAsCells"
+    rejected = ["LevelsReversed"]
+    impacts = [levelsOf]
+
+fn levelsOf(ls: List<Level>, ps: List<Name>, us: List<Level>) -> List<Level>
+    ? "Instantiates every level of a constant, each prepended to the rest instantiated (LevelsAsCells)."
     match ls
-        [] -> List.reverse(acc)
-        [l, ..rest] -> levelsOf(rest, ps, us, List.prepend(Core.Univ.instantiate(l, ps, us), acc))
+        [] -> []
+        [l, ..rest] -> List.prepend(Core.Univ.instantiate(l, ps, us), levelsOf(rest, ps, us))
 
 verify levelsOf
-    levelsOf([Level.Param(Core.Names.anon())], [Core.Names.anon()], [Level.Zero], []) => [Level.Zero]
+    levelsOf([Level.Param(Core.Names.anon())], [Core.Names.anon()], [Level.Zero]) => [Level.Zero]
 
 fn hasLooseBVar(e: Expr, i: Int) -> Bool
     ? "Whether bound variable i occurs loose in e."
@@ -518,7 +571,7 @@ fn looseAt(e: Expr, i: Int) -> Bool
     match Core.Exprs.within(e, i)
         true -> false
         false -> match e
-            Expr.BVar(j) -> j == i
+            Expr.BVar(_, j) -> j == i
             Expr.App(_, f, a) -> Bool.or(looseAt(f, i), looseAt(a, i))
             Expr.Lam(_, t, b) -> Bool.or(looseAt(t, i), looseAt(b, i + 1))
             Expr.Pi(_, t, b) -> Bool.or(looseAt(t, i), looseAt(b, i + 1))
@@ -543,7 +596,7 @@ fn looseFrom(e: Expr, off: Int) -> Bool
     match Core.Exprs.within(e, off)
         true -> false
         false -> match e
-            Expr.BVar(j) -> j >= off
+            Expr.BVar(_, j) -> j >= off
             Expr.App(_, f, a) -> Bool.or(looseFrom(f, off), looseFrom(a, off))
             Expr.Lam(_, t, b) -> Bool.or(looseFrom(t, off), looseFrom(b, off + 1))
             Expr.Pi(_, t, b) -> Bool.or(looseFrom(t, off), looseFrom(b, off + 1))

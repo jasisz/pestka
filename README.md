@@ -78,6 +78,9 @@ argument, for example `MyModule.ndjson 1`. Each declaration sees only the
 environment available at its position in the file; the verdict reports the
 first failure in file order.
 
+For a smaller memory footprint, pass `--low-memory` before the file name.
+See [low-memory mode](docs/usage.md#low-memory-mode) for the tradeoff.
+
 Need an export first? See [producing input](docs/usage.md#producing-input).
 Lean and `lean4export` are needed to make the file, but not to check it.
 
@@ -106,6 +109,9 @@ environment. If an inductive block cannot be checked, the final result is
 
 ## A few things inside
 
+Pestka follows the reference kernel's substitution-based algorithm, exploring
+how far it can go without normalization by evaluation (NbE).
+
 **Variables can be reused across proofs.** A fresh name every time a binder
 opens makes equivalent terms look different to a cache. Pestka identifies
 a free variable by its type, value and how many of the same kind are already
@@ -125,6 +131,12 @@ Pestka reads the argument types from the constant's signature. Once earlier
 arguments agree, a proof argument can be skipped: its proposition is already
 the same on both sides. This avoids walking through potentially large proofs
 just to establish an equality the type theory already gives us.
+
+**Checking order matters.** On large inputs, workers group declarations by
+namespace so related proofs meet the same cached results before they are
+evicted. This cut about 9% of the instructions on mathlib. Reordering is
+allowed only when the reader has established that every constant reference
+points backwards in the file; failures are still reported in file order.
 
 **Failed comparisons are useful results.** During a declaration, the checker
 also remembers pairs of terms it found definitionally unequal. Otherwise,

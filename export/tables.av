@@ -24,6 +24,9 @@ record Tables
     nextExpr: Int
     decls: List<Decl>
     constants: Int
+    known: Map<Name, Bool>
+    pending: List<Name>
+    allPlaced: Bool
 
 record Parsed
     constants: Int
@@ -31,17 +34,18 @@ record Parsed
     levels: Int
     exprs: Int
     decls: List<Decl>
+    allPlaced: Bool
 
 fn finish(t: Tables) -> Parsed
     ? "What checking needs: the declarations in file order and the counts; the index tables are left behind to be freed."
-    Parsed(constants = t.constants, names = t.nextName, levels = t.nextLevel, exprs = t.nextExpr, decls = List.reverse(t.decls))
+    Parsed(constants = t.constants, names = t.nextName, levels = t.nextLevel, exprs = t.nextExpr, decls = List.reverse(t.decls), allPlaced = t.allPlaced)
 
 verify finish
     finish(empty()).names => 1
 
 fn empty() -> Tables
     ? "Name 0 is the anonymous name and level 0 is zero; neither has a line."
-    Tables(names = {0 => Core.Names.anon()}, levels = {0 => Level.Zero}, exprs = {}, cur = freshChunk(), chunks = Vector.fromList([]), dense = 0, nextName = 1, nextLevel = 1, nextExpr = 0, decls = [], constants = 0)
+    Tables(names = {0 => Core.Names.anon()}, levels = {0 => Level.Zero}, exprs = {}, cur = freshChunk(), chunks = Vector.fromList([]), dense = 0, nextName = 1, nextLevel = 1, nextExpr = 0, decls = [], constants = 0, known = {}, pending = [], allPlaced = true)
 
 verify empty
     empty().nextName => 1
@@ -157,25 +161,25 @@ fn freshChunk() -> Vector<Expr>
 verify expr
     expr(empty(), 0) => Result.Err("unknown expression index 0")
 
-fn names(t: Tables, ids: List<Int>, acc: List<Name>) -> Result<List<Name>, String>
-    ? "Several names by index, in order."
+fn names(t: Tables, ids: List<Int>) -> Result<List<Name>, String>
+    ? "Several names by index, in order, each prepended to the rest, as a constant's levels are (LevelsAsCells): a declaration's universe parameters are walked at every instantiation of it."
     match ids
-        [] -> Result.Ok(List.reverse(acc))
-        [i, ..rest] -> names(t, rest, List.prepend(name(t, i)?, acc))
+        [] -> Result.Ok([])
+        [i, ..rest] -> Result.Ok(List.prepend(name(t, i)?, names(t, rest)?))
 
 verify names
-    names(empty(), [0, 0], []) => Result.Ok([Core.Names.anon(), Core.Names.anon()])
-    names(empty(), [3], []) => Result.Err("unknown name index 3")
+    names(empty(), [0, 0]) => Result.Ok([Core.Names.anon(), Core.Names.anon()])
+    names(empty(), [3]) => Result.Err("unknown name index 3")
 
-fn levels(t: Tables, ids: List<Int>, acc: List<Level>) -> Result<List<Level>, String>
-    ? "Several levels by index, in order."
+fn levels(t: Tables, ids: List<Int>) -> Result<List<Level>, String>
+    ? "Several levels by index, in order, each prepended to the rest (LevelsAsCells)."
     match ids
-        [] -> Result.Ok(List.reverse(acc))
-        [i, ..rest] -> levels(t, rest, List.prepend(level(t, i)?, acc))
+        [] -> Result.Ok([])
+        [i, ..rest] -> Result.Ok(List.prepend(level(t, i)?, levels(t, rest)?))
 
 verify levels
-    levels(empty(), [0], []) => Result.Ok([Level.Zero])
-    levels(empty(), [2], []) => Result.Err("unknown level index 2")
+    levels(empty(), [0]) => Result.Ok([Level.Zero])
+    levels(empty(), [2]) => Result.Err("unknown level index 2")
 
 fn addName(t: Tables, i: Int, n: Name) -> Result<Tables, String>
     ? "Defines name i. An index already bound, the anonymous name 0 included, is malformed input, as the reference kernel holds it; it is refused rather than overwritten."
@@ -202,7 +206,7 @@ fn addExpr(t: Tables, i: Int, e: Expr) -> Result<Tables, String>
     ? "Defines expression i. lean4export numbers expressions 0, 1, 2 and on, so they go into chunks of a dense run, 16 bytes each; an index out of that order goes into the map, which expr reads first. On mathlib the map alone held 105 million entries, about 4.4 GB, twice that while it grew. An index already bound is refused, as by addName."
     match Bool.or(Bool.and(i >= 0, i < t.dense), Map.has(t.exprs, i))
         true -> Result.Err("expression index {i} is already bound")
-        false -> Result.Ok(exprPlaced(t, i, e))
+        false -> Result.Ok(noted(exprPlaced(t, i, e), e))
 
 fn exprPlaced(t: Tables, i: Int, e: Expr) -> Tables
     ? "t with the unbound expression i: at the end of the dense run when it comes next there, else in the map."
@@ -243,9 +247,178 @@ verify addExpr
     addExpr(Result.withDefault(addExpr(empty(), 5, Core.Exprs.bvar(0)), empty()), 5, Core.Exprs.bvar(1)) => Result.Err("expression index 5 is already bound")
 
 fn addDecl(t: Tables, d: Decl) -> Tables
-    ? "Appends a declaration, newest first, and counts its constants."
-    Tables.update(t, decls = List.prepend(d, t.decls), constants = t.constants + Core.Decls.constantCount(d))
+    ? "Appends a declaration, newest first, and counts its constants; the constants named since the last declaration must be placed before it or, for an inductive block, be its own (NamesPlacedWhereRead)."
+    places = placedBy(d)
+    ok = pendingPlaced(t.pending, t.known, ownForBlock(d, places))
+    Tables.update(t, decls = List.prepend(d, t.decls), constants = t.constants + Core.Decls.constantCount(d), known = placeAll(t.known, places), pending = [], allPlaced = Bool.and(t.allPlaced, ok))
 
 verify addDecl
     addDecl(empty(), Decl.Induct([], [], [])).constants => 0
+    addDecl(noted(empty(), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), [])), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), false)).allPlaced => false
+    addDecl(addDecl(empty(), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), false)), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "y"), params = [], ty = Core.Exprs.sort(Level.Zero)), false)).allPlaced => true
     List.len(addDecl(empty(), Decl.Induct([], [], [])).decls) => 1
+    addDecl(noted(empty(), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), [])), Decl.Induct([IndType(head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = true, isReflexive = false)], [], [])).allPlaced => false
+    addDecl(noted(empty(), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), [])), Decl.Induct([IndType(head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false)], [], [])).allPlaced => true
+
+decision NamesPlacedWhereRead
+    date = "2026-11-06"
+    reason =
+        "Checking may take declarations out of file order"
+        "(CheckedByNamespace) only when every declaration names constants"
+        "placed before it alone. A walk of every type and value to find out"
+        "cost mathlib about 195 G instructions. Here each expression line"
+        "is looked at once as it is read: a constant or a projection names"
+        "its constant, a literal the constants checking unfolds it to. A"
+        "name not yet placed waits, and the next declaration line must"
+        "place it as part of its own inductive block; else allPlaced turns"
+        "false and checking keeps file order. This suffices: an expression"
+        "is built from lines before it, so a declaration only holds"
+        "expressions whose lines came before its own, and each of those"
+        "named only constants placed before the declaration that followed"
+        "the line, which is no later than this one. A name of a declaration"
+        "Pestka skips is never placed, as it is never in the environment,"
+        "and an unsafe block's names are not its own to name either: else a"
+        "line naming such a name passes, a safe declaration of the same name"
+        "comes later, and checked out of order the earlier declaration uses"
+        "it. Every name placed is in the environment once the declaration is"
+        "added: the stated types, constructors and recursors of a block must"
+        "equal derived ones, a quotient adds its whole package, and a name"
+        "declared twice stops the building there."
+    chosen = "NamesPlacedWhereRead"
+    rejected = ["TermsWalkedBeforeChecking"]
+    impacts = [addExpr, addDecl, noted, placedBy, ownForBlock]
+
+natName: Name = Core.Names.str(Core.Names.anon(), "Nat")
+litNames: List<Name> = [Core.Names.str(Core.Names.anon(), "Nat"), Core.Names.str(Core.Names.anon(), "String"), Core.Names.str(Core.Names.str(Core.Names.anon(), "String"), "ofList"), Core.Names.str(Core.Names.anon(), "List"), Core.Names.str(Core.Names.anon(), "Char"), Core.Names.str(Core.Names.str(Core.Names.anon(), "Char"), "ofNat")]
+
+fn noted(t: Tables, e: Expr) -> Tables
+    ? "The constants e names, kept to be matched with the next declaration when not placed yet: a constant's own, a projection's structure, Nat for a number, and for a string what checking unfolds it to (NamesPlacedWhereRead)."
+    match e
+        Expr.Const(_, n, _) -> waiting(t, n)
+        Expr.Proj(_, n, _, _) -> waiting(t, n)
+        Expr.NatLit(_) -> waiting(t, natName)
+        Expr.StrLit(_) -> waitingAll(t, litNames)
+        _ -> t
+
+verify noted
+    noted(empty(), Core.Exprs.natLit(1)).pending => [Core.Names.str(Core.Names.anon(), "Nat")]
+    noted(empty(), Core.Exprs.bvar(0)).pending => []
+
+fn waiting(t: Tables, n: Name) -> Tables
+    ? "n waits for the next declaration unless already placed."
+    match Map.has(t.known, n)
+        true -> t
+        false -> Tables.update(t, pending = List.prepend(n, t.pending))
+
+verify waiting
+    List.len(waiting(empty(), Core.Names.anon()).pending) => 1
+
+fn waitingAll(t: Tables, ns: List<Name>) -> Tables
+    ? "waiting for each name."
+    match ns
+        [] -> t
+        [n, ..rest] -> waitingAll(waiting(t, n), rest)
+
+verify waitingAll
+    List.len(waitingAll(empty(), [Core.Names.anon(), Core.Names.anon()]).pending) => 2
+
+fn pendingPlaced(ps: List<Name>, known: Map<Name, Bool>, own: List<Name>) -> Bool
+    ? "Every waiting name is placed, or one of the block's own."
+    match ps
+        [] -> true
+        [p, ..rest] -> match Bool.or(Map.has(known, p), List.contains(own, p))
+            true -> pendingPlaced(rest, known, own)
+            false -> false
+
+verify pendingPlaced
+    pendingPlaced([Core.Names.anon()], {}, []) => false
+    pendingPlaced([Core.Names.anon()], {}, [Core.Names.anon()]) => true
+
+fn declNames(d: Decl) -> List<Name>
+    ? "The names a declaration declares."
+    match d
+        Decl.Axiom(h, _) -> [h.name]
+        Decl.Defn(h, _, _, _, _) -> [h.name]
+        Decl.Thm(h, _, _) -> [h.name]
+        Decl.Opaq(h, _, _, _) -> [h.name]
+        Decl.Quot(h, _) -> [h.name]
+        Decl.Induct(types, ctors, recs) -> List.concat(typeNames(types, []), List.concat(ctorNames(ctors, []), recNames(recs, [])))
+
+verify declNames
+    declNames(Decl.Induct([], [], [])) => []
+
+fn typeNames(xs: List<IndType>, acc: List<Name>) -> List<Name>
+    ? "The names of a block's types."
+    match xs
+        [] -> acc
+        [x, ..rest] -> typeNames(rest, List.prepend(x.head.name, acc))
+
+verify typeNames
+    typeNames([], []) => []
+
+fn ctorNames(xs: List<Ctor>, acc: List<Name>) -> List<Name>
+    ? "The names of a block's constructors."
+    match xs
+        [] -> acc
+        [x, ..rest] -> ctorNames(rest, List.prepend(x.head.name, acc))
+
+verify ctorNames
+    ctorNames([], []) => []
+
+fn recNames(xs: List<Rec>, acc: List<Name>) -> List<Name>
+    ? "The names of a block's recursors."
+    match xs
+        [] -> acc
+        [x, ..rest] -> recNames(rest, List.prepend(x.head.name, acc))
+
+verify recNames
+    recNames([], []) => []
+
+fn ownForBlock(d: Decl, places: List<Name>) -> List<Name>
+    ? "The names a declaration's own expressions may name besides those placed before it: those an inductive block places itself, nothing for any other."
+    match d
+        Decl.Induct(_, _, _) -> places
+        _ -> []
+
+verify ownForBlock
+    ownForBlock(Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false), [Core.Names.anon()]) => []
+
+fn placedBy(d: Decl) -> List<Name>
+    ? "The names d places in the environment: its own, or none when Pestka skips it as unsafe or partial, so that a skipped block's own names are neither placed nor its own to name (NamesPlacedWhereRead)."
+    match skipped(d)
+        true -> []
+        false -> declNames(d)
+
+verify placedBy
+    placedBy(Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true)) => []
+    placedBy(Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)) => [Core.Names.anon()]
+
+fn placeAll(known: Map<Name, Bool>, ns: List<Name>) -> Map<Name, Bool>
+    ? "Every name placed."
+    match ns
+        [] -> known
+        [n, ..rest] -> placeAll(Map.set(known, n, true), rest)
+
+verify placeAll
+    Map.has(placeAll({}, [Core.Names.anon()]), Core.Names.anon()) => true
+
+fn skipped(d: Decl) -> Bool
+    ? "A declaration checking skips, as Check.Decl.prepared does: unsafe or partial."
+    match d
+        Decl.Axiom(_, unsafe) -> unsafe
+        Decl.Defn(_, _, _, safety, _) -> safety != Safety.Safe
+        Decl.Opaq(_, _, unsafe, _) -> unsafe
+        Decl.Induct(types, _, _) -> anyUnsafe(types)
+        _ -> false
+
+verify skipped
+    skipped(Decl.Induct([], [], [])) => false
+
+fn anyUnsafe(types: List<IndType>) -> Bool
+    ? "A type of the block is unsafe."
+    match types
+        [] -> false
+        [t, ..rest] -> Bool.or(t.isUnsafe, anyUnsafe(rest))
+
+verify anyUnsafe
+    anyUnsafe([]) => false
