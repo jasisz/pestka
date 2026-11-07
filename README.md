@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="#written-in-aver">Aver</a> ·
   <a href="#try-it">Try it</a> ·
   <a href="#what-it-checks">What it checks</a> ·
   <a href="docs/architecture.md">Inside the kernel</a> ·
@@ -29,6 +30,23 @@ result is **179/179 correct**. [Measurements and setup →](docs/benchmarks.md)
 
 *Pestka* is Polish for a fruit stone — a kernel. It's also what you call
 something that's a piece of cake.
+
+## Written in Aver
+
+[Aver](https://github.com/jasisz/aver) is a statically typed, pure functional
+language designed for AI to write and humans to review. Pestka is written
+by an AI agent under human guidance, and gives the language a substantial
+program to work on: a proof checker running over all of mathlib. The same
+source runs natively through Aver's Rust backend and as WebAssembly through
+its own wasm-gc backend.
+
+There is a connection in the other direction, too. Aver can send laws from
+its source to Lean for proof checking. Pestka uses those laws to state
+properties of substitution, universe arithmetic and the metadata its
+optimizations rely on. Some already have proofs checked by Lean;
+[the verification notes](docs/development.md#laws) describe which ones.
+So Lean checks properties of code written in Aver, while that code checks
+Lean proofs.
 
 ## Try it
 
@@ -88,26 +106,33 @@ environment. If an inductive block cannot be checked, the final result is
 
 ## A few things inside
 
-Most of the interesting work is in making repeated checks cheap.
+**Variables can be reused across proofs.** A fresh name every time a binder
+opens makes equivalent terms look different to a cache. Pestka identifies
+a free variable by its type, value and how many of the same kind are already
+open. Distinct variables in one scope stay distinct; equivalent binders
+elsewhere can reuse earlier inference, reduction and equality results.
+Those results survive between declarations in bounded caches.
 
-**A binder doesn't always need a new variable.** Pestka identifies free
-variables by their type, value and how many of the same kind are already
-open. Opening an equivalent binder again can reuse the work from the first
-one — even across declarations.
+**Recursive definitions can produce their own shortcuts.** When a definition
+is unfolded often enough, Pestka reduces it on fresh variables and splits
+on the constructors its recursor needs. That produces a tree of reduction
+rules for later calls. The rules come from the definition's body, and can
+skip repeated unfolding, pattern matching and structural recursion machinery.
 
-**A worker remembers what it learned.** Inference, reduction and equality
-results survive between declarations, within bounded caches. The state is
-passed around as a value in Aver; when it has one owner, the native build
-updates its maps in place.
+**Proof arguments needn't be compared.** Lean treats proofs of the same
+proposition as equal. When comparing two applications of a constant,
+Pestka reads the argument types from the constant's signature. Once earlier
+arguments agree, a proof argument can be skipped: its proposition is already
+the same on both sides. This avoids walking through potentially large proofs
+just to establish an equality the type theory already gives us.
 
-**Repeated unfolding can become a rule.** For hot recursive definitions,
-Pestka derives reduction rules from their bodies. Later calls can use those
-rules to skip the same unfolding and pattern matching.
+**Failed comparisons are useful results.** During a declaration, the checker
+also remembers pairs of terms it found definitionally unequal. Otherwise,
+trying different routes through an equality problem can repeat the same
+expensive dead end hundreds of times.
 
-The [implementation notes](docs/architecture.md) explain these choices,
-the lazy reduction machine, term representation and the experiments behind
-them. [Laws and verification](docs/development.md#laws) describe the
-properties checked alongside the code, including which claims have proofs.
+The [implementation notes](docs/architecture.md) cover these ideas, the lazy
+reduction machine, term representation and the measurements behind them.
 
 ## Also runs as WebAssembly
 
@@ -128,10 +153,6 @@ A host failure exits with `3`. Native and wasm measurements, including
 mathlib, are in the [benchmark tables](docs/benchmarks.md).
 
 ## Working on Pestka
-
-The checker is written in [Aver](https://github.com/jasisz/aver), by an AI
-agent under human guidance. Aver is statically typed and pure functional;
-its native backend compiles to Rust.
 
 ```sh
 aver check . --module-root .     # Types, effects and lint
