@@ -1,359 +1,151 @@
-<p align="center"><img src="logo.svg" alt="Pestka" width="120"></p>
-<p align="center"><a href="https://github.com/jasisz/aver"><img src="https://img.shields.io/badge/written%20in-Aver-6b4f9e" alt="Written in Aver"></a></p>
+<p align="center">
+  <img src="logo.svg" alt="" width="96">
+</p>
 
-# Pestka
+<h1 align="center">Pestka</h1>
 
-*Pestka* is Polish for the stone of a fruit, its kernel, and, said of a task,
-for a piece of cake.
+<p align="center">
+  A Lean 4 kernel, written in <a href="https://github.com/jasisz/aver">Aver</a>.
+</p>
 
-Pestka is a type checker for Lean 4. It reads an environment exported by
-[`lean4export`](https://github.com/leanprover/lean4export) (NDJSON, format
-3.1.0) and checks every declaration with its own implementation of Lean's type
-theory: universe levels, definitional equality, inductive types (mutual and
-nested, with their recursors derived and compared with the export),
-quotients, and the Nat and String literal extensions. It answers accepted or
-rejected, and admits nothing unchecked.
+<p align="center">
+  <a href="#try-it">Try it</a> ·
+  <a href="#what-it-checks">What it checks</a> ·
+  <a href="docs/architecture.md">Inside the kernel</a> ·
+  <a href="docs/benchmarks.md">Benchmarks</a>
+</p>
 
-It is written in [Aver](https://github.com/jasisz/aver), a statically typed
-language designed for AI to write and humans to review, which compiles to Rust
-and has its own claims checked by Lean's kernel. Pestka is a Lean kernel
-written in Aver, by an AI agent under human guidance.
+---
 
-## Status
+Pestka checks Lean proofs with its own implementation of Lean’s type theory.
+Give it a [lean4export](https://github.com/leanprover/lean4export) file and it
+checks the declarations, down to universe levels, reduction and recursors.
+Lean itself is not involved in the check.
 
-On the small Lean Kernel Arena tests (all but `perf/` and the large corpora)
-Pestka answers 179 of 179 correctly.
+It checks **all of mathlib**: 702,040 declarations in the recorded export.
+The same Aver source also compiles to **WebAssembly**, where it checks the
+same corpus under V8. On the small Lean Kernel Arena suite, the recorded
+result is **179/179 correct**. [Measurements and setup →](docs/benchmarks.md)
 
-The Arena's large tests and its `perf/` tests, exported as the Arena exports
-them and checked on an Apple M2 Pro: on one worker, as the Arena runs Pestka,
-and on eight, the default. The instructions retired on one worker are what
-the Arena ranks checkers by.
-The build is `bin/build-pgo` with `-C target-cpu=native`, guided by the
-profile of a check of all of `Init` (see Commands); `init` is the one test
-below that profile was made from.
+*Pestka* is Polish for a fruit stone — a kernel. It's also what you call
+something that's a piece of cake.
 
-| Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 8 workers | Peak, 8 workers |
-|---|---|---|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 58.3 G | 7.3 s | 0.7 GB | 3.8 s | 1.0 GB |
-| `std` (98,086) | accepted | 102.9 G | 13 s | 1.1 GB | 5.8 s | 1.6 GB |
-| `reachability` | accepted | 23.6 G | 2.2 s | 0.4 GB | 1.7 s | 0.4 GB |
-| `con-leche` | accepted | 96.3 G | 11 s | 1.1 GB | 5.7 s | 1.5 GB |
-| `cedar` | accepted | 143.5 G | 19 s | 1.3 GB | 7.7 s | 1.8 GB |
-| `cslib` | accepted | 543.0 G | 81 s | 3.7 GB | 30 s | 4.9 GB |
-| `mathlib` (702,040) | accepted | 1.89 T | 313 s | 6.5 GB | 119 s | 8.6 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 42.0 G (7.0 G) | 3.6 s (0.5 s) | 0.9 GB | 3.5 s (0.5 s) | 0.9 GB |
+## Try it
 
-### As WebAssembly
+You need a Rust toolchain. From a checkout of this repository:
 
-The same source compiled by Aver's own wasm-gc backend (not through Rust or
-LLVM) and run on V8 under Node 26 by `bin/run-wasm`, the Lean Kernel Arena's
-`pestka-wasm` entry: every term, map and closure is an object of the engine's
-garbage collector, and the module is about 0.4 MB. It gives the same verdict
-as the compiled build on every test here and on the small Arena tests. One
-thread, with the module `bin/build-wasm` makes: Binaryen's `wasm-opt` takes
-about 6% of the instructions off the one Aver emits.
+```sh
+# Install the Aver version this checkout uses.
+cargo install aver-lang --version "$(cat .aver-version)" --locked
 
-| Test | Verdict | Instructions | Time | Peak |
-|---|---|---|---|---|
-| `init` | accepted | 245.7 G | 17 s | 2.5 GB |
-| `std` | accepted | 413.8 G | 29 s | 4.8 GB |
-| `reachability` | accepted | 81.6 G | 4.7 s | 1.7 GB |
-| `con-leche` | accepted | 390.9 G | 26 s | 4.2 GB |
-| `cedar` | accepted | 580.2 G | 41 s | 5.0 GB |
-| `cslib` | accepted | 2.19 T | 159 s | 11.0 GB |
-| `mathlib` | accepted | 9.04 T | 708 s | 13.0 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 224 G (22.6 G) | 14 s (1.3 s) | 2.1 GB |
-
-## What it does differently
-
-The checker follows the reference kernel's algorithm. What is its own:
-
-- **It is written in Aver**, a pure functional language compiled to Rust:
-  the checker's state is a value passed from function to function. A state
-  could be kept and gone back to, but the checker never does: it hands its
-  state on, so the compiled code finds each cache with a single owner and
-  updates it in place. Caches kept as persistent tries, copying a path on
-  every write so that an old version nobody held stayed intact, cost 17%
-  more instructions on `Init`.
-- **Declarations are checked in parallel with a sequential verdict.** The
-  environment is built in file order; the other declarations are then
-  checked on several workers, each against the environment at its own place
-  in the file, and the verdict is the first failure in file order.
-- **Free variables are named by what they are.** A variable is its type and
-  value, and how many variables of that same type and value are open where
-  its binder is opened. Two binders open at once with the same type and value
-  get different counts, and Lean only needs variables that meet to be told
-  apart; two binders that get the same variable are never open at once, and
-  they have the same type and value, so whatever holds of a term with one
-  holds of it with the other. The checker no longer makes a fresh variable
-  for every opening, nor another for every place in a telescope: a binder
-  opened again gets its variable again, and so does a type or an instance
-  that is the third binder of one theorem and the seventh of the next, so
-  what was found about the terms under it, instance diamonds included, is
-  found again. On slices of `mathlib` naming variables by their place in the
-  telescope and the next point cut 18–20% of the instructions; naming them
-  by their kind instead cut 4–5% more.
-- **Terms are equal as Lean's are.** Lean's kernel compares expressions
-  without the names and annotations of their binders; Pestka's terms do not
-  hold them, so equality of terms is equality up to the names of bound
-  variables, and a cache finds its result again for a term that differs
-  from one it has seen only in such a name. Leaving them out cut about 7%
-  of the instructions on `Init`.
-- **A term knows which variables may be in it.** Each free variable has one
-  of ten bits, by its number, and each term the bits of the variables in it,
-  kept with its hash in one word. Abstracting variables, as closing a binder
-  does, skips every subterm that shares no bit with them; before, 59% of the
-  nodes it rebuilt came back unchanged. This cut nearly 3% on `Init`.
-- **Proofs are not compared.** Two applications of one constant are equal
-  when their arguments are, and once the arguments before it are equal, an
-  argument in a place whose domain is a proposition is a proof of the same
-  proposition on both sides; proofs of one proposition are equal, so such
-  arguments are left out. Whether a domain is a proposition is read from the
-  constant's type, not inferred. This cut about 9% on a `mathlib`
-  declaration.
-- **Metadata and keys are machine words.** A term's packed metadata, the kind
-  mixed into its hash, a variable's number and the key of every memo and
-  cache are refinements over Int bounded below 2^62, which Aver holds as
-  raw 64-bit words: making and reading them is machine arithmetic, and the
-  caches are maps keyed by machine words. This cut about 15% on a `mathlib`
-  declaration and 13% on `Init`.
-- **A casesOn goes straight to its branch.** A definition named casesOn whose
-  value is its recursor applied to its own arguments, each minor premise
-  wrapped to drop the induction hypotheses, is not unfolded: the major
-  premise is brought to its constructor and that constructor's minor premise
-  takes the fields. Computations by `decide` meet one per number and list
-  they take apart; this cut about 5% on the `perf/` tests.
-- **What a worker finds is kept across declarations.** Each worker meets its
-  declarations in file order, so every constant a result rests on is still
-  there in the next one. It carries its variables and their context, and the
-  results of inference, checking, reduction and comparison, about closed
-  terms and, with variables named as above, open ones too; what checking
-  found about a term with a universe parameter is kept under the
-  declaration's parameters, for every declaration with the same ones.
-  A constant's type and a definition's value at universe levels depend only
-  on the levels as written, and are kept as well. Every cache has a limit and
-  is emptied past it.
-- **Failures are kept too.** Within a declaration, pairs found
-  definitionally different are remembered as well as pairs found equal: its
-  free variables each have one type and value, so the answer for a pair does
-  not change while it is checked. In `std`, one proof compared the same pairs
-  hundreds of times and took 211 s without this, 3 s with it.
-- **Weak head normalization runs a lazy machine**: arguments wait as terms
-  with their environment and are built only when needed, each at most once;
-  definitions unfold and recursor rules fire inside it. What it does at a
-  constant (the rule a recursor fires, the branch a casesOn or a matcher
-  takes, the body a definition unfolds to) is worked out by plain functions,
-  and the machine takes one step there: its loop has five arms, where each
-  arm it had cost every other part of the checker as well.
-- **A matcher is unfolded into its callers once.** A function compiled from
-  pattern matching passes its arguments and one lambda per alternative to a
-  matcher, which hands them to a casesOn. The body a definition unfolds to,
-  kept for the rest of the run, has the matcher at its head unfolded into it
-  and the alternatives applied to its fields, so a call goes from the
-  function straight to the casesOn. A literal of `Nat` goes to its branch
-  without being turned into `Nat.succ` of the one below. With the facts a
-  recursor and a casesOn need found once, these and the machine's shorter
-  loop cut about a third of the instructions on the `perf/` tests and a
-  quarter on `reachability`, measured on one Aver.
-- **Hot recursive definitions get rules.** Reduction commutes with
-  substitution: what `f x1 … xn` reduces to on variables, `f a1 … an`
-  reduces to with the arguments put in. A definition that reaches a
-  recursor and unfolds 32 times in a declaration is reduced once on fresh
-  variables and split on the constructors its recursor waits on, three
-  levels deep; the tree of patterns and reducts is its rule for the rest of
-  the run. A call whose arguments match a path skips the unfolding, the
-  matcher and the course-of-values table of structural recursion. A rule
-  that saves no more than one unfolding per form is not kept. This cut 12%
-  of the instructions on `reachability`, 16% on the `perf/` tests and up to
-  1% on the large tests.
-- **Deep binders are not copied.** Opening a binder substitutes its variable
-  into the body, as the reference does; past 128 open binders, bodies are
-  inferred under their variables as they are instead, so deep nesting does
-  not copy each body once per binder above it.
-- **Laws** state the properties the optimizations rely on and are checked
-  with the code; see below.
-
-## Laws
-
-Besides examples, some `verify` blocks state laws: an equation checked on
-every combination of the values its `given` lines list, and the claim
-`aver proof` tries to prove for all of them.
-
-- `natOp law natSpec` (`check/lits.av`): the fourteen Nat operations the
-  checker computes on literals agree with Lean's own definitions of them
-  (`Nat.sub` by `pred`, `Nat.div` and `Nat.mod` by their equations,
-  `Nat.bitwise` for `land`, `lor` and `xor`, and so on).
-- `pack law roundTrip` and `pack law rangeNeverShrinks` (`core/exprs.av`):
-  the metadata packed into every node reads back as it was, and the loose
-  bound variable range read back is never below the true one, so a
-  substitution never skips a term it has to change. `aver proof` proves the
-  second for all inputs.
-- `apply law applySpec` (`core/subst.av`): substitution, with its skipping
-  by metadata and its memo for shared subterms, gives what plain recursion
-  gives; `abstractFVars law undoneByInstantiateRev` puts abstracted
-  variables back.
-- `localGet` laws (`check/state.av`): the local context, a persistent trie,
-  holds what was put, keeps every other variable and finds each declared
-  one.
-- Universe levels (`core/univ.av`), against `levelValue`, what a level
-  denotes for an assignment of its parameters: `isGeq law sound` (a
-  level accepted as at least another is so for every assignment),
-  `isEquiv law sound`, `normalize`, `mkMax` and `mkImax law keepsValue`,
-  and `instantiate law sameAsSubstitutedValues`. `aver proof` proves the
-  helpers below them for all inputs (`toOffset`, `mkSucc`, `mkSuccN`,
-  `biggerExplicit law keepsValue`, `isNotZero law atLeastOne`,
-  `normalizesToZero law alwaysZero`, `isExplicit law valueIsDepth`, values
-  never negative); the rest it does not yet, as they turn on `==` between
-  levels or recurse through normal forms.
-
-```bash
-aver verify . --module-root .                                  # examples and laws
-aver proof check/lits.av --module-root . --backend aver --check-json
+# Build the native checker and try a small included export.
+bin/build
+.build/target/release/main tests/export/wellformed/small.ndjson
 ```
 
-## Requirements
+The last line should be:
 
-- **Aver at the version in [`.aver-version`](.aver-version)**, a release
-  on crates.io.
-- **Lean** through elan, and `lean4export` built for the same Lean, only to
-  produce input files. Pestka itself never runs Lean. The numbers here come
-  from exports made as the Lean Kernel Arena makes them: `lean4export`
-  `master` built with Lean 4.34.1, or with the Lean a test project pins.
-- A Rust toolchain, for the compiled build, with the `llvm-tools` component
-  for `bin/build-pgo`.
-- For the WebAssembly build, Node (24 or later) and Binaryen's `wasm-opt`.
+```text
+accepted
+```
 
-### Installing the pinned Aver
+To check your own export:
 
-```bash
+```sh
+.build/target/release/main MyModule.ndjson
+```
+
+Pestka uses eight workers by default. Pass a worker count as the second
+argument, for example `MyModule.ndjson 1`. Each declaration sees only the
+environment available at its position in the file; the verdict reports the
+first failure in file order.
+
+Need an export first? See [producing input](docs/usage.md#producing-input).
+Lean and `lean4export` are needed to make the file, but not to check it.
+
+## What it checks
+
+Pestka implements Lean's type theory, including:
+
+- Universe polymorphism and definitional equality.
+- Mutual and nested inductive types, with recursors derived by Pestka and
+  compared against the export.
+- Quotients, proof irrelevance, and the Nat and String literal extensions.
+
+The input format is **lean4export NDJSON 3.1.0**. The last output line and
+exit code give the result:
+
+| Output | Exit code | Meaning |
+| :--- | :---: | :--- |
+| `accepted` | `0` | The check passed. |
+| `rejected: <why>` | `1` | The input failed a check. |
+| `declined: <why>` | `2` | The input needs something Pestka does not support. |
+
+Axioms are assumptions: Pestka checks their types, not proofs of them.
+Unsafe and partial declarations are skipped and kept out of the logical
+environment. If an inductive block cannot be checked, the final result is
+`declined`, never `accepted`.
+
+## A few things inside
+
+Most of the interesting work is in making repeated checks cheap.
+
+**A binder doesn't always need a new variable.** Pestka identifies free
+variables by their type, value and how many of the same kind are already
+open. Opening an equivalent binder again can reuse the work from the first
+one — even across declarations.
+
+**A worker remembers what it learned.** Inference, reduction and equality
+results survive between declarations, within bounded caches. The state is
+passed around as a value in Aver; when it has one owner, the native build
+updates its maps in place.
+
+**Repeated unfolding can become a rule.** For hot recursive definitions,
+Pestka derives reduction rules from their bodies. Later calls can use those
+rules to skip the same unfolding and pattern matching.
+
+The [implementation notes](docs/architecture.md) explain these choices,
+the lazy reduction machine, term representation and the experiments behind
+them. [Laws and verification](docs/development.md#laws) describe the
+properties checked alongside the code, including which claims have proofs.
+
+## Also runs as WebAssembly
+
+Aver has its own wasm-gc backend. It compiles the same checker directly to
+WebAssembly; terms, maps and closures become garbage-collected objects in
+the engine.
+
+With Node 24 or later and Binaryen's `wasm-opt` installed:
+
+```sh
 cargo install aver-lang --version "$(cat .aver-version)" --locked --features wasm
+bin/build-wasm
+bin/run-wasm tests/export/wellformed/small.ndjson
 ```
 
-`--features wasm` adds `--target wasm-gc` and `aver run --wasm-gc`. Add
-`wasip2` to the feature list for `--target wasip2` and `aver run --wasip2`.
+The runner uses V8 and checks that the verdict agrees with the exit status.
+A host failure exits with `3`. Native and wasm measurements, including
+mathlib, are in the [benchmark tables](docs/benchmarks.md).
 
-### Producing input
+## Working on Pestka
 
-```bash
-git clone https://github.com/leanprover/lean4export
-cd lean4export && echo leanprover/lean4:v4.34.1 > lean-toolchain && lake build
-.lake/build/bin/lean4export Init > init.ndjson          # all of Init, ~348 MB
-.lake/build/bin/lean4export MyModule -- MyModule.foo     # one constant and its dependencies
+The checker is written in [Aver](https://github.com/jasisz/aver), by an AI
+agent under human guidance. Aver is statically typed and pure functional;
+its native backend compiles to Rust.
+
+```sh
+aver check . --module-root .     # Types, effects and lint
+aver verify . --module-root .    # Examples and laws
+bin/build
+tests/run.sh                    # Accepted, rejected and unsupported fixtures
 ```
 
-## Commands
+The core lives in [`core/`](core), the checker in [`check/`](check), and the
+export reader in [`export/`](export). [`main.av`](main.av) ties them together.
 
-```bash
-aver check . --module-root .                 # types, effects, lint
-aver verify . --module-root .                # run the verify blocks
-aver run main.av --module-root . -- FILE.ndjson
-```
+For a closer look:
 
-Compiled to Rust, which is the build meant for large inputs:
-
-```bash
-bin/build                  # aver compile + cargo build --release into .build/
-bin/build-pgo TRAIN.ndjson # the same, guided by a profile of checking TRAIN
-.build/target/release/main FILE.ndjson [WORKERS]
-tests/run.sh               # every export under tests/export against its expected status
-tests/arena.sh DIR         # the small Lean Kernel Arena tests, each under bin/capped
-python3 tests/soundness.py corpus DIR --exclude '*/perf/*' --max-bytes 4000000
-                                             # compare Pestka with other kernels
-python3 tests/soundness.py mutate FILE # guaranteed-invalid mutations; no kernel may accept
-```
-
-`tests/soundness.py` accepts repeated `--kernel 'NAME=COMMAND {file}'`
-arguments, so Pestka can be compared with any checker that uses the Arena exit
-codes. Add `--require-verdict NAME` for commands such as `aver run`: an exit
-without an `accepted`, `rejected:` or `declined:` line is then a runner error,
-not a kernel verdict. Reports retain bounded command output for diagnostics,
-with no path of the machine they ran on: a program is named by its path in
-the repository or by its name, an input by its path from the directory
-holding the one given, the home directory as `~`.
-In `mutate` mode it first requires every selected kernel to accept the seed,
-then injects loose bound variables and duplicate universe parameters. An
-invalid export accepted by any kernel is kept under `tests/soundness-findings/`.
-
-`bin/build` uses the `aver` on `PATH`, or the one `AVER` names.
-`bin/build-pgo` builds once with instrumentation, checks TRAIN with it on
-one worker, and builds again with the profile that run left; `FLAGS` adds
-rustc flags to both builds (the Arena gives `-C target-cpu=native`). It needs
-`llvm-profdata`, from rustup's `llvm-tools` component. A profile of a check
-of `init-prelude` alone cuts 12–15% of the instructions on every test above,
-those far from it included; one of all of `Init` cuts another 1–1.5% on the
-tests it was not made from (`std`, `con-leche`, `cedar`, `mathlib`).
-
-Pestka builds the environment in file order, checking inductive types and
-the quotient package as it meets them, and then checks the types and
-values of the other declarations on WORKERS threads at once (eight by
-default), each against the environment at its own place in the file. The
-verdict is the first failure in file order, as in a strictly sequential
-check. Reading shares out the same way: the lines are parsed on the workers
-in rounds and go into the tables in file order, each round while the next
-one is parsed.
-
-The VM is far slower on large files; use it for `verify` and small inputs.
-
-Compiled to WebAssembly:
-
-```bash
-bin/build-wasm                               # wasm-gc, optimized by wasm-opt, into .build-wasm/
-bin/run-wasm FILE.ndjson
-aver compile main.av --module-root . --target wasip2 -o out/
-aver run main.av --module-root . --wasm-gc -- FILE.ndjson
-```
-
-`bin/run-wasm` runs the module under Node through Aver's host for wasm-gc
-programs ([`wasm-host/`](wasm-host), copied from `tools/wasm-work` of the
-Aver release, which the crate leaves out),
-with a heap of up to 14 GB and young-generation semi-spaces of 256 MB. It
-passes on Pestka's exit status only when the verdict line agrees with it and
-exits with 3 otherwise, so a crash of V8 or of the host never reads as a
-verdict. `aver run --wasm-gc` uses Wasmtime instead, whose collector is far
-slower on Pestka (17 times the instructions of V8 on `etale`) and whose heap
-stops at 4 GiB.
-
-Under wasip2, `Disk` reaches only preopened directories; `aver run --wasip2`
-preopens the current directory, so pass a relative path.
-
-## Exit codes
-
-The last line printed is the verdict: `accepted`, `rejected: <why>` or
-`declined: <why>`. `main` returns the matching exit status, the one the Lean
-Kernel Arena and `lake comparator` read:
-
-| Code | Meaning |
-|---|---|
-| 0 | every declaration accepted |
-| 1 | a declaration rejected |
-| 2 | input uses something Pestka does not support yet (declined) |
-| 3 | `bin/run-wasm` only: the host or V8 failed, no verdict |
-
-## Layout
-
-- `main.av` — command line and verdict.
-- `json/` — one NDJSON line to a JSON tree (`Json.Line`, `Json.Escapes`) and
-  field access (`Json.Access`).
-- `core/` — the type theory's data: `Core.Names`, `Core.Levels`, `Core.Exprs`
-  (with hash and loose bound variable range in every node), `Core.Decls`,
-  `Core.Hash`. Not `kernel/`: Aver reserves `Kernel.*`.
-- `export/` — reading a lean4export file: `Export.Stream` (whole file,
-  header first), `Export.Reader` (lines parsed in rounds on the workers,
-  each round added in order while the next is parsed), `Export.Items`
-  (names, levels, expressions),
-  `Export.Declarations`, `Export.Tables`.
-- `tests/export/` — small exports: `wellformed/` from `tests/export/Small.lean`
-  (`small.ndjson` is the whole module, `small_core.ndjson` the constants
-  without `String` and `Repr`), `malformed/` and `unsupported/` written by hand,
-  and `illtyped/`: declarations the checker must reject, made by
-  `tests/export/mkbad.py` from the correct ones of `tests/export/PestkaBad.lean`
-  (`wellformed/levelled_*`), aimed at the naming of free variables.
-- `check/` — the type checker: `Check.State` (environment, local context,
-  caches), `Check.Tc` (inference, weak head normal form, definitional
-  equality), `Check.Decl` (adding declarations), `Check.Induct`,
-  `Check.Recursor`, `Check.Nested`, `Check.IndAdd` (inductive blocks),
-  `Check.Quot`, `Check.Lits` (Nat and String literals).
-- `bin/` — `build`, and `capped` (kills a run above a memory or time cap;
-  macOS does not enforce `ulimit -v`).
-- `proto/` — scouting prototypes used for early measurements. Not part of the
-  checker.
+- [Build and run](docs/usage.md) — exports, PGO, command reference and runtimes.
+- [Inside the kernel](docs/architecture.md) — algorithms and optimizations.
+- [Benchmarks](docs/benchmarks.md) — native and WebAssembly results, with setup.
+- [Development](docs/development.md) — tests, laws and the source map.
