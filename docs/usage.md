@@ -92,7 +92,8 @@ one is parsed.
 
 When each worker has more declarations than its caches hold (`mathlib` on
 one worker), the deferred declarations are checked grouped by the first
-component of their names, so that declarations about the same things meet
+two components of their namespaces, a declaration going with those named
+under it (`Foo.bar` with `Foo.bar.eq_1`), so that declarations about the same things meet
 the facts they share before those are let go (decision `CheckedByNamespace`
 in `check/decl.av`). That is sound only when every declaration names
 constants placed before it, which the reader makes sure of as it reads

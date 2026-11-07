@@ -75,7 +75,8 @@ without NbE, to see how far that algorithm can be pushed. What is its own:
   is emptied past it.
 - **Declarations are checked grouped by namespace.** When a worker has more
   declarations than its caches hold, it checks them grouped by the first
-  component of their names, so that declarations about the same things
+  two components of their namespaces, a declaration going with those named
+  under it, so that declarations about the same things
   meet what they share while it is still kept; `mathlib` takes about 9%
   fewer instructions. The reader makes sure every declaration names only
   constants placed before it, the condition for what is kept to hold in any

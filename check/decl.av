@@ -134,8 +134,21 @@ decision CheckedByNamespace
         "peak 8.2 GB to 8.6 GB; Init and etale unchanged. A walk of every"
         "type and value before checking, to know the names placed, cost"
         "195 G of that (TermsWalkedBeforeChecking)."
+        "Grouping by the first two components of the namespace rather than"
+        "the first (2026-11-07) took mathlib on one worker from 1319.8 G and"
+        "1320.6 G to 1308.7 G and 1303.5 G, on four from 1432.9 G to"
+        "1414.4 G; cslib 404.4 G either way. Grouping by the rarest"
+        "namespace among the constants of a declaration's conclusion took"
+        "it to 1388.4 G: what a declaration shares with its neighbours"
+        "comes from what it is named after more than from what it states."
+        "That order within each namespace, or the maps past half their"
+        "limits emptied where a group ends, changed it by under 0.5%."
+        "A declaration that others are named under, Foo.bar with"
+        "Foo.bar.eq_1 or Nat.Prime with Nat.Prime.two_le, now goes with"
+        "them rather than with its own namespace: 1302.2 G and 1301.3 G to"
+        "1298.8 G and 1298.4 G."
     chosen = "CheckedByNamespace"
-    rejected = ["FileOrderAlways", "OrderedBySharedKeys", "TermsWalkedBeforeChecking"]
+    rejected = ["FileOrderAlways", "OrderedBySharedKeys", "TermsWalkedBeforeChecking", "FirstComponentOnly", "OwnersWithTheirNamespace", "RarestConclusionNamespace", "ConclusionWithinNamespace", "EmptiedWhereGroupsEnd"]
     impacts = [orderFor, ordered, chunkLoop, chunkNext]
 
 fn orderFor(jobs: List<Job>, workers: Int, placed: Bool, always: Bool) -> List<Job>
@@ -152,20 +165,48 @@ verify orderFor
     orderFor([Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "b"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Job(pos = 1, upTo = 1, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "a"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)], 1, true, true) == orderFor([Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "b"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Job(pos = 1, upTo = 1, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "a"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)], 1, true, false) => false
 
 fn ordered(jobs: List<Job>) -> List<Job>
-    ? "The deferred declarations grouped by the first component of their names, groups in the order of that component and file order within each, so that declarations about the same things are checked one after another and the facts one finds are still kept when the next asks for them (CheckedByNamespace)."
-    unkeyed(sortKeyed(keyed(jobs, [])), [])
+    ? "The deferred declarations grouped by the first two components of their names, groups in the order of those and file order within each, so that declarations about the same things are checked one after another and the facts one finds are still kept when the next asks for them (CheckedByNamespace)."
+    unkeyed(sortKeyed(keyed(jobs, ownersOf(jobs, {}), [])), [])
 
 verify ordered
     ordered([]) => []
 
-fn keyed(jobs: List<Job>, acc: List<Tuple<String, Job>>) -> List<Tuple<String, Job>>
-    ? "Each job with its group, in the jobs' order."
+fn keyed(jobs: List<Job>, owners: Map<Int, Bool>, acc: List<Tuple<String, Job>>) -> List<Tuple<String, Job>>
+    ? "Each job with its group, in the jobs' order: a declaration that others are named under goes with them (CheckedByNamespace)."
     match jobs
         [] -> List.reverse(acc)
-        [j, ..rest] -> keyed(rest, List.prepend((groupOf(j.head.name), j), acc))
+        [j, ..rest] -> keyed(rest, owners, List.prepend((groupFor(j.head.name, owners), j), acc))
 
 verify keyed
-    keyed([], []) => []
+    keyed([], {}, []) => []
+
+fn groupFor(n: Name, owners: Map<Int, Bool>) -> String
+    ? "The group of a name: of the namespace it is in, or of itself when other declarations are named under it."
+    match Map.has(owners, Core.Names.hashOf(n))
+        true -> rootOf(n)
+        false -> groupOf(n)
+
+verify groupFor
+    groupFor(Core.Names.str(Core.Names.str(Core.Names.anon(), "Foo"), "bar"), {}) => "Foo"
+
+fn ownersOf(jobs: List<Job>, m: Map<Int, Bool>) -> Map<Int, Bool>
+    ? "The hashes of the namespaces the jobs' names are directly in; a collision only moves a declaration to another group."
+    match jobs
+        [] -> m
+        [j, ..rest] -> ownersOf(rest, Map.set(m, Core.Names.hashOf(namespaceOf(j.head.name)), true))
+
+verify ownersOf
+    ownersOf([], {}) => {}
+
+fn namespaceOf(n: Name) -> Name
+    ? "The name a name is directly under."
+    match n
+        Name.Anon -> n
+        Name.Str(pre, _, _) -> pre
+        Name.Num(pre, _, _) -> pre
+
+verify namespaceOf
+    namespaceOf(Core.Names.str(Core.Names.str(Core.Names.anon(), "Foo"), "bar")) => Core.Names.str(Core.Names.anon(), "Foo")
 
 fn unkeyed(xs: List<Tuple<String, Job>>, acc: List<Job>) -> List<Job>
     ? "The jobs without their groups, in order."
@@ -177,27 +218,33 @@ verify unkeyed
     unkeyed([], []) => []
 
 fn groupOf(n: Name) -> String
-    ? "The first component of a name of two components or more; the empty string for a name of one."
+    ? "The first two components of the namespace a name is in, the first alone when it is one deep; the empty string for a name of one component."
     match n
         Name.Anon -> ""
         Name.Str(pre, _, _) -> rootOf(pre)
         Name.Num(pre, _, _) -> rootOf(pre)
 
 verify groupOf
-    groupOf(Core.Names.str(Core.Names.str(Core.Names.str(Core.Names.anon(), "Nat"), "add"), "comm")) => "Nat"
+    groupOf(Core.Names.str(Core.Names.str(Core.Names.str(Core.Names.anon(), "Nat"), "add"), "comm")) => "Nat.add"
+    groupOf(Core.Names.str(Core.Names.str(Core.Names.anon(), "Nat"), "succ")) => "Nat"
     groupOf(Core.Names.str(Core.Names.anon(), "x")) => ""
 
 fn rootOf(n: Name) -> String
-    ? "The first component of a name, empty for the empty name."
+    ? "The first two components of a name, joined by a dot; the first alone for a name of one, empty for the empty name."
     match n
         Name.Anon -> ""
         Name.Str(Name.Anon, s, _) -> s
         Name.Num(Name.Anon, i, _) -> String.fromInt(i)
+        Name.Str(Name.Str(Name.Anon, a, _), s, _) -> a + "." + s
+        Name.Str(Name.Num(Name.Anon, a, _), s, _) -> String.fromInt(a) + "." + s
+        Name.Num(Name.Str(Name.Anon, a, _), i, _) -> a + "." + String.fromInt(i)
+        Name.Num(Name.Num(Name.Anon, a, _), i, _) -> String.fromInt(a) + "." + String.fromInt(i)
         Name.Str(pre, _, _) -> rootOf(pre)
         Name.Num(pre, _, _) -> rootOf(pre)
 
 verify rootOf
-    rootOf(Core.Names.str(Core.Names.str(Core.Names.anon(), "Nat"), "add")) => "Nat"
+    rootOf(Core.Names.str(Core.Names.str(Core.Names.anon(), "Nat"), "add")) => "Nat.add"
+    rootOf(Core.Names.str(Core.Names.anon(), "Nat")) => "Nat"
     rootOf(Core.Names.anon()) => ""
 
 fn sortKeyed(xs: List<Tuple<String, Job>>) -> List<Tuple<String, Job>>
