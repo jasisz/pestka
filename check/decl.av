@@ -327,14 +327,36 @@ verify limitsFor
     limitsFor(8, Memory.Low).vars => 8192
 
 fn keepFor(workers: Int) -> Int
-    ? "How many hashes a map carried across declarations keeps before it is emptied: the unit of the limits carried sets, three of it for the checked types, one and a half for equal pairs and three quarters for the rest (LimitsFromReuseDistances, LimitsAfterOrdering). Every worker keeps maps of its own, and mathlib on eight workers already peaks near 13 GB; one worker alone keeps four times as much. Twice as much took mathlib from 10467.3 G to 10336.7 G instructions and its peak from 8.28 GB to 8.90 GB; twice that, once terms were smaller, from 5124.6 G to 5010.4 G and from 7.91 GB to 8.89 GB."
-    match workers > 1
-        true -> 65536
-        false -> 262144
+    ? "How many hashes a map carried across declarations keeps before it is emptied: the unit of the limits carried sets, three of it for the checked types, one and a half for equal pairs and three quarters for the rest (LimitsFromReuseDistances, LimitsAfterOrdering). Every worker keeps maps of its own; the workers share twice what one worker keeps, and no worker keeps more than one alone (CacheBudgetShared). Twice as much on one worker took mathlib from 10467.3 G to 10336.7 G instructions and its peak from 8.28 GB to 8.90 GB; twice that, once terms were smaller, from 5124.6 G to 5010.4 G and from 7.91 GB to 8.89 GB."
+    Int.min(262144, Result.withDefault(Int.div(524288, Int.max(workers, 1)), 262144))
 
 verify keepFor
-    keepFor(8) => 65536
     keepFor(1) => 262144
+    keepFor(2) => 262144
+    keepFor(4) => 131072
+    keepFor(8) => 65536
+    keepFor(12) => 43690
+
+decision CacheBudgetShared
+    date = "2026-11-07"
+    reason =
+        "Once a worker checks long stretches of the same namespaces"
+        "(WorkersByNamespace), its maps are asked for again much as one"
+        "worker's are, but the workers' maps together compete for memory"
+        "and the processor's caches. Mathlib, instructions retired, wall"
+        "and peak, each worker keeping 65536, 131072 or 262144: four workers"
+        "1462.1 G, 118 s, 7.13 GB; 1427.9 G, 95 s, 9.60 GB; 1659.1 G,"
+        "145 s, 13.95 GB; eight workers 1476.9 G, 106 s, 9.75 GB;"
+        "1594.5 G, 89 s, 12.92 GB; 1823.7 G, 162 s, 22.09 GB, where the"
+        "system's paging showed in the instructions. The best of each"
+        "keeps 524288 among all the workers, twice what one worker keeps."
+        "Against 65536 each: two workers 1455.9 G, 164 s, 5.99 GB to"
+        "1393.7 G, 126 s, 10.01 GB; twelve 1637.0 G, 98 s, 10.81 GB to"
+        "1494.9 G, 95 s, 9.52 GB; eight with 131072 again 1589.2 G against"
+        "1463.6 G."
+    chosen = "TwiceOneWorkerShared"
+    rejected = ["QuarterPerWorker", "OneWorkerEach"]
+    impacts = [keepFor, limitsFor, orderFor]
 
 fn emptyGroups(n: Int, acc: List<List<Chunk>>) -> List<List<Chunk>>
     ? "n empty groups."
