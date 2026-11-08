@@ -73,6 +73,15 @@ without NbE, to see how far that algorithm can be pushed. What is its own:
   A constant's type and a definition's value at universe levels depend only
   on the levels as written, and are kept as well. Every cache has a limit and
   is emptied past it.
+- **Universe levels are compared and put in without being built.** Two
+  levels without imax have the same normal form exactly when every
+  parameter has the same most successors in both and the largest numeral
+  above them agrees, so they are compared by those numbers and no normal
+  form is built; levels with imax are normalized as before. Whether a sort
+  is Prop at a constant's levels is read from the level as written. Putting
+  levels into a term rebuilds each constant in it once and shares the copy.
+  `mathlib` takes about 5% fewer instructions and 10% less memory at its
+  peak.
 - **Declarations are checked grouped by namespace.** When a worker has more
   declarations than its caches hold, it checks them grouped by the first
   two components of their namespaces, a declaration going with those named
