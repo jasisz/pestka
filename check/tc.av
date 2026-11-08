@@ -5682,15 +5682,36 @@ verify lazyDeltaProj
     resultBool(lazyDeltaProj(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Names.anon(), 0)) => false
 
 fn projFallback(st: St, t: Expr, s: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
-    ? "Fields of constructor applications, else the structures themselves."
+    ? "Fields of constructor applications; a constructor application against a structure that is none, its field against the projection of the other (FieldNotStructure); else the structures themselves."
     match projCore(st, t, sname, idx)
         Option.Some(pt) -> match projCore(st, s, sname, idx)
             Option.Some(ps) -> defEqCore(st, pt, ps)
+            Option.None -> defEqCore(st, pt, Core.Exprs.proj(sname, idx, s))
+        Option.None -> match projCore(st, s, sname, idx)
+            Option.Some(ps) -> defEqCore(st, Core.Exprs.proj(sname, idx, t), ps)
             Option.None -> defEqCore(st, t, s)
-        Option.None -> defEqCore(st, t, s)
 
 verify projFallback
     resultBool(projFallback(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Names.anon(), 0)) => true
+
+decision FieldNotStructure
+    date = "2026-11-08"
+    reason =
+        "t.i =?= s.i where lazy delta leaves t a constructor application and"
+        "s none (or the other way round) compared the two structures, which"
+        "holds only by structure eta, field by field: every field of the"
+        "constructor against the projection of s, field i among them. Only"
+        "field i is asked for, so only it is compared: its value against s.i."
+        "Either answer is sound, since a failure falls back to whnfCore of"
+        "both projections as before. Counters on etale: comparisons of whole"
+        "structures here that failed cost 1.6% of all instructions."
+        "Instructions retired, PGO, one worker, two rounds against the base"
+        "of each: mathlib 1226.8 G to 1224.9 G and 1219.6 G to 1216.9 G"
+        "(-0.2%), etale 17.97 G to 17.94 G, Init unchanged; plain build:"
+        "contdiff 16.73 G to 16.63 G, taylor 19.13 G to 19.05 G."
+    chosen = "FieldNotStructure"
+    rejected = ["StructuresCompared"]
+    impacts = [projFallback]
 
 fn defEqArgs(st: St, t: Expr, s: Expr, skip: List<Bool>) -> Result<RB, Fail>
     ? "Pairwise equal arguments of two spines of the same length, last first, leaving out those flagged in skip."
