@@ -5,7 +5,7 @@ module Univ
         "equivalence and the greater-or-equal test. Equivalence and the"
         "test are sound but deliberately as incomplete as the reference, so"
         "Pestka accepts and rejects the same universe constraints it does."
-    exposes [Offset, toOffset, isExplicit, isZero, isNotZero, normalizesToZero, mkSucc, mkSuccN, mkMax, mkImax, instantiate, undefParam, normalize, isEquiv, isEquivList, isGeq]
+    exposes [Offset, toOffset, isExplicit, isZero, isNotZero, normalizesToZero, zeroUnder, zeroUnderTwice, notZeroUnder, mkSucc, mkSuccN, mkMax, mkImax, instantiate, undefParam, normalize, isEquiv, isEquivList, isGeq]
     depends [Core.Names, Core.Levels]
     effects []
 
@@ -76,6 +76,81 @@ fn normalizesToZero(l: Level) -> Bool
 verify normalizesToZero
     normalizesToZero(Level.IMax(Level.Succ(Level.Zero), Level.Zero)) => true
     normalizesToZero(Level.Max(Level.Zero, Level.Param(Core.Names.anon()))) => false
+
+decision ZeroAtTheLevels
+    date = "2026-11-08"
+    reason =
+        "Whether a sort is Prop, or never Prop, at a constant's levels was"
+        "asked of the level instantiated there, and the level was built for"
+        "the question and dropped: a family's sort under the levels as"
+        "written, then again under the declaration's, some 15 M times on"
+        "mathlib. Both tests read a max by its two sides and an imax by its"
+        "right side, and the simplifying max and imax that instantiation"
+        "rebuilds with keep both answers (laws zeroUnder.likeInstantiated,"
+        "notZeroUnder.likeInstantiated), so the answer is read off the level"
+        "with each parameter's answer taken from the level it stands for."
+        "One worker, PGO, on EquivByMaxima: Init 48.33 G to 48.24 G"
+        "instructions, etale 18.25 G to 18.19 G."
+    chosen = "ZeroAtTheLevels"
+    rejected = ["InstantiateThenTest"]
+    impacts = [zeroUnder, zeroUnderTwice, notZeroUnder]
+
+fn zeroUnder(l: Level, ps: List<Name>, us: List<Level>) -> Bool
+    ? "normalizesToZero of l with ps replaced by us, without building it (ZeroAtTheLevels)."
+    match l
+        Level.Zero -> true
+        Level.Param(n) -> normalizesToZero(lookup(n, ps, us, l))
+        Level.Succ -> false
+        Level.Max(a, b) -> Bool.and(zeroUnder(a, ps, us), zeroUnder(b, ps, us))
+        Level.IMax(_, b) -> zeroUnder(b, ps, us)
+
+verify zeroUnder
+    zeroUnder(Level.IMax(sampleParam("u"), sampleParam("v")), [Core.Names.str(Core.Names.anon(), "v")], [Level.Zero]) => true
+    zeroUnder(sampleParam("u"), [], []) => false
+
+fn zeroUnderTwice(l: Level, ps: List<Name>, us: List<Level>, qs: List<Name>, ws: List<Level>) -> Bool
+    ? "normalizesToZero of l with ps replaced by us, then qs by ws, without building either."
+    match l
+        Level.Zero -> true
+        Level.Param(n) -> zeroUnder(lookup(n, ps, us, l), qs, ws)
+        Level.Succ -> false
+        Level.Max(a, b) -> Bool.and(zeroUnderTwice(a, ps, us, qs, ws), zeroUnderTwice(b, ps, us, qs, ws))
+        Level.IMax(_, b) -> zeroUnderTwice(b, ps, us, qs, ws)
+
+verify zeroUnderTwice
+    zeroUnderTwice(sampleParam("u"), [Core.Names.str(Core.Names.anon(), "u")], [sampleParam("v")], [Core.Names.str(Core.Names.anon(), "v")], [Level.Zero]) => true
+    zeroUnderTwice(sampleParam("u"), [Core.Names.str(Core.Names.anon(), "u")], [sampleParam("v")], [], []) => false
+
+fn notZeroUnder(l: Level, ps: List<Name>, us: List<Level>) -> Bool
+    ? "isNotZero of l with ps replaced by us, without building it (ZeroAtTheLevels)."
+    match l
+        Level.Zero -> false
+        Level.Param(n) -> isNotZero(lookup(n, ps, us, l))
+        Level.Succ -> true
+        Level.Max(a, b) -> Bool.or(notZeroUnder(a, ps, us), notZeroUnder(b, ps, us))
+        Level.IMax(_, b) -> notZeroUnder(b, ps, us)
+
+verify notZeroUnder
+    notZeroUnder(Level.Max(sampleParam("u"), Level.Zero), [Core.Names.str(Core.Names.anon(), "u")], [Level.Succ(Level.Zero)]) => true
+    notZeroUnder(sampleParam("u"), [], []) => false
+
+verify zeroUnder law likeInstantiated
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u")), Level.Max(sampleParam("u"), Level.Zero)]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u")], [Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")], []]
+    given us: List<Level> = [[Level.Zero], [Level.Succ(sampleParam("v"))], [Level.Zero, Level.Max(sampleParam("u"), sampleParam("w"))], [Level.Zero, Level.Zero], [Level.IMax(sampleParam("w"), Level.Zero), sampleParam("w")], []]
+    zeroUnder(l, ps, us) => normalizesToZero(instantiate(l, ps, us))
+
+verify notZeroUnder law likeInstantiated
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u")), Level.Max(sampleParam("u"), Level.Zero)]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u")], [Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")], []]
+    given us: List<Level> = [[Level.Zero], [Level.Succ(sampleParam("v"))], [Level.Zero, Level.Max(sampleParam("u"), sampleParam("w"))], [Level.Zero, Level.Zero], [Level.IMax(sampleParam("w"), Level.Zero), sampleParam("w")], []]
+    notZeroUnder(l, ps, us) => isNotZero(instantiate(l, ps, us))
+
+verify zeroUnderTwice law likeInstantiated
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u")), Level.Max(sampleParam("u"), Level.Zero)]
+    given us: List<Level> = [[Level.Zero], [Level.Succ(sampleParam("v"))], [Level.Zero, Level.Max(sampleParam("u"), sampleParam("w"))], [Level.Zero, Level.Zero], [Level.IMax(sampleParam("w"), Level.Zero), sampleParam("w")], []]
+    given ws: List<Level> = [[Level.Zero], [Level.Succ(Level.Zero)], [sampleParam("w")]]
+    zeroUnderTwice(l, [Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")], us, [Core.Names.str(Core.Names.anon(), "w")], ws) => normalizesToZero(instantiate(instantiate(l, [Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")], us), [Core.Names.str(Core.Names.anon(), "w")], ws))
 
 fn depth(l: Level) -> Int
     ? "Height of the level tree."

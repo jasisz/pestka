@@ -5068,7 +5068,7 @@ fn neverZeroFamily(c: Option<Const>, dls: List<Level>, a: Int) -> Bool
     match c
         Option.Some(x) -> match List.len(Check.State.headOf(x).params) == List.len(dls)
             true -> match peelPis(Check.State.headOf(x).ty, a)
-                Option.Some(Expr.Sort(_, w)) -> Core.Univ.isNotZero(Core.Univ.instantiate(w, Check.State.headOf(x).params, dls))
+                Option.Some(Expr.Sort(_, w)) -> Core.Univ.notZeroUnder(w, Check.State.headOf(x).params, dls)
                 _ -> false
             false -> false
         Option.None -> false
@@ -5113,7 +5113,7 @@ verify piDomain
 fn sortNotZero(e: Option<Expr>, ps: List<Name>, ls: List<Level>) -> Bool
     ? "A sort whose level is not zero once the parameters ps are ls."
     match e
-        Option.Some(Expr.Sort(_, v)) -> Bool.not(Core.Univ.normalizesToZero(Core.Univ.instantiate(v, ps, ls)))
+        Option.Some(Expr.Sort(_, v)) -> Bool.not(Core.Univ.zeroUnder(v, ps, ls))
         _ -> false
 
 verify sortNotZero
@@ -5126,7 +5126,7 @@ fn sortSays(ps: List<Name>, ls: List<Level>, dls: List<Level>, dc: Option<Const>
     match dc
         Option.Some(c) -> match List.len(Check.State.headOf(c).params) == List.len(dls)
             true -> match peelPis(Check.State.headOf(c).ty, m)
-                Option.Some(Expr.Sort(_, v)) -> Bool.not(Core.Univ.normalizesToZero(Core.Univ.instantiate(Core.Univ.instantiate(v, Check.State.headOf(c).params, dls), ps, ls)))
+                Option.Some(Expr.Sort(_, v)) -> Bool.not(Core.Univ.zeroUnderTwice(v, Check.State.headOf(c).params, dls, ps, ls))
                 _ -> false
             false -> false
         Option.None -> false
@@ -5500,7 +5500,7 @@ fn constIsProp(c: Option<Const>, dls: List<Level>, m: Int, h: Head, ls: List<Lev
     match c
         Option.Some(x) -> match List.len(Check.State.headOf(x).params) == List.len(dls)
             true -> match peelPis(Check.State.headOf(x).ty, m)
-                Option.Some(Expr.Sort(_, v)) -> Core.Univ.normalizesToZero(Core.Univ.instantiate(Core.Univ.instantiate(v, Check.State.headOf(x).params, dls), h.params, ls))
+                Option.Some(Expr.Sort(_, v)) -> Core.Univ.zeroUnderTwice(v, Check.State.headOf(x).params, dls, h.params, ls)
                 _ -> false
             false -> false
         Option.None -> false
@@ -5532,7 +5532,7 @@ verify nthDomain
 fn sortIsZero(e: Option<Expr>, ps: List<Name>, ls: List<Level>) -> Bool
     ? "A sort whose level is zero once the parameters ps are ls."
     match e
-        Option.Some(Expr.Sort(_, v)) -> Core.Univ.normalizesToZero(Core.Univ.instantiate(v, ps, ls))
+        Option.Some(Expr.Sort(_, v)) -> Core.Univ.zeroUnder(v, ps, ls)
         _ -> false
 
 verify sortIsZero
