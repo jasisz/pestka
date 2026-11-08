@@ -1247,11 +1247,34 @@ verify projInduct
 fn projCtor(st: St, idx: Int, x: Expr, ty: Expr, ls: List<Level>, params: List<Expr>, sname: Name, c: Option<Const>) -> Result<RE, Fail>
     ? "Walks the constructor type past the parameters and the earlier fields."
     match c
-        Option.Some(Const.CCtor(k)) -> projWalk(st, idx, x, ty, sname, Core.Subst.instLevelParams(k.head.ty, k.head.params, ls), params)
+        Option.Some(Const.CCtor(k)) -> projAtLevels(levelledType(st, Core.Exprs.cnst(k.head.name, ls), k.head, ls), idx, x, ty, sname, params)
         _ -> Result.Err(badProj())
 
 verify projCtor
     projCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, Core.Exprs.natLit(1), Core.Exprs.bvar(0), [], [], Core.Names.anon(), Option.None) => Result.Err(Fail.Reject("invalid projection"))
+
+fn projAtLevels(r: RE, idx: Int, x: Expr, ty: Expr, sname: Name, params: List<Expr>) -> Result<RE, Fail>
+    ? "The constructor's type at the structure's levels, taken where the constructor's own uses keep it (ProjTypeKept), walked."
+    projWalk(r.st, idx, x, ty, sname, r.e, params)
+
+verify projAtLevels
+    projAtLevels(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.natLit(1), Core.Exprs.sort(Level.Zero), Core.Names.anon(), []) => Result.Err(Fail.Reject("invalid projection"))
+
+decision ProjTypeKept
+    date = "2026-11-08"
+    reason =
+        "A projection instantiated its constructor's whole type at the"
+        "structure's levels every time its type was inferred, about 22 k"
+        "instructions each, 300 k times on mathlib, though the constructor at"
+        "those levels is a constant like any other, whose levelled type"
+        "levelledType keeps from one declaration to the next. The projection"
+        "now asks levelledType for it, under the key the constructor itself"
+        "is used by, and walks what it gets. One worker, PGO, on"
+        "ZeroAtTheLevels: etale 18.25 G to 18.17 G instructions, Init"
+        "unchanged within noise (48.40 G to 48.31 G)."
+    chosen = "ProjTypeKept"
+    rejected = ["ProjTypeInstantiated"]
+    impacts = [projCtor, projAtLevels]
 
 fn projWalk(st: St, idx: Int, x: Expr, ty: Expr, sname: Name, r: Expr, params: List<Expr>) -> Result<RE, Fail>
     ? "Parameters, then fields, then the field's own type."
