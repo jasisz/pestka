@@ -25,7 +25,7 @@ below that profile was made from.
 | `con-leche` | accepted | 77.6 G | 10 s | 1.3 GB | 5.3 s | 1.8 GB |
 | `cedar` | accepted | 115.2 G | 18 s | 1.5 GB | 8.2 s | 2.1 GB |
 | `cslib` | accepted | 375.0 G | 56 s | 3.6 GB | 29 s | 4.8 GB |
-| `mathlib` (702,040) | accepted | 1.19 T | 187 s | 6.6 GB | 95 s | 8.8 GB |
+| `mathlib` (702,040) | accepted | 1.19 T | 187 s | 6.6 GB | 71 s | 9.4 GB |
 | `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 45.5 G (6.7 G) | 4.0 s (0.46 s) | 0.9 GB | 4.0 s (0.47 s) | 0.9 GB |
 
 ### As WebAssembly

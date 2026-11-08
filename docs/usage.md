@@ -117,7 +117,7 @@ one worker unless said:
 | Test | Default | `--low-memory` |
 |---|---|---|
 | `mathlib` | 1187 G, 6.6 GB, 187 s | 1243 G (+4.7%), 4.9 GB, 220 s |
-| `mathlib`, 4 workers | 8.8 GB, 95 s | 5.4 GB, 79 s |
+| `mathlib`, 4 workers | 9.4 GB, 71 s | 5.9 GB, 76 s |
 | `init` | 47.4 G, 0.90 GB | 51.7 G (+9.1%), 0.52 GB |
 | `etale` | 17.5 G, 0.78 GB | 18.4 G (+4.9%), 0.43 GB |
 
