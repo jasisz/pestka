@@ -18,8 +18,8 @@ module Subst
 type Op
     Inst(List<Expr>, Int)
     InstRev(List<Expr>, Int)
-    Lift(Int, Int)
-    Lower(Int, Int)
+    Lift(Int)
+    Lower(Int)
     Abstract(List<Int>, Int, Int)
 
 fn instantiate(e: Expr, subst: List<Expr>) -> Expr
@@ -49,7 +49,7 @@ fn lift(e: Expr, s: Int, d: Int) -> Expr
     ? "Adds d to every loose bound variable at or above s."
     match d == 0
         true -> e
-        false -> apply(Op.Lift(s, d), e, 0)
+        false -> apply(Op.Lift(d), e, s)
 
 verify lift
     lift(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1)), 1, 2) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(3))
@@ -59,7 +59,7 @@ fn lower(e: Expr, s: Int, d: Int) -> Expr
     ? "Subtracts d from every loose bound variable at or above s; the caller knows none lies in [s - d, s)."
     match d == 0
         true -> e
-        false -> apply(Op.Lower(s, d), e, 0)
+        false -> apply(Op.Lower(d), e, s)
 
 verify lower
     lower(Core.Exprs.bvar(3), 1, 1) => Core.Exprs.bvar(2)
@@ -92,12 +92,12 @@ fn untouched(op: Op, e: Expr, offset: Core.Exprs.Depth) -> Bool
     match op
         Op.Inst -> Core.Exprs.withinDepth(e, offset)
         Op.InstRev -> Core.Exprs.withinDepth(e, offset)
-        Op.Lift(s, _) -> Core.Exprs.within(e, s + Core.Exprs.depthValue(offset))
-        Op.Lower(s, _) -> Core.Exprs.within(e, s + Core.Exprs.depthValue(offset))
+        Op.Lift -> Core.Exprs.withinDepth(e, offset)
+        Op.Lower -> Core.Exprs.withinDepth(e, offset)
         Op.Abstract(_, _, bits) -> Bits.and(Core.Exprs.varsOf(e), bits) == 0
 
 verify untouched
-    untouched(Op.Lift(0, 1), Core.Exprs.sort(Level.Zero), Core.Exprs.depthZero()) => true
+    untouched(Op.Lift(1), Core.Exprs.sort(Level.Zero), Core.Exprs.depthZero()) => true
     untouched(Op.Inst([], 0), Core.Exprs.bvar(0), Core.Exprs.depthZero()) => false
 
 record SR
@@ -120,6 +120,25 @@ decision DepthAsMachineWord
     rejected = ["DepthAsInt"]
     impacts = [apply, applyAt, go, visit, small, memoed, build, untouched]
 
+decision ShiftsStartAtTheirCutoff
+    date = "2026-11-08"
+    reason =
+        "A lift or a lowering from s carried s in the operation and started"
+        "the walk at depth 0, so every node it visited asked whether its loose"
+        "range reached s plus the depth, a sum on the general number, and"
+        "every bound variable compared itself with the same sum. Starting the"
+        "walk at depth s instead gives the same cutoff at every node: a bound"
+        "variable at depth k is shifted when its index is at least s + k"
+        "either way. The operation then keeps only the amount, and a shift"
+        "asks what an instantiation asks, on the machine word of the depth."
+        "One worker, PGO, on 9a8d69a: Init 48.76 G to 48.63 G instructions,"
+        "etale 18.75 G to 18.72 G. With KeyByXor, on 73cdd84: Init 48.61 G to"
+        "48.45 G, etale 18.70 G to 18.65 G, mathlib 1283.3 G to 1282.0 G"
+        "(two runs each, within noise there)."
+    chosen = "ShiftsStartAtTheirCutoff"
+    rejected = ["CutoffInTheOperation"]
+    impacts = [Op, lift, lower, untouched, bvarCase]
+
 fn apply(op: Op, e: Expr, offset: Int) -> Expr
     ? "Applies op to e under offset binders, as a depth on the machine word; an offset past any depth goes by the plain recursion."
     match Core.Exprs.depthOf(offset)
@@ -133,7 +152,7 @@ fn applyAt(op: Op, e: Expr, offset: Core.Exprs.Depth) -> Expr
         false -> go(op, e, offset, {}).e
 
 verify applyAt
-    applyAt(Op.Lift(0, 1), Core.Exprs.bvar(0), Core.Exprs.depthZero()) => Core.Exprs.bvar(1)
+    applyAt(Op.Lift(1), Core.Exprs.bvar(0), Core.Exprs.depthZero()) => Core.Exprs.bvar(1)
 
 fn done(e: Expr) -> Expr
     ? "The term as it is."
@@ -143,7 +162,7 @@ verify done
     done(Core.Exprs.bvar(0)) => Core.Exprs.bvar(0)
 
 verify apply
-    apply(Op.Lift(0, 1), Core.Exprs.bvar(0), 1) => Core.Exprs.bvar(0)
+    apply(Op.Lift(1), Core.Exprs.bvar(0), 1) => Core.Exprs.bvar(0)
 
 fn go(op: Op, e: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Skips what op cannot touch; otherwise visits."
@@ -152,7 +171,7 @@ fn go(op: Op, e: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple
         false -> visit(op, e, offset, memo)
 
 verify go
-    go(Op.Lift(0, 1), Core.Exprs.bvar(0), Core.Exprs.depthZero(), {}).e => Core.Exprs.bvar(1)
+    go(Op.Lift(1), Core.Exprs.bvar(0), Core.Exprs.depthZero(), {}).e => Core.Exprs.bvar(1)
 
 fn visit(op: Op, e: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Variables are rewritten directly; compound nodes go through the memo."
@@ -181,7 +200,7 @@ fn small(op: Op, e: Expr, offset: Core.Exprs.Depth) -> Expr
             _ -> e
 
 verify small
-    small(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.sort(Level.Zero)), Core.Exprs.depthZero()) => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.sort(Level.Zero))
+    small(Op.Lift(1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.sort(Level.Zero)), Core.Exprs.depthZero()) => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.sort(Level.Zero))
     small(Op.Inst([Core.Exprs.fvar(5)], 1), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Binder.Default), Core.Exprs.depthZero()) => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.fvar(5), Core.Exprs.fvar(5), Binder.Default)
 
 fn memoed(op: Op, e: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, key: Core.Exprs.Key) -> SR
@@ -191,7 +210,7 @@ fn memoed(op: Op, e: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, T
         Option.None -> remember(build(op, e, offset, memo), e, key)
 
 verify memoed
-    memoed(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), Core.Exprs.depthZero(), {}, Core.Exprs.hashKey(Core.Exprs.bvar(7))).e => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(1))
+    memoed(Op.Lift(1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), Core.Exprs.depthZero(), {}, Core.Exprs.hashKey(Core.Exprs.bvar(7))).e => Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(1))
 
 fn remember(r: SR, e: Expr, key: Core.Exprs.Key) -> SR
     ? "Records a rebuilt node; an older entry with the same key is replaced, which only costs a later recomputation."
@@ -223,7 +242,7 @@ fn build(op: Op, e: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tu
         _ -> SR(e = e, memo = memo)
 
 verify build
-    build(Op.Lift(0, 1), Core.Exprs.sort(Level.Zero), Core.Exprs.depthZero(), {}).e => Core.Exprs.sort(Level.Zero)
+    build(Op.Lift(1), Core.Exprs.sort(Level.Zero), Core.Exprs.depthZero(), {}).e => Core.Exprs.sort(Level.Zero)
 
 fn buildApp(op: Op, f: Expr, a: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Function, then argument."
@@ -232,7 +251,7 @@ fn buildApp(op: Op, f: Expr, a: Expr, offset: Core.Exprs.Depth, memo: Map<Core.E
     SR(e = Core.Exprs.app(rf.e, ra.e), memo = ra.memo)
 
 verify buildApp
-    buildApp(Op.Lift(0, 2), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Exprs.depthZero(), {}).e => Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(3))
+    buildApp(Op.Lift(2), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Exprs.depthZero(), {}).e => Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(3))
 
 fn buildBinder(op: Op, n: Name, t: Expr, b: Expr, bi: Binder, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, isLam: Bool) -> SR
     ? "Domain at this depth, body one deeper."
@@ -243,7 +262,7 @@ fn buildBinder(op: Op, n: Name, t: Expr, b: Expr, bi: Binder, offset: Core.Exprs
         false -> SR(e = Core.Exprs.pi(n, rt.e, rb.e, bi), memo = rb.memo)
 
 verify buildBinder
-    buildBinder(Op.Lift(0, 1), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default, Core.Exprs.depthZero(), {}, true).e => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.bvar(0), Binder.Default)
+    buildBinder(Op.Lift(1), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Binder.Default, Core.Exprs.depthZero(), {}, true).e => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.bvar(0), Binder.Default)
 
 fn buildLet(op: Op, n: Name, t: Expr, v: Expr, b: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "Type and value at this depth, body one deeper."
@@ -253,7 +272,7 @@ fn buildLet(op: Op, n: Name, t: Expr, v: Expr, b: Expr, offset: Core.Exprs.Depth
     SR(e = Core.Exprs.letE(n, rt.e, rv.e, rb.e), memo = rb.memo)
 
 verify buildLet
-    buildLet(Op.Lift(0, 1), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Exprs.depthZero(), {}).e => Core.Exprs.letE(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.bvar(1), Core.Exprs.bvar(2))
+    buildLet(Op.Lift(1), Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Core.Exprs.depthZero(), {}).e => Core.Exprs.letE(Core.Names.anon(), Core.Exprs.bvar(1), Core.Exprs.bvar(1), Core.Exprs.bvar(2))
 
 fn buildProj(op: Op, s: Name, i: Int, x: Expr, offset: Core.Exprs.Depth, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
     ? "The projected structure."
@@ -261,23 +280,23 @@ fn buildProj(op: Op, s: Name, i: Int, x: Expr, offset: Core.Exprs.Depth, memo: M
     SR(e = Core.Exprs.proj(s, i, r.e), memo = r.memo)
 
 verify buildProj
-    buildProj(Op.Lift(0, 1), Core.Names.anon(), 0, Core.Exprs.bvar(0), Core.Exprs.depthZero(), {}).e => Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.bvar(1))
+    buildProj(Op.Lift(1), Core.Names.anon(), 0, Core.Exprs.bvar(0), Core.Exprs.depthZero(), {}).e => Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.bvar(1))
 
 fn bvarCase(op: Op, i: Int, offset: Int) -> Expr
     ? "What a bound variable becomes."
     match op
         Op.Inst(subst, n) -> substituted(i, offset, n, subst, i - offset)
         Op.InstRev(subst, n) -> substituted(i, offset, n, subst, n - (i - offset) - 1)
-        Op.Lift(s, d) -> match i >= s + offset
+        Op.Lift(d) -> match i >= offset
             true -> Core.Exprs.bvar(i + d)
             false -> Core.Exprs.bvar(i)
-        Op.Lower(s, d) -> match i >= s + offset
+        Op.Lower(d) -> match i >= offset
             true -> Core.Exprs.bvar(i - d)
             false -> Core.Exprs.bvar(i)
         Op.Abstract -> Core.Exprs.bvar(i)
 
 verify bvarCase
-    bvarCase(Op.Lift(1, 1), 0, 0) => Core.Exprs.bvar(0)
+    bvarCase(Op.Lift(1), 0, 1) => Core.Exprs.bvar(0)
     bvarCase(Op.Inst([Core.Exprs.fvar(3)], 1), 1, 0) => Core.Exprs.bvar(0)
 
 fn substituted(i: Int, offset: Int, n: Int, subst: List<Expr>, pick: Int) -> Expr
@@ -355,7 +374,7 @@ fn applySpec(op: Op, e: Expr, offset: Int) -> Expr
         _ -> e
 
 verify applySpec
-    applySpec(Op.Lift(0, 1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1)), 1) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(2))
+    applySpec(Op.Lift(1), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(1)), 1) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(2))
 
 verify apply law applySpec
     given k: Int = 0..8
@@ -398,12 +417,12 @@ fn sampleOp(k: Int) -> Op
     match k
         0 -> Op.Inst([Core.Exprs.fvar(5), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(6))], 2)
         1 -> Op.InstRev([Core.Exprs.fvar(5), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.fvar(6))], 2)
-        2 -> Op.Lift(1, 2)
-        3 -> Op.Lower(2, 1)
+        2 -> Op.Lift(2)
+        3 -> Op.Lower(1)
         _ -> Op.Abstract([7, 8], 2, idsBits([7, 8], 0))
 
 verify sampleOp
-    sampleOp(2) => Op.Lift(1, 2)
+    sampleOp(2) => Op.Lift(2)
 
 fn instLevelParams(e: Expr, ps: List<Name>, us: List<Level>) -> Expr
     ? "Replaces universe parameters ps by us everywhere in e. Each parameter put in for itself, as a constant used at its own parameters is, changes nothing, and e is returned as it is."
