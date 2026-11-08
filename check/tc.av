@@ -180,7 +180,7 @@ decision VariablesReadInPlace
 fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "One inference step by the shape of e, whose loose bound variables stand for the free variables in env, the innermost first."
     match e
-        Expr.BVar(_, i) -> match List.drop(env, i)
+        Expr.BVar(_, i) -> match List.drop(env, Core.Exprs.indexValue(i))
             [x, .._] -> Result.Ok(RE(e = Check.State.localType(st.lctx, fvarId(x))?, st = st))
             [] -> Result.Err(bad("the type checker met a loose bound variable"))
         Expr.FVar(_, id) -> Result.Ok(RE(e = Check.State.localType(st.lctx, id)?, st = st))
@@ -906,7 +906,7 @@ verify fitsWithin
 fn fitsWithinNode(t: Expr, d: Expr, subst: List<Expr>, off: Int, left: Int) -> Int
     ? "fitsWithin one node of d down, as fitsNode, the budget passed from part to part."
     match d
-        Expr.BVar(_, i) -> match fitsVar(t, i, subst, off)
+        Expr.BVar(_, i) -> match fitsVar(t, Core.Exprs.indexValue(i), subst, off)
             true -> left
             false -> -1
         Expr.App(_, f, a) -> match t
@@ -944,7 +944,7 @@ verify fitSample
 fn fitsNode(t: Expr, d: Expr, subst: List<Expr>, off: Int) -> Bool
     ? "fitsUnder one node of d down: a bound variable takes its argument or drops by the substitution's length, a compound node compares its parts."
     match d
-        Expr.BVar(_, i) -> fitsVar(t, i, subst, off)
+        Expr.BVar(_, i) -> fitsVar(t, Core.Exprs.indexValue(i), subst, off)
         Expr.App(_, f, a) -> match t
             Expr.App(_, g, b) -> Bool.and(fitsUnder(g, f, subst, off), fitsUnder(b, a, subst, off))
             _ -> false
@@ -1144,7 +1144,7 @@ fn cheapDone(e: Expr, f: Expr, args: List<Expr>, i: Int) -> Expr
     match Core.Exprs.isClosed(f)
         true -> Core.Apps.mkApps(f, List.drop(args, i))
         false -> match f
-            Expr.BVar(_, j) -> Core.Apps.mkApps(nth(args, i - j - 1), List.drop(args, i))
+            Expr.BVar(_, j) -> Core.Apps.mkApps(nth(args, i - Core.Exprs.indexValue(j) - 1), List.drop(args, i))
             _ -> e
 
 verify cheapDone
@@ -2294,9 +2294,9 @@ fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool,
         Expr.Lam(_, _, body) -> match stack
             [c, ..rest] -> lcore(st, body, List.prepend(c, env), rest, ms, delta, cheapRec, cheapProj)
             [] -> Result.Ok(RE(e = matTerm(t, env, ms).e, st = st))
-        Expr.BVar(_, i) -> match List.drop(env, i)
+        Expr.BVar(_, i) -> match List.drop(env, Core.Exprs.indexValue(i))
             [c, .._] -> lclo(st, c, stack, ms, delta, cheapRec, cheapProj)
-            [] -> Result.Ok(RE(e = lstuck(MX(e = Core.Exprs.bvar(i - List.len(env)), ms = ms), stack), st = st))
+            [] -> Result.Ok(RE(e = lstuck(MX(e = Core.Exprs.bvar(Core.Exprs.indexValue(i) - List.len(env)), ms = ms), stack), st = st))
         Expr.Let(_, _, v, body) -> lcore(st, body, List.prepend(closure(v, env, ms.next), env), stack, MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
         Expr.FVar(_, id) -> lvar(st, t, Check.State.localValue(st.lctx, id), stack, ms, delta, cheapRec, cheapProj)
         Expr.Const(_, n, ls) -> lconst(st, t, ls, Check.State.lookup(st, n), stack, ms, delta, cheapRec, cheapProj)
@@ -3396,7 +3396,7 @@ verify nthMinor
 fn majorVar(e: Expr, n: Int) -> Bool
     ? "Whether e is one of the n lambdas' variables."
     match e
-        Expr.BVar(_, i) -> i < n
+        Expr.BVar(_, i) -> Core.Exprs.indexValue(i) < n
         _ -> false
 
 verify majorVar
@@ -3406,7 +3406,7 @@ verify majorVar
 fn bvarIndex(e: Expr) -> Int
     ? "A bound variable's index."
     match e
-        Expr.BVar(_, i) -> i
+        Expr.BVar(_, i) -> Core.Exprs.indexValue(i)
         _ -> 0
 
 verify bvarIndex
@@ -3845,7 +3845,7 @@ decision VariableIsItsClosure
 fn closure(a: Expr, env: List<Clo>, id: Int) -> Clo
     ? "a as a closure over env; a term with no loose bound variable needs no environment, and is its own value; a variable of env is its closure there, built at most once under that closure's number (VariableIsItsClosure)."
     match a
-        Expr.BVar(_, i) -> varClosure(env, i, a, env, id)
+        Expr.BVar(_, i) -> varClosure(env, Core.Exprs.indexValue(i), a, env, id)
         _ -> match Core.Exprs.isClosed(a)
             true -> Clo.Clo(-1, a, [])
             false -> Clo.Clo(id, a, env)
@@ -3941,9 +3941,9 @@ verify lgo
 fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
     ? "A variable takes its closure's value; a large compound node is counted, and goes through the memo once the walk has met four of them (MemoAfterAPrefix)."
     match e
-        Expr.BVar(_, i) -> match List.drop(env, i - off)
+        Expr.BVar(_, i) -> match List.drop(env, Core.Exprs.indexValue(i) - off)
             [c, .._] -> lvalue(matClo(c, ms), memo)
-            [] -> LS(e = Core.Exprs.bvar(i - List.len(env)), ms = ms, memo = memo)
+            [] -> LS(e = Core.Exprs.bvar(Core.Exprs.indexValue(i) - List.len(env)), ms = ms, memo = memo)
         _ -> match Core.Exprs.isSmall(e)
             true -> lbuild(e, off, env, ms, memo)
             false -> match memo.met < 4
@@ -5030,7 +5030,7 @@ fn familySays(st: St, ty: Expr, k: Int, ps: List<Name>, ls: List<Level>, d: Expr
     ? "The family d of the term's type, applied to m arguments: a constant whose type past m pis ends in a sort, a variable bound by one of the k pis of ty, or a free variable, whose type is so; the sort must not be zero at the levels. A type variable is the usual case: HAdd.hAdd ends in its γ, which is bound with Type u (NoProofByTypeVariables)."
     match d
         Expr.Const(_, dn, dls) -> sortSays(ps, ls, dls, Check.State.lookup(st, dn), m)
-        Expr.BVar(_, j) -> sortNotZero(peelAfter(piDomain(ty, k - 1 - j), m), ps, ls)
+        Expr.BVar(_, j) -> sortNotZero(peelAfter(piDomain(ty, k - 1 - Core.Exprs.indexValue(j)), m), ps, ls)
         Expr.FVar(_, id) -> localSortSays(st, id, m)
         _ -> false
 
@@ -5077,9 +5077,9 @@ fn fieldFamilySays(st: St, cty: Expr, n: Int, d: Expr, m: Int, f: Expr, a: Int) 
     ? "The family f, applied to a arguments, of the field's type: a constant, or a variable bound by one of the m pis of d or by one of the n pis of cty before the field."
     match f
         Expr.Const(_, dn, dls) -> neverZeroFamily(Check.State.lookup(st, dn), dls, a)
-        Expr.BVar(_, j) -> match j < m
-            true -> neverZeroSort(peelAfter(piDomain(d, m - 1 - j), a))
-            false -> neverZeroSort(peelAfter(piDomain(cty, n - 1 - (j - m)), a))
+        Expr.BVar(_, j) -> match Core.Exprs.indexValue(j) < m
+            true -> neverZeroSort(peelAfter(piDomain(d, m - 1 - Core.Exprs.indexValue(j)), a))
+            false -> neverZeroSort(peelAfter(piDomain(cty, n - 1 - (Core.Exprs.indexValue(j) - m)), a))
         _ -> false
 
 verify fieldFamilySays
@@ -5511,7 +5511,7 @@ verify isProposition
 fn headIsProp(st: St, h: Head, ls: List<Level>, f: Expr, m: Int, ctx: List<Expr>) -> Bool
     ? "The head f of the type, applied to m arguments: its own type past m pis must be a sort zero at the levels."
     match f
-        Expr.BVar(_, j) -> sortIsZero(peelAfter(nthDomain(ctx, j), m), h.params, ls)
+        Expr.BVar(_, j) -> sortIsZero(peelAfter(nthDomain(ctx, Core.Exprs.indexValue(j)), m), h.params, ls)
         Expr.Const(_, n, dls) -> constIsProp(Check.State.lookup(st, n), dls, m, h, ls)
         _ -> false
 

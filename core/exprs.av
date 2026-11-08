@@ -7,7 +7,7 @@ module Exprs
         "a tree, capped, so that traversals know when memoizing pays), packed"
         "into one word below 2^62 so that every node stays small, computed once"
         "by the constructors here and never by callers."
-    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, appHash3, key, keyAt, hashKey, looseRange, within, withinDepth, depthOf, depthZero, deeper, depthValue, keyAtDepth, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
+    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, appHash3, key, keyAt, hashKey, looseRange, within, withinDepth, depthOf, depthZero, deeper, depthValue, indexValue, indexBelow, indexWithin, indexPast, indexBack, bvarAt, bvarUp, bvarDown, bvarAbstracted, keyAtDepth, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
     exposes opaque [Word, Tag, Index, Key, Depth]
     depends [Core.Hash, Core.Names, Core.Levels]
     effects []
@@ -158,6 +158,26 @@ decision KeyByXor
     rejected = ["DepthAboveHash"]
     impacts = [keyAtDepth]
 
+decision IndexAsMachineWord
+    date = "2026-11-08"
+    reason =
+        "A bound variable kept its index as an Int, and substitution compared"
+        "it with the depth, shifted it and picked the value put in for it on"
+        "the general number, with its checks for a boxed operand at every"
+        "variable it rewrote: the Depth it compared with had to be read out"
+        "as an Int, since another module cannot read a carrier's field. The"
+        "index is now an Index, below 2^40, which compiled Aver holds as a"
+        "machine word, and the comparisons and shifts on it live here, where"
+        "the fields of both are read. An index at 2^40 or past it is held as"
+        "2^40 - 1: either is loose under every binder depth a term reaches,"
+        "and inference refuses a term with a loose bound variable before"
+        "anything compares it. With LeavesOnMachineWords, one worker, PGO, on"
+        "61236ab: Init 48.46 G to 48.24 G instructions, etale 18.65 G to"
+        "18.55 G, mathlib 1286.1 G to 1283.8 G (within its noise)."
+    chosen = "IndexAsMachineWord"
+    rejected = ["IndexAsInt"]
+    impacts = [Expr, bvar, bvarAt, indexAtMost, indexValue, indexBelow, indexWithin, indexPast, indexBack, bvarUp, bvarDown, bvarAbstracted, metaOf, leafRange]
+
 decision WordsAsMachineWords
     date = "2026-10-25"
     reason =
@@ -208,7 +228,7 @@ record Depth
     value: Int
 
 type Expr
-    BVar(Word, Int)
+    BVar(Word, Index)
     FVar(Word, Int)
     Sort(Word, Level)
     Const(Word, Name, List<Level>)
@@ -358,12 +378,96 @@ verify indexOf
     indexOf(-1) => Result.Err("index out of range")
     indexOf(1099511627776) => Result.Err("index out of range")
 
+fn bvarAt(x: Index) -> Expr
+    ? "Bound variable of an index already on the machine word."
+    Expr.BVar(bvarWordAt(x), x)
+
+verify bvarAt
+    bvarAt(Index(value = 2)) => bvar(2)
+
 fn bvar(i: Int) -> Expr
-    ? "Bound variable by de Bruijn index, carrying its word (LeavesCarryWords)."
-    Expr.BVar(bvarWord(i), i)
+    ? "Bound variable by de Bruijn index, carrying its word (LeavesCarryWords). Its index is an Index on the machine word (IndexAsMachineWord); an index past 2^40 - 1, which is loose in every term the checker can build, is held as 2^40 - 1, as loose as it."
+    bvarAt(indexAtMost(i))
 
 verify bvar
     looseRange(bvar(2)) => 3
+    bvar(1099511627776) == bvar(1099511627775) => true
+    looseRange(bvar(1099511627776)) => 1099511627776
+
+fn indexAtMost(i: Int) -> Index
+    ? "Index i, or 2^40 - 1 for an index past it (IndexAsMachineWord)."
+    match indexOf(i)
+        Result.Ok(x) -> x
+        Result.Err(_) -> Index(value = 1099511627775)
+
+verify indexAtMost
+    indexValue(indexAtMost(3)) => 3
+    indexValue(indexAtMost(1099511627776)) => 1099511627775
+
+fn indexValue(x: Index) -> Int
+    ? "A bound variable's index as a number."
+    x.value
+
+verify indexValue
+    indexValue(Index(value = 3)) => 3
+
+fn indexBelow(x: Index, d: Depth) -> Bool
+    ? "Whether index x is bound by one of the d binders a traversal has passed."
+    x.value < d.value
+
+verify indexBelow
+    indexBelow(Index(value = 1), Depth(value = 2)) => true
+    indexBelow(Index(value = 2), Depth(value = 2)) => false
+
+fn indexWithin(x: Index, offset: Depth, n: Depth) -> Bool
+    ? "Whether index x is below offset + n: one of the n values an instantiation under offset binders puts in."
+    x.value < offset.value + n.value
+
+verify indexWithin
+    indexWithin(Index(value = 3), Depth(value = 1), Depth(value = 2)) => false
+    indexWithin(Index(value = 2), Depth(value = 1), Depth(value = 2)) => true
+
+fn indexPast(x: Index, offset: Depth) -> Int
+    ? "How far index x lies past offset: the position of the value an instantiation puts in for it."
+    x.value - offset.value
+
+verify indexPast
+    indexPast(Index(value = 5), Depth(value = 2)) => 3
+
+fn indexBack(x: Index, offset: Depth, n: Depth) -> Int
+    ? "The position of the value a reversed instantiation of n values puts in for index x: counted from the last."
+    n.value - (x.value - offset.value) - 1
+
+verify indexBack
+    indexBack(Index(value = 2), Depth(value = 2), Depth(value = 3)) => 2
+
+fn bvarUp(x: Index, d: Depth) -> Expr
+    ? "The bound variable d above index x, on the machine word."
+    match indexOf(x.value + d.value)
+        Result.Ok(y) -> bvarAt(y)
+        Result.Err(_) -> bvar(x.value + d.value)
+
+verify bvarUp
+    bvarUp(Index(value = 2), Depth(value = 3)) => bvar(5)
+    bvarUp(Index(value = 1099511627775), Depth(value = 1)) => bvar(1099511627775)
+
+fn bvarDown(x: Index, d: Depth) -> Expr
+    ? "The bound variable d below index x, on the machine word; the callers know it is not below 0."
+    match indexOf(x.value - d.value)
+        Result.Ok(y) -> bvarAt(y)
+        Result.Err(_) -> bvar(x.value - d.value)
+
+verify bvarDown
+    bvarDown(Index(value = 5), Depth(value = 3)) => bvar(2)
+
+fn bvarAbstracted(offset: Depth, n: Depth, j: Depth) -> Expr
+    ? "The bound variable that position j of n abstracted free variables becomes under offset binders: offset + n - j - 1."
+    match indexOf(offset.value + n.value - j.value - 1)
+        Result.Ok(y) -> bvarAt(y)
+        Result.Err(_) -> bvar(offset.value + n.value - j.value - 1)
+
+verify bvarAbstracted
+    bvarAbstracted(Depth(value = 2), Depth(value = 2), Depth(value = 1)) => bvar(2)
 
 fn fvar(i: Int) -> Expr
     ? "Free variable of the local context, carrying its word (LeavesCarryWords)."
@@ -494,7 +598,7 @@ verify proj
 fn metaOf(e: Expr) -> Meta
     ? "Metadata of any node; leaves compute theirs on the spot."
     match e
-        Expr.BVar(_, i) -> Meta(hash = Core.Hash.mix(1, i), range = i + 1, vars = 0, params = false, size = 1)
+        Expr.BVar(_, i) -> Meta(hash = Core.Hash.mix(1, i.value), range = i.value + 1, vars = 0, params = false, size = 1)
         Expr.FVar(_, i) -> Meta(hash = Core.Hash.mix(11, i), range = 0, vars = varsOfId(i), params = false, size = 1)
         Expr.Sort(_, l) -> Meta(hash = Core.Hash.mix(2, Core.Levels.hashOf(l)), range = 0, vars = 0, params = Core.Levels.hasParam(l), size = 1)
         Expr.Const(m, _, _) -> metaIn(m)
@@ -563,15 +667,9 @@ fn leafWordOf(e: Expr) -> Word
 verify leafWordOf
     unpack(leafWordOf(bvar(2)).value).range => 3
 
-fn bvarWord(i: Int) -> Word
-    ? "A bound variable's word: mix(1, i) as its hash, its index and one as its range. An index below 2^40 is spelled out on the machine word."
-    match indexOf(i)
-        Result.Ok(x) -> bvarWordAt(x)
-        Result.Err(_) -> leafWord(Core.Hash.mix(1, i), Int.min(i + 1, 16383), 0, 0)
-
-verify bvarWord law sameAsLeaf
-    given i: Int = [0, 1, 16382, 16383, 2147483646 - 1000003, 2147483647 - 1000003, 4294967294 - 1000003, 1099511627775, 1099511627776, -3]
-    bvarWord(i) => leafWord(Core.Hash.mix(1, i), Int.min(i + 1, 16383), 0, 0)
+verify bvar law sameAsLeaf
+    given i: Int = [0, 1, 16382, 16383, 2147483646 - 1000003, 2147483647 - 1000003, 4294967294 - 1000003, 1099511627775]
+    wordOf(bvar(i)) => leafWord(Core.Hash.mix(1, i), Int.min(i + 1, 16383), 0, 0)
 
 fn fvarWord(i: Int) -> Word
     ? "A free variable's word: mix(11, i) as its hash, its bits (varsOfId: the low ten, all ten when none is set) in place. A number below 2^40 is spelled out on the machine word."
@@ -584,7 +682,7 @@ verify fvarWord law sameAsLeaf
     fvarWord(i) => leafWord(Core.Hash.mix(11, i), 0, varsOfId(i), 0)
 
 fn bvarWordAt(x: Index) -> Word
-    ? "bvarWord of an index below 2^40, on the machine word: mix(1, i) reduced as mix reduces (MersenneFolds)."
+    ? "A bound variable's word: mix(1, i) as its hash, its index and one as its range, on the machine word, mix(1, i) reduced as mix reduces (MersenneFolds)."
     y = 1000003 + x.value
     r = Bits.and(y, 2147483647) + Bits.shiftRight(y, 31)
     h = Bits.and(r + Bits.shiftRight(r + 1, 31), 2147483647)
@@ -804,7 +902,7 @@ verify looseRange
 fn leafRange(e: Expr) -> Int
     ? "A leaf's loose range: a bound variable's index and one, nothing for another leaf."
     match e
-        Expr.BVar(_, i) -> i + 1
+        Expr.BVar(_, i) -> i.value + 1
         _ -> 0
 
 fn within(e: Expr, n: Int) -> Bool
