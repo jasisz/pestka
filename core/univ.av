@@ -504,12 +504,133 @@ verify mkMaxList
     mkMaxList([Level.Param(Core.Names.anon()), Level.Param(Core.Names.str(Core.Names.anon(), "v"))]) => Level.Max(Level.Param(Core.Names.anon()), Level.Param(Core.Names.str(Core.Names.anon(), "v")))
 
 fn isEquiv(a: Level, b: Level) -> Bool
-    ? "Equal, or equal normal forms."
-    Bool.or(a == b, normalize(a) == normalize(b))
+    ? "Equal, or equal normal forms. Without imax the normal forms are compared by what they are made of, without building them (EquivByMaxima)."
+    match a == b
+        true -> true
+        false -> match Bool.or(hasImax(a), hasImax(b))
+            true -> normalize(a) == normalize(b)
+            false -> sameMaxima(a, b)
 
 verify isEquiv
     isEquiv(Level.Max(Level.Param(Core.Names.anon()), Level.Zero), Level.Param(Core.Names.anon())) => true
     isEquiv(Level.Succ(Level.Zero), Level.Zero) => false
+    isEquiv(Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("u"), sampleParam("v"))) => true
+    isEquiv(Level.IMax(sampleParam("u"), Level.Succ(sampleParam("v"))), Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))) => true
+
+decision EquivByMaxima
+    date = "2026-11-08"
+    reason =
+        "Two levels that are not the same term were both normalized and the"
+        "normal forms compared, as the reference kernel does: flattening every"
+        "max, sorting the arguments, dropping a dominated numeral and repeated"
+        "parameters and rebuilding, about 12 k instructions a pair on etale."
+        "Without imax the normal form is fixed by what it is made of: for each"
+        "parameter the most successors it has anywhere, and the largest"
+        "numeral, kept only when it is above every parameter's. The arguments"
+        "are then sorted by a total order and rebuilt by right-nested max that"
+        "simplifies nothing more, so two such levels have equal normal forms"
+        "exactly when those maxima agree (law sameMaxima.likeNormalForms):"
+        "the same pairs pass and fail as in the reference. Levels with imax"
+        "are still normalized; they are under 0.1% of the pairs. One worker,"
+        "PGO, on 61236ab: etale 18.65 G to 18.25 G instructions, Init 48.45 G"
+        "to 48.32 G."
+    chosen = "EquivByMaxima"
+    rejected = ["NormalizeBoth"]
+    impacts = [isEquiv, sameMaxima]
+
+fn hasImax(l: Level) -> Bool
+    ? "Whether an imax occurs in the level."
+    match l
+        Level.Succ(a) -> hasImax(a)
+        Level.Max(a, b) -> Bool.or(hasImax(a), hasImax(b))
+        Level.IMax -> true
+        _ -> false
+
+verify hasImax
+    hasImax(Level.Max(Level.Zero, Level.Succ(Level.IMax(Level.Zero, Level.Zero)))) => true
+    hasImax(Level.Max(Level.Zero, sampleParam("u"))) => false
+
+fn sameMaxima(a: Level, b: Level) -> Bool
+    ? "For levels without imax: every parameter has the same most successors in both, and the kept numeral is the same."
+    match keptNumeral(a) == keptNumeral(b)
+        false -> false
+        true -> Bool.and(paramsAgree(a, a, b), paramsAgree(b, a, b))
+
+verify sameMaxima
+    sameMaxima(Level.Max(Level.Succ(sampleParam("u")), Level.Succ(sampleParam("v"))), Level.Succ(Level.Max(sampleParam("v"), sampleParam("u")))) => true
+    sameMaxima(Level.Max(Level.Succ(Level.Zero), sampleParam("u")), sampleParam("u")) => false
+    sameMaxima(Level.Max(Level.Succ(Level.Zero), Level.Succ(sampleParam("u"))), Level.Succ(sampleParam("u"))) => true
+    sameMaxima(sampleParam("u"), sampleParam("v")) => false
+
+fn paramsAgree(l: Level, a: Level, b: Level) -> Bool
+    ? "Every parameter met in l has the same most successors in a and in b."
+    match l
+        Level.Param(p) -> topOf(a, p, 0) == topOf(b, p, 0)
+        Level.Succ(x) -> paramsAgree(x, a, b)
+        Level.Max(x, y) -> Bool.and(paramsAgree(x, a, b), paramsAgree(y, a, b))
+        _ -> true
+
+verify paramsAgree
+    paramsAgree(sampleParam("u"), sampleParam("u"), Level.Succ(sampleParam("u"))) => false
+    paramsAgree(Level.Zero, Level.Zero, sampleParam("u")) => true
+
+fn topOf(l: Level, p: Name, off: Int) -> Int
+    ? "The most successors above parameter p in l, -1 where p does not occur."
+    match l
+        Level.Param(q) -> match q == p
+            true -> off
+            false -> -1
+        Level.Succ(x) -> topOf(x, p, off + 1)
+        Level.Max(x, y) -> Int.max(topOf(x, p, off), topOf(y, p, off))
+        Level.IMax(x, y) -> Int.max(topOf(x, p, off), topOf(y, p, off))
+        Level.Zero -> -1
+
+verify topOf
+    topOf(Level.Max(Level.Succ(sampleParam("u")), sampleParam("u")), Core.Names.str(Core.Names.anon(), "u"), 0) => 1
+    topOf(Level.Zero, Core.Names.str(Core.Names.anon(), "u"), 0) => -1
+
+fn numeralTop(l: Level, off: Int) -> Int
+    ? "The largest numeral in l, -1 when there is none."
+    match l
+        Level.Zero -> off
+        Level.Succ(x) -> numeralTop(x, off + 1)
+        Level.Max(x, y) -> Int.max(numeralTop(x, off), numeralTop(y, off))
+        Level.IMax(x, y) -> Int.max(numeralTop(x, off), numeralTop(y, off))
+        Level.Param -> -1
+
+verify numeralTop
+    numeralTop(Level.Max(Level.Succ(Level.Zero), sampleParam("u")), 0) => 1
+    numeralTop(sampleParam("u"), 0) => -1
+
+fn paramTop(l: Level, off: Int) -> Int
+    ? "The most successors above any parameter in l, -1 when there is none."
+    match l
+        Level.Zero -> -1
+        Level.Param -> off
+        Level.Succ(x) -> paramTop(x, off + 1)
+        Level.Max(x, y) -> Int.max(paramTop(x, off), paramTop(y, off))
+        Level.IMax(x, y) -> Int.max(paramTop(x, off), paramTop(y, off))
+
+verify paramTop
+    paramTop(Level.Max(Level.Succ(Level.Zero), sampleParam("u")), 0) => 0
+    paramTop(Level.Succ(Level.Zero), 0) => -1
+
+fn keptNumeral(l: Level) -> Int
+    ? "The numeral the normal form keeps: the largest, when it is above every parameter's successors; -1 when none is kept."
+    n = numeralTop(l, 0)
+    match n > paramTop(l, 0)
+        true -> n
+        false -> -1
+
+verify keptNumeral
+    keptNumeral(Level.Max(Level.Succ(Level.Succ(Level.Zero)), Level.Succ(sampleParam("u")))) => 2
+    keptNumeral(Level.Max(Level.Succ(Level.Zero), Level.Succ(sampleParam("u")))) => -1
+    keptNumeral(Level.Zero) => 0
+
+verify sameMaxima law likeNormalForms
+    given a: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(sampleParam("v"), sampleParam("u")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.Max(Level.Zero, sampleParam("u")), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.Max(Level.Succ(sampleParam("u")), Level.Succ(Level.Succ(sampleParam("v")))), Level.Max(Level.Max(sampleParam("u"), Level.Succ(Level.Zero)), Level.Succ(sampleParam("u"))), Level.Max(Level.Succ(Level.Succ(Level.Zero)), Level.Succ(sampleParam("u"))), Level.Max(sampleParam("u"), Level.Max(sampleParam("v"), sampleParam("u"))), Level.Succ(Level.Max(Level.Zero, Level.Zero))]
+    given b: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(sampleParam("v"), sampleParam("u")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.Max(Level.Zero, sampleParam("u")), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.Max(Level.Succ(sampleParam("u")), Level.Succ(Level.Succ(sampleParam("v")))), Level.Max(Level.Max(sampleParam("u"), Level.Succ(Level.Zero)), Level.Succ(sampleParam("u"))), Level.Max(Level.Succ(Level.Succ(Level.Zero)), Level.Succ(sampleParam("u"))), Level.Max(sampleParam("u"), Level.Max(sampleParam("v"), sampleParam("u"))), Level.Succ(Level.Max(Level.Zero, Level.Zero))]
+    sameMaxima(a, b) => normalize(a) == normalize(b)
 
 fn isEquivList(as: List<Level>, bs: List<Level>) -> Bool
     ? "Pairwise equivalent lists of the same length."
