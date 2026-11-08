@@ -47,30 +47,30 @@ fn input(args: List<String>) -> Outcome
     ? "The file read on as many workers as asked for, or the usage as a decline."
     ! [Disk.readBytesAt]
     match args
-        [path] -> Export.Stream.readFile(path, 8)
+        [path] -> Export.Stream.readFile(path, 4)
         [path, n] -> Export.Stream.readFile(path, workersOf(n))
         _ -> Outcome.Declined("usage: pestka [--low-memory] [--reorder-always] FILE.ndjson [WORKERS]")
 
 fn workersIn(args: List<String>) -> Int
-    ? "The workers the arguments ask for; eight by default."
+    ? "The workers the arguments ask for; four by default."
     match args
         [_, n] -> workersOf(n)
-        _ -> 8
+        _ -> 4
 
 verify workersIn
     workersIn(["f", "3"]) => 3
-    workersIn(["f"]) => 8
+    workersIn(["f"]) => 4
 
 fn workersOf(n: String) -> Int
-    ? "The number of workers asked for, at least one; anything unreadable means eight."
+    ? "The number of workers asked for, at least one; anything unreadable means four."
     match Int.fromString(n)
         Result.Ok(k) -> Int.max(k, 1)
-        Result.Err -> 8
+        Result.Err -> 4
 
 verify workersOf
     workersOf("3") => 3
     workersOf("0") => 1
-    workersOf("x") => 8
+    workersOf("x") => 4
 
 fn report(o: Outcome, workers: Int, memory: Memory, always: Bool) -> Verdict
     ? "Prints the verdict; always, from --reorder-always, a tool for tests, checks out of file order on any file the reader allows it on (CheckedByNamespace)."

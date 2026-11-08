@@ -78,7 +78,7 @@ To check your own export:
 .build/target/release/main MyModule.ndjson
 ```
 
-Pestka uses eight workers by default. Pass a worker count as the second
+Pestka uses four workers by default. Pass a worker count as the second
 argument, for example `MyModule.ndjson 1`. Each declaration sees only the
 environment available at its position in the file; the verdict reports the
 first failure in file order.

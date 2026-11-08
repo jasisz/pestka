@@ -83,7 +83,7 @@ tests it was not made from (`std`, `con-leche`, `cedar`, `mathlib`).
 
 Pestka builds the environment in file order, checking inductive types and
 the quotient package as it meets them, and then checks the types and
-values of the other declarations on WORKERS threads at once (eight by
+values of the other declarations on WORKERS threads at once (four by
 default), each against the environment at its own place in the file. The
 verdict is the first failure in file order, as in a strictly sequential
 check. Reading shares out the same way: the lines are parsed on the workers
