@@ -151,6 +151,9 @@ decision KeyByXor
         "bits does, and both are machine words below 2^62, so the key is"
         "one instruction on the word. Two nodes that meet on a key only make"
         "a lookup compare and miss, as two nodes with one hash did before."
+        "The memo of universe instantiation, which has no depth, keys a node"
+        "by its word alone the same way. One worker, PGO, on 9a8d69a: Init"
+        "48.76 G to 48.51 G instructions, etale 18.75 G to 18.68 G."
     chosen = "KeyByXor"
     rejected = ["DepthAboveHash"]
     impacts = [keyAtDepth]

@@ -473,7 +473,7 @@ fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Core.Exprs.Key, Tuple
             Expr.Const(_, n, ls) -> SR(e = Core.Exprs.cnst(n, levelsOf(ls, ps, us)), memo = memo)
             _ -> match Core.Exprs.isSmall(e)
                 true -> SR(e = lsmall(e, ps, us), memo = memo)
-                false -> lmemoed(e, ps, us, memo, Core.Exprs.hashKey(e))
+                false -> lmemoed(e, ps, us, memo, Core.Exprs.keyAtDepth(e, Core.Exprs.depthZero()))
 
 verify lgo
     lgo(Core.Exprs.bvar(0), [], [], {}).e => Core.Exprs.bvar(0)
