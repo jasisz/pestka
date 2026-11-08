@@ -112,15 +112,14 @@ terms, kept for the whole run otherwise, are emptied past a limit too. The
 limits were chosen by what a cost model of the caches says each GB kept
 returns, then swept on `mathlib` until the peak reached what reading
 alone takes (decision `LowMemoryMode` in `check/state.av`). PGO build,
-one worker unless said. These measurements were recorded before the later
-namespace-ordering and cache-limit changes:
+one worker unless said:
 
 | Test | Default | `--low-memory` |
 |---|---|---|
-| `mathlib` | 1726 G, 7.6 GB, 295 s | 1871 G (+8.4%), 4.7 GB, 294 s |
-| `mathlib`, 8 workers | 13.0 GB | 5.4 GB, 99 s |
-| `init` | 51.4 G, 0.98 GB | 56.6 G (+10%), 0.51 GB |
-| `etale` | 21.4 G, 0.84 GB | 22.2 G (+3.8%), 0.46 GB |
+| `mathlib` | 1187 G, 6.6 GB, 187 s | 1243 G (+4.7%), 4.9 GB, 220 s |
+| `mathlib`, 4 workers | 8.8 GB, 95 s | 5.4 GB, 79 s |
+| `init` | 47.4 G, 0.90 GB | 51.7 G (+9.1%), 0.52 GB |
+| `etale` | 17.5 G, 0.78 GB | 18.4 G (+4.9%), 0.43 GB |
 
 What the mode cannot shrink is the environment. Pestka holds every
 expression of the export until the process ends; on `mathlib` reading
