@@ -465,18 +465,44 @@ verify isParam
     isParam(Level.Param(Core.Names.str(Core.Names.anon(), "u")), Core.Names.anon()) => false
 
 fn lgo(e: Expr, ps: List<Name>, us: List<Level>, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>) -> SR
-    ? "Skips terms without parameters; compound nodes go through the memo."
+    ? "Skips terms without parameters; constants and large compound nodes go through the memo, small ones are rebuilt with it carried (ConstantsOnce)."
     match Core.Exprs.hasParam(e)
         false -> SR(e = e, memo = memo)
         true -> match e
             Expr.Sort(_, l) -> SR(e = Core.Exprs.sort(Core.Univ.instantiate(l, ps, us)), memo = memo)
-            Expr.Const(_, n, ls) -> SR(e = Core.Exprs.cnst(n, levelsOf(ls, ps, us)), memo = memo)
+            Expr.Const(_, n, ls) -> lconst(e, n, ls, ps, us, memo, Core.Exprs.keyAtDepth(e, Core.Exprs.depthZero()))
             _ -> match Core.Exprs.isSmall(e)
-                true -> SR(e = lsmall(e, ps, us), memo = memo)
+                true -> levelNode(e, ps, us, memo)
                 false -> lmemoed(e, ps, us, memo, Core.Exprs.keyAtDepth(e, Core.Exprs.depthZero()))
 
 verify lgo
     lgo(Core.Exprs.bvar(0), [], [], {}).e => Core.Exprs.bvar(0)
+    lgo(Core.Exprs.app(Core.Exprs.cnst(Core.Names.anon(), [Level.Param(Core.Names.anon())]), Core.Exprs.cnst(Core.Names.anon(), [Level.Param(Core.Names.anon())])), [Core.Names.anon()], [Level.Zero], {}).e => Core.Exprs.app(Core.Exprs.cnst(Core.Names.anon(), [Level.Zero]), Core.Exprs.cnst(Core.Names.anon(), [Level.Zero]))
+
+decision ConstantsOnce
+    date = "2026-11-08"
+    reason =
+        "Of the constants instantiateLevelParams rebuilt on mathlib, 50 M,"
+        "more than half were a constant the same call had already rebuilt,"
+        "met again in another small subterm, and each rebuild instantiated"
+        "its levels, hashed them, flagged their parameters and built the"
+        "node, about 1.1 k instructions. A constant now goes through the"
+        "call's memo, which small subterms carry too, so each distinct"
+        "constant is rebuilt once per call and its copies share the node."
+        "One worker, PGO, on ProjTypeKept: etale 18.15 G to 17.99 G"
+        "instructions, peak 901 MB to 840 MB; Init 48.33 G to 48.29 G."
+    chosen = "ConstantsOnce"
+    rejected = ["ConstantsEachTime"]
+    impacts = [lgo, lconst]
+
+fn lconst(e: Expr, n: Name, ls: List<Level>, ps: List<Name>, us: List<Level>, memo: Map<Core.Exprs.Key, Tuple<Expr, Expr>>, key: Core.Exprs.Key) -> SR
+    ? "A constant at its levels instantiated, once per call."
+    match hit(Map.get(memo, key), e)
+        Option.Some(r) -> SR(e = r, memo = memo)
+        Option.None -> remember(SR(e = Core.Exprs.cnst(n, levelsOf(ls, ps, us)), memo = memo), e, key)
+
+verify lconst
+    lconst(Core.Exprs.cnst(Core.Names.anon(), [Level.Param(Core.Names.anon())]), Core.Names.anon(), [Level.Param(Core.Names.anon())], [Core.Names.anon()], [Level.Zero], {}, Core.Exprs.hashKey(Core.Exprs.bvar(1))).e => Core.Exprs.cnst(Core.Names.anon(), [Level.Zero])
 
 fn lsmall(e: Expr, ps: List<Name>, us: List<Level>) -> Expr
     ? "instLevelParams on a term of fewer than 32 tree nodes: plain recursion that skips terms without parameters, with no memo to carry."
