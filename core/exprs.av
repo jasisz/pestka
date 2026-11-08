@@ -139,6 +139,22 @@ decision KeysAsMachineWords
     rejected = ["IntKeys"]
     impacts = [Key, keyOf, key, keyAt, hashKey]
 
+decision KeyByXor
+    date = "2026-11-08"
+    reason =
+        "Substitution's memo keyed a node by its depth times 2^31 plus its"
+        "hash, read out of the word by a division, and the sum was made on"
+        "the general number with its checks for overflow and a boxed operand"
+        "at every memo lookup. The memo compares the node it finds with the"
+        "one it looks up, so a key only has to tell one node at two depths"
+        "apart: the node's whole word with the depth xor-ed into its low"
+        "bits does, and both are machine words below 2^62, so the key is"
+        "one instruction on the word. Two nodes that meet on a key only make"
+        "a lookup compare and miss, as two nodes with one hash did before."
+    chosen = "KeyByXor"
+    rejected = ["DepthAboveHash"]
+    impacts = [keyAtDepth]
+
 decision WordsAsMachineWords
     date = "2026-10-25"
     reason =
@@ -299,11 +315,17 @@ verify withinDepth
     withinDepth(bvar(1), deeper(depthZero())) => false
 
 fn keyAtDepth(e: Expr, d: Depth) -> Key
-    ? "keyAt on a depth."
-    key(d.value * 2147483648 + hashOf(e))
+    ? "The key of e under d binders, for a memo that compares the node it finds with e: e's whole word with the depth xor-ed in, both machine words below 2^62, so the key never leaves the word (KeyByXor). One node at two depths has two keys; two nodes that meet on a key only make a lookup compare and miss. A literal, which carries no word, is keyed as keyAt keys it."
+    match packedOf(e)
+        Option.Some(w) -> match keyOf(Bits.xor(w.value, d.value))
+            Result.Ok(k) -> k
+            Result.Err(_) -> Key(value = 0)
+        Option.None -> keyAt(e, d.value)
 
 verify keyAtDepth
-    keyAtDepth(bvar(0), deeper(depthZero())) == keyAt(bvar(0), 1) => true
+    keyAtDepth(bvar(0), deeper(depthZero())) == keyAtDepth(bvar(0), depthZero()) => false
+    keyAtDepth(app(bvar(0), bvar(1)), deeper(depthZero())) == keyAtDepth(app(bvar(0), bvar(1)), depthZero()) => false
+    keyAtDepth(natLit(3), deeper(depthZero())) == keyAt(natLit(3), 1) => true
 
 fn key(n: Int) -> Key
     ? "A key from an Int in range; anything else is key 0, which only makes a lookup compare with another node and miss."
