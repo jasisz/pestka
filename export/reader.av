@@ -198,12 +198,12 @@ verify roundDone
     roundDone(At(t = Export.Tables.empty(), n = 3), [], [], 2) => Result.Ok(Export.Tables.empty())
 
 fn starts(lines: List<String>, k: Int, acc: List<List<String>>) -> List<List<String>>
-    ? "Where each of k runs begins, in order: the lines from there on, which share their cells with lines."
+    ? "The first k runs of lines, in order, each a list of its own: a worker stepping through a run it shares with the others counts every step on the one allocation they all hold."
     match k <= 0
         true -> List.reverse(acc)
         false -> match lines
             [] -> List.reverse(acc)
-            _ -> starts(List.drop(lines, runLines()), k - 1, List.prepend(lines, acc))
+            _ -> starts(List.drop(lines, runLines()), k - 1, List.prepend(List.take(lines, runLines()), acc))
 
 verify starts
     starts(["a"], 3, []) => [["a"]]
