@@ -2,8 +2,7 @@
 # Compiles Pestka to Rust and builds the release binary into .build/.
 # Uses the aver on PATH unless AVER names another one; it should be the
 # version in .aver-version. The allocator comes from aver.toml.
-# AVER_FLAGS holds further flags for aver compile (for example
-# --single-thread, the build the Arena runs on one worker).
+# AVER_FLAGS holds further flags for aver compile.
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck disable=SC2086 # AVER_FLAGS is a list of flags

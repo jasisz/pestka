@@ -2,7 +2,8 @@
 
 # Benchmarks
 
-Measured on revision `88fb511`, compiled by Aver at commit `d55294ab0`.
+Measured on the revision that last changed this file, compiled by Aver
+0.33.1.
 
 ## Native
 
@@ -10,23 +11,27 @@ On the small Lean Kernel Arena tests (all but `perf/` and the large corpora)
 Pestka answers 179 of 179 correctly.
 
 The Arena's large tests and its `perf/` tests, exported as the Arena exports
-them and checked on an Apple M2 Pro: on one worker, as the Arena runs Pestka,
-and on four, the default. The instructions retired on one worker are what
-the Arena ranks checkers by.
+them and checked on an Apple M2 Pro with the default build: on four workers,
+the default, and on one. Four workers parse the file in rounds and share
+caches an eighth larger than one worker's, so their peak stays close to one
+worker's; they take more instructions than one worker, from parsing each line
+into a value of its own and from caches each worker fills on its own (see
+[workers](usage.md#workers)). The Lean Kernel Arena counts instructions
+retired over all threads.
 The build is `bin/build-pgo` with `-C target-cpu=native`, guided by the
 profile of a check of all of `Init` (see [building with PGO](usage.md#commands)); `init` is the one test
 below that profile was made from.
 
-| Test | Verdict | Instructions, 1 worker | Time, 1 worker | Peak, 1 worker | Time, 4 workers | Peak, 4 workers |
-|---|---|---|---|---|---|---|
-| `init` (58,170 declarations) | accepted | 47.5 G | 6.6 s | 0.9 GB | 3.6 s | 1.4 GB |
-| `std` (101,286) | accepted | 81.8 G | 12 s | 1.3 GB | 5.7 s | 2.0 GB |
-| `reachability` | accepted | 20.8 G | 2.0 s | 0.3 GB | 1.4 s | 0.4 GB |
-| `con-leche` | accepted | 77.6 G | 10 s | 1.3 GB | 5.3 s | 1.8 GB |
-| `cedar` | accepted | 115.2 G | 18 s | 1.5 GB | 8.2 s | 2.1 GB |
-| `cslib` | accepted | 375.0 G | 56 s | 3.6 GB | 29 s | 4.8 GB |
-| `mathlib` (702,040) | accepted | 1.19 T | 187 s | 6.6 GB | 71 s | 9.4 GB |
-| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 45.5 G (6.7 G) | 4.0 s (0.46 s) | 0.9 GB | 4.0 s (0.47 s) | 0.9 GB |
+| Test | Verdict | Time, 4 workers | Peak, 4 workers | Instructions, 4 workers | Time, 1 worker | Peak, 1 worker | Instructions, 1 worker |
+|---|---|---|---|---|---|---|---|
+| `init` (58,170 declarations) | accepted | 3.4 s | 1.0 GB | 58.4 G | 6.8 s | 0.9 GB | 47.5 G |
+| `std` (101,286) | accepted | 5.5 s | 1.5 GB | 99.2 G | 12 s | 1.3 GB | 81.7 G |
+| `reachability` | accepted | 1.2 s | 0.4 GB | 21.2 G | 1.8 s | 0.3 GB | 20.7 G |
+| `con-leche` | accepted | 4.8 s | 1.3 GB | 90.5 G | 9.1 s | 1.3 GB | 77.3 G |
+| `cedar` | accepted | 8.0 s | 1.5 GB | 135.8 G | 16 s | 1.5 GB | 115.0 G |
+| `cslib` | accepted | 26 s | 3.7 GB | 419.9 G | 55 s | 3.6 GB | 373.6 G |
+| `mathlib` (702,040) | accepted | 73–76 s | 7.0 GB | 1.31 T | 183 s | 6.6 GB | 1.19 T |
+| `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 3.8 s (0.47 s) | 0.9 GB | 47.0 G (6.7 G) | 4.0 s (0.46 s) | 0.9 GB | 45.6 G (6.7 G) |
 
 ### As WebAssembly
 

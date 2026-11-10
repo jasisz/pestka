@@ -68,11 +68,8 @@ then injects loose bound variables and duplicate universe parameters. An
 invalid export accepted by any kernel is kept under `tests/soundness-findings/`.
 
 `bin/build` uses the `aver` on `PATH`, or the one `AVER` names, and passes
-`AVER_FLAGS` on to `aver compile`. `AVER_FLAGS=--single-thread` builds
-Pestka for one thread: the workers then run one after another, and Aver
-counts references with plain instructions instead of atomic ones (needs an
-Aver with `--single-thread`). That is the build for one worker, as the Arena
-runs it; the default build keeps its workers on threads of their own.
+`AVER_FLAGS` on to `aver compile`. The workers run on threads of their
+own; the same build serves one worker and many.
 `bin/build-pgo` builds once with instrumentation, checks TRAIN with it on
 one worker, and builds again with the profile that run left; `FLAGS` adds
 rustc flags to both builds (the Arena gives `-C target-cpu=native`). It needs
@@ -117,7 +114,7 @@ one worker unless said:
 | Test | Default | `--low-memory` |
 |---|---|---|
 | `mathlib` | 1187 G, 6.6 GB, 187 s | 1243 G (+4.7%), 4.9 GB, 220 s |
-| `mathlib`, 4 workers | 9.4 GB, 71 s | 5.9 GB, 76 s |
+| `mathlib`, 4 workers | 7.0 GB, 73–76 s | 5.0 GB, 74 s |
 | `init` | 47.4 G, 0.90 GB | 51.7 G (+9.1%), 0.52 GB |
 | `etale` | 17.5 G, 0.78 GB | 18.4 G (+4.9%), 0.43 GB |
 
@@ -137,6 +134,24 @@ stored terms.
 
 `tests/run.sh` and `tests/arena.sh` take `PESTKA_ARGS`, so
 `PESTKA_ARGS=--low-memory sh tests/run.sh` runs them in this mode.
+
+### Workers
+
+Workers take more instructions than one worker on the same file: reading in
+rounds parses each line into a value of its own before the tables take it,
+and each worker keeps caches of its own and learns again facts that another
+worker has already found. The workers share caches only an eighth larger
+than one worker's, so the peak stays close to one worker's (decision
+`FrugalWorkers` in `check/decl.av`). `mathlib`, PGO build:
+
+| Workers | Time | Peak | Instructions |
+|---|---|---|---|
+| 1 | 183 s | 6.6 GB | 1186 G |
+| 4 | 73–76 s | 7.0 GB | 1312 G (+11%) |
+
+Of that 11%, reading in rounds takes about 7% (84 G) and saves 6–8 s. The
+rest comes mostly from the smaller caches each worker keeps. Four workers
+each given a whole worker's caches would need about twice the memory.
 
 ### WebAssembly
 

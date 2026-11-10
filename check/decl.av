@@ -153,18 +153,18 @@ decision CheckedByNamespace
     rejected = ["FileOrderAlways", "OrderedBySharedKeys", "TermsWalkedBeforeChecking", "FirstComponentOnly", "OwnersWithTheirNamespace", "JobsSortedByJoinedKeys", "RarestConclusionNamespace", "ConclusionWithinNamespace", "EmptiedWhereGroupsEnd"]
     impacts = [orderFor, ordered, chunkLoop, chunkNext]
 
-fn orderFor(jobs: List<Job>, workers: Int, placed: Bool, always: Bool) -> List<Job>
+fn orderFor(jobs: List<Job>, workers: Int, unit: Int, placed: Bool, always: Bool) -> List<Job>
     ? "File order while each worker has no more declarations than the unit of its limits, where the maps carried are emptied a few times at most and grouping costs more than it keeps, or when some declaration names a constant not placed before it; otherwise grouped by namespace (CheckedByNamespace). Mathlib's 702040 declarations on one worker pass 262144; Init's 58170, std's 101286 and cedar's 143203 do not, nor any of these on eight workers. always, for tests, groups whatever the count, still only when every name was placed."
-    match Bool.or(always, List.len(jobs) > Int.max(workers, 1) * keepFor(workers))
+    match Bool.or(always, List.len(jobs) > Int.max(workers, 1) * unit)
         false -> jobs
         true -> match placed
             true -> ordered(jobs)
             false -> jobs
 
 verify orderFor
-    orderFor([], 1, true, false) => []
-    List.len(orderFor([Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "b"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Job(pos = 1, upTo = 1, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "a"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)], 1, true, true)) => 2
-    orderFor([Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "b"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Job(pos = 1, upTo = 1, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "a"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)], 1, true, true) == orderFor([Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "b"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Job(pos = 1, upTo = 1, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "a"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)], 1, true, false) => false
+    orderFor([], 1, 262144, true, false) => []
+    List.len(orderFor([Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "b"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Job(pos = 1, upTo = 1, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "a"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)], 1, 262144, true, true)) => 2
+    orderFor([Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "b"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Job(pos = 1, upTo = 1, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "a"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)], 1, 262144, true, true) == orderFor([Job(pos = 0, upTo = 0, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "b"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false), Job(pos = 1, upTo = 1, head = Head(name = Core.Names.str(Core.Names.str(Core.Names.anon(), "a"), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)], 1, 262144, true, false) => false
 
 fn ordered(jobs: List<Job>) -> List<Job>
     ? "The deferred declarations grouped by the first two components of their names, groups in the order of those and file order within each, so that declarations about the same things are checked one after another and the facts one finds are still kept when the next asks for them (CheckedByNamespace)."
@@ -345,10 +345,12 @@ decision FactsHeldToExit
     impacts = [checkHeld, groupLoop, Checked]
 
 fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always: Bool) -> Checking
-    ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit); the maps carried are bounded as the memory mode says (LowMemoryMode); always groups by namespace whatever the count, for tests (CheckedByNamespace)."
+    ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit); the maps carried are bounded as the memory mode says (LowMemoryMode) and shared out among the workers (FrugalWorkers); always groups by namespace whatever the count, for tests (CheckedByNamespace)."
     a = admit(decls)
-    jobs = orderFor(due(a), workers, placed, always)
-    cs = runWorkers(deal(chunks(jobs, a.run.env, limitsFor(workers, memory), runSize(List.len(jobs), workers), [], 0, []), workers, 0, emptyGroups(workers, [])))
+    w = Int.max(workers, 1)
+    unit = unitFor(w)
+    jobs = orderFor(due(a), w, unit, placed, always)
+    cs = runWorkers(deal(chunks(jobs, a.run.env, Check.State.limitsOf(unit, memory), runSize(List.len(jobs), w), [], 0, []), w, 0, emptyGroups(w, [])))
     Checking(run = combine(a, cs), held = cs)
 
 verify checkHeld
@@ -383,24 +385,44 @@ decision WorkersByNamespace
     rejected = ["RunsOfSixteen", "OneRunPerWorker", "TwoRunsPerWorker", "EightRunsPerWorker"]
     impacts = [runSize, deal, checkHeld]
 
-fn limitsFor(workers: Int, memory: Memory) -> Limits
-    ? "The limits of the maps a worker carries across declarations, from the unit the number of workers sets and the memory mode."
-    Check.State.limitsOf(keepFor(workers), memory)
+decision FrugalWorkers
+    date = "2026-11-10"
+    reason =
+        "Each worker kept maps of its own, the workers sharing twice what"
+        "one worker keeps. Now they share maps an eighth larger than one"
+        "worker's, so the peak stays near one worker's. Mathlib, PGO, the"
+        "file read on one thread to compare the checking alone,"
+        "instructions, peak and wall against one worker (1185.2 G, 7.07 GB,"
+        "183 s): four workers as before 1214.4 G, 9.48 GB, 80 s; now two"
+        "workers 1203.0 G, 7.66 GB, 118 s; three 1216.9 G, 7.70 GB, 93 s;"
+        "four 1225.1 G, 7.67 GB, 79 s. What four workers take beyond one is"
+        "mostly their smaller maps: one worker with a fourth of the maps"
+        "took 1216.5 G, four workers each with a whole worker's 1195.2 G"
+        "(at 14.8 GB). Starting the workers from the facts one worker found"
+        "in the first 2.5 to 20% of the file, checked while the rest was"
+        "read, took 0.1 to 1.5% more instructions, not fewer: a map emptied"
+        "past its limit lets the warm facts go within a few declarations."
+        "Reading in rounds on the workers stays: on mathlib it costs 84 G"
+        "more (184.7 G to 269.1 G) and saves 6 to 8 s."
+    chosen = "ShareAnEighthMore"
+    rejected = ["ShareTwiceOneWorkers", "ShareAQuarterMore", "WarmRoots", "SmallFilesOnOneWorker"]
+    impacts = [unitFor, frugalBudget, checkHeld]
 
-verify limitsFor
-    limitsFor(1, Memory.Fast).vars => 196608
-    limitsFor(8, Memory.Low).vars => 8192
+fn unitFor(workers: Int) -> Int
+    ? "How many hashes a map carried across declarations keeps before it is emptied, the unit of the limits carried: three of it for the checked types, one and a half for equal pairs and three quarters for the rest (LimitsFromReuseDistances, LimitsAfterOrdering). Every worker keeps maps of its own and they share out what all of them keep (FrugalWorkers), no worker keeping more than one alone."
+    Int.min(262144, Result.withDefault(Int.div(frugalBudget(), Int.max(workers, 1)), 262144))
 
-fn keepFor(workers: Int) -> Int
-    ? "How many hashes a map carried across declarations keeps before it is emptied: the unit of the limits carried sets, three of it for the checked types, one and a half for equal pairs and three quarters for the rest (LimitsFromReuseDistances, LimitsAfterOrdering). Every worker keeps maps of its own; the workers share twice what one worker keeps, and no worker keeps more than one alone (CacheBudgetShared). Twice as much on one worker took mathlib from 10467.3 G to 10336.7 G instructions and its peak from 8.28 GB to 8.90 GB; twice that, once terms were smaller, from 5124.6 G to 5010.4 G and from 7.91 GB to 8.89 GB."
-    Int.min(262144, Result.withDefault(Int.div(524288, Int.max(workers, 1)), 262144))
+verify unitFor
+    unitFor(1) => 262144
+    unitFor(2) => 147456
+    unitFor(4) => 73728
 
-verify keepFor
-    keepFor(1) => 262144
-    keepFor(2) => 262144
-    keepFor(4) => 131072
-    keepFor(8) => 65536
-    keepFor(12) => 43690
+fn frugalBudget() -> Int
+    ? "The hashes the workers keep together: an eighth more than one worker keeps alone (FrugalWorkers)."
+    294912
+
+verify frugalBudget
+    frugalBudget() > 262144 => true
 
 decision CacheBudgetShared
     date = "2026-11-07"
@@ -421,7 +443,7 @@ decision CacheBudgetShared
         "1463.6 G."
     chosen = "TwiceOneWorkerShared"
     rejected = ["QuarterPerWorker", "OneWorkerEach"]
-    impacts = [keepFor, limitsFor, orderFor]
+    impacts = [unitFor, orderFor]
 
 fn emptyGroups(n: Int, acc: List<List<Chunk>>) -> List<List<Chunk>>
     ? "n empty groups."
@@ -651,7 +673,7 @@ decision LimitsFromReuseDistances
         "40 M on the checked types alone."
     chosen = "LimitsFromReuseDistances"
     rejected = ["OneLimit", "TwoGenerations"]
-    impacts = [carried, keepFor]
+    impacts = [carried, unitFor]
 
 fn carried(st: St) -> Facts
     ? "What checking takes from a declaration to the next: the facts about closed terms; the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration; and, since a free variable is made of its type and value and how many of its kind are open around it (CountedVariables), the variables made so far with their context, and what was found by inference, checking, reduction and comparison about terms holding them, which holds wherever the same variables appear. What was found by checking terms with a universe parameter is kept under the declaration's parameters (ParamsInTheKey). Each map is emptied past its limit, a multiple of the unit set by what its entries are used again at and cost to keep (LimitsFromReuseDistances), the closed terms only in the low-memory mode (LowMemoryMode); when the variables are, their context and every map that may hold a variable go with them, so no kept result names a variable that is gone."
