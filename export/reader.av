@@ -311,7 +311,7 @@ fn applyRuns(t: Tables, runs: List<List<Line>>, n: Int) -> Result<At, String>
     ? "The parsed runs into the tables, in order."
     match runs
         [] -> Result.Ok(At(t = t, n = n))
-        [r, ..rest] -> applyNext(applyAll(t, r, n)?, rest)
+        [r, ..rest] -> applyNext(applyAt(t, Vector.fromList(r), 0, n)?, rest)
 
 verify applyRuns
     applyRuns(Export.Tables.empty(), [[Line.Blank], [Line.Bad("x")]], 5) => Result.Err("line 6: x")
@@ -322,6 +322,25 @@ fn applyNext(at: At, rest: List<List<Line>>) -> Result<At, String>
 
 verify applyNext
     applyNext(At(t = Export.Tables.empty(), n = 3), []) => Result.Ok(At(t = Export.Tables.empty(), n = 3))
+
+fn applyAt(t: Tables, ls: Vector<Line>, k: Int, n: Int) -> Result<At, String>
+    ? "Line k of a parsed run on into the tables; n is its line number. A run is read by its places: stepping through the list it was built as counted the list's one allocation at every step."
+    match Vector.get(ls, k)
+        Option.None -> Result.Ok(At(t = t, n = n))
+        Option.Some(l) -> applyAtAfter(applyLine(t, l), ls, k, n)
+
+verify applyAt
+    applyAt(Export.Tables.empty(), Vector.fromList([Line.Blank, Line.Bad("x")]), 0, 2) => Result.Err("line 3: x")
+    applyAt(Export.Tables.empty(), Vector.fromList([Line.Blank]), 0, 2) => Result.Ok(At(t = Export.Tables.empty(), n = 3))
+
+fn applyAtAfter(r: Result<Tables, String>, ls: Vector<Line>, k: Int, n: Int) -> Result<At, String>
+    ? "Stops at the first bad line, naming it; otherwise goes on."
+    match r
+        Result.Err(e) -> Result.Err("line {n}: {e}")
+        Result.Ok(t) -> applyAt(t, ls, k + 1, n + 1)
+
+verify applyAtAfter
+    applyAtAfter(Result.Err("x"), Vector.fromList([]), 0, 7) => Result.Err("line 7: x")
 
 fn applyAll(t: Tables, ls: List<Line>, n: Int) -> Result<At, String>
     ? "One run's lines into the tables; n is the line number of the first."
