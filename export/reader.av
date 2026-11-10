@@ -239,6 +239,23 @@ verify parseAll
     parseAll(["", ""], 5, []) => [Line.Blank, Line.Blank]
     parseAll(["", ""], 1, []) => [Line.Blank]
 
+decision RangesInPlace
+    date = "2026-11-10"
+    reason =
+        "On several workers a chunk's lines were copied twice before they"
+        "were parsed, all of them into a list of their own and each run into"
+        "another, and the parsed runs were stepped through as lists, which"
+        "counted their one allocation at every step: on mathlib four workers"
+        "read with 80 G more instructions than one. The chunk's parts now"
+        "become a vector, which the split's list shares as it is; each"
+        "worker parses a range of it, and each parsed run is read back by"
+        "index. Mathlib, reading only, four workers, PGO build: 268.1 G,"
+        "16.3 to 17.2 s, to 239.9 G, 14.8 s; one worker 187.8 G to 184.8 G."
+        "Checked in full on four workers, 1318.9 G to 1285.8 G."
+    chosen = "RangesInPlace"
+    rejected = ["RunsCopied"]
+    impacts = [readRange, parseRanges, parseSpan, applyAt]
+
 fn readRange(t: Tables, v: Vector<String>, from: Int, to: Int, n: Int, workers: Int) -> Result<Tables, String>
     ? "Reads lines from to to of v, which a chunk's text was split into, with the parsing shared out among workers in rounds as readParallel does; n is the line number of the first. The workers read their runs where they lie in v, so no line is copied into a run of its own (RangesInPlace)."
     match from >= to
