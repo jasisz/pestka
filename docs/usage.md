@@ -84,8 +84,9 @@ values of the other declarations on WORKERS threads at once (four by
 default), each against the environment at its own place in the file. The
 verdict is the first failure in file order, as in a strictly sequential
 check. Reading shares out the same way: the lines are parsed on the workers
-in rounds and go into the tables in file order, each round while the next
-one is parsed.
+in rounds, each worker a range of the chunk being read where the split put
+it, and go into the tables in file order, each round while the next one is
+parsed (decision `RangesInPlace` in `export/reader.av`).
 
 When each worker has more declarations than its caches hold (`mathlib` on
 one worker), the deferred declarations are checked grouped by the first
@@ -114,7 +115,7 @@ one worker unless said:
 | Test | Default | `--low-memory` |
 |---|---|---|
 | `mathlib` | 1187 G, 6.6 GB, 187 s | 1243 G (+4.7%), 4.9 GB, 220 s |
-| `mathlib`, 4 workers | 7.0 GB, 73–76 s | 5.0 GB, 74 s |
+| `mathlib`, 4 workers | 7.1 GB, 73–74 s | 5.0 GB, 71 s |
 | `init` | 47.4 G, 0.90 GB | 51.7 G (+9.1%), 0.52 GB |
 | `etale` | 17.5 G, 0.78 GB | 18.4 G (+4.9%), 0.43 GB |
 
@@ -146,12 +147,13 @@ than one worker's, so the peak stays close to one worker's (decision
 
 | Workers | Time | Peak | Instructions |
 |---|---|---|---|
-| 1 | 183 s | 6.6 GB | 1186 G |
-| 4 | 73–76 s | 7.0 GB | 1312 G (+11%) |
+| 1 | 180 s | 6.6 GB | 1185 G |
+| 4 | 73–74 s | 7.1 GB | 1283 G (+8%) |
 
-Of that 11%, reading in rounds takes about 7% (84 G) and saves 6–8 s. The
-rest comes mostly from the smaller caches each worker keeps. Four workers
-each given a whole worker's caches would need about twice the memory.
+Of that 8%, reading in rounds takes about 4.5% (55 G) and saves about
+10 s. The rest comes mostly from the smaller caches each worker keeps. Four
+workers each given a whole worker's caches would need about twice the
+memory.
 
 ### WebAssembly
 
