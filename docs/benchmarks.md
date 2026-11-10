@@ -34,6 +34,19 @@ below that profile was made from.
 | `mathlib` (702,040) | accepted | 73–74 s | 7.1 GB | 1.28 T | 180 s | 6.6 GB | 1.19 T |
 | `perf/`, 30 tests (in brackets `magma-list-deep-n36`) | as expected | 3.9 s (0.47 s) | 0.9 GB | 46.7 G (6.7 G) | 4.3 s (0.49 s) | 0.9 GB | 45.5 G (6.7 G) |
 
+### Susz
+
+`mathlib` packed into [Susz](susz.md) by `pestka pack` (5.90 GB of ndjson to
+661 MB, in about a minute) and checked from that, with the same build as the
+table above and the same verdict and output:
+
+| | From ndjson | From Susz |
+|---|---|---|
+| Reading, to the `constants` line, one thread | 24.6 s, 183.5 G | 12.3 s, 101.5 G |
+| Reading, four workers | 15.7 s, 241.2 G | 12.3 s, 101.7 G (read on one thread) |
+| Whole check, four workers | 76.5 s, 7.6 GB, 1314.1 G | 71.5 s, 7.6 GB, 1163.0 G |
+| Whole check, one worker | 187 s, 7.0 GB, 1196.7 G | 178 s, 7.1 GB, 1115.1 G |
+
 ### As WebAssembly
 
 The same source compiled by Aver's own wasm-gc backend (not through Rust or
