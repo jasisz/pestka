@@ -34,6 +34,24 @@ cd lean4export && echo leanprover/lean4:v4.34.1 > lean-toolchain && lake build
 .lake/build/bin/lean4export MyModule -- MyModule.foo     # one constant and its dependencies
 ```
 
+### Susz
+
+An export can be packed once into Susz, Pestka's binary form of it
+([format](susz.md)), and checked from that as often as needed:
+
+```bash
+.build/target/release/main pack mathlib.ndjson mathlib.susz   # 5.90 GB to 661 MB, about a minute
+.build/target/release/main mathlib.susz [WORKERS]
+```
+
+Pestka recognises a Susz file by its first bytes. It reads it into the same
+tables as the ndjson file and checks it the same way, with the same verdict;
+only a malformed record is named by its number rather than its line. The
+packer refuses what the reader would reject while reading. On mathlib,
+reading takes 95 G instructions and 11 s on one thread instead of 184 G and
+24 s (16 s and 247 G reading the ndjson file on four), and the whole check on
+four workers 71 s and 1156 G instead of 79 s and 1320 G.
+
 ## Commands
 
 ```bash
