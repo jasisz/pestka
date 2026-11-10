@@ -6,6 +6,12 @@
 # "-C target-cpu=native"). Needs llvm-profdata, on PATH or from rustup's
 # llvm-tools component. AVER_FLAGS holds further flags for aver compile, as
 # for bin/build.
+# The profile is taken on one worker although four is the default. Taken
+# on four, or on one and then four, it left four workers where they were
+# (mathlib 1285.8 G on one, 1285.4 G on four, 1287.6 G on both; Init
+# 56.6, 56.4, 56.3 G) and made one worker slower (mathlib 1196.0,
+# 1229.4, 1199.6 G; Init 47.4, 49.4, 48.1 G): what four workers do
+# beyond one, parsing in rounds, is a small part of the run.
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 train=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
