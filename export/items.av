@@ -5,7 +5,7 @@ module Items
         "value is built from values already in the tables and every shared"
         "subterm stays shared. mdata is transparent to the kernel and"
         "resolves to the expression it wraps."
-    exposes [nameLine, levelLine, exprLine, appAt, binderAt, nameStrAt, nameNumAt, succAdded, paramAdded, levelsRead, sortAt, constAt, letAt]
+    exposes [nameLine, levelLine, exprLine, appAt, binderAt, nameStrAt, nameNumAt, succAdded, paramAdded, levelsRead, sortAt, constAt, letAt, natOf]
     depends [Json.Line, Json.Access, Core.Names, Core.Levels, Core.Univ, Core.Exprs, Export.Tables]
     effects []
 

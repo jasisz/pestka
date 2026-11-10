@@ -4,7 +4,7 @@ module Reader
         "other line in order. A line is a declaration when its object has a"
         "single key, and an item of the name, level or expression table"
         "when it carries an in, il or ie index."
-    exposes [Chunk, header, supported, readAll, readChunk, readParallel, readRange, readLine]
+    exposes [Chunk, Line, header, supported, readAll, readChunk, readParallel, readRange, readLine, parseLine]
     depends [Json.Line, Json.Escapes, Json.Access, Core.Exprs, Core.Decls, Export.Tables, Export.Items, Export.Declarations]
     effects []
 

@@ -3,7 +3,7 @@ module Declarations
         "Lines that declare constants: axioms, definitions, theorems, opaque"
         "constants, the quotient package and inductive blocks. Every name,"
         "level and expression they mention must already be in the tables."
-    exposes [declLine, thmAt, defAt]
+    exposes [declLine, thmAt, defAt, headOf]
     depends [Json.Line, Json.Access, Core.Names, Core.Exprs, Core.Decls, Export.Tables]
     effects []
 

@@ -4,8 +4,8 @@ module Main
         "The verdict is the last line printed: accepted, rejected: <why> or"
         "declined: <why>. main returns the exit status: 0 accepted, 1 rejected,"
         "2 declined."
-    depends [Core.Names, Check.State, Check.Decl, Export.Stream, Export.Tables]
-    effects [Args.get, Console.print, Disk.readBytesAt]
+    depends [Core.Names, Check.State, Check.Decl, Export.Stream, Export.Tables, Export.Susz, Export.Pack]
+    effects [Args.get, Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
 
 record Verdict
     code: Int
@@ -13,12 +13,32 @@ record Verdict
 
 fn main() -> Int
     ? "Reads the file, checks it and ends with the exit status. The input and what checking found are still held here when main ends, so the process ends without freeing them (FactsHeldToExit)."
-    ! [Args.get, Console.print, Disk.readBytesAt]
+    ! [Args.get, Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     args = Args.get()
+    match args
+        ["pack", src, dst] -> packed(Export.Pack.pack(src, dst))
+        _ -> checked(args)
+
+fn checked(args: List<String>) -> Int
+    ? "Reads and checks the file the arguments name; the exit status."
+    ! [Console.print, Disk.readBytesAt, Disk.size]
     plain = withoutFlag(args, [])
     o = input(plain)
     v = report(o, workersIn(plain), memoryIn(args), List.contains(args, "--reorder-always"))
     v.code
+
+fn packed(r: Result<String, String>) -> Int
+    ? "pestka pack FILE.ndjson FILE.susz writes the export in Susz (docs/susz.md): 0 when written, 1 when not."
+    ! [Console.print]
+    match r
+        Result.Ok(m) -> printed(m, 0)
+        Result.Err(e) -> printed("cannot pack: {e}", 1)
+
+fn printed(m: String, code: Int) -> Int
+    ? "Prints m and gives code."
+    ! [Console.print]
+    Console.print(m)
+    code
 
 fn memoryIn(args: List<String>) -> Memory
     ? "The low-memory mode when --low-memory is among the arguments (LowMemoryMode)."
@@ -45,11 +65,18 @@ verify withoutFlag
 
 fn input(args: List<String>) -> Outcome
     ? "The file read on as many workers as asked for, or the usage as a decline."
-    ! [Disk.readBytesAt]
+    ! [Disk.readBytesAt, Disk.size]
     match args
-        [path] -> Export.Stream.readFile(path, 4)
-        [path, n] -> Export.Stream.readFile(path, workersOf(n))
-        _ -> Outcome.Declined("usage: pestka [--low-memory] [--reorder-always] FILE.ndjson [WORKERS]")
+        [path] -> fileOf(path, 4)
+        [path, n] -> fileOf(path, workersOf(n))
+        _ -> Outcome.Declined("usage: pestka [--low-memory] [--reorder-always] FILE [WORKERS] | pestka pack FILE.ndjson FILE.susz")
+
+fn fileOf(path: String, workers: Int) -> Outcome
+    ? "A Susz file by its signature, otherwise lean4export's ndjson."
+    ! [Disk.readBytesAt, Disk.size]
+    match Export.Susz.isSusz(path)
+        true -> Export.Susz.readFile(path)
+        false -> Export.Stream.readFile(path, workers)
 
 fn workersIn(args: List<String>) -> Int
     ? "The workers the arguments ask for; four by default."
