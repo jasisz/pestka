@@ -4,7 +4,7 @@ module Reader
         "other line in order. A line is a declaration when its object has a"
         "single key, and an item of the name, level or expression table"
         "when it carries an in, il or ie index."
-    exposes [Chunk, header, supported, readAll, readChunk, readParallel, readLine]
+    exposes [Chunk, header, supported, readAll, readChunk, readParallel, readRange, readLine]
     depends [Json.Line, Json.Escapes, Json.Access, Core.Exprs, Core.Decls, Export.Tables, Export.Items, Export.Declarations]
     effects []
 
@@ -238,6 +238,70 @@ fn parseAll(lines: List<String>, count: Int, acc: List<Line>) -> List<Line>
 verify parseAll
     parseAll(["", ""], 5, []) => [Line.Blank, Line.Blank]
     parseAll(["", ""], 1, []) => [Line.Blank]
+
+fn readRange(t: Tables, v: Vector<String>, from: Int, to: Int, n: Int, workers: Int) -> Result<Tables, String>
+    ? "Reads lines from to to of v, which a chunk's text was split into, with the parsing shared out among workers in rounds as readParallel does; n is the line number of the first. The workers read their runs where they lie in v, so no line is copied into a run of its own (RangesInPlace)."
+    match from >= to
+        true -> Result.Ok(t)
+        false -> rangeRounds(t, parseRanges(v, from, Int.min(to, from + workers * runLines())), v, from + workers * runLines(), to, n, workers)
+
+verify readRange
+    readRange(Export.Tables.empty(), Vector.fromList(["", "{{\"app\":{{\"arg\":3,\"fn\":3}},\"ie\":1}}", ""]), 0, 3, 2, 2) => Result.Err("line 3: unknown expression index 3")
+    readRange(Export.Tables.empty(), Vector.fromList(["", ""]), 0, 2, 2, 3) => Result.Ok(Export.Tables.empty())
+    readRange(Export.Tables.empty(), Vector.fromList(["x", ""]), 1, 2, 2, 3) => Result.Ok(Export.Tables.empty())
+
+fn rangeRounds(t: Tables, parsed: List<List<Line>>, v: Vector<String>, next: Int, to: Int, n: Int, workers: Int) -> Result<Tables, String>
+    ? "Puts a parsed round into the tables while the next round is parsed."
+    match next >= to
+        true -> lastRound(applyRuns(t, parsed, n)?)
+        false -> match (applyRuns(t, parsed, n), parseRanges(v, next, Int.min(to, next + workers * runLines())))!
+            (applied, more) -> rangeDone(applied?, more, v, next + workers * runLines(), to, workers)
+
+verify rangeRounds
+    rangeRounds(Export.Tables.empty(), [[Line.Blank]], Vector.fromList([""]), 1, 1, 2, 2) => Result.Ok(Export.Tables.empty())
+
+fn rangeDone(at: At, more: List<List<Line>>, v: Vector<String>, next: Int, to: Int, workers: Int) -> Result<Tables, String>
+    ? "Goes on with the next round."
+    rangeRounds(at.t, more, v, next, to, at.n, workers)
+
+verify rangeDone
+    rangeDone(At(t = Export.Tables.empty(), n = 3), [], Vector.fromList([""]), 1, 1, 2) => Result.Ok(Export.Tables.empty())
+
+fn parseRanges(v: Vector<String>, from: Int, to: Int) -> List<List<Line>>
+    ? "Lines from to to of v parsed in runs of runLines, each run on a worker of its own: the runs are halved, and the halves run as an independent product."
+    match to - from <= runLines()
+        true -> [parseSpan(v, from, to, [])]
+        false -> parseRangeHalves(v, from, from + halfRuns(to - from), to)
+
+verify parseRanges
+    parseRanges(Vector.fromList(["", ""]), 0, 2) => [[Line.Blank, Line.Blank]]
+
+fn halfRuns(n: Int) -> Int
+    ? "The lines of half the runs n lines make, at least one run: where a range of n lines is halved."
+    Int.max(1, Int.div(Result.withDefault(Int.div(n + runLines() - 1, runLines()), 1), 2)) * runLines()
+
+verify halfRuns
+    halfRuns(runLines() * 4) => runLines() * 2
+    halfRuns(runLines() * 3) => runLines()
+    halfRuns(runLines() + 1) => runLines()
+
+fn parseRangeHalves(v: Vector<String>, from: Int, mid: Int, to: Int) -> List<List<Line>>
+    ? "The two halves at once."
+    match (parseRanges(v, from, mid), parseRanges(v, mid, to))!
+        (l, r) -> List.concat(l, r)
+
+verify parseRangeHalves
+    parseRangeHalves(Vector.fromList(["", ""]), 0, 1, 2) => [[Line.Blank], [Line.Blank]]
+
+fn parseSpan(v: Vector<String>, i: Int, to: Int, acc: List<Line>) -> List<Line>
+    ? "Lines i to to of v parsed, in order."
+    match i >= to
+        true -> List.reverse(acc)
+        false -> parseSpan(v, i + 1, to, List.prepend(parseLine(Option.withDefault(Vector.get(v, i), "")), acc))
+
+verify parseSpan
+    parseSpan(Vector.fromList(["", ""]), 0, 2, []) => [Line.Blank, Line.Blank]
+    parseSpan(Vector.fromList(["", ""]), 1, 2, []) => [Line.Blank]
 
 record At
     t: Tables
