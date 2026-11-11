@@ -27,6 +27,7 @@ type Const
 type Memory
     Fast
     Low
+    Bare
 
 decision LowMemoryMode
     date = "2026-11-04"
@@ -79,6 +80,7 @@ fn limitsOf(unit: Int, memory: Memory) -> Limits
     ? "How many hashes each map carried across declarations keeps before it is emptied, from the unit a worker gets. The fast mode keeps the multiples the reuse distances pay for (LimitsFromReuseDistances), three quarters of them since declarations are checked by namespace (LimitsAfterOrdering), and the facts about closed terms for the whole run. The low-memory mode keeps the checked types at the unit, whose entries are the cheapest to keep and the dearest to lose, a quarter of it for the inferred types, reduction results, equal pairs, constant types at levels and closed terms, and an eighth for the variables, with which the open caches go, the pairs found different and the unfolding cache (LowMemoryMode)."
     match memory
         Memory.Fast -> Limits(vars = Int.div(3 * unit, 4), check = 3 * unit, infer = Int.div(3 * unit, 4), whnf = Int.div(3 * unit, 4), core = Int.div(3 * unit, 4), eqOk = Int.div(3 * unit, 2), eqFail = Int.div(3 * unit, 4), eqNo = Int.div(3 * unit, 4), unfold = Int.div(3 * unit, 4), types = Int.div(3 * unit, 4), closed = unbounded())
+        Memory.Bare -> Limits(vars = 0, check = 0, infer = 0, whnf = 0, core = 0, eqOk = 0, eqFail = 0, eqNo = 0, unfold = 0, types = 0, closed = 0)
         Memory.Low -> Limits(vars = Int.div(unit, 8), check = unit, infer = Int.div(unit, 4), whnf = Int.div(unit, 4), core = Int.div(unit, 4), eqOk = Int.div(unit, 4), eqFail = Int.div(unit, 8), eqNo = Int.div(unit, 8), unfold = Int.div(unit, 8), types = Int.div(unit, 4), closed = Int.div(unit, 4))
 
 verify limitsOf

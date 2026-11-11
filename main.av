@@ -44,7 +44,9 @@ fn memoryIn(args: List<String>) -> Memory
     ? "The low-memory mode when --low-memory is among the arguments (LowMemoryMode)."
     match List.contains(args, "--low-memory")
         true -> Memory.Low
-        false -> Memory.Fast
+        false -> match List.contains(args, "--no-carry")
+            true -> Memory.Bare
+            false -> Memory.Fast
 
 verify memoryIn
     memoryIn(["--low-memory", "f"]) => Memory.Low
@@ -54,7 +56,7 @@ fn withoutFlag(args: List<String>, acc: List<String>) -> List<String>
     ? "The arguments without the flags --low-memory and --reorder-always, in their order."
     match args
         [] -> List.reverse(acc)
-        [a, ..rest] -> match Bool.or(a == "--low-memory", a == "--reorder-always")
+        [a, ..rest] -> match Bool.or(Bool.or(a == "--low-memory", a == "--no-carry"), a == "--reorder-always")
             true -> withoutFlag(rest, acc)
             false -> withoutFlag(rest, List.prepend(a, acc))
 
