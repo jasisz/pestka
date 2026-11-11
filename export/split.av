@@ -1186,10 +1186,11 @@ fn colsWritten(b: Bytes, q: Pos, left: Int, end: Pos, w: W, owner: Vector<Vector
     ? "left more expressions of the columns written, each into the main block or its block, then the records from q."
     match left <= 0
         true -> written(b, q, end, w, owner, ids, nameF, levelF, count, codes, cs)
-        false -> colWritten(b, q, left, end, flushedIf(w)?, owner, ids, nameF, levelF, count, codes, cs, cget(owner, w.ei))
+        false -> colWritten(b, q, left, end, flushedIf(w)?, owner, ids, nameF, levelF, count, codes, cs)
 
-fn colWritten(b: Bytes, q: Pos, left: Int, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vector<U32>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes, cs: Cols, o: Int) -> Result<W, String>
-    ? "One expression of the columns, of owner o."
+fn colWritten(b: Bytes, q: Pos, left: Int, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vector<U32>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes, cs: Cols) -> Result<W, String>
+    ? "One expression of the columns, by its owner."
+    o = cget(owner, w.ei)
     k = cget(cs.kind, w.ei)
     c1 = cget32(cs.c1, w.ei)
     c2 = cget32(cs.c2, w.ei)
@@ -1200,8 +1201,15 @@ fn colWritten(b: Bytes, q: Pos, left: Int, end: Pos, w: W, owner: Vector<Vector<
 fn colMainDone(b: Bytes, q: Pos, left: Int, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vector<U32>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes, cs: Cols, o: Int) -> Result<W, String>
     ? "After a main expression of the columns: its frontier entry, as mainExprWritten."
     match o == -3
-        true -> colsWritten(b, q, left - 1, end, W.update(w, main = List.prepend(1, List.prepend(2, List.prepend(19, w.main))), fE = w.fE + 1, ei = w.ei + 1, mainNext = w.mainNext + 1), cset(owner, w.ei, 0 - w.fE - 4), ids, nameF, levelF, count, codes, cs)
+        true -> colFrontier(b, q, left, end, cset(owner, w.ei, 0 - w.fE - 4), w, ids, nameF, levelF, count, codes, cs)
         false -> colsWritten(b, q, left - 1, end, W.update(w, ei = w.ei + 1, mainNext = w.mainNext + 1), owner, ids, nameF, levelF, count, codes, cs)
+
+fn colFrontier(b: Bytes, q: Pos, left: Int, end: Pos, owner: Vector<Vector<Int>>, w: W, ids: Vector<Vector<U32>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes, cs: Cols) -> Result<W, String>
+    ? "The frontier entry of a main expression of the columns, its owner already set to its index."
+    colsWritten(b, q, left - 1, end, W.update(w, main = List.prepend(1, List.prepend(2, List.prepend(19, w.main))), fE = w.fE + 1, ei = w.ei + 1, mainNext = w.mainNext + 1), owner, ids, nameF, levelF, count, codes, cs)
+
+verify colFrontier
+    Result.withDefault(colFrontier(Bytes.fromList([]), at(0), 1, at(0), cnew(1, -2), fresh(), cnew32(1), Vector.fromList([]), Vector.fromList([]), Vector.fromList([]), codes0(), cols0()), fresh()).fE => 1
 
 fn colHead(acc: List<Int>, k: Int) -> List<Int>
     ? "The tag of kind word k, and a binder's annotation byte."
@@ -1671,7 +1679,7 @@ verify colsWritten
     Result.withDefault(colsWritten(Bytes.fromList([]), at(0), 1, at(0), W.update(fresh(), ei = 2, mainNext = 2), cnew(3, -2), cnew32(3), Vector.fromList([]), Vector.fromList([]), Vector.fromList([]), codes0(), cols2(1, 0, 1)), fresh()).main => [2, 2, 10]
 
 verify colWritten
-    Result.withDefault(colWritten(Bytes.fromList([]), at(0), 1, at(0), W.update(fresh(), ei = 2, mainNext = 2), cnew(3, -3), cnew32(3), Vector.fromList([]), Vector.fromList([]), Vector.fromList([]), codes0(), cols2(1, 0, 1), -3), fresh()).fE => 1
+    Result.withDefault(colWritten(Bytes.fromList([]), at(0), 1, at(0), W.update(fresh(), ei = 2, mainNext = 2), cnew(3, -3), cnew32(3), Vector.fromList([]), Vector.fromList([]), Vector.fromList([]), codes0(), cols2(1, 0, 1)), fresh()).fE => 1
 
 verify colMainDone
     Result.withDefault(colMainDone(Bytes.fromList([]), at(0), 1, at(0), fresh(), cnew(1, -2), cnew32(1), Vector.fromList([]), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), -2), fresh()).mainNext => 1
