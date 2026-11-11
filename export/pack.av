@@ -3,12 +3,14 @@ module Pack
         "Writes an export in Susz, Pestka's binary export format"
         "(docs/susz.md): the lines of a lean4export file, read with the"
         "reader's own line parser, become records with implicit ids. Version"
-        "0 puts every record in one block, in the order of the file. The"
-        "packer copies structure only; the reader trusts none of it and"
-        "computes every hash and range itself."
+        "0 puts every record in one block, in the order of the file; version"
+        "2, the default, is version 0 rewritten by Export.Split with each"
+        "theorem's own proof in a block of its own. The packer copies"
+        "structure only; the reader trusts none of it and computes every hash"
+        "and range itself."
     exposes [pack]
-    depends [Bytes, Json.Line, Json.Access, Core.Exprs, Core.Decls, Export.Reader]
-    effects [Disk.readBytesAt, Disk.writeBytes, Disk.appendBytes]
+    depends [Bytes, Json.Line, Json.Access, Core.Exprs, Core.Decls, Export.Reader, Export.Split]
+    effects [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
 
 record P
     path: String
@@ -100,12 +102,21 @@ fn lvs(q: P, xs: List<Int>, acc: List<Int>) -> Result<List<Int>, String>
 verify lvs
     lvs(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), [3], []) => Result.Err("unknown level index 3")
 
-fn pack(src: String, dst: String) -> Result<String, String>
-    ? "Packs src into dst; the counts written, or why not."
-    ! [Disk.readBytesAt, Disk.writeBytes, Disk.appendBytes]
+fn pack(src: String, dst: String, version: Int) -> Result<String, String>
+    ? "Packs src into dst in Susz of version 0 or 2; the counts written, or why not."
+    ! [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     match Disk.writeBytes(dst, Bytes.fromList([]))
         Result.Err(e) -> Result.Err("cannot write {dst}: {e}")
-        Result.Ok(_) -> chunked(src, dst, 0, "", Option.None, 1)
+        Result.Ok(_) -> versioned(chunked(src, dst, 0, "", Option.None, 1), dst, version)
+
+fn versioned(r: Result<String, String>, dst: String, version: Int) -> Result<String, String>
+    ? "Version 0 as written, or rewritten as version 2."
+    ! [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
+    match r
+        Result.Err(e) -> Result.Err(e)
+        Result.Ok(m) -> match version == 2
+            true -> Export.Split.split(dst)
+            false -> Result.Ok(m)
 
 fn chunkBytes() -> Int
     ? "How much of the ndjson file one chunk reads."

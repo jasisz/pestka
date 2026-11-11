@@ -625,11 +625,41 @@ verify checkerFor
     checkerFor(Check.State.envEmpty(), Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.None, isThm = false)).upTo => 0
 
 fn jobChecks(j: Job, st0: St) -> Result<Facts, Fail>
-    ? "A deferred declaration, from st0, its checker carrying the cache of checked closed terms: the type is a type, a theorem's type a proposition, and the value's type equal to the declared one. Returns the cache. The caller puts the cache into the checker itself, where it moves, so that the cache reaches the checker with one owner and is updated in place."
-    st = typeIsSort(Check.Tc.check(st0, j.head.ty)?)?
+    ? "A deferred declaration, from st0, its checker carrying the cache of checked closed terms: the value is decoded when it is a packed proof, and a block that does not decode is the declaration's failure before any check of it (BlockErrorsFirst); then the type is a type, a theorem's type a proposition, and the value's type equal to the declared one. Returns the cache. The caller puts the cache into the checker itself, where it moves, so that the cache reaches the checker with one owner and is updated in place."
     match j.value
-        Option.None -> Result.Ok(carried(st))
-        Option.Some(v) -> valueChecks(st, j.head.ty, Core.Lazy.force(v), j.isThm)
+        Option.None -> Result.Ok(carried(typeIsSort(Check.Tc.check(st0, j.head.ty)?)?))
+        Option.Some(v) -> valueDecoded(j, st0, Core.Lazy.forced(v))
+
+decision BlockErrorsFirst
+    date = "2026-11-11"
+    reason =
+        "A proof kept in a block of a Susz file (Core.Lazy) is decoded when"
+        "its declaration is checked, and so is every block of a file that is"
+        "accepted: every theorem before the building's first failure is"
+        "checked. What is wrong with a block is an error of its declaration"
+        "(docs/susz.md, rule 4): it comes after the declaration's building"
+        "failures, a name already taken or parameters named twice, and"
+        "before any failure of checking it, and it is reported in the order"
+        "of declarations with every other failure, the earliest first, as a"
+        "reader decoding every block while reading would have it. The"
+        "message is the block's alone, with the number of the record, so it"
+        "is the same whenever the block is decoded and on any number of"
+        "workers. A theorem unfolded while checking a later declaration is"
+        "decoded there too; a block that fails there stands for an unknown"
+        "constant, and its own declaration, placed earlier, fails first."
+    chosen = "BlockErrorsFirst"
+    rejected = ["BlockErrorsWhileReading", "BlockErrorsAfterTypes"]
+    impacts = [jobChecks, valueDecoded]
+
+fn valueDecoded(j: Job, st0: St, d: Decoded) -> Result<Facts, Fail>
+    ? "The value once decoded: a block that does not decode rejects the declaration, one past the limits declines it (BlockErrorsFirst)."
+    match d
+        Decoded.Term(v) -> valueChecks(typeIsSort(Check.Tc.check(st0, j.head.ty)?)?, j.head.ty, v, j.isThm)
+        Decoded.Broken(e) -> Result.Err(Fail.Reject(e))
+        Decoded.Long(e) -> Result.Err(Fail.Decline(e))
+
+verify valueDecoded
+    valueDecoded(Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = true), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Decoded.Broken("proof record 1: x")) => Result.Err(Fail.Reject("proof record 1: x"))
 
 verify jobChecks
     jobChecks(Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Proof.Built(Core.Exprs.sort(Level.Zero))), isThm = false), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => Result.Err(Fail.Reject("declaration type mismatch"))

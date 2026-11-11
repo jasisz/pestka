@@ -1,0 +1,11 @@
+{"meta":{"exporter":{"name":"lean4export","version":"3.1.0"},"format":{"version":"3.1.0"}}}
+{"in":1,"str":{"pre":0,"str":"B"}}
+{"in":2,"str":{"pre":1,"str":"bad"}}
+{"in":3,"str":{"pre":0,"str":"A"}}
+{"in":4,"str":{"pre":3,"str":"bad"}}
+{"in":5,"str":{"pre":0,"str":"C"}}
+{"ie":0,"sort":0}
+{"const":{"name":5,"us":[]},"ie":1}
+{"def":{"all":[2],"hints":"opaque","levelParams":[],"name":2,"safety":"safe","type":0,"value":0}}
+{"def":{"all":[4],"hints":"opaque","levelParams":[],"name":4,"safety":"safe","type":0,"value":0}}
+{"axiom":{"isUnsafe":false,"levelParams":[],"name":5,"type":0}}

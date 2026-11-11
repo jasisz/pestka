@@ -1,25 +1,31 @@
-// lazypack IN.susz OUT.susz : rewrites a Susz v0 file as the experimental
-// version 2 ("lazy proofs"): expressions reachable only from one theorem's
-// value move into a per-theorem block in a proof section; the main block
-// keeps names, levels, every other expression (renumbered densely) and the
-// declarations; a theorem whose value is its own is declaration kind 6
-// (head, block offset, block length, all). Records tag 19 at the end of the
-// main block list the names (kind 0), levels (1) and main expressions (2)
-// blocks name, by absolute id: the "frontier" tables, in order.
+// lazypack IN.susz OUT.susz : rewrites a Susz v0 file as version 2
+// (docs/susz.md), independently of Pestka's own packer (export/split.av), so
+// that the two can be compared byte for byte (tests/susz.sh).
 //
-// In a block: varint count, then expression records as in v0 except that
-// an expression reference r means local back r when r <= k (k = records of
-// the block before this one), else frontier expression r - k - 1; a name is
-// a frontier name index, a level a frontier level index.
+// Expressions reachable only from one theorem's value move into that
+// theorem's block in the proof section; the main block keeps names, levels,
+// every other expression (renumbered densely) and the declarations. A
+// theorem whose value has a block is declaration kind 6: head, block length,
+// placed byte, all. Records 19 of the main block list the frontier: kind 0
+// name, 1 level, 2 expression, then how far back the item is (always 1 here:
+// each entry follows its item).
 //
-// Trailer (60 bytes): names u32, levels u32, main exprs u32, decls u32,
-// total exprs u32, main off u64, main len u64, proofs off u64, proofs len
-// u64, u32 60, "ZSUS". Header: "SUSZ" 2 0 0 0, meta string.
+// A block: varint count, then records: expression records as in v0 except
+// that an expression reference r means local back r when r <= k (k = the
+// block's expressions before this one), else frontier expression r - k - 1;
+// a name is a frontier name index, a level a frontier level index. Record
+// 19 | mark: the expression records after it stood before declaration mark
+// in the export (marks start at 0).
+//
+// Trailer (56 bytes): names u32, levels u32, main exprs u32, decls u32, main
+// off u64, main len u64, proofs off u64, proofs len u64, u32 56, "ZSUS".
 use std::collections::HashMap;
 use std::io::Write;
 
-const NONE: u32 = u32::MAX;
-const SHARED: u32 = u32::MAX - 1;
+const NONE: i64 = -1;
+const SHARED: i64 = -2;
+const EXPORTED: i64 = -3;
+const NEVER: u64 = 1 << 61;
 
 fn rv(b: &[u8], p: &mut usize) -> u64 {
     let mut v: u64 = 0;
@@ -47,6 +53,12 @@ fn wv(out: &mut Vec<u8>, mut v: u64) {
     }
 }
 
+fn wvlen(v: u64) -> usize {
+    let mut t = Vec::new();
+    wv(&mut t, v);
+    t.len()
+}
+
 fn u32at(b: &[u8], i: usize) -> u32 {
     u32::from_le_bytes(b[i..i + 4].try_into().unwrap())
 }
@@ -54,10 +66,15 @@ fn u64at(b: &[u8], i: usize) -> u64 {
     u64::from_le_bytes(b[i..i + 8].try_into().unwrap())
 }
 
+fn placed_for(code: u64, mark: u64) -> bool {
+    code < 2 * mark || code == 2 * mark + 1
+}
+
 #[derive(Clone, Copy)]
 enum Piece {
     Raw(usize, usize),
-    Expr(u32),
+    Ref(u32),
+    Val(u32),
 }
 
 struct Cur<'a> {
@@ -66,6 +83,8 @@ struct Cur<'a> {
     raw: usize,
     pieces: Vec<Piece>,
     next: u32,
+    names: Vec<u64>,
+    skip: bool,
 }
 
 impl<'a> Cur<'a> {
@@ -76,6 +95,11 @@ impl<'a> Cur<'a> {
         let x = self.b[self.p];
         self.p += 1;
         x
+    }
+    fn unsafe_byte(&mut self) {
+        if self.byte() == 1 {
+            self.skip = true;
+        }
     }
     fn list(&mut self) {
         let n = self.v();
@@ -88,11 +112,12 @@ impl<'a> Cur<'a> {
             self.pieces.push(Piece::Raw(self.raw, self.p));
         }
         let d = self.v() as u32;
-        self.pieces.push(Piece::Expr(self.next - d));
+        self.pieces.push(Piece::Ref(self.next - d));
         self.raw = self.p;
     }
     fn head(&mut self) {
-        self.v();
+        let n = self.v();
+        self.names.push(n);
         self.list();
         self.expr();
     }
@@ -107,17 +132,17 @@ impl<'a> Cur<'a> {
 struct Decl {
     kind: u8,
     pieces: Vec<Piece>,
-    value: Option<usize>, // piece index of a theorem's value
+    names: Vec<u64>,
+    skip: bool,
 }
 
 fn parse_decl(b: &[u8], p: usize, next: u32) -> (Decl, usize) {
     let kind = b[p];
-    let mut c = Cur { b, p: p + 1, raw: p + 1, pieces: Vec::new(), next };
-    let mut value = None;
+    let mut c = Cur { b, p: p + 1, raw: p + 1, pieces: Vec::new(), next, names: Vec::new(), skip: false };
     match kind {
         0 => {
             c.head();
-            c.byte();
+            c.unsafe_byte();
         }
         1 => {
             c.head();
@@ -126,19 +151,23 @@ fn parse_decl(b: &[u8], p: usize, next: u32) -> (Decl, usize) {
             if h == 2 {
                 c.v();
             }
-            c.byte();
+            if c.byte() != 0 {
+                c.skip = true;
+            }
             c.list();
         }
         2 => {
             c.head();
             c.expr();
-            value = Some(c.pieces.len() - 1);
+            if let Some(Piece::Ref(e)) = c.pieces.last().copied() {
+                *c.pieces.last_mut().unwrap() = Piece::Val(e);
+            }
             c.list();
         }
         3 => {
             c.head();
             c.expr();
-            c.byte();
+            c.unsafe_byte();
             c.list();
         }
         4 => {
@@ -149,7 +178,7 @@ fn parse_decl(b: &[u8], p: usize, next: u32) -> (Decl, usize) {
             let nt = c.v();
             for _ in 0..nt {
                 c.head();
-                c.byte();
+                c.unsafe_byte();
                 c.v();
                 c.v();
                 c.list();
@@ -189,7 +218,7 @@ fn parse_decl(b: &[u8], p: usize, next: u32) -> (Decl, usize) {
     }
     c.finish();
     let end = c.p;
-    (Decl { kind, pieces: c.pieces, value }, end)
+    (Decl { kind, pieces: c.pieces, names: c.names, skip: c.skip }, end)
 }
 
 // Skips a record at p (tag at p); returns the end.
@@ -201,7 +230,7 @@ fn skip_record(b: &[u8], p: usize) -> usize {
             let n = rv(b, &mut q) as usize;
             q += n;
         }
-        2 | 4 | 5 => {
+        2 | 4 | 5 | 10 => {
             rv(b, &mut q);
             rv(b, &mut q);
         }
@@ -214,10 +243,6 @@ fn skip_record(b: &[u8], p: usize) -> usize {
             for _ in 0..n {
                 rv(b, &mut q);
             }
-        }
-        10 => {
-            rv(b, &mut q);
-            rv(b, &mut q);
         }
         11 | 12 => {
             q += 1;
@@ -244,121 +269,70 @@ fn skip_record(b: &[u8], p: usize) -> usize {
     q
 }
 
-fn children(b: &[u8], off: usize, id: u32, out: &mut Vec<u32>) {
-    out.clear();
+// The expression parts (as ids), names and levels of the record at off.
+fn parts(b: &[u8], off: usize, id: u32, ch: &mut Vec<u32>, names: &mut Vec<u64>, levels: &mut Vec<u64>) {
+    ch.clear();
+    names.clear();
+    levels.clear();
     let mut q = off + 1;
     match b[off] {
+        8 => levels.push(rv(b, &mut q)),
+        9 => {
+            names.push(rv(b, &mut q));
+            let k = rv(b, &mut q);
+            for _ in 0..k {
+                levels.push(rv(b, &mut q));
+            }
+        }
         10 => {
             let f = rv(b, &mut q) as u32;
             let a = rv(b, &mut q) as u32;
-            out.push(id - f);
-            out.push(id - a);
+            ch.push(id - f);
+            ch.push(id - a);
         }
         11 | 12 => {
             q += 1;
-            rv(b, &mut q);
+            names.push(rv(b, &mut q));
             let t = rv(b, &mut q) as u32;
             let x = rv(b, &mut q) as u32;
-            out.push(id - t);
-            out.push(id - x);
+            ch.push(id - t);
+            ch.push(id - x);
         }
         13 => {
-            rv(b, &mut q);
+            names.push(rv(b, &mut q));
             for _ in 0..3 {
                 let d = rv(b, &mut q) as u32;
-                out.push(id - d);
+                ch.push(id - d);
             }
         }
         16 => {
-            rv(b, &mut q);
+            names.push(rv(b, &mut q));
             rv(b, &mut q);
             let d = rv(b, &mut q) as u32;
-            out.push(id - d);
+            ch.push(id - d);
         }
         17 => {
             let d = rv(b, &mut q) as u32;
-            out.push(id - d);
+            ch.push(id - d);
         }
         _ => {}
     }
 }
 
-// Re-encodes the expression record at off (id) with references, names and
-// levels mapped.
-fn enc_expr(
-    b: &[u8],
-    off: usize,
-    id: u32,
-    out: &mut Vec<u8>,
-    fe: &mut dyn FnMut(u32) -> u64,
-    fname: &mut dyn FnMut(u64) -> u64,
-    flevel: &mut dyn FnMut(u64) -> u64,
-) {
-    let tag = b[off];
-    out.push(tag);
-    let mut q = off + 1;
-    match tag {
-        7 => {
-            let k = rv(b, &mut q);
-            wv(out, k);
-        }
-        8 => {
-            let l = rv(b, &mut q);
-            wv(out, flevel(l));
-        }
-        9 => {
-            let n = rv(b, &mut q);
-            wv(out, fname(n));
-            let k = rv(b, &mut q);
-            wv(out, k);
-            for _ in 0..k {
-                let l = rv(b, &mut q);
-                wv(out, flevel(l));
-            }
-        }
-        10 => {
-            let f = id - rv(b, &mut q) as u32;
-            let a = id - rv(b, &mut q) as u32;
-            wv(out, fe(f));
-            wv(out, fe(a));
-        }
-        11 | 12 => {
-            out.push(b[q]);
-            q += 1;
-            let n = rv(b, &mut q);
-            wv(out, fname(n));
-            let t = id - rv(b, &mut q) as u32;
-            let x = id - rv(b, &mut q) as u32;
-            wv(out, fe(t));
-            wv(out, fe(x));
-        }
-        13 => {
-            let n = rv(b, &mut q);
-            wv(out, fname(n));
-            for _ in 0..3 {
-                let d = id - rv(b, &mut q) as u32;
-                wv(out, fe(d));
-            }
-        }
-        14 | 15 => {
-            let n = rv(b, &mut q) as usize;
-            wv(out, n as u64);
-            out.extend_from_slice(&b[q..q + n]);
-        }
-        16 => {
-            let n = rv(b, &mut q);
-            wv(out, fname(n));
-            let k = rv(b, &mut q);
-            wv(out, k);
-            let d = id - rv(b, &mut q) as u32;
-            wv(out, fe(d));
-        }
-        17 => {
-            let d = id - rv(b, &mut q) as u32;
-            wv(out, fe(d));
-        }
-        t => panic!("not an expression tag {t}"),
+fn mark(owner: &mut [i64], e: u32, o: i64) {
+    let x = &mut owner[e as usize];
+    if *x == NONE {
+        *x = o;
+    } else if *x != o {
+        *x = SHARED;
     }
+}
+
+struct Acc {
+    out: Vec<u8>,
+    k: u32,
+    mark: u64,
+    fine: bool,
 }
 
 fn main() {
@@ -370,228 +344,354 @@ fn main() {
     let tr = &b[size - tn..];
     assert_eq!(tn, 60);
     assert_eq!(u32at(tr, 16), 1);
-    let (names, levels, exprs, ndecls) = (u32at(tr, 0), u32at(tr, 4), u32at(tr, 8), u32at(tr, 12));
+    let (nnames, nlevels, exprs, ndecls) = (u32at(tr, 0), u32at(tr, 4), u32at(tr, 8), u32at(tr, 12));
     let boff = u64at(tr, 20) as usize;
     let blen = u64at(tr, 28) as usize;
     assert_eq!(&b[0..8], b"SUSZ\0\0\0\0");
     let header = &b[8..boff];
+    let end = boff + blen;
 
-    // Pass 1: offsets of expressions, declarations parsed.
+    // Pass 1: names (canonical), offsets of expressions, declarations.
+    let mut canon: Vec<u32> = vec![0; nnames as usize];
+    let mut cmap: HashMap<(u32, u8, Vec<u8>), u32> = HashMap::new();
+    let mut ncanon: u32 = 1;
     let mut eoff: Vec<u32> = Vec::with_capacity(exprs as usize);
     let mut decls: Vec<Decl> = Vec::with_capacity(ndecls as usize);
+    let mut known: HashMap<u32, u64> = HashMap::new();
+    let mut nid = 1usize;
     let mut p = boff;
-    let end = boff + blen;
+    let mut canon_of = |key: (u32, u8, Vec<u8>), cmap: &mut HashMap<(u32, u8, Vec<u8>), u32>| -> u32 {
+        *cmap.entry(key).or_insert_with(|| {
+            let c = ncanon;
+            ncanon += 1;
+            c
+        })
+    };
     while p < end {
         let tag = b[p];
         if tag == 18 {
             let (d, q) = parse_decl(&b, p + 1, eoff.len() as u32);
+            if !d.skip {
+                let di = decls.len() as u64;
+                let code = 2 * di + if d.kind == 5 { 1 } else { 0 };
+                for &n in d.names.iter() {
+                    known.entry(canon[n as usize]).or_insert(code);
+                }
+            }
             decls.push(d);
             p = q;
         } else {
-            if (7..=17).contains(&tag) {
+            let q = skip_record(&b, p);
+            if tag == 1 {
+                let mut r = p + 1;
+                let pre = rv(&b, &mut r) as usize;
+                let n = rv(&b, &mut r) as usize;
+                canon[nid] = canon_of((canon[pre], 0, b[r..r + n].to_vec()), &mut cmap);
+                nid += 1;
+            } else if tag == 2 {
+                let mut r = p + 1;
+                let pre = rv(&b, &mut r) as usize;
+                let k = rv(&b, &mut r);
+                canon[nid] = canon_of((canon[pre], 1, k.to_le_bytes().to_vec()), &mut cmap);
+                nid += 1;
+            } else if (7..=17).contains(&tag) {
                 eoff.push(p as u32);
             }
-            p = skip_record(&b, p);
+            p = q;
         }
     }
     assert_eq!(eoff.len() as u32, exprs);
     assert_eq!(decls.len() as u32, ndecls);
-    eprintln!("pass 1: {} exprs, {} decls", eoff.len(), decls.len());
+    let code_of_canon = |c: Option<u32>| -> u64 { c.and_then(|c| known.get(&c).copied()).unwrap_or(NEVER) };
+    let code_by_id: Vec<u64> = canon.iter().map(|&c| code_of_canon(Some(c))).collect();
+    let lit = |pre: u32, s: &str| cmap.get(&(pre, 0, s.as_bytes().to_vec())).copied();
+    let nat = lit(0, "Nat");
+    let string = lit(0, "String");
+    let char_ = lit(0, "Char");
+    let str_names = [
+        nat,
+        string,
+        string.and_then(|s| lit(s, "ofList")),
+        lit(0, "List"),
+        char_,
+        char_.and_then(|c| lit(c, "ofNat")),
+    ];
+    let nat_code = code_of_canon(nat);
+    let str_codes: Vec<u64> = str_names.iter().map(|&c| code_of_canon(c)).collect();
 
     // Ownership.
     let n = eoff.len();
-    let mut owner: Vec<u32> = vec![NONE; n];
-    fn mark(owner: &mut [u32], e: u32, o: u32) {
-        let x = &mut owner[e as usize];
-        if *x == NONE {
-            *x = o;
-        } else if *x != o {
-            *x = SHARED;
-        }
-    }
+    let mut owner: Vec<i64> = vec![NONE; n];
     for (di, d) in decls.iter().enumerate() {
-        for (pi, pc) in d.pieces.iter().enumerate() {
-            if let Piece::Expr(e) = *pc {
-                let o = if d.value == Some(pi) { di as u32 } else { SHARED };
-                mark(&mut owner, e, o);
+        for pc in d.pieces.iter() {
+            match *pc {
+                Piece::Val(e) => mark(&mut owner, e, di as i64),
+                Piece::Ref(e) => mark(&mut owner, e, SHARED),
+                _ => {}
             }
         }
     }
     let mut ch: Vec<u32> = Vec::with_capacity(4);
-    let mut unreached = 0u64;
+    let mut nm: Vec<u64> = Vec::new();
+    let mut lv: Vec<u64> = Vec::new();
     for e in (0..n).rev() {
         let mut o = owner[e];
         if o == NONE {
-            unreached += 1;
             o = SHARED;
             owner[e] = SHARED;
         }
-        children(&b, eoff[e] as usize, e as u32, &mut ch);
+        parts(&b, eoff[e] as usize, e as u32, &mut ch, &mut nm, &mut lv);
         for &c in ch.iter() {
             mark(&mut owner, c, o);
         }
     }
-    // New ids.
+    // Numbers, and what goes to the frontier.
     let mut newid: Vec<u32> = vec![0; n];
     let mut count: Vec<u32> = vec![0; decls.len()];
+    let mut name_f: Vec<i64> = vec![-2; nnames as usize];
+    let mut level_f: Vec<i64> = vec![-2; nlevels as usize];
     let mut main = 0u32;
     for e in 0..n {
         let o = owner[e];
-        if o == SHARED {
-            newid[e] = main;
-            main += 1;
-        } else {
+        if o >= 0 {
             newid[e] = count[o as usize];
             count[o as usize] += 1;
-        }
-    }
-    let owned = n as u64 - main as u64;
-    let lazy = count.iter().filter(|&&c| c > 0).count();
-    eprintln!("main exprs {main}, owned {owned}, unreached {unreached}, lazy theorems {lazy}");
-
-    // Blocks.
-    let mut fe_map: HashMap<u32, u32> = HashMap::new();
-    let mut fe_list: Vec<u32> = Vec::new();
-    let mut fn_map: HashMap<u64, u32> = HashMap::new();
-    let mut fn_list: Vec<u64> = Vec::new();
-    let mut fl_map: HashMap<u64, u32> = HashMap::new();
-    let mut fl_list: Vec<u64> = Vec::new();
-    let mut blocks: Vec<Vec<u8>> = (0..decls.len()).map(|_| Vec::new()).collect();
-    for e in 0..n {
-        let o = owner[e];
-        if o == SHARED {
-            continue;
-        }
-        let k = newid[e] as u64;
-        let mut out = std::mem::take(&mut blocks[o as usize]);
-        enc_expr(
-            &b,
-            eoff[e] as usize,
-            e as u32,
-            &mut out,
-            &mut |c: u32| {
-                let oc = owner[c as usize];
-                if oc == o {
-                    k - newid[c as usize] as u64
-                } else {
-                    assert_eq!(oc, SHARED);
-                    let m = newid[c as usize];
-                    let f = *fe_map.entry(m).or_insert_with(|| {
-                        fe_list.push(m);
-                        (fe_list.len() - 1) as u32
-                    });
-                    k + 1 + f as u64
+            parts(&b, eoff[e] as usize, e as u32, &mut ch, &mut nm, &mut lv);
+            for &c in ch.iter() {
+                if owner[c as usize] < 0 {
+                    owner[c as usize] = EXPORTED;
                 }
-            },
-            &mut |x: u64| {
-                *fn_map.entry(x).or_insert_with(|| {
-                    fn_list.push(x);
-                    (fn_list.len() - 1) as u32
-                }) as u64
-            },
-            &mut |x: u64| {
-                *fl_map.entry(x).or_insert_with(|| {
-                    fl_list.push(x);
-                    (fl_list.len() - 1) as u32
-                }) as u64
-            },
-        );
-        blocks[o as usize] = out;
-    }
-    eprintln!(
-        "frontier: names {}, levels {}, exprs {}",
-        fn_list.len(),
-        fl_list.len(),
-        fe_list.len()
-    );
-
-    // Proof section and block places.
-    let mut proofs: Vec<u8> = Vec::new();
-    let mut place: Vec<(u64, u64)> = vec![(0, 0); decls.len()];
-    for di in 0..decls.len() {
-        if count[di] > 0 {
-            let start = proofs.len();
-            wv(&mut proofs, count[di] as u64);
-            proofs.extend_from_slice(&blocks[di]);
-            place[di] = (start as u64, (proofs.len() - start) as u64);
-            blocks[di] = Vec::new();
+            }
+            for &x in nm.iter() {
+                name_f[x as usize] = -1;
+            }
+            for &x in lv.iter() {
+                level_f[x as usize] = -1;
+            }
+        } else {
+            newid[e] = main;
+            main += 1;
         }
     }
-    drop(blocks);
+    drop(eoff);
 
-    // Main block.
+    // Writing.
     let mut out: Vec<u8> = Vec::with_capacity(blen);
+    let mut proofs: Vec<u8> = Vec::new();
+    let mut open: HashMap<u32, Acc> = HashMap::new();
+    let (mut f_n, mut f_l, mut f_e) = (0i64, 0i64, 0i64);
+    let mut fidx: Vec<i64> = vec![-1; n]; // frontier index of an exported main expression
+    let (mut name_id, mut level_id, mut ei, mut di, mut mnext) = (1usize, 1usize, 0usize, 0u64, 0u32);
+    let mut lazy = 0u32;
+    // The anonymous name and the level zero have no records: their entries
+    // open the main block when a block names them.
+    if name_f[0] == -1 {
+        out.extend_from_slice(&[19, 0, 1]);
+        name_f[0] = f_n;
+        f_n += 1;
+    }
+    if level_f[0] == -1 {
+        out.extend_from_slice(&[19, 1, 1]);
+        level_f[0] = f_l;
+        f_l += 1;
+    }
     let mut p = boff;
-    let mut ei = 0usize;
-    let mut di = 0usize;
-    let mut mrun = 0u32;
     while p < end {
         let tag = b[p];
         if tag == 18 {
-            let (_, q) = parse_decl(&b, p + 1, ei as u32);
-            let d = &decls[di];
-            let mnext = mrun;
-            let lazy = count[di] > 0;
+            let (d, q) = parse_decl(&b, p + 1, ei as u32);
+            let is_lazy = count[di as usize] > 0;
             out.push(18);
-            out.push(if lazy { 6 } else { d.kind });
-            for (pi, pc) in d.pieces.iter().enumerate() {
-                match *pc {
-                    Piece::Raw(s, t) => out.extend_from_slice(&b[s..t]),
-                    Piece::Expr(e) => {
-                        if lazy && d.value == Some(pi) {
-                            wv(&mut out, place[di].0);
-                            wv(&mut out, place[di].1);
-                        } else {
-                            assert_eq!(owner[e as usize], SHARED);
-                            wv(&mut out, mnext as u64 - newid[e as usize] as u64);
+            if is_lazy {
+                let acc = open.remove(&(di as u32)).expect("block");
+                assert_eq!(acc.k, count[di as usize]);
+                let blen = wvlen(acc.k as u64) + acc.out.len();
+                out.push(6);
+                for pc in d.pieces.iter() {
+                    match *pc {
+                        Piece::Raw(s, t) => out.extend_from_slice(&b[s..t]),
+                        Piece::Ref(e) => wv(&mut out, (mnext - newid[e as usize]) as u64),
+                        Piece::Val(_) => {
+                            wv(&mut out, blen as u64);
+                            out.push(if acc.fine { 1 } else { 0 });
                         }
+                    }
+                }
+                wv(&mut proofs, acc.k as u64);
+                proofs.extend_from_slice(&acc.out);
+                lazy += 1;
+            } else {
+                out.push(d.kind);
+                for pc in d.pieces.iter() {
+                    match *pc {
+                        Piece::Raw(s, t) => out.extend_from_slice(&b[s..t]),
+                        Piece::Ref(e) | Piece::Val(e) => wv(&mut out, (mnext - newid[e as usize]) as u64),
                     }
                 }
             }
             di += 1;
             p = q;
-        } else if (7..=17).contains(&tag) {
-            let e = ei;
-            ei += 1;
-            let q = skip_record(&b, p);
-            if owner[e] == SHARED {
-                let k = newid[e] as u64;
-                enc_expr(
-                    &b,
-                    p,
-                    e as u32,
-                    &mut out,
-                    &mut |c: u32| {
-                        assert_eq!(owner[c as usize], SHARED);
-                        k - newid[c as usize] as u64
-                    },
-                    &mut |x| x,
-                    &mut |x| x,
-                );
-                mrun += 1;
-            }
-            p = q;
-        } else {
-            let q = skip_record(&b, p);
-            out.extend_from_slice(&b[p..q]);
-            p = q;
+            continue;
         }
+        let q = skip_record(&b, p);
+        if tag <= 2 {
+            out.extend_from_slice(&b[p..q]);
+            if name_f[name_id] == -1 {
+                out.extend_from_slice(&[19, 0, 1]);
+                name_f[name_id] = f_n;
+                f_n += 1;
+            }
+            name_id += 1;
+        } else if tag <= 6 {
+            out.extend_from_slice(&b[p..q]);
+            if level_f[level_id] == -1 {
+                out.extend_from_slice(&[19, 1, 1]);
+                level_f[level_id] = f_l;
+                f_l += 1;
+            }
+            level_id += 1;
+        } else {
+            let e = ei as u32;
+            let o = owner[ei];
+            if o >= 0 {
+                let acc = open.entry(o as u32).or_insert_with(|| Acc { out: Vec::new(), k: 0, mark: 0, fine: true });
+                if acc.mark != di {
+                    acc.out.push(19);
+                    wv(&mut acc.out, di);
+                    acc.mark = di;
+                }
+                let k = newid[ei];
+                let m = acc.mark;
+                let a = &mut acc.out;
+                let mut r = p + 1;
+                let mut eref = |a: &mut Vec<u8>, d: u64| {
+                    let c = e - d as u32;
+                    if owner[c as usize] == o {
+                        wv(a, (k - newid[c as usize]) as u64);
+                    } else {
+                        assert!(fidx[c as usize] >= 0);
+                        wv(a, k as u64 + 1 + fidx[c as usize] as u64);
+                    }
+                };
+                a.push(tag);
+                let mut fine = true;
+                match tag {
+                    7 => wv(a, rv(&b, &mut r)),
+                    8 => {
+                        let l = level_f[rv(&b, &mut r) as usize];
+                        assert!(l >= 0);
+                        wv(a, l as u64)
+                    }
+                    9 => {
+                        let nmi = rv(&b, &mut r);
+                        fine = placed_for(code_by_id[nmi as usize], m);
+                        wv(a, name_f[nmi as usize] as u64);
+                        let c = rv(&b, &mut r);
+                        wv(a, c);
+                        for _ in 0..c {
+                            wv(a, level_f[rv(&b, &mut r) as usize] as u64);
+                        }
+                    }
+                    10 => {
+                        let f = rv(&b, &mut r);
+                        let x = rv(&b, &mut r);
+                        eref(a, f);
+                        eref(a, x);
+                    }
+                    11 | 12 => {
+                        a.push(b[r]);
+                        r += 1;
+                        wv(a, name_f[rv(&b, &mut r) as usize] as u64);
+                        let t = rv(&b, &mut r);
+                        let x = rv(&b, &mut r);
+                        eref(a, t);
+                        eref(a, x);
+                    }
+                    13 => {
+                        wv(a, name_f[rv(&b, &mut r) as usize] as u64);
+                        for _ in 0..3 {
+                            let d = rv(&b, &mut r);
+                            eref(a, d);
+                        }
+                    }
+                    14 | 15 => {
+                        a.pop();
+                        a.extend_from_slice(&b[p..q]);
+                        fine = if tag == 14 { placed_for(nat_code, m) } else { str_codes.iter().all(|&c| placed_for(c, m)) };
+                    }
+                    16 => {
+                        let nmi = rv(&b, &mut r);
+                        fine = placed_for(code_by_id[nmi as usize], m);
+                        wv(a, name_f[nmi as usize] as u64);
+                        wv(a, rv(&b, &mut r));
+                        let d = rv(&b, &mut r);
+                        eref(a, d);
+                    }
+                    17 => {
+                        let d = rv(&b, &mut r);
+                        eref(a, d);
+                    }
+                    t => panic!("not an expression tag {t}"),
+                }
+                acc.fine &= fine;
+                acc.k += 1;
+            } else {
+                let mut r = p + 1;
+                let mref = |out: &mut Vec<u8>, d: u64| {
+                    let c = e - d as u32;
+                    wv(out, (mnext - newid[c as usize]) as u64);
+                };
+                match tag {
+                    10 => {
+                        out.push(10);
+                        let f = rv(&b, &mut r);
+                        let x = rv(&b, &mut r);
+                        mref(&mut out, f);
+                        mref(&mut out, x);
+                    }
+                    11 | 12 | 13 | 16 => {
+                        let (skip, refs) = match tag {
+                            11 | 12 => (2, 2),
+                            13 => (1, 3),
+                            _ => (2, 1),
+                        };
+                        // raw prefix: tag, (binder byte), then varints that are not references
+                        let mut s = p + 1;
+                        if tag == 11 || tag == 12 {
+                            s += 1;
+                            rv(&b, &mut s);
+                        } else {
+                            for _ in 0..skip {
+                                rv(&b, &mut s);
+                            }
+                        }
+                        out.extend_from_slice(&b[p..s]);
+                        let mut r2 = s;
+                        for _ in 0..refs {
+                            let d = rv(&b, &mut r2);
+                            mref(&mut out, d);
+                        }
+                    }
+                    17 => {
+                        out.push(17);
+                        let d = rv(&b, &mut r);
+                        mref(&mut out, d);
+                    }
+                    _ => out.extend_from_slice(&b[p..q]),
+                }
+                if o == EXPORTED {
+                    out.extend_from_slice(&[19, 2, 1]);
+                    fidx[ei] = f_e;
+                    f_e += 1;
+                }
+                mnext += 1;
+            }
+            ei += 1;
+        }
+        p = q;
     }
-    for &x in fn_list.iter() {
-        out.push(19);
-        out.push(0);
-        wv(&mut out, x);
-    }
-    for &x in fl_list.iter() {
-        out.push(19);
-        out.push(1);
-        wv(&mut out, x);
-    }
-    for &x in fe_list.iter() {
-        out.push(19);
-        out.push(2);
-        wv(&mut out, x as u64);
-    }
+    assert!(open.is_empty());
+    assert_eq!(mnext, main);
 
     let mut f = std::io::BufWriter::new(std::fs::File::create(&args[2]).expect("create"));
     let mut hd: Vec<u8> = b"SUSZ\x02\0\0\0".to_vec();
@@ -599,38 +699,25 @@ fn main() {
     let moff = hd.len() as u64;
     let poff = moff + out.len() as u64;
     let mut t: Vec<u8> = Vec::new();
-    for x in [names, levels, main, ndecls, exprs] {
+    for x in [nnames, nlevels, main, ndecls] {
         t.extend_from_slice(&x.to_le_bytes());
     }
     for x in [moff, out.len() as u64, poff, proofs.len() as u64] {
         t.extend_from_slice(&x.to_le_bytes());
     }
-    t.extend_from_slice(&60u32.to_le_bytes());
+    t.extend_from_slice(&56u32.to_le_bytes());
     t.extend_from_slice(b"ZSUS");
-    assert_eq!(t.len(), 60);
+    assert_eq!(t.len(), 56);
     f.write_all(&hd).unwrap();
     f.write_all(&out).unwrap();
     f.write_all(&proofs).unwrap();
     f.write_all(&t).unwrap();
     f.flush().unwrap();
     eprintln!(
-        "main block {} bytes, proof section {} bytes, file {} bytes (was {})",
+        "main exprs {main}, in blocks {}, lazy theorems {lazy}, frontier names {f_n} levels {f_l} exprs {f_e}; main block {} bytes, proof section {} bytes, file {} bytes (was {size})",
+        n as u32 - main,
         out.len(),
         proofs.len(),
-        poff + proofs.len() as u64 + 60,
-        size
+        poff + proofs.len() as u64 + 56
     );
-}
-
-// The next main id at the position of expression index ei (exprs before it
-// that are shared): newid of the last shared expr before ei, plus one.
-fn newid_main_next(owner: &[u32], newid: &[u32], ei: usize) -> u32 {
-    let mut e = ei;
-    while e > 0 {
-        e -= 1;
-        if owner[e] == SHARED {
-            return newid[e] + 1;
-        }
-    }
-    0
 }

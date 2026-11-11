@@ -9,7 +9,7 @@ module Tables
         "DAG. The next fields count the lines read (plus the implicit name"
         "and level 0)."
     exposes [Tables, Parsed, empty, name, level, expr, names, levels, addName, addLevel, addExpr, addDecl, finish]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy]
     effects []
 
 record Tables
@@ -24,12 +24,18 @@ record Tables
     nextExpr: Int
     decls: List<Decl>
     constants: Int
-    known: Map<Name, Bool>
+    known: Map<Name, Int>
     pending: List<Name>
     allPlaced: Bool
+    declCount: Int
+    version: Int
     outNames: List<Name>
     outLevels: List<Level>
     outExprs: List<Expr>
+    nOutNames: Int
+    nOutLevels: Int
+    nOutExprs: Int
+    proofAt: Int
 
 record Parsed
     constants: Int
@@ -48,7 +54,7 @@ verify finish
 
 fn empty() -> Tables
     ? "Name 0 is the anonymous name and level 0 is zero; neither has a line."
-    Tables(names = {0 => Core.Names.anon()}, levels = {0 => Level.Zero}, exprs = {}, cur = freshChunk(), chunks = Vector.fromList([]), dense = 0, nextName = 1, nextLevel = 1, nextExpr = 0, decls = [], constants = 0, known = {}, pending = [], allPlaced = true, outNames = [], outLevels = [], outExprs = [])
+    Tables(names = {0 => Core.Names.anon()}, levels = {0 => Level.Zero}, exprs = {}, cur = freshChunk(), chunks = Vector.fromList([]), dense = 0, nextName = 1, nextLevel = 1, nextExpr = 0, decls = [], constants = 0, known = {}, pending = [], allPlaced = true, declCount = 0, version = 0, outNames = [], outLevels = [], outExprs = [], nOutNames = 0, nOutLevels = 0, nOutExprs = 0, proofAt = 0)
 
 verify empty
     empty().nextName => 1
@@ -250,10 +256,11 @@ verify addExpr
     addExpr(Result.withDefault(addExpr(empty(), 5, Core.Exprs.bvar(0)), empty()), 5, Core.Exprs.bvar(1)) => Result.Err("expression index 5 is already bound")
 
 fn addDecl(t: Tables, d: Decl) -> Tables
-    ? "Appends a declaration, newest first, and counts its constants; the constants named since the last declaration must be placed before it or, for an inductive block, be its own (NamesPlacedWhereRead)."
+    ? "Appends a declaration, newest first, and counts its constants; the constants named since the last declaration must be placed before it or, for an inductive block, be its own (NamesPlacedWhereRead). The names it places keep its place code (PlaceCodes in Core.Lazy)."
     places = placedBy(d)
     ok = pendingPlaced(t.pending, t.known, ownForBlock(d, places))
-    Tables.update(t, decls = List.prepend(d, t.decls), constants = t.constants + Core.Decls.constantCount(d), known = placeAll(t.known, places), pending = [], allPlaced = Bool.and(t.allPlaced, ok))
+    code = Core.Lazy.codeOf(t.declCount, isBlock(d))
+    Tables.update(t, decls = List.prepend(d, t.decls), constants = t.constants + Core.Decls.constantCount(d), known = placeAll(t.known, places, code), pending = [], allPlaced = Bool.and(t.allPlaced, ok), declCount = t.declCount + 1)
 
 verify addDecl
     addDecl(empty(), Decl.Induct([], [], [])).constants => 0
@@ -325,7 +332,7 @@ fn waitingAll(t: Tables, ns: List<Name>) -> Tables
 verify waitingAll
     List.len(waitingAll(empty(), [Core.Names.anon(), Core.Names.anon()]).pending) => 2
 
-fn pendingPlaced(ps: List<Name>, known: Map<Name, Bool>, own: List<Name>) -> Bool
+fn pendingPlaced(ps: List<Name>, known: Map<Name, Int>, own: List<Name>) -> Bool
     ? "Every waiting name is placed, or one of the block's own."
     match ps
         [] -> true
@@ -336,6 +343,7 @@ fn pendingPlaced(ps: List<Name>, known: Map<Name, Bool>, own: List<Name>) -> Boo
 verify pendingPlaced
     pendingPlaced([Core.Names.anon()], {}, []) => false
     pendingPlaced([Core.Names.anon()], {}, [Core.Names.anon()]) => true
+    pendingPlaced([Core.Names.anon()], {Core.Names.anon() => 0}, []) => true
 
 fn declNames(d: Decl) -> List<Name>
     ? "The names a declaration declares."
@@ -396,14 +404,26 @@ verify placedBy
     placedBy(Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true)) => []
     placedBy(Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false)) => [Core.Names.anon()]
 
-fn placeAll(known: Map<Name, Bool>, ns: List<Name>) -> Map<Name, Bool>
-    ? "Every name placed."
+fn placeAll(known: Map<Name, Int>, ns: List<Name>, code: Int) -> Map<Name, Int>
+    ? "Every name placed, keeping the code of its first placement (PlaceCodes in Core.Lazy)."
     match ns
         [] -> known
-        [n, ..rest] -> placeAll(Map.set(known, n, true), rest)
+        [n, ..rest] -> match Map.has(known, n)
+            true -> placeAll(known, rest, code)
+            false -> placeAll(Map.set(known, n, code), rest, code)
 
 verify placeAll
-    Map.has(placeAll({}, [Core.Names.anon()]), Core.Names.anon()) => true
+    Map.has(placeAll({}, [Core.Names.anon()], 0), Core.Names.anon()) => true
+    Map.get(placeAll(placeAll({}, [Core.Names.anon()], 2), [Core.Names.anon()], 6), Core.Names.anon()) => Option.Some(2)
+
+fn isBlock(d: Decl) -> Bool
+    ? "Whether d is an inductive block."
+    match d
+        Decl.Induct(_, _, _) -> true
+        _ -> false
+
+verify isBlock
+    isBlock(Decl.Induct([], [], [])) => true
 
 fn skipped(d: Decl) -> Bool
     ? "A declaration checking skips, as Check.Decl.prepared does: unsafe or partial."
