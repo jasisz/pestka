@@ -11,7 +11,7 @@ module Susz
         "which this reader hands to checking undecoded (Core.Lazy): the main"
         "block, the frontier it lists and how the blocks fill the section are"
         "checked here, each block when its declaration is checked."
-    exposes [isSusz, readFile]
+    exposes [isSusz, readFile, At, vAt, posAt, place, ahead, ahead1, ahead2, octetAt]
     exposes opaque [Pos]
     depends [Bytes, Core.Names, Core.Exprs, Core.Decls, Core.Lazy, Export.Tables, Export.Items, Export.Declarations, Export.Reader, Export.Stream]
     effects [Disk.readBytesAt, Disk.size]
@@ -94,6 +94,63 @@ fn orNone(r: Result<Pos, String>) -> Pos
 verify orNone
     orNone(Result.Ok(Pos(value = 3))).value => 3
     orNone(posOf(-5)).value => -1
+
+decision OneDecoder
+    date = "2026-11-11"
+    reason =
+        "Export.Split, which rewrites a file of version 0 as version 2, reads"
+        "the same records with the same encoding as this reader. It reads"
+        "them with this module's positions and varints, through posAt,"
+        "place, ahead, octetAt and vAt, so that one decoder reads Susz while"
+        "reading and while packing, and the packer's positions are machine"
+        "words as the reader's are (PositionsInRange, VarintsByValue)."
+    chosen = "OneDecoder"
+    rejected = ["DecoderPerModule"]
+    impacts = [posAt, place, ahead, ahead1, ahead2, octetAt, vAt]
+
+fn posAt(n: Int) -> Pos
+    ? "The position n, or none when n is not one (OneDecoder)."
+    orNone(posOf(n))
+
+verify posAt
+    posAt(3).value => 3
+    posAt(-7).value => -1
+
+fn place(i: Pos) -> Int
+    ? "Where i is, -1 for none (OneDecoder)."
+    i.value
+
+verify place
+    place(Pos(value = 5)) => 5
+
+fn ahead(i: Pos, k: Int) -> Pos
+    ? "The position k bytes past i, which is a position, not none (OneDecoder)."
+    orNone(posOf(i.value + k))
+
+verify ahead
+    ahead(Pos(value = 5), 2) => Pos(value = 7)
+
+fn ahead1(i: Pos) -> Pos
+    ? "The position one byte past i, which is a position: past a tag (OneDecoder)."
+    orNone(posOf(i.value + 1))
+
+verify ahead1
+    ahead1(Pos(value = 5)) => Pos(value = 6)
+
+fn ahead2(i: Pos) -> Pos
+    ? "The position two bytes past i, which is a position: past a tag and a byte (OneDecoder)."
+    orNone(posOf(i.value + 2))
+
+verify ahead2
+    ahead2(Pos(value = 5)) => Pos(value = 7)
+
+fn octetAt(b: Bytes, i: Pos) -> Int
+    ? "The octet at i, 0 at none or past the end (OneDecoder)."
+    octet(b, i.value)
+
+verify octetAt
+    octetAt(Bytes.fromList([7, 9]), Pos(value = 1)) => 9
+    octetAt(Bytes.fromList([7, 9]), Pos(value = -1)) => 0
 
 record At
     value: Int
