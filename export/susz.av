@@ -9,7 +9,7 @@ module Susz
         "a line's would be, and every hash and range is computed here."
     exposes [isSusz, readFile]
     exposes opaque [Pos]
-    depends [Bytes, Core.Names, Core.Exprs, Core.Decls, Export.Tables, Export.Items, Export.Declarations, Export.Reader, Export.Stream]
+    depends [Bytes, Core.Names, Core.Exprs, Core.Decls, Core.Lazy, Export.Tables, Export.Items, Export.Declarations, Export.Reader, Export.Stream]
     effects [Disk.readBytesAt, Disk.size]
 
 fn isSusz(path: String) -> Bool
@@ -106,6 +106,10 @@ record Trailer
     decls: Int
     offset: Int
     length: Int
+    version: Int
+    total: Int
+    proofs: Int
+    proofsLength: Int
 
 fn readFile(path: String) -> Outcome
     ? "Reads the whole file: the trailer first, for the block, then the header and the block's records."
@@ -124,7 +128,22 @@ fn withTail(path: String, size: Int, tail: Bytes) -> Outcome
         false -> Outcome.Rejected("not a complete Susz file")
         true -> match Disk.readBytesAt(path, size - n, n)
             Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
-            Result.Ok(tr) -> withTrailer(path, size - n, trailerOf(tr))
+            Result.Ok(tr) -> withVersion(path, size - n, tr)
+
+fn withVersion(path: String, end: Int, tr: Bytes) -> Outcome
+    ? "The version byte of the header picks the trailer's layout: 0, or 2 for the prototype with lazy proofs."
+    ! [Disk.readBytesAt]
+    match Disk.readBytesAt(path, 4, 1)
+        Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
+        Result.Ok(v) -> match octet(v, 0) == 2
+            true -> withTrailer(path, end, trailer2Of(tr))
+            false -> withTrailer(path, end, trailerOf(tr))
+
+fn trailer2Of(b: Bytes) -> Option<Trailer>
+    ? "Version 2 (prototype): counts with the main block's expressions, the total of expressions, the main block and the proof section."
+    match Bytes.len(b) == 60
+        false -> Option.None
+        true -> Option.Some(Trailer(names = u32At(b, 0), levels = u32At(b, 4), exprs = u32At(b, 8), decls = u32At(b, 12), offset = u64At(b, 20), length = u64At(b, 28), version = 2, total = u32At(b, 16), proofs = u64At(b, 36), proofsLength = u64At(b, 44)))
 
 fn trailerOf(b: Bytes) -> Option<Trailer>
     ? "Counts, then one block: version 0 files have exactly one, starting with the first name, level, expression and declaration."
@@ -132,7 +151,7 @@ fn trailerOf(b: Bytes) -> Option<Trailer>
         false -> Option.None
         true -> match Bool.and(Bool.and(u32At(b, 36) == 1, u32At(b, 40) == 1), Bool.and(u32At(b, 44) == 0, u32At(b, 48) == 0))
             false -> Option.None
-            true -> Option.Some(Trailer(names = u32At(b, 0), levels = u32At(b, 4), exprs = u32At(b, 8), decls = u32At(b, 12), offset = u64At(b, 20), length = u64At(b, 28)))
+            true -> Option.Some(Trailer(names = u32At(b, 0), levels = u32At(b, 4), exprs = u32At(b, 8), decls = u32At(b, 12), offset = u64At(b, 20), length = u64At(b, 28), version = 0, total = u32At(b, 8), proofs = 0, proofsLength = 0))
 
 verify trailerOf
     trailerOf(Bytes.fromList([])) => Option.None
@@ -152,7 +171,7 @@ fn header(path: String, tr: Trailer, h: Bytes) -> Outcome
     ? "Signature, version 0, three zero bytes, and the meta text, checked as the ndjson header line is; then the block's records."
     ! [Disk.readBytesAt]
     m = vAt(h, posOf(8))
-    match Bool.and(Bytes.take(h, 8) == Bytes.fromList([83, 85, 83, 90, 0, 0, 0, 0]), m.at.value + m.value == Bytes.len(h))
+    match Bool.and(Bool.and(Bytes.take(h, 4) == Bytes.fromList([83, 85, 83, 90]), Bool.and(octet(h, 4) == tr.version, Bytes.take(Bytes.drop(h, 5), 3) == Bytes.fromList([0, 0, 0]))), m.at.value + m.value == Bytes.len(h))
         false -> Outcome.Rejected("not a Susz file of version 0")
         true -> match textAt(h, m)
             Result.Err(e) -> Outcome.Rejected("meta: {e}")
@@ -173,7 +192,7 @@ fn records(r: Rd, t: Tables, i: Pos, tr: Trailer) -> Outcome
     ? "The record at i; the tables are passed apart from the reading state so that they have one owner and grow in place. At the end of the block the counts are checked; a chunk with less than the margin left is first replaced (ChunkWithMargin)."
     ! [Disk.readBytesAt]
     match r.base + i.value == r.stop
-        true -> ended(t, tr)
+        true -> ended(r.path, t, tr)
         false -> match Bool.and(r.base + Bytes.len(r.b) < r.stop, Bytes.len(r.b) - i.value < marginBytes())
             true -> refill(r, t, r.base + i.value, tr)
             false -> step(r, t, i, tr)
@@ -202,15 +221,79 @@ fn short(r: Rd) -> Outcome
 verify short
     short(Rd(path = "f", b = Bytes.fromList([]), base = 4, stop = 4, n = 2)) => Outcome.Rejected("record 3: the block ends inside it")
 
-fn ended(t: Tables, tr: Trailer) -> Outcome
-    ? "The trailer's counts must be the block's."
+fn ended(path: String, t: Tables, tr: Trailer) -> Outcome
+    ? "The trailer's counts must be the block's; in version 2 the proof section is read then."
+    ! [Disk.readBytesAt]
     match Bool.and(Bool.and(tr.names == t.nextName, tr.levels == t.nextLevel), Bool.and(tr.exprs == t.nextExpr, tr.decls == List.len(t.decls)))
-        true -> Outcome.Read(Export.Tables.finish(t))
+        true -> match tr.version == 2
+            false -> Outcome.Read(Export.Tables.finish(t))
+            true -> withProofs(path, t, tr)
         false -> Outcome.Rejected("the trailer's counts disagree with the records")
 
-verify ended
-    ended(Export.Tables.empty(), Trailer(names = 1, levels = 1, exprs = 0, decls = 0, offset = 0, length = 0)) => Outcome.Read(Export.Tables.finish(Export.Tables.empty()))
-    ended(Export.Tables.empty(), Trailer(names = 2, levels = 1, exprs = 0, decls = 0, offset = 0, length = 0)) => Outcome.Rejected("the trailer's counts disagree with the records")
+fn withProofs(path: String, t: Tables, tr: Trailer) -> Outcome
+    ? "Version 2: the frontier the main block listed, and the proof section read whole; every lazy theorem gets its block's bytes."
+    ! [Disk.readBytesAt]
+    s = Store(names = Vector.fromList(List.reverse(t.outNames)), levels = Vector.fromList(List.reverse(t.outLevels)), exprs = Vector.fromList(List.reverse(t.outExprs)))
+    match Disk.readBytesAt(path, tr.proofs, tr.proofsLength)
+        Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
+        Result.Ok(pb) -> Outcome.Read(packedAll(Export.Tables.finish(t), s, pb, tr.total))
+
+fn packedAll(p: Parsed, s: Store, pb: Bytes, total: Int) -> Parsed
+    ? "The declarations with their proofs packed, and the expressions counted as the file holds them."
+    ds = packedDecls(p.decls, s, pb, [])
+    Parsed.update(p, decls = ds, exprs = total)
+
+fn packedDecls(ds: List<Decl>, s: Store, pb: Bytes, acc: List<Decl>) -> List<Decl>
+    ? "Each declaration, a lazy theorem with its block."
+    match ds
+        [] -> List.reverse(acc)
+        [d, ..rest] -> packedDecls(rest, s, pb, List.prepend(packedDecl(d, s, pb), acc))
+
+fn packedDecl(d: Decl, s: Store, pb: Bytes) -> Decl
+    ? "A theorem whose proof is a spot in the proof section gets that block's bytes."
+    match d
+        Decl.Thm(h, p, all) -> match p
+            Proof.Spot(o, l) -> Decl.Thm(h, Proof.Packed(s, Bytes.take(Bytes.drop(pb, o), l)), all)
+            _ -> d
+        _ -> d
+
+fn exportRec(t: Tables, b: Bytes, i: Pos) -> Done
+    ? "19 (version 2): a name (0), level (1) or main expression (2) by id, the next of the frontier."
+    x = vAt(b, orNone(posOf(i.value + 1)))
+    match x.at.value < 0
+        true -> Done.Short
+        false -> exported(t, octet(b, i.value), x.value, x.at)
+
+fn exported(t: Tables, kind: Int, id: Int, at: Pos) -> Done
+    ? "The frontier entry added."
+    match kind
+        0 -> match Export.Tables.name(t, id)
+            Result.Ok(n) -> Done.Next(Tables.update(t, outNames = List.prepend(n, t.outNames)), at)
+            Result.Err(e) -> Done.Bad(e)
+        1 -> match Export.Tables.level(t, id)
+            Result.Ok(l) -> Done.Next(Tables.update(t, outLevels = List.prepend(l, t.outLevels)), at)
+            Result.Err(e) -> Done.Bad(e)
+        2 -> match Export.Tables.expr(t, id)
+            Result.Ok(e) -> Done.Next(Tables.update(t, outExprs = List.prepend(e, t.outExprs)), at)
+            Result.Err(e) -> Done.Bad(e)
+        _ -> Done.Bad("unknown frontier kind {kind}")
+
+fn lazyThm(t: Tables, b: Bytes, head: Head, o: At) -> Done
+    ? "6 (version 2): a theorem whose proof is a block of the proof section, by its offset and length, then its group."
+    l = vAt(b, o.at)
+    all = idsAt(b, l.at)
+    match Bool.or(o.at.value < 0, Bool.or(l.at.value < 0, all.at.value < 0))
+        true -> Done.Short
+        false -> lazyAdded(t, head, o.value, l.value, all)
+
+fn lazyAdded(t: Tables, head: Head, o: Int, l: Int, all: Ids) -> Done
+    ? "The lazy theorem built, then added."
+    d = lazyOf(t, head, o, l, all.ids)
+    declAdded(t, d, all.at)
+
+fn lazyOf(t: Tables, head: Head, o: Int, l: Int, all: List<Int>) -> Result<Decl, String>
+    ? "The theorem with its proof's spot."
+    Result.Ok(Decl.Thm(head, Proof.Spot(o, l), Export.Tables.names(t, all)?))
 
 fn u32At(b: Bytes, i: Int) -> Int
     ? "A little-endian u32 at i, or -1 past the end."
@@ -460,6 +543,7 @@ fn recordAt(t: Tables, b: Bytes, tag: Int, i: Pos) -> Done
         16 -> proj(t, b, vAt(b, i))
         17 -> mdata(t, vAt(b, i))
         18 -> decl(t, b, i)
+        19 -> exportRec(t, b, i)
         _ -> Done.Bad("unknown record tag {tag}")
 
 verify recordAt
@@ -738,6 +822,7 @@ fn declKind(t: Tables, b: Bytes, k: Int, head: Head, i: Pos) -> Done
         2 -> thm(t, b, head, vAt(b, i))
         3 -> opaq(t, b, head, vAt(b, i))
         4 -> quot(t, head, octet(b, i.value), orNone(posOf(i.value + 1)), i.value < Bytes.len(b))
+        6 -> lazyThm(t, b, head, vAt(b, i))
         _ -> Done.Bad("unknown declaration kind {k}")
 
 verify declKind
@@ -860,7 +945,7 @@ verify thmAdded
 fn thmOf(t: Tables, head: Head, v: Int, all: List<Int>) -> Result<Decl, String>
     ? "The theorem."
     value = Export.Tables.expr(t, v)?
-    Result.Ok(Decl.Thm(head, value, Export.Tables.names(t, all)?))
+    Result.Ok(Decl.Thm(head, Proof.Built(value), Export.Tables.names(t, all)?))
 
 verify thmOf
     thmOf(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0, []) => Result.Err("unknown expression index 0")

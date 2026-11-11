@@ -1,0 +1,338 @@
+module Lazy
+    intent =
+        "A theorem's proof that is built only when it is asked for (a"
+        "measuring prototype, Susz version 2): the bytes of its block in the"
+        "file's proof section and the frontier tables of names, levels and"
+        "expressions the block names, which the reader built. Forcing decodes"
+        "the block into a fresh term, nothing of it kept in any table, so the"
+        "term lives only while checking holds it. A block that does not decode"
+        "gives a constant no environment has, which fails the check."
+    exposes [Proof, Store, force, valued, emptyStore]
+    exposes opaque [LPos]
+    depends [Bytes, Core.Names, Core.Levels, Core.Exprs]
+    effects []
+
+record Store
+    names: Vector<Name>
+    levels: Vector<Level>
+    exprs: Vector<Expr>
+
+type Proof
+    Built(Expr)
+    Spot(Int, Int)
+    Packed(Store, Bytes)
+
+fn emptyStore() -> Store
+    ? "No frontier."
+    Store(names = Vector.fromList([]), levels = Vector.fromList([]), exprs = Vector.fromList([]))
+
+fn valued(p: Proof) -> Bool
+    ? "Every proof has a value; asked without building it."
+    match p
+        Proof.Built(_) -> true
+        Proof.Spot(_, _) -> true
+        Proof.Packed(_, _) -> true
+
+verify valued
+    valued(Proof.Built(Core.Exprs.bvar(0))) => true
+
+fn force(p: Proof) -> Expr
+    ? "The proof's term, decoded from its block when packed."
+    match p
+        Proof.Built(e) -> e
+        Proof.Spot(_, _) -> broken()
+        Proof.Packed(s, b) -> decoded(s, b)
+
+verify force
+    force(Proof.Built(Core.Exprs.natLit(1))) => Core.Exprs.natLit(1)
+    force(Proof.Packed(emptyStore(), Bytes.fromList([1, 7, 3]))) => Core.Exprs.bvar(3)
+    force(Proof.Packed(emptyStore(), Bytes.fromList([2, 7, 3, 10, 1, 1]))) => Core.Exprs.app(Core.Exprs.bvar(3), Core.Exprs.bvar(3))
+
+fn broken() -> Expr
+    ? "What a block that does not decode stands for: a constant that no environment has."
+    Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "<undecodable proof block>"), [])
+
+decision LazyPositionsInRange
+    date = "2026-11-11"
+    reason =
+        "As PositionsInRange in Export.Susz: a position in a block is -1 or"
+        "below 2^62, held as a machine word."
+    chosen = "LazyPositionsInRange"
+    rejected = ["PositionsAsInts"]
+    impacts = [LPos, lposOf, lorNone]
+
+record LPos
+    value: Int
+
+fn lposOf(n: Int) -> Result<LPos, String>
+    ? "A position: -1 for none, otherwise below 2^62 (LazyPositionsInRange)."
+    match Bool.and(n >= -1, n <= 4611686018427387903)
+        true -> Result.Ok(LPos(value = n))
+        false -> Result.Err("position out of range")
+
+verify lposOf
+    lposOf(-2) => Result.Err("position out of range")
+
+fn lorNone(r: Result<LPos, String>) -> LPos
+    ? "A position made by lposOf, or none (LazyPositionsInRange)."
+    match r
+        Result.Ok(p) -> p
+        Result.Err(_) -> LPos(value = -1)
+
+verify lorNone
+    lorNone(lposOf(-5)).value => -1
+
+record LAt
+    value: Int
+    at: LPos
+
+record One
+    e: Expr
+    at: LPos
+
+record Lvls
+    ls: List<Level>
+    at: LPos
+
+fn bad() -> One
+    ? "A record that does not decode."
+    One(e = Core.Exprs.bvar(0), at = LPos(value = -1))
+
+fn vAt(b: Bytes, i: LPos) -> LAt
+    ? "The varint at i (at most nine bytes) and where the next field starts; at is -1 when there is none."
+    match Bytes.get(b, i.value)
+        Option.None -> LAt(value = 0, at = LPos(value = -1))
+        Option.Some(x) -> match x < 128
+            true -> LAt(value = x, at = lorNone(lposOf(i.value + 1)))
+            false -> vMore(b, i, Bits.and(x, 127), 1, 128)
+
+verify vAt
+    vAt(Bytes.fromList([172, 2]), LPos(value = 0)) => LAt(value = 300, at = LPos(value = 2))
+
+fn vMore(b: Bytes, i: LPos, acc: Int, k: Int, w: Int) -> LAt
+    ? "Byte k of the varint at i, of weight w."
+    match k >= 9
+        true -> LAt(value = 0, at = LPos(value = -1))
+        false -> match Bytes.get(b, i.value + k)
+            Option.None -> LAt(value = 0, at = LPos(value = -1))
+            Option.Some(x) -> match x < 128
+                true -> LAt(value = acc + x * w, at = lorNone(lposOf(i.value + k + 1)))
+                false -> vMore(b, i, acc + Bits.and(x, 127) * w, k + 1, w * 128)
+
+verify vMore
+    vMore(Bytes.fromList([128, 1]), LPos(value = 0), 0, 1, 128) => LAt(value = 128, at = LPos(value = 2))
+
+fn decoded(s: Store, b: Bytes) -> Expr
+    ? "The block: its count, then its records; the last one is the proof."
+    n = vAt(b, LPos(value = 0))
+    match Bool.or(n.at.value < 0, n.value < 1)
+        true -> broken()
+        false -> match Vector.new(n.value, Core.Exprs.bvar(0))
+            Result.Ok(xs) -> built(s, b, n.at, 0, n.value, xs)
+            Result.Err(_) -> broken()
+
+fn built(s: Store, b: Bytes, i: LPos, k: Int, n: Int, xs: Vector<Expr>) -> Expr
+    ? "Record k of n at i; xs holds the k before it."
+    match k >= n
+        true -> lastOf(xs, n)
+        false -> withOne(s, b, i, k, n, xs)
+
+fn withOne(s: Store, b: Bytes, i: LPos, k: Int, n: Int, xs: Vector<Expr>) -> Expr
+    ? "Record k decoded before xs is handed on, so that xs is not shared when it is set."
+    r = oneAt(s, b, xs, k, i)
+    stepped(s, b, k, n, xs, r)
+
+fn stepped(s: Store, b: Bytes, k: Int, n: Int, xs: Vector<Expr>, r: One) -> Expr
+    ? "Goes on after record k, or stops at a bad one."
+    match r.at.value < 0
+        true -> broken()
+        false -> built(s, b, r.at, k + 1, n, placed(xs, k, r.e))
+
+fn placed(v: Vector<Expr>, j: Int, e: Expr) -> Vector<Expr>
+    ? "v with e at j; j is always in range."
+    Option.withDefault(Vector.set(v, j, e), v)
+
+fn lastOf(xs: Vector<Expr>, n: Int) -> Expr
+    ? "The last record's term."
+    match Vector.get(xs, n - 1)
+        Option.Some(e) -> e
+        Option.None -> broken()
+
+fn ref(s: Store, xs: Vector<Expr>, k: Int, r: Int) -> Option<Expr>
+    ? "Reference r from record k: r back among the block's own records when r is at most k, else frontier expression r - k - 1."
+    match r <= k
+        true -> match r >= 1
+            true -> Vector.get(xs, k - r)
+            false -> Option.None
+        false -> Vector.get(s.exprs, r - k - 1)
+
+fn oneAt(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, i: LPos) -> One
+    ? "The record at i."
+    match Bytes.get(b, i.value)
+        Option.None -> bad()
+        Option.Some(tag) -> recordOf(s, b, xs, k, tag, lorNone(lposOf(i.value + 1)))
+
+fn recordOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, tag: Int, i: LPos) -> One
+    ? "The record with tag, its fields at i; applications first, the most common."
+    match tag
+        10 -> appOf(s, b, xs, k, vAt(b, i))
+        11 -> binderOf(s, b, xs, k, i, true)
+        12 -> binderOf(s, b, xs, k, i, false)
+        7 -> bvarOf(vAt(b, i))
+        9 -> constOf(s, b, vAt(b, i))
+        8 -> sortOf(s, vAt(b, i))
+        13 -> letOf(s, b, xs, k, vAt(b, i))
+        14 -> litOf(b, vAt(b, i), true)
+        15 -> litOf(b, vAt(b, i), false)
+        16 -> projOf(s, b, xs, k, vAt(b, i))
+        17 -> mdataOf(s, xs, k, vAt(b, i))
+        _ -> bad()
+
+fn appOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, f: LAt) -> One
+    ? "10: the function and the argument."
+    a = vAt(b, f.at)
+    match a.at.value < 0
+        true -> bad()
+        false -> match ref(s, xs, k, f.value)
+            Option.None -> bad()
+            Option.Some(fe) -> match ref(s, xs, k, a.value)
+                Option.None -> bad()
+                Option.Some(ae) -> One(e = Core.Exprs.app(fe, ae), at = a.at)
+
+fn binderOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, i: LPos, isLam: Bool) -> One
+    ? "11 lambda, 12 pi: the annotation byte, the name, the type and the body."
+    n = vAt(b, lorNone(lposOf(i.value + 1)))
+    ty = vAt(b, n.at)
+    body = vAt(b, ty.at)
+    match body.at.value < 0
+        true -> bad()
+        false -> match binderInfo(Option.withDefault(Bytes.get(b, i.value), 9))
+            Option.None -> bad()
+            Option.Some(bi) -> binderBuilt(Vector.get(s.names, n.value), ref(s, xs, k, ty.value), ref(s, xs, k, body.value), bi, isLam, body.at)
+
+fn binderBuilt(n: Option<Name>, ty: Option<Expr>, body: Option<Expr>, bi: Binder, isLam: Bool, at: LPos) -> One
+    ? "The binder from its parts, when all are there."
+    match n
+        Option.None -> bad()
+        Option.Some(nm) -> match ty
+            Option.None -> bad()
+            Option.Some(t) -> match body
+                Option.None -> bad()
+                Option.Some(x) -> match isLam
+                    true -> One(e = Core.Exprs.lam(nm, t, x, bi), at = at)
+                    false -> One(e = Core.Exprs.pi(nm, t, x, bi), at = at)
+
+fn binderInfo(k: Int) -> Option<Binder>
+    ? "0 default, 1 implicit, 2 strict implicit, 3 instance implicit."
+    match k
+        0 -> Option.Some(Binder.Default)
+        1 -> Option.Some(Binder.Implicit)
+        2 -> Option.Some(Binder.StrictImplicit)
+        3 -> Option.Some(Binder.InstImplicit)
+        _ -> Option.None
+
+fn bvarOf(x: LAt) -> One
+    ? "7: a bound variable."
+    match x.at.value < 0
+        true -> bad()
+        false -> One(e = Core.Exprs.bvar(x.value), at = x.at)
+
+fn sortOf(s: Store, l: LAt) -> One
+    ? "8: the sort of a frontier level."
+    match l.at.value < 0
+        true -> bad()
+        false -> match Vector.get(s.levels, l.value)
+            Option.None -> bad()
+            Option.Some(lv) -> One(e = Core.Exprs.sort(lv), at = l.at)
+
+fn constOf(s: Store, b: Bytes, n: LAt) -> One
+    ? "9: a frontier name and its frontier levels."
+    c = vAt(b, n.at)
+    match c.at.value < 0
+        true -> bad()
+        false -> constBuilt(Vector.get(s.names, n.value), levelsFrom(s, b, c.at, c.value))
+
+fn constBuilt(n: Option<Name>, ls: Lvls) -> One
+    ? "The constant, when its name and levels are there."
+    match ls.at.value < 0
+        true -> bad()
+        false -> match n
+            Option.None -> bad()
+            Option.Some(nm) -> One(e = Core.Exprs.cnst(nm, ls.ls), at = ls.at)
+
+fn levelsFrom(s: Store, b: Bytes, i: LPos, n: Int) -> Lvls
+    ? "n frontier levels at i, in order."
+    match n <= 0
+        true -> Lvls(ls = [], at = i)
+        false -> levelThen(s, b, vAt(b, i), n)
+
+fn levelThen(s: Store, b: Bytes, x: LAt, n: Int) -> Lvls
+    ? "One level read; the rest follow it."
+    match x.at.value < 0
+        true -> Lvls(ls = [], at = LPos(value = -1))
+        false -> match Vector.get(s.levels, x.value)
+            Option.None -> Lvls(ls = [], at = LPos(value = -1))
+            Option.Some(l) -> levelsPrefixed(l, levelsFrom(s, b, x.at, n - 1))
+
+fn levelsPrefixed(l: Level, rest: Lvls) -> Lvls
+    ? "l in front of the rest."
+    Lvls(ls = List.prepend(l, rest.ls), at = rest.at)
+
+fn letOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, n: LAt) -> One
+    ? "13: a let, its name, type, value and body."
+    ty = vAt(b, n.at)
+    v = vAt(b, ty.at)
+    body = vAt(b, v.at)
+    match body.at.value < 0
+        true -> bad()
+        false -> letBuilt(Vector.get(s.names, n.value), ref(s, xs, k, ty.value), ref(s, xs, k, v.value), ref(s, xs, k, body.value), body.at)
+
+fn letBuilt(n: Option<Name>, ty: Option<Expr>, v: Option<Expr>, body: Option<Expr>, at: LPos) -> One
+    ? "The let, when all its parts are there."
+    match n
+        Option.None -> bad()
+        Option.Some(nm) -> match ty
+            Option.None -> bad()
+            Option.Some(t) -> match v
+                Option.None -> bad()
+                Option.Some(x) -> match body
+                    Option.None -> bad()
+                    Option.Some(y) -> One(e = Core.Exprs.letE(nm, t, x, y), at = at)
+
+fn litOf(b: Bytes, n: LAt, isNat: Bool) -> One
+    ? "14 a Nat by its decimal digits, 15 a string."
+    match Bool.and(n.at.value >= 0, n.at.value + n.value <= Bytes.len(b))
+        false -> bad()
+        true -> match String.fromUtf8(Bytes.take(Bytes.drop(b, n.at.value), n.value))
+            Result.Err(_) -> bad()
+            Result.Ok(text) -> litBuilt(text, isNat, lorNone(lposOf(n.at.value + n.value)))
+
+fn litBuilt(text: String, isNat: Bool, at: LPos) -> One
+    ? "The literal; a Nat must be digits."
+    match isNat
+        false -> One(e = Core.Exprs.strLit(text), at = at)
+        true -> match String.startsWith(text, "-")
+            true -> bad()
+            false -> match Int.fromString(text)
+                Result.Ok(v) -> One(e = Core.Exprs.natLit(v), at = at)
+                Result.Err(_) -> bad()
+
+fn projOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, n: LAt) -> One
+    ? "16: a projection, the structure's frontier name, the field and the structure."
+    f = vAt(b, n.at)
+    x = vAt(b, f.at)
+    match x.at.value < 0
+        true -> bad()
+        false -> match Vector.get(s.names, n.value)
+            Option.None -> bad()
+            Option.Some(nm) -> match ref(s, xs, k, x.value)
+                Option.None -> bad()
+                Option.Some(e) -> One(e = Core.Exprs.proj(nm, f.value, e), at = x.at)
+
+fn mdataOf(s: Store, xs: Vector<Expr>, k: Int, d: LAt) -> One
+    ? "17: metadata stands for the expression it wraps."
+    match d.at.value < 0
+        true -> bad()
+        false -> match ref(s, xs, k, d.value)
+            Option.None -> bad()
+            Option.Some(e) -> One(e = e, at = d.at)

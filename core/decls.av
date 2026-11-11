@@ -9,7 +9,7 @@ module Decls
         "is a non-recursive structure, and whether its motive may land in"
         "any sort."
     exposes [Head, Hints, Safety, QuotKind, IndType, Ctor, RecRule, Rec, Decl, nameOf, constantCount]
-    depends [Core.Names, Core.Levels, Core.Exprs]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Lazy]
     effects []
 
 record Head
@@ -74,7 +74,7 @@ record Rec
 type Decl
     Axiom(Head, Bool)
     Defn(Head, Expr, Hints, Safety, List<Name>)
-    Thm(Head, Expr, List<Name>)
+    Thm(Head, Proof, List<Name>)
     Opaq(Head, Expr, Bool, List<Name>)
     Quot(Head, QuotKind)
     Induct(List<IndType>, List<Ctor>, List<Rec>)

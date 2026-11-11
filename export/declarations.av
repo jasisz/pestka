@@ -4,7 +4,7 @@ module Declarations
         "constants, the quotient package and inductive blocks. Every name,"
         "level and expression they mention must already be in the tables."
     exposes [declLine, thmAt, defAt, headOf]
-    depends [Json.Line, Json.Access, Core.Names, Core.Exprs, Core.Decls, Export.Tables]
+    depends [Json.Line, Json.Access, Core.Names, Core.Exprs, Core.Decls, Core.Lazy, Export.Tables]
     effects []
 
 fn declLine(t: Tables, kind: String, o: List<Tuple<String, J>>) -> Result<Tables, String>
@@ -20,7 +20,7 @@ fn declOf(t: Tables, kind: String, o: List<Tuple<String, J>>) -> Result<Decl, St
     match kind
         "axiom" -> Result.Ok(Decl.Axiom(head(t, o)?, Json.Access.bool(o, "isUnsafe")?))
         "def" -> defOf(t, o)
-        "thm" -> Result.Ok(Decl.Thm(head(t, o)?, value(t, o)?, all(t, o)?))
+        "thm" -> Result.Ok(Decl.Thm(head(t, o)?, Proof.Built(value(t, o)?), all(t, o)?))
         "opaque" -> Result.Ok(Decl.Opaq(head(t, o)?, value(t, o)?, Json.Access.bool(o, "isUnsafe")?, all(t, o)?))
         "quot" -> Result.Ok(Decl.Quot(head(t, o)?, quotKind(Json.Access.text(o, "kind")?)?))
         "inductive" -> inductiveOf(t, o)
@@ -53,7 +53,7 @@ fn thmAt(t: Tables, name: Int, params: List<Int>, ty: Int, val: Int, group: List
     ? "A theorem from the indices of a thm line read by position, looked up in the order declOf looks them up."
     h = headOf(t, name, params, ty)?
     v = Export.Tables.expr(t, val)?
-    Result.Ok(Export.Tables.addDecl(t, Decl.Thm(h, v, Export.Tables.names(t, group)?)))
+    Result.Ok(Export.Tables.addDecl(t, Decl.Thm(h, Proof.Built(v), Export.Tables.names(t, group)?)))
 
 verify thmAt
     thmAt(Export.Tables.empty(), 0, [], 0, 0, [0]) => Result.Err("unknown expression index 0")

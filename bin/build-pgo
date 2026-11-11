@@ -28,6 +28,12 @@ RUSTFLAGS="$FLAGS -Cprofile-generate=$prof" cargo build --release --target-dir "
 if [ "$(head -c 4 "$train")" != SUSZ ]; then
     "$root/.build/target-pgo/release/main" pack "$train" "$root/.build/train.susz" >/dev/null
     "$root/.build/target-pgo/release/main" "$root/.build/train.susz" 1 >/dev/null
+    # Prototype (reader/susz-lazy): the same file with lazy proofs, written
+    # by the packer LAZYPACK names, so that decoding blocks is not cold.
+    if [ -n "$LAZYPACK" ]; then
+        "$LAZYPACK" "$root/.build/train.susz" "$root/.build/train-lazy.susz" 2>/dev/null
+        "$root/.build/target-pgo/release/main" "$root/.build/train-lazy.susz" 1 >/dev/null
+    fi
 fi
 profdata=$(command -v llvm-profdata || ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-profdata | head -1)
 "$profdata" merge -o "$prof/merged.profdata" "$prof"

@@ -6,8 +6,8 @@ module State
         "scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, Memory, Limits, limitsOf, unbounded, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, paramLevels, cacheGetAt, cachePutAt, quotSeen, quotMark]
-    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Subst, Core.Cache, Check.Shapes]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, Memory, Limits, limitsOf, unbounded, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, valued, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, paramLevels, cacheGetAt, cachePutAt, quotSeen, quotMark]
+    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Subst, Core.Cache, Check.Shapes]
     effects []
 
 type Fail
@@ -17,7 +17,7 @@ type Fail
 type Const
     CAxiom(Head, Bool)
     CDefn(Head, Expr, Hints, Safety, Bool)
-    CThm(Head, Expr)
+    CThm(Head, Proof)
     COpaque(Head, Expr, Bool)
     CQuot(Head, QuotKind)
     CInduct(IndType)
@@ -367,7 +367,7 @@ fn headOf(c: Const) -> Head
         Const.CRec(r) -> r.head
 
 verify headOf
-    headOf(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0))).name => Core.Names.anon()
+    headOf(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Built(Core.Exprs.bvar(0)))).name => Core.Names.anon()
 
 fn isUnsafe(c: Const) -> Bool
     ? "Whether the constant is unsafe."
@@ -390,17 +390,27 @@ fn isPartial(c: Const) -> Bool
         _ -> false
 
 verify isPartial
-    isPartial(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0))) => false
+    isPartial(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Built(Core.Exprs.bvar(0)))) => false
 
 fn valueOf(c: Const) -> Option<Expr>
     ? "The value delta reduction may unfold: definitions and theorems, never opaque constants."
     match c
         Const.CDefn(_, v, _, _, _) -> Option.Some(v)
-        Const.CThm(_, v) -> Option.Some(v)
+        Const.CThm(_, p) -> Option.Some(Core.Lazy.force(p))
         _ -> Option.None
 
 verify valueOf
     valueOf(Const.COpaque(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0), false)) => Option.None
+
+fn valued(c: Const) -> Bool
+    ? "Whether valueOf gives a value, without building a packed theorem's proof."
+    match c
+        Const.CDefn(_, _, _, _, _) -> true
+        Const.CThm(_, _) -> true
+        _ -> false
+
+verify valued
+    valued(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Built(Core.Exprs.bvar(0)))) => true
 
 fn hintsOf(c: Const) -> Hints
     ? "Reducibility hints; everything but a definition counts as opaque."
@@ -409,7 +419,7 @@ fn hintsOf(c: Const) -> Hints
         _ -> Hints.Opaque
 
 verify hintsOf
-    hintsOf(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0))) => Hints.Opaque
+    hintsOf(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Built(Core.Exprs.bvar(0)))) => Hints.Opaque
 
 fn lookup(st: St, n: Name) -> Option<Const>
     ? "A constant of the inductive block being added, or of the environment placed before upTo. The block's constants are kept apart until the block is accepted, so the environment is only read while a block is checked and is never copied for it."

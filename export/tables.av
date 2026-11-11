@@ -27,6 +27,9 @@ record Tables
     known: Map<Name, Bool>
     pending: List<Name>
     allPlaced: Bool
+    outNames: List<Name>
+    outLevels: List<Level>
+    outExprs: List<Expr>
 
 record Parsed
     constants: Int
@@ -45,7 +48,7 @@ verify finish
 
 fn empty() -> Tables
     ? "Name 0 is the anonymous name and level 0 is zero; neither has a line."
-    Tables(names = {0 => Core.Names.anon()}, levels = {0 => Level.Zero}, exprs = {}, cur = freshChunk(), chunks = Vector.fromList([]), dense = 0, nextName = 1, nextLevel = 1, nextExpr = 0, decls = [], constants = 0, known = {}, pending = [], allPlaced = true)
+    Tables(names = {0 => Core.Names.anon()}, levels = {0 => Level.Zero}, exprs = {}, cur = freshChunk(), chunks = Vector.fromList([]), dense = 0, nextName = 1, nextLevel = 1, nextExpr = 0, decls = [], constants = 0, known = {}, pending = [], allPlaced = true, outNames = [], outLevels = [], outExprs = [])
 
 verify empty
     empty().nextName => 1

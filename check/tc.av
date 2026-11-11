@@ -6,7 +6,7 @@ module Tc
         "structures, equality normalizes, inference checks equality), so"
         "they live in one module. Every function threads the checker state."
     exposes [RI, LD, reachesRecursor, inferType, check, valueFits, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel, withFacts, recFacts, majorInduct]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Cache, Check.State, Check.Lits, Core.Hash, Check.Shapes]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Lazy, Core.Cache, Check.State, Check.Lits, Core.Hash, Check.Shapes]
     effects []
 
 decision CongruenceAfterSteps
@@ -4239,11 +4239,9 @@ verify isDelta
 fn deltaConst(c: Option<Const>, ls: List<Level>) -> Option<Const>
     ? "Has a value and the right number of levels."
     match c
-        Option.Some(k) -> match Check.State.valueOf(k)
-            Option.Some -> match List.len(Check.State.headOf(k).params) == List.len(ls)
-                true -> Option.Some(k)
-                false -> Option.None
-            Option.None -> Option.None
+        Option.Some(k) -> match Bool.and(Check.State.valued(k), List.len(Check.State.headOf(k).params) == List.len(ls))
+            true -> Option.Some(k)
+            false -> Option.None
         Option.None -> Option.None
 
 verify deltaConst
@@ -5457,7 +5455,7 @@ fn unfoldBoth(st: St, t: Expr, s: Expr, ct: Const, cs: Const) -> Result<LD, Fail
             false -> sameHead(st, t, s, ct, cs)
 
 verify unfoldBoth
-    resultStatus(unfoldBoth(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0)), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0)))) => 1
+    resultStatus(unfoldBoth(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Built(Core.Exprs.bvar(0))), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Built(Core.Exprs.bvar(0))))) => 1
 
 fn sameHead(st: St, t: Expr, s: Expr, ct: Const, cs: Const) -> Result<LD, Fail>
     ? "f as =?= f bs for a regular f: equal arguments settle it, unless that failed before."
@@ -5468,7 +5466,7 @@ fn sameHead(st: St, t: Expr, s: Expr, ct: Const, cs: Const) -> Result<LD, Fail>
             false -> tryArgs(st, t, s, ct)
 
 verify sameHead
-    resultStatus(sameHead(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0)), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0)))) => 1
+    resultStatus(sameHead(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Built(Core.Exprs.bvar(0))), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Built(Core.Exprs.bvar(0))))) => 1
 
 fn headLevels(e: Expr) -> List<Level>
     ? "Universe levels of the head constant."

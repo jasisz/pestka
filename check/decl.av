@@ -12,7 +12,7 @@ module Decl
         "checked apart; the verdict names the first failure in file order,"
         "as checking strictly in order would."
     exposes [Run, Job, Admitted, Chunk, Checked, Checking, checkAll, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Cache, Check.Shapes, Check.State, Check.Tc, Check.IndAdd]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Cache, Check.Shapes, Check.State, Check.Tc, Check.IndAdd]
     effects []
 
 record Run
@@ -28,7 +28,7 @@ record Job
     pos: Int
     upTo: Int
     head: Head
-    value: Option<Expr>
+    value: Option<Proof>
     isThm: Bool
 
 record Admitted
@@ -629,10 +629,10 @@ fn jobChecks(j: Job, st0: St) -> Result<Facts, Fail>
     st = typeIsSort(Check.Tc.check(st0, j.head.ty)?)?
     match j.value
         Option.None -> Result.Ok(carried(st))
-        Option.Some(v) -> valueChecks(st, j.head.ty, v, j.isThm)
+        Option.Some(v) -> valueChecks(st, j.head.ty, Core.Lazy.force(v), j.isThm)
 
 verify jobChecks
-    jobChecks(Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Core.Exprs.sort(Level.Zero)), isThm = false), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => Result.Err(Fail.Reject("declaration type mismatch"))
+    jobChecks(Job(pos = 0, upTo = 0, head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), value = Option.Some(Proof.Built(Core.Exprs.sort(Level.Zero))), isThm = false), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => Result.Err(Fail.Reject("declaration type mismatch"))
 
 decision LimitsFromReuseDistances
     date = "2026-11-03"
@@ -724,7 +724,7 @@ verify failNamed
 
 type Addition
     Skipped
-    Deferred(Head, Option<Expr>, Bool, Const)
+    Deferred(Head, Option<Proof>, Bool, Const)
     Derived(Env)
     Block(Map<Name, Const>)
     Trusted(List<Const>)
@@ -736,12 +736,12 @@ fn prepared(env: Env, d: Decl) -> Result<Addition, Fail>
             true -> Result.Ok(Addition.Skipped)
             false -> deferred(env, h, Option.None, false, Const.CAxiom(h, false))
         Decl.Defn(h, v, hints, safety, _) -> match safety
-            Safety.Safe -> deferred(env, h, Option.Some(v), false, Const.CDefn(h, v, hints, safety, Check.Tc.reachesRecursor(env, v)))
+            Safety.Safe -> deferred(env, h, Option.Some(Proof.Built(v)), false, Const.CDefn(h, v, hints, safety, Check.Tc.reachesRecursor(env, v)))
             _ -> Result.Ok(Addition.Skipped)
-        Decl.Thm(h, v, _) -> deferred(env, h, Option.Some(v), true, Const.CThm(h, v))
+        Decl.Thm(h, p, _) -> deferred(env, h, Option.Some(p), true, Const.CThm(h, p))
         Decl.Opaq(h, v, unsafe, _) -> match unsafe
             true -> Result.Ok(Addition.Skipped)
-            false -> deferred(env, h, Option.Some(v), false, Const.COpaque(h, v, unsafe))
+            false -> deferred(env, h, Option.Some(Proof.Built(v)), false, Const.COpaque(h, v, unsafe))
         Decl.Quot(h, kind) -> Result.Ok(Addition.Derived(Check.IndAdd.addQuotDecl(env, h, kind)?))
         Decl.Induct(types, ctors, recs) -> match anyUnsafe(types)
             true -> Result.Ok(Addition.Skipped)
@@ -750,7 +750,7 @@ fn prepared(env: Env, d: Decl) -> Result<Addition, Fail>
 verify prepared
     prepared(Check.State.envEmpty(), Decl.Axiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), true)) => Result.Ok(Addition.Skipped)
 
-fn deferred(env: Env, h: Head, v: Option<Expr>, isThm: Bool, c: Const) -> Result<Addition, Fail>
+fn deferred(env: Env, h: Head, v: Option<Proof>, isThm: Bool, c: Const) -> Result<Addition, Fail>
     ? "A new name and distinct universe parameters now; the type and value are checked later, against the environment before the constant."
     ok = newHead(env, h)?
     Result.Ok(Addition.Deferred(h, v, isThm, c))
@@ -802,7 +802,7 @@ verify applied
     applied(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Addition.Block({})).checked => 1
     applied(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), Addition.Trusted([])).trusted => 1
 
-fn deferAdded(run: Run, h: Head, v: Option<Expr>, isThm: Bool, c: Const) -> Run
+fn deferAdded(run: Run, h: Head, v: Option<Proof>, isThm: Bool, c: Const) -> Run
     ? "The constant joins the environment, and its type and value wait to be checked against the environment before it. Its place is read before the environment is passed on, so that the add has it alone."
     upTo = Check.State.envSize(run.env)
     Run.update(run, env = Check.State.envSet(run.env, h.name, c), jobs = List.prepend(Job(pos = run.pos, upTo = upTo, head = h, value = v, isThm = isThm), run.jobs), pos = run.pos + 1)
