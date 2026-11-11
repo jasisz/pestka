@@ -667,11 +667,9 @@ record Acc
 
 record W
     main: List<Int>
-    mainLen: Int
     mainChunks: List<Bytes>
     mainBytes: Int
     proofs: List<Int>
-    proofsLen: Int
     proofChunks: List<Bytes>
     proofBytes: Int
     fN: Int
@@ -688,7 +686,7 @@ record W
 fn zeroes(w: W, name: Bool, level: Bool) -> W
     ? "The anonymous name and the level zero have no records: when a block names them, their frontier entries open the main block, 1 back from names 1 and levels 1."
     match name
-        true -> zeroLevel(W.update(w, main = List.prepend(1, List.prepend(0, List.prepend(19, w.main))), mainLen = w.mainLen + 1, fN = 1), level)
+        true -> zeroLevel(W.update(w, main = List.prepend(1, List.prepend(0, List.prepend(19, w.main))), fN = 1), level)
         false -> zeroLevel(w, level)
 
 verify zeroes
@@ -698,7 +696,7 @@ verify zeroes
 fn zeroLevel(w: W, level: Bool) -> W
     ? "The level zero's frontier entry, when a block names it."
     match level
-        true -> W.update(w, main = List.prepend(1, List.prepend(1, List.prepend(19, w.main))), mainLen = w.mainLen + 1, fL = 1)
+        true -> W.update(w, main = List.prepend(1, List.prepend(1, List.prepend(19, w.main))), fL = 1)
         false -> w
 
 verify zeroLevel
@@ -716,7 +714,7 @@ verify zeroed
 
 fn fresh() -> W
     ? "Nothing written yet; names and levels start at 1, after the implicit 0."
-    W(main = [], mainLen = 0, mainChunks = [], mainBytes = 0, proofs = [], proofsLen = 0, proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = 0, di = 0, mainNext = 0, lazy = 0, open = {})
+    W(main = [], mainChunks = [], mainBytes = 0, proofs = [], proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = 0, di = 0, mainNext = 0, lazy = 0, open = {})
 
 verify fresh
     fresh().nameId => 1
@@ -807,32 +805,32 @@ fn appended(path: String, cs: List<Bytes>) -> Result<Unit, String>
 
 fn flushMain(w: W) -> Result<W, String>
     ? "The main block's bytes so far, as a chunk."
-    match w.mainLen == 0
+    match List.len(w.main) == 0
         true -> Result.Ok(w)
         false -> mainChunked(w, Bytes.fromList(List.reverse(w.main))?)
 
 fn mainChunked(w: W, c: Bytes) -> Result<W, String>
     ? "c, the main block's bytes so far, kept as a chunk."
-    Result.Ok(W.update(w, main = [], mainLen = 0, mainChunks = List.prepend(c, w.mainChunks), mainBytes = w.mainBytes + Bytes.len(c)))
+    Result.Ok(W.update(w, main = [], mainChunks = List.prepend(c, w.mainChunks), mainBytes = w.mainBytes + Bytes.len(c)))
 
 verify mainChunked
     Result.withDefault(mainChunked(fresh(), Bytes.fromList([1, 2])), fresh()).mainBytes => 2
 
 fn flushProofs(w: W) -> Result<W, String>
     ? "The proof section's bytes so far, as a chunk."
-    match w.proofsLen == 0
+    match List.len(w.proofs) == 0
         true -> Result.Ok(w)
         false -> proofsChunked(w, Bytes.fromList(List.reverse(w.proofs))?)
 
 fn proofsChunked(w: W, c: Bytes) -> Result<W, String>
     ? "c, the proof section's bytes so far, kept as a chunk."
-    Result.Ok(W.update(w, proofs = [], proofsLen = 0, proofChunks = List.prepend(c, w.proofChunks), proofBytes = w.proofBytes + Bytes.len(c)))
+    Result.Ok(W.update(w, proofs = [], proofChunks = List.prepend(c, w.proofChunks), proofBytes = w.proofBytes + Bytes.len(c)))
 
 verify proofsChunked
     Result.withDefault(proofsChunked(fresh(), Bytes.fromList([1, 2])), fresh()).proofBytes => 2
 
 fn chunkLimit() -> Int
-    ? "Main-block records, or proof-section bytes, gathered as a list before they become a chunk."
+    ? "Bytes of the main block, or of the proof section, gathered as a list before they become a chunk; List.len is a field of the list, so it is asked after every record."
     1048576
 
 verify chunkLimit
@@ -840,19 +838,19 @@ verify chunkLimit
 
 fn flushedIf(w: W) -> Result<W, String>
     ? "Chunks made once the lists are long."
-    match w.mainLen >= chunkLimit()
+    match List.len(w.main) >= chunkLimit()
         true -> proofsFlushedIf(flushMain(w)?)
         false -> proofsFlushedIf(w)
 
 fn proofsFlushedIf(w: W) -> Result<W, String>
     ? "The proof section's chunk made once its list is long."
-    match w.proofsLen >= chunkLimit()
+    match List.len(w.proofs) >= chunkLimit()
         true -> flushProofs(w)
         false -> Result.Ok(w)
 
 fn mainOut(w: W, out: List<Int>) -> W
     ? "The main block's list now out, one record longer."
-    W.update(w, main = out, mainLen = w.mainLen + 1)
+    W.update(w, main = out)
 
 fn written(b: Bytes, p: Pos, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vector<Int>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes) -> Result<W, String>
     ? "The last pass: each record of version 0 written into the main block or its block; a record at none ran past the block (ReadAsTheReaderReads)."
@@ -868,21 +866,21 @@ fn writtenAt(b: Bytes, p: Pos, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: 
     match tag
         18 -> declWritten(b, end, w, owner, ids, nameF, levelF, count, codes, declOf(b, next1(p), w.ei))
         _ -> match tag <= 2
-            true -> nameWritten(b, q, end, W.update(w, main = copied(w.main, b, p, q), mainLen = w.mainLen + 1), owner, ids, nameF, levelF, count, codes, geti(nameF, w.nameId))
+            true -> nameWritten(b, q, end, W.update(w, main = copied(w.main, b, p, q)), owner, ids, nameF, levelF, count, codes, geti(nameF, w.nameId))
             false -> match tag <= 6
-                true -> levelWritten(b, q, end, W.update(w, main = copied(w.main, b, p, q), mainLen = w.mainLen + 1), owner, ids, nameF, levelF, count, codes, geti(levelF, w.levelId))
+                true -> levelWritten(b, q, end, W.update(w, main = copied(w.main, b, p, q)), owner, ids, nameF, levelF, count, codes, geti(levelF, w.levelId))
                 false -> exprWritten(b, p, q, end, w, owner, ids, nameF, levelF, count, codes, cget(owner, w.ei))
 
 fn nameWritten(b: Bytes, q: Pos, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vector<Int>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes, f: Int) -> Result<W, String>
     ? "A name, then its frontier entry when a block names it."
     match f == -1
-        true -> written(b, q, end, W.update(w, main = List.prepend(1, List.prepend(0, List.prepend(19, w.main))), mainLen = w.mainLen + 1, fN = w.fN + 1, nameId = w.nameId + 1), owner, ids, seti(nameF, w.nameId, w.fN), levelF, count, codes)
+        true -> written(b, q, end, W.update(w, main = List.prepend(1, List.prepend(0, List.prepend(19, w.main))), fN = w.fN + 1, nameId = w.nameId + 1), owner, ids, seti(nameF, w.nameId, w.fN), levelF, count, codes)
         false -> written(b, q, end, W.update(w, nameId = w.nameId + 1), owner, ids, nameF, levelF, count, codes)
 
 fn levelWritten(b: Bytes, q: Pos, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vector<Int>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes, f: Int) -> Result<W, String>
     ? "A level, then its frontier entry when a block names it."
     match f == -1
-        true -> written(b, q, end, W.update(w, main = List.prepend(1, List.prepend(1, List.prepend(19, w.main))), mainLen = w.mainLen + 1, fL = w.fL + 1, levelId = w.levelId + 1), owner, ids, nameF, seti(levelF, w.levelId, w.fL), count, codes)
+        true -> written(b, q, end, W.update(w, main = List.prepend(1, List.prepend(1, List.prepend(19, w.main))), fL = w.fL + 1, levelId = w.levelId + 1), owner, ids, nameF, seti(levelF, w.levelId, w.fL), count, codes)
         false -> written(b, q, end, W.update(w, levelId = w.levelId + 1), owner, ids, nameF, levelF, count, codes)
 
 fn exprWritten(b: Bytes, p: Pos, q: Pos, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vector<Int>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes, o: Int) -> Result<W, String>
@@ -894,7 +892,7 @@ fn exprWritten(b: Bytes, p: Pos, q: Pos, end: Pos, w: W, owner: Vector<Vector<In
 fn mainExprWritten(b: Bytes, q: Pos, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vector<Int>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes, o: Int) -> Result<W, String>
     ? "After a main expression: its frontier entry, the frontier index kept in its owner as -(index + 4)."
     match o == -3
-        true -> written(b, q, end, W.update(w, main = List.prepend(1, List.prepend(2, List.prepend(19, w.main))), mainLen = w.mainLen + 1, fE = w.fE + 1, ei = w.ei + 1, mainNext = w.mainNext + 1), cset(owner, w.ei, 0 - w.fE - 4), ids, nameF, levelF, count, codes)
+        true -> written(b, q, end, W.update(w, main = List.prepend(1, List.prepend(2, List.prepend(19, w.main))), fE = w.fE + 1, ei = w.ei + 1, mainNext = w.mainNext + 1), cset(owner, w.ei, 0 - w.fE - 4), ids, nameF, levelF, count, codes)
         false -> written(b, q, end, W.update(w, ei = w.ei + 1, mainNext = w.mainNext + 1), owner, ids, nameF, levelF, count, codes)
 
 fn mainRef(acc: List<Int>, e: Int, d: Int, next: Int, ids: Vector<Vector<Int>>) -> List<Int>
@@ -1029,7 +1027,7 @@ fn lazyOut(b: Bytes, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vec
     ? "The theorem and its block written."
     blen = uvLen(n) + List.len(x.out)
     m = declPieces(b, d.pieces, w.ei, w.mainNext, ids, d.value, blen, x.fine, List.prepend(6, List.prepend(18, w.main)))
-    w2 = W.update(mainOut(w, m), proofs = List.concat(x.out, uv(w.proofs, n)), proofsLen = w.proofsLen + blen, open = Map.remove(w.open, w.di), di = w.di + 1, lazy = w.lazy + 1)
+    w2 = W.update(mainOut(w, m), proofs = List.concat(x.out, uv(w.proofs, n)), open = Map.remove(w.open, w.di), di = w.di + 1, lazy = w.lazy + 1)
     written(b, d.end, end, w2, owner, ids, nameF, levelF, count, codes)
 
 fn declPieces(b: Bytes, ps: List<Piece>, e: Int, next: Int, ids: Vector<Vector<Int>>, value: Int, blen: Int, fine: Bool, acc: List<Int>) -> List<Int>
@@ -1165,10 +1163,10 @@ verify codesOf
     codesOf({Core.Names.anon() => 4}, [Core.Names.anon()], []) => [4]
 
 verify flushMain
-    Result.withDefault(flushMain(W.update(fresh(), main = [1], mainLen = 1)), fresh()).mainBytes => 1
+    Result.withDefault(flushMain(W.update(fresh(), main = [1])), fresh()).mainBytes => 1
 
 verify flushProofs
-    Result.withDefault(flushProofs(W.update(fresh(), proofs = [1], proofsLen = 1)), fresh()).proofBytes => 1
+    Result.withDefault(flushProofs(W.update(fresh(), proofs = [1])), fresh()).proofBytes => 1
 
 verify flushedIf
     flushedIf(fresh()) => Result.Ok(fresh())
