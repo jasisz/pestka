@@ -1,0 +1,605 @@
+module Lines
+    intent =
+        "Reads the lines of a lean4export file from its bytes, for the"
+        "packer: the lines most of an export is made of, in the exact form"
+        "lean4export writes them, are read by position from the bytes of a"
+        "chunk, as Export.Reader reads them from text, and give the same"
+        "Line; any other line gives none and is read as text by"
+        "Export.Reader.parseLine."
+    exposes [lineAt, LineAt, offAt, offValue, fwd, newlineFrom]
+    exposes opaque [Off, Small]
+    depends [Bytes, Core.Exprs, Export.Reader]
+    effects []
+
+decision LinesFromBytes
+    date = "2026-11-11"
+    reason =
+        "The packer read a chunk as text, split it into a list of lines and"
+        "read each line by position as text: on mathlib 215 G of the 727 G"
+        "a pack took, with the digits read one String.charAt at a time the"
+        "hottest code of it. The common lines are now read from the chunk's"
+        "bytes where they lie, each byte one Bytes.get at a position held as"
+        "a machine word, the digits summed in one, and only a line in any"
+        "other form is cut out and decoded as text for the reader's parser."
+        "A line read from bytes gives the Line the reader's parser gives, so"
+        "the records packed are the same."
+    chosen = "LinesFromBytes"
+    rejected = ["LinesAsText"]
+    impacts = [lineAt, digits, canon]
+
+record Off
+    value: Int
+
+fn offOf(n: Int) -> Result<Off, String>
+    ? "A place in a chunk: -1 for none, otherwise below 2^62."
+    match Bool.and(n >= -1, n <= 4611686018427387903)
+        true -> Result.Ok(Off(value = n))
+        false -> Result.Err("offset out of range")
+
+verify offOf
+    offOf(-2) => Result.Err("offset out of range")
+    offOf(3) => offAt(3)
+
+fn offAt(n: Int) -> Off
+    ? "The place n, none when it is not one."
+    match offOf(n)
+        Result.Ok(o) -> o
+        Result.Err(_) -> Off(value = -1)
+
+verify offAt
+    offAt(4).value => 4
+    offAt(-4).value => -1
+
+fn offValue(p: Off) -> Int
+    ? "Where p is, -1 for none."
+    p.value
+
+verify offValue
+    offValue(offAt(5)) => 5
+
+fn fwd(p: Off, k: Int) -> Off
+    ? "k bytes past p; none stays none."
+    match p.value < 0
+        true -> p
+        false -> offAt(p.value + k)
+
+verify fwd
+    fwd(offAt(2), 3) => offAt(5)
+    fwd(offAt(-1), 3) => offAt(-1)
+
+record Small
+    value: Int
+
+fn smallOf(n: Int) -> Result<Small, String>
+    ? "A number of at most 17 digits, which a step of reading one more digit keeps a machine word."
+    match Bool.and(n >= 0, n <= 99999999999999999)
+        true -> Result.Ok(Small(value = n))
+        false -> Result.Err("too large")
+
+verify smallOf
+    smallOf(-1) => Result.Err("too large")
+    smallOf(12) => smallAt(12)
+
+fn smallAt(n: Int) -> Small
+    ? "n, or 0 when it is out of range."
+    match smallOf(n)
+        Result.Ok(s) -> s
+        Result.Err(_) -> Small(value = 0)
+
+verify smallAt
+    smallAt(7).value => 7
+
+record Num
+    value: Small
+    end: Off
+
+record LineAt
+    line: Line
+    next: Off
+
+fn none() -> Num
+    ? "No number."
+    Num(value = smallAt(0), end = offAt(-1))
+
+verify none
+    none().end => offAt(-1)
+
+fn digits(b: Bytes, p: Off, acc: Small) -> Num
+    ? "The digits from p on summed onto acc, and where they stop; none past 17 digits, which the text path reads. One function calling itself, so a loop, the sum a machine word."
+    match Bytes.get(b, p.value)
+        Option.Some(x) -> match Bool.and(x >= 48, x <= 57)
+            true -> match acc.value < 10000000000000000
+                true -> digits(b, offAt(p.value + 1), smallAt(acc.value * 10 + x - 48))
+                false -> none()
+            false -> Num(value = acc, end = p)
+        Option.None -> Num(value = acc, end = p)
+
+verify digits
+    digits(Bytes.fromList([49, 50, 44]), offAt(0), smallAt(0)) => Num(value = smallAt(12), end = offAt(2))
+    digits(Bytes.fromList([49]), offAt(0), smallAt(10000000000000000)) => none()
+
+fn canon(b: Bytes, p: Off) -> Num
+    ? "The number at p in its canonical form, as Export.Reader.canonAt reads it: digits with no leading zero, or 0 alone; none otherwise."
+    match Bytes.get(b, p.value)
+        Option.Some(48) -> zeroEnd(b, p)
+        Option.Some(x) -> match Bool.and(x >= 49, x <= 57)
+            true -> digits(b, offAt(p.value + 1), smallAt(x - 48))
+            false -> none()
+        Option.None -> none()
+
+verify canon
+    canon(Bytes.fromList([49, 50, 44]), offAt(0)) => Num(value = smallAt(12), end = offAt(2))
+    canon(Bytes.fromList([48, 50]), offAt(0)) => none()
+    canon(Bytes.fromList([48, 44]), offAt(0)) => Num(value = smallAt(0), end = offAt(1))
+    canon(Bytes.fromList([44]), offAt(0)) => none()
+    canon(Bytes.fromList([49]), offAt(-1)) => none()
+
+fn zeroEnd(b: Bytes, p: Off) -> Num
+    ? "A zero is a number only when no digit follows it."
+    match Bytes.get(b, p.value + 1)
+        Option.Some(x) -> match Bool.and(x >= 48, x <= 57)
+            true -> none()
+            false -> Num(value = smallAt(0), end = offAt(p.value + 1))
+        Option.None -> Num(value = smallAt(0), end = offAt(p.value + 1))
+
+verify zeroEnd
+    zeroEnd(Bytes.fromList([48]), offAt(0)) => Num(value = smallAt(0), end = offAt(1))
+
+fn closedNl(b: Bytes, p: Off) -> Bool
+    ? "A closing brace at p and the line's newline after it."
+    match Bytes.get(b, p.value)
+        Option.Some(125) -> byteIs(b, p.value + 1, 10)
+        _ -> false
+
+fn byteIs(b: Bytes, i: Int, c: Int) -> Bool
+    ? "Whether the byte at i is c, read where it lies."
+    match Bytes.get(b, i)
+        Option.Some(x) -> x == c
+        Option.None -> false
+
+verify byteIs
+    byteIs(Bytes.fromList([7]), 0, 7) => true
+    byteIs(Bytes.fromList([7]), 1, 7) => false
+
+verify closedNl
+    closedNl(Bytes.fromList([125, 10]), offAt(0)) => true
+    closedNl(Bytes.fromList([125]), offAt(0)) => false
+
+fn newlineFrom(b: Bytes, p: Off) -> Off
+    ? "The first newline at p or after it, none when the bytes end first."
+    match Bytes.get(b, p.value)
+        Option.Some(10) -> p
+        Option.Some(_) -> newlineFrom(b, offAt(p.value + 1))
+        Option.None -> offAt(-1)
+
+verify newlineFrom
+    newlineFrom(Bytes.fromList([1, 10]), offAt(0)) => offAt(1)
+    newlineFrom(Bytes.fromList([1]), offAt(0)) => offAt(-1)
+
+fn lineAt(b: Bytes, p: Off) -> Option<LineAt>
+    ? "The line at p when it is an application, a lambda, a pi, a name or a constant in the exact form lean4export writes and ends with a newline; none for any other, which the caller reads as text (LinesFromBytes)."
+    match Bytes.get(b, p.value + 2)
+        Option.Some(97) -> match litApp(b, p)
+            true -> appArg(b, canon(b, offAt(p.value + 14)))
+            false -> Option.None
+        Option.Some(105) -> match Bytes.get(b, p.value + 3)
+            Option.Some(101) -> match litIe(b, p)
+                true -> lamAfterIe(b, canon(b, offAt(p.value + 6)))
+                false -> Option.None
+            Option.Some(110) -> match litIn(b, p)
+                true -> nameAfter(b, canon(b, offAt(p.value + 6)))
+                false -> Option.None
+            _ -> Option.None
+        Option.Some(102) -> match litPi(b, p)
+            true -> piAfter(b, binderAt(b, offAt(p.value + 26)))
+            false -> Option.None
+        Option.Some(99) -> match litConst(b, p)
+            true -> constAfter(b, canon(b, offAt(p.value + 17)))
+            false -> Option.None
+        _ -> Option.None
+
+verify lineAt
+    lineAt(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58, 51, 44, 34, 102, 110, 34, 58, 52, 125, 44, 34, 105, 101, 34, 58, 49, 50, 125, 10]), offAt(0)) => Option.Some(LineAt(line = Line.App(12, 4, 3), next = offAt(33)))
+    lineAt(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58, 51, 44, 34, 102, 110, 34, 58, 52, 125, 44, 34, 105, 101, 34, 58, 49, 50, 125]), offAt(0)) => Option.None
+    lineAt(Bytes.fromList([]), offAt(0)) => Option.None
+
+fn appArg(b: Bytes, a: Num) -> Option<LineAt>
+    ? "The function's index after the argument's."
+    match litFn(b, a.end)
+        true -> appFn(b, a, canon(b, fwd(a.end, 6)))
+        false -> Option.None
+
+verify appArg
+    appArg(Bytes.fromList([]), none()) => Option.None
+
+fn appFn(b: Bytes, a: Num, f: Num) -> Option<LineAt>
+    ? "The line's own index after the function's."
+    match litIeClose(b, f.end)
+        true -> appEnd(a, f, canon(b, fwd(f.end, 7)), closedNl(b, canon(b, fwd(f.end, 7)).end))
+        false -> Option.None
+
+verify appFn
+    appFn(Bytes.fromList([]), none(), none()) => Option.None
+
+fn appEnd(a: Num, f: Num, i: Num, closed: Bool) -> Option<LineAt>
+    ? "The application, once its brace and newline end it."
+    match closed
+        true -> Option.Some(LineAt(line = Line.App(i.value.value, f.value.value, a.value.value), next = fwd(i.end, 2)))
+        false -> Option.None
+
+verify appEnd
+    appEnd(none(), none(), none(), false) => Option.None
+
+record BAt
+    bi: Binder
+    body: Small
+    name: Small
+    ty: Small
+    end: Off
+
+fn binderAt(b: Bytes, p: Off) -> Option<BAt>
+    ? "The binder object from p, just after the quote that opens its annotation, as Export.Reader.binderAt reads it; its end is just after its closing brace."
+    match Bytes.get(b, p.value)
+        Option.Some(100) -> annotated(b, litDefault(b, p), Binder.Default, canon(b, fwd(p, 16)))
+        Option.Some(115) -> annotated(b, litStrict(b, p), Binder.StrictImplicit, canon(b, fwd(p, 23)))
+        Option.Some(105) -> match Bytes.get(b, p.value + 1)
+            Option.Some(109) -> annotated(b, litImplicit(b, p), Binder.Implicit, canon(b, fwd(p, 17)))
+            _ -> annotated(b, litInst(b, p), Binder.InstImplicit, canon(b, fwd(p, 21)))
+        _ -> Option.None
+
+verify binderAt
+    binderAt(Bytes.fromList([]), offAt(0)) => Option.None
+
+fn annotated(b: Bytes, found: Bool, bi: Binder, d: Num) -> Option<BAt>
+    ? "The body's index after the annotation, when the annotation's text was found."
+    match found
+        false -> Option.None
+        true -> match litName(b, d.end)
+            false -> Option.None
+            true -> binderName(b, bi, d, canon(b, fwd(d.end, 8)))
+
+verify annotated
+    annotated(Bytes.fromList([]), false, Binder.Default, none()) => Option.None
+
+fn binderName(b: Bytes, bi: Binder, d: Num, n: Num) -> Option<BAt>
+    ? "The type's index after the name's."
+    match litType(b, n.end)
+        false -> Option.None
+        true -> binderType(b, bi, d, n, canon(b, fwd(n.end, 8)))
+
+verify binderName
+    binderName(Bytes.fromList([]), Binder.Default, none(), none()) => Option.None
+
+fn binderType(b: Bytes, bi: Binder, d: Num, n: Num, t: Num) -> Option<BAt>
+    ? "The binder object's closing brace."
+    match byteIs(b, t.end.value, 125)
+        true -> Option.Some(BAt(bi = bi, body = d.value, name = n.value, ty = t.value, end = fwd(t.end, 1)))
+        false -> Option.None
+
+verify binderType
+    binderType(Bytes.fromList([]), Binder.Default, none(), none(), none()) => Option.None
+
+fn lamAfterIe(b: Bytes, i: Num) -> Option<LineAt>
+    ? "A lambda's binder after its index."
+    match litLam(b, i.end)
+        true -> lamEnd(b, i, binderAt(b, fwd(i.end, 22)))
+        false -> Option.None
+
+verify lamAfterIe
+    lamAfterIe(Bytes.fromList([]), none()) => Option.None
+
+fn lamEnd(b: Bytes, i: Num, x: Option<BAt>) -> Option<LineAt>
+    ? "The lambda line's closing brace and newline."
+    match x
+        Option.None -> Option.None
+        Option.Some(y) -> match closedNl(b, y.end)
+            true -> Option.Some(LineAt(line = Line.Bind(BinderIds(ie = i.value.value, nameIdx = y.name.value, typeIdx = y.ty.value, bodyIdx = y.body.value, bi = y.bi, isLam = true)), next = fwd(y.end, 2)))
+            false -> Option.None
+
+verify lamEnd
+    lamEnd(Bytes.fromList([]), none(), Option.None) => Option.None
+
+fn piAfter(b: Bytes, x: Option<BAt>) -> Option<LineAt>
+    ? "A pi's index after its binder."
+    match x
+        Option.None -> Option.None
+        Option.Some(y) -> match litIeComma(b, y.end)
+            true -> piEnd(b, y, canon(b, fwd(y.end, 6)))
+            false -> Option.None
+
+verify piAfter
+    piAfter(Bytes.fromList([]), Option.None) => Option.None
+
+fn piEnd(b: Bytes, y: BAt, i: Num) -> Option<LineAt>
+    ? "The pi line's closing brace and newline."
+    match closedNl(b, i.end)
+        true -> Option.Some(LineAt(line = Line.Bind(BinderIds(ie = i.value.value, nameIdx = y.name.value, typeIdx = y.ty.value, bodyIdx = y.body.value, bi = y.bi, isLam = false)), next = fwd(i.end, 2)))
+        false -> Option.None
+
+verify piEnd
+    piEnd(Bytes.fromList([]), BAt(bi = Binder.Default, body = smallAt(0), name = smallAt(0), ty = smallAt(0), end = offAt(0)), none()) => Option.None
+
+fn nameAfter(b: Bytes, i: Num) -> Option<LineAt>
+    ? "Name.str or Name.num after the index."
+    match litStr(b, i.end)
+        true -> nameStrAfter(b, i, canon(b, fwd(i.end, 14)))
+        false -> match litNum(b, i.end)
+            true -> nameNumAfter(b, i, canon(b, fwd(i.end, 12)))
+            false -> Option.None
+
+verify nameAfter
+    nameAfter(Bytes.fromList([]), none()) => Option.None
+
+fn nameStrAfter(b: Bytes, i: Num, pre: Num) -> Option<LineAt>
+    ? "The string component: bytes up to the closing quote, with no backslash, which the text path decodes."
+    match litStrText(b, pre.end)
+        false -> Option.None
+        true -> nameText(b, i, pre, fwd(pre.end, 8), quoteFrom(b, fwd(pre.end, 8)))
+
+verify nameStrAfter
+    nameStrAfter(Bytes.fromList([]), none(), none()) => Option.None
+
+fn quoteFrom(b: Bytes, p: Off) -> Off
+    ? "The closing quote of a string from p, none when a backslash comes first or the bytes end."
+    match Bytes.get(b, p.value)
+        Option.Some(34) -> p
+        Option.Some(92) -> offAt(-1)
+        Option.Some(_) -> quoteFrom(b, offAt(p.value + 1))
+        Option.None -> offAt(-1)
+
+verify quoteFrom
+    quoteFrom(Bytes.fromList([97, 34]), offAt(0)) => offAt(1)
+    quoteFrom(Bytes.fromList([92, 34]), offAt(0)) => offAt(-1)
+
+fn nameText(b: Bytes, i: Num, pre: Num, s: Off, q: Off) -> Option<LineAt>
+    ? "The two closing braces and the newline after the quote, then the text decoded."
+    match Bool.and(q.value >= 0, Bool.and(byteIs(b, q.value + 1, 125), closedNl(b, fwd(q, 2))))
+        false -> Option.None
+        true -> match String.fromUtf8(Bytes.take(Bytes.drop(b, s.value), q.value - s.value))
+            Result.Ok(t) -> Option.Some(LineAt(line = Line.NameStr(i.value.value, pre.value.value, t), next = fwd(q, 4)))
+            Result.Err(_) -> Option.None
+
+verify nameText
+    nameText(Bytes.fromList([]), none(), none(), offAt(0), offAt(-1)) => Option.None
+
+fn nameNumAfter(b: Bytes, i: Num, k: Num) -> Option<LineAt>
+    ? "The prefix after the numeric component, then two braces and the newline."
+    match litPre(b, k.end)
+        false -> Option.None
+        true -> nameNumEnd(b, i, k, canon(b, fwd(k.end, 7)))
+
+verify nameNumAfter
+    nameNumAfter(Bytes.fromList([]), none(), none()) => Option.None
+
+fn nameNumEnd(b: Bytes, i: Num, k: Num, pre: Num) -> Option<LineAt>
+    ? "The two closing braces and the newline."
+    match Bool.and(byteIs(b, pre.end.value, 125), closedNl(b, fwd(pre.end, 1)))
+        true -> Option.Some(LineAt(line = Line.NameNum(i.value.value, pre.value.value, k.value.value), next = fwd(pre.end, 3)))
+        false -> Option.None
+
+verify nameNumEnd
+    nameNumEnd(Bytes.fromList([]), none(), none(), none()) => Option.None
+
+record UsAt
+    us: List<Int>
+    end: Off
+
+fn constAfter(b: Bytes, n: Num) -> Option<LineAt>
+    ? "The universe levels after the name."
+    match litUs(b, n.end)
+        true -> constIe(b, n, usFirst(b, fwd(n.end, 7)))
+        false -> Option.None
+
+verify constAfter
+    constAfter(Bytes.fromList([]), none()) => Option.None
+
+fn usFirst(b: Bytes, p: Off) -> UsAt
+    ? "A list of level indices up to its closing bracket, possibly empty; its end is none when it is not in the canonical form."
+    match byteIs(b, p.value, 93)
+        true -> UsAt(us = [], end = fwd(p, 1))
+        false -> usMore(b, canon(b, p), [])
+
+verify usFirst
+    usFirst(Bytes.fromList([93]), offAt(0)) => UsAt(us = [], end = offAt(1))
+    usFirst(Bytes.fromList([51, 44, 52, 93]), offAt(0)) => UsAt(us = [3, 4], end = offAt(4))
+    usFirst(Bytes.fromList([51, 44, 93]), offAt(0)).end => offAt(-1)
+
+fn usMore(b: Bytes, u: Num, acc: List<Int>) -> UsAt
+    ? "One more index, then a comma and the next or the closing bracket."
+    match u.end.value < 0
+        true -> UsAt(us = [], end = offAt(-1))
+        false -> match Bytes.get(b, u.end.value)
+            Option.Some(44) -> usMore(b, canon(b, fwd(u.end, 1)), List.prepend(u.value.value, acc))
+            Option.Some(93) -> UsAt(us = List.reverse(List.prepend(u.value.value, acc)), end = fwd(u.end, 1))
+            _ -> UsAt(us = [], end = offAt(-1))
+
+verify usMore
+    usMore(Bytes.fromList([93]), Num(value = smallAt(7), end = offAt(0)), []) => UsAt(us = [7], end = offAt(1))
+
+fn constIe(b: Bytes, n: Num, us: UsAt) -> Option<LineAt>
+    ? "The line's index after the constant, then the brace and the newline."
+    match litIeClose(b, us.end)
+        false -> Option.None
+        true -> constEnd(b, n, us, canon(b, fwd(us.end, 7)))
+
+verify constIe
+    constIe(Bytes.fromList([]), none(), UsAt(us = [], end = offAt(-1))) => Option.None
+
+fn constEnd(b: Bytes, n: Num, us: UsAt, i: Num) -> Option<LineAt>
+    ? "The closing brace and the newline."
+    match closedNl(b, i.end)
+        true -> Option.Some(LineAt(line = Line.Const(i.value.value, n.value.value, us.us), next = fwd(i.end, 2)))
+        false -> Option.None
+
+verify constEnd
+    constEnd(Bytes.fromList([]), none(), UsAt(us = [], end = offAt(0)), none()) => Option.None
+
+fn byteAt(b: Bytes, p: Off, k: Int, c: Int) -> Bool
+    ? "Whether the byte k past p is c, read where it lies."
+    match Bytes.get(b, p.value + k)
+        Option.Some(x) -> x == c
+        Option.None -> false
+
+verify byteAt
+    byteAt(Bytes.fromList([7, 8]), offAt(0), 1, 8) => true
+    byteAt(Bytes.fromList([7]), offAt(-1), 0, 7) => false
+
+fn litApp(b: Bytes, p: Off) -> Bool
+    ? "Whether the 14 bytes of {{\"app\":{{\"arg\": stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 123), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 97))), Bool.and(Bool.and(byteAt(b, p, 3, 112), byteAt(b, p, 4, 112)), Bool.and(byteAt(b, p, 5, 34), byteAt(b, p, 6, 58)))), Bool.and(Bool.and(byteAt(b, p, 7, 123), Bool.and(byteAt(b, p, 8, 34), byteAt(b, p, 9, 97))), Bool.and(Bool.and(byteAt(b, p, 10, 114), byteAt(b, p, 11, 103)), Bool.and(byteAt(b, p, 12, 34), byteAt(b, p, 13, 58)))))
+
+verify litApp
+    litApp(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58]), offAt(0)) => true
+    litApp(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34]), offAt(0)) => false
+
+fn litFn(b: Bytes, p: Off) -> Bool
+    ? "Whether the 6 bytes of ,\"fn\": stand at p, each read where it lies."
+    Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 102))), Bool.and(byteAt(b, p, 3, 110), Bool.and(byteAt(b, p, 4, 34), byteAt(b, p, 5, 58))))
+
+verify litFn
+    litFn(Bytes.fromList([44, 34, 102, 110, 34, 58]), offAt(0)) => true
+    litFn(Bytes.fromList([44, 34, 102, 110, 34]), offAt(0)) => false
+
+fn litIeClose(b: Bytes, p: Off) -> Bool
+    ? "Whether the 7 bytes of }},\"ie\": stand at p, each read where it lies."
+    Bool.and(Bool.and(byteAt(b, p, 0, 125), Bool.and(byteAt(b, p, 1, 44), byteAt(b, p, 2, 34))), Bool.and(Bool.and(byteAt(b, p, 3, 105), byteAt(b, p, 4, 101)), Bool.and(byteAt(b, p, 5, 34), byteAt(b, p, 6, 58))))
+
+verify litIeClose
+    litIeClose(Bytes.fromList([125, 44, 34, 105, 101, 34, 58]), offAt(0)) => true
+    litIeClose(Bytes.fromList([125, 44, 34, 105, 101, 34]), offAt(0)) => false
+
+fn litIe(b: Bytes, p: Off) -> Bool
+    ? "Whether the 6 bytes of {{\"ie\": stand at p, each read where it lies."
+    Bool.and(Bool.and(byteAt(b, p, 0, 123), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 105))), Bool.and(byteAt(b, p, 3, 101), Bool.and(byteAt(b, p, 4, 34), byteAt(b, p, 5, 58))))
+
+verify litIe
+    litIe(Bytes.fromList([123, 34, 105, 101, 34, 58]), offAt(0)) => true
+    litIe(Bytes.fromList([123, 34, 105, 101, 34]), offAt(0)) => false
+
+fn litLam(b: Bytes, p: Off) -> Bool
+    ? "Whether the 22 bytes of ,\"lam\":{{\"binderInfo\":\" stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), byteAt(b, p, 1, 34)), Bool.and(byteAt(b, p, 2, 108), Bool.and(byteAt(b, p, 3, 97), byteAt(b, p, 4, 109)))), Bool.and(Bool.and(byteAt(b, p, 5, 34), Bool.and(byteAt(b, p, 6, 58), byteAt(b, p, 7, 123))), Bool.and(byteAt(b, p, 8, 34), Bool.and(byteAt(b, p, 9, 98), byteAt(b, p, 10, 105))))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 11, 110), byteAt(b, p, 12, 100)), Bool.and(byteAt(b, p, 13, 101), Bool.and(byteAt(b, p, 14, 114), byteAt(b, p, 15, 73)))), Bool.and(Bool.and(byteAt(b, p, 16, 110), Bool.and(byteAt(b, p, 17, 102), byteAt(b, p, 18, 111))), Bool.and(byteAt(b, p, 19, 34), Bool.and(byteAt(b, p, 20, 58), byteAt(b, p, 21, 34))))))
+
+verify litLam
+    litLam(Bytes.fromList([44, 34, 108, 97, 109, 34, 58, 123, 34, 98, 105, 110, 100, 101, 114, 73, 110, 102, 111, 34, 58, 34]), offAt(0)) => true
+    litLam(Bytes.fromList([44, 34, 108, 97, 109, 34, 58, 123, 34, 98, 105, 110, 100, 101, 114, 73, 110, 102, 111, 34, 58]), offAt(0)) => false
+
+fn litPi(b: Bytes, p: Off) -> Bool
+    ? "Whether the 26 bytes of {{\"forallE\":{{\"binderInfo\":\" stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 123), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 102))), Bool.and(byteAt(b, p, 3, 111), Bool.and(byteAt(b, p, 4, 114), byteAt(b, p, 5, 97)))), Bool.and(Bool.and(byteAt(b, p, 6, 108), Bool.and(byteAt(b, p, 7, 108), byteAt(b, p, 8, 69))), Bool.and(Bool.and(byteAt(b, p, 9, 34), byteAt(b, p, 10, 58)), Bool.and(byteAt(b, p, 11, 123), byteAt(b, p, 12, 34))))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 13, 98), Bool.and(byteAt(b, p, 14, 105), byteAt(b, p, 15, 110))), Bool.and(byteAt(b, p, 16, 100), Bool.and(byteAt(b, p, 17, 101), byteAt(b, p, 18, 114)))), Bool.and(Bool.and(byteAt(b, p, 19, 73), Bool.and(byteAt(b, p, 20, 110), byteAt(b, p, 21, 102))), Bool.and(Bool.and(byteAt(b, p, 22, 111), byteAt(b, p, 23, 34)), Bool.and(byteAt(b, p, 24, 58), byteAt(b, p, 25, 34))))))
+
+verify litPi
+    litPi(Bytes.fromList([123, 34, 102, 111, 114, 97, 108, 108, 69, 34, 58, 123, 34, 98, 105, 110, 100, 101, 114, 73, 110, 102, 111, 34, 58, 34]), offAt(0)) => true
+    litPi(Bytes.fromList([123, 34, 102, 111, 114, 97, 108, 108, 69, 34, 58, 123, 34, 98, 105, 110, 100, 101, 114, 73, 110, 102, 111, 34, 58]), offAt(0)) => false
+
+fn litDefault(b: Bytes, p: Off) -> Bool
+    ? "Whether the 16 bytes of default\",\"body\": stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 100), byteAt(b, p, 1, 101)), Bool.and(byteAt(b, p, 2, 102), byteAt(b, p, 3, 97))), Bool.and(Bool.and(byteAt(b, p, 4, 117), byteAt(b, p, 5, 108)), Bool.and(byteAt(b, p, 6, 116), byteAt(b, p, 7, 34)))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 8, 44), byteAt(b, p, 9, 34)), Bool.and(byteAt(b, p, 10, 98), byteAt(b, p, 11, 111))), Bool.and(Bool.and(byteAt(b, p, 12, 100), byteAt(b, p, 13, 121)), Bool.and(byteAt(b, p, 14, 34), byteAt(b, p, 15, 58)))))
+
+verify litDefault
+    litDefault(Bytes.fromList([100, 101, 102, 97, 117, 108, 116, 34, 44, 34, 98, 111, 100, 121, 34, 58]), offAt(0)) => true
+    litDefault(Bytes.fromList([100, 101, 102, 97, 117, 108, 116, 34, 44, 34, 98, 111, 100, 121, 34]), offAt(0)) => false
+
+fn litImplicit(b: Bytes, p: Off) -> Bool
+    ? "Whether the 17 bytes of implicit\",\"body\": stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 105), byteAt(b, p, 1, 109)), Bool.and(byteAt(b, p, 2, 112), byteAt(b, p, 3, 108))), Bool.and(Bool.and(byteAt(b, p, 4, 105), byteAt(b, p, 5, 99)), Bool.and(byteAt(b, p, 6, 105), byteAt(b, p, 7, 116)))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 8, 34), byteAt(b, p, 9, 44)), Bool.and(byteAt(b, p, 10, 34), byteAt(b, p, 11, 98))), Bool.and(Bool.and(byteAt(b, p, 12, 111), byteAt(b, p, 13, 100)), Bool.and(byteAt(b, p, 14, 121), Bool.and(byteAt(b, p, 15, 34), byteAt(b, p, 16, 58))))))
+
+verify litImplicit
+    litImplicit(Bytes.fromList([105, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34, 58]), offAt(0)) => true
+    litImplicit(Bytes.fromList([105, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34]), offAt(0)) => false
+
+fn litStrict(b: Bytes, p: Off) -> Bool
+    ? "Whether the 23 bytes of strictImplicit\",\"body\": stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 115), byteAt(b, p, 1, 116)), Bool.and(byteAt(b, p, 2, 114), Bool.and(byteAt(b, p, 3, 105), byteAt(b, p, 4, 99)))), Bool.and(Bool.and(byteAt(b, p, 5, 116), Bool.and(byteAt(b, p, 6, 73), byteAt(b, p, 7, 109))), Bool.and(byteAt(b, p, 8, 112), Bool.and(byteAt(b, p, 9, 108), byteAt(b, p, 10, 105))))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 11, 99), Bool.and(byteAt(b, p, 12, 105), byteAt(b, p, 13, 116))), Bool.and(byteAt(b, p, 14, 34), Bool.and(byteAt(b, p, 15, 44), byteAt(b, p, 16, 34)))), Bool.and(Bool.and(byteAt(b, p, 17, 98), Bool.and(byteAt(b, p, 18, 111), byteAt(b, p, 19, 100))), Bool.and(byteAt(b, p, 20, 121), Bool.and(byteAt(b, p, 21, 34), byteAt(b, p, 22, 58))))))
+
+verify litStrict
+    litStrict(Bytes.fromList([115, 116, 114, 105, 99, 116, 73, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34, 58]), offAt(0)) => true
+    litStrict(Bytes.fromList([115, 116, 114, 105, 99, 116, 73, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34]), offAt(0)) => false
+
+fn litInst(b: Bytes, p: Off) -> Bool
+    ? "Whether the 21 bytes of instImplicit\",\"body\": stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 105), byteAt(b, p, 1, 110)), Bool.and(byteAt(b, p, 2, 115), Bool.and(byteAt(b, p, 3, 116), byteAt(b, p, 4, 73)))), Bool.and(Bool.and(byteAt(b, p, 5, 109), byteAt(b, p, 6, 112)), Bool.and(byteAt(b, p, 7, 108), Bool.and(byteAt(b, p, 8, 105), byteAt(b, p, 9, 99))))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 10, 105), byteAt(b, p, 11, 116)), Bool.and(byteAt(b, p, 12, 34), Bool.and(byteAt(b, p, 13, 44), byteAt(b, p, 14, 34)))), Bool.and(Bool.and(byteAt(b, p, 15, 98), Bool.and(byteAt(b, p, 16, 111), byteAt(b, p, 17, 100))), Bool.and(byteAt(b, p, 18, 121), Bool.and(byteAt(b, p, 19, 34), byteAt(b, p, 20, 58))))))
+
+verify litInst
+    litInst(Bytes.fromList([105, 110, 115, 116, 73, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34, 58]), offAt(0)) => true
+    litInst(Bytes.fromList([105, 110, 115, 116, 73, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34]), offAt(0)) => false
+
+fn litName(b: Bytes, p: Off) -> Bool
+    ? "Whether the 8 bytes of ,\"name\": stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), byteAt(b, p, 1, 34)), Bool.and(byteAt(b, p, 2, 110), byteAt(b, p, 3, 97))), Bool.and(Bool.and(byteAt(b, p, 4, 109), byteAt(b, p, 5, 101)), Bool.and(byteAt(b, p, 6, 34), byteAt(b, p, 7, 58))))
+
+verify litName
+    litName(Bytes.fromList([44, 34, 110, 97, 109, 101, 34, 58]), offAt(0)) => true
+    litName(Bytes.fromList([44, 34, 110, 97, 109, 101, 34]), offAt(0)) => false
+
+fn litType(b: Bytes, p: Off) -> Bool
+    ? "Whether the 8 bytes of ,\"type\": stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), byteAt(b, p, 1, 34)), Bool.and(byteAt(b, p, 2, 116), byteAt(b, p, 3, 121))), Bool.and(Bool.and(byteAt(b, p, 4, 112), byteAt(b, p, 5, 101)), Bool.and(byteAt(b, p, 6, 34), byteAt(b, p, 7, 58))))
+
+verify litType
+    litType(Bytes.fromList([44, 34, 116, 121, 112, 101, 34, 58]), offAt(0)) => true
+    litType(Bytes.fromList([44, 34, 116, 121, 112, 101, 34]), offAt(0)) => false
+
+fn litIeComma(b: Bytes, p: Off) -> Bool
+    ? "Whether the 6 bytes of ,\"ie\": stand at p, each read where it lies."
+    Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 105))), Bool.and(byteAt(b, p, 3, 101), Bool.and(byteAt(b, p, 4, 34), byteAt(b, p, 5, 58))))
+
+verify litIeComma
+    litIeComma(Bytes.fromList([44, 34, 105, 101, 34, 58]), offAt(0)) => true
+    litIeComma(Bytes.fromList([44, 34, 105, 101, 34]), offAt(0)) => false
+
+fn litIn(b: Bytes, p: Off) -> Bool
+    ? "Whether the 6 bytes of {{\"in\": stand at p, each read where it lies."
+    Bool.and(Bool.and(byteAt(b, p, 0, 123), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 105))), Bool.and(byteAt(b, p, 3, 110), Bool.and(byteAt(b, p, 4, 34), byteAt(b, p, 5, 58))))
+
+verify litIn
+    litIn(Bytes.fromList([123, 34, 105, 110, 34, 58]), offAt(0)) => true
+    litIn(Bytes.fromList([123, 34, 105, 110, 34]), offAt(0)) => false
+
+fn litStr(b: Bytes, p: Off) -> Bool
+    ? "Whether the 14 bytes of ,\"str\":{{\"pre\": stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 115))), Bool.and(Bool.and(byteAt(b, p, 3, 116), byteAt(b, p, 4, 114)), Bool.and(byteAt(b, p, 5, 34), byteAt(b, p, 6, 58)))), Bool.and(Bool.and(byteAt(b, p, 7, 123), Bool.and(byteAt(b, p, 8, 34), byteAt(b, p, 9, 112))), Bool.and(Bool.and(byteAt(b, p, 10, 114), byteAt(b, p, 11, 101)), Bool.and(byteAt(b, p, 12, 34), byteAt(b, p, 13, 58)))))
+
+verify litStr
+    litStr(Bytes.fromList([44, 34, 115, 116, 114, 34, 58, 123, 34, 112, 114, 101, 34, 58]), offAt(0)) => true
+    litStr(Bytes.fromList([44, 34, 115, 116, 114, 34, 58, 123, 34, 112, 114, 101, 34]), offAt(0)) => false
+
+fn litStrText(b: Bytes, p: Off) -> Bool
+    ? "Whether the 8 bytes of ,\"str\":\" stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), byteAt(b, p, 1, 34)), Bool.and(byteAt(b, p, 2, 115), byteAt(b, p, 3, 116))), Bool.and(Bool.and(byteAt(b, p, 4, 114), byteAt(b, p, 5, 34)), Bool.and(byteAt(b, p, 6, 58), byteAt(b, p, 7, 34))))
+
+verify litStrText
+    litStrText(Bytes.fromList([44, 34, 115, 116, 114, 34, 58, 34]), offAt(0)) => true
+    litStrText(Bytes.fromList([44, 34, 115, 116, 114, 34, 58]), offAt(0)) => false
+
+fn litNum(b: Bytes, p: Off) -> Bool
+    ? "Whether the 12 bytes of ,\"num\":{{\"i\": stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 110))), Bool.and(byteAt(b, p, 3, 117), Bool.and(byteAt(b, p, 4, 109), byteAt(b, p, 5, 34)))), Bool.and(Bool.and(byteAt(b, p, 6, 58), Bool.and(byteAt(b, p, 7, 123), byteAt(b, p, 8, 34))), Bool.and(byteAt(b, p, 9, 105), Bool.and(byteAt(b, p, 10, 34), byteAt(b, p, 11, 58)))))
+
+verify litNum
+    litNum(Bytes.fromList([44, 34, 110, 117, 109, 34, 58, 123, 34, 105, 34, 58]), offAt(0)) => true
+    litNum(Bytes.fromList([44, 34, 110, 117, 109, 34, 58, 123, 34, 105, 34]), offAt(0)) => false
+
+fn litPre(b: Bytes, p: Off) -> Bool
+    ? "Whether the 7 bytes of ,\"pre\": stand at p, each read where it lies."
+    Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 112))), Bool.and(Bool.and(byteAt(b, p, 3, 114), byteAt(b, p, 4, 101)), Bool.and(byteAt(b, p, 5, 34), byteAt(b, p, 6, 58))))
+
+verify litPre
+    litPre(Bytes.fromList([44, 34, 112, 114, 101, 34, 58]), offAt(0)) => true
+    litPre(Bytes.fromList([44, 34, 112, 114, 101, 34]), offAt(0)) => false
+
+fn litConst(b: Bytes, p: Off) -> Bool
+    ? "Whether the 17 bytes of {{\"const\":{{\"name\": stand at p, each read where it lies."
+    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 123), byteAt(b, p, 1, 34)), Bool.and(byteAt(b, p, 2, 99), byteAt(b, p, 3, 111))), Bool.and(Bool.and(byteAt(b, p, 4, 110), byteAt(b, p, 5, 115)), Bool.and(byteAt(b, p, 6, 116), byteAt(b, p, 7, 34)))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 8, 58), byteAt(b, p, 9, 123)), Bool.and(byteAt(b, p, 10, 34), byteAt(b, p, 11, 110))), Bool.and(Bool.and(byteAt(b, p, 12, 97), byteAt(b, p, 13, 109)), Bool.and(byteAt(b, p, 14, 101), Bool.and(byteAt(b, p, 15, 34), byteAt(b, p, 16, 58))))))
+
+verify litConst
+    litConst(Bytes.fromList([123, 34, 99, 111, 110, 115, 116, 34, 58, 123, 34, 110, 97, 109, 101, 34, 58]), offAt(0)) => true
+    litConst(Bytes.fromList([123, 34, 99, 111, 110, 115, 116, 34, 58, 123, 34, 110, 97, 109, 101, 34]), offAt(0)) => false
+
+fn litUs(b: Bytes, p: Off) -> Bool
+    ? "Whether the 7 bytes of ,\"us\":[ stand at p, each read where it lies."
+    Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 117))), Bool.and(Bool.and(byteAt(b, p, 3, 115), byteAt(b, p, 4, 34)), Bool.and(byteAt(b, p, 5, 58), byteAt(b, p, 6, 91))))
+
+verify litUs
+    litUs(Bytes.fromList([44, 34, 117, 115, 34, 58, 91]), offAt(0)) => true
+    litUs(Bytes.fromList([44, 34, 117, 115, 34, 58]), offAt(0)) => false

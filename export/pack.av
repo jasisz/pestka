@@ -9,7 +9,7 @@ module Pack
         "structure only; the reader trusts none of it and computes every hash"
         "and range itself."
     exposes [pack, image]
-    depends [Bytes, Json.Line, Json.Access, Core.Names, Core.Lazy, Core.Exprs, Core.Decls, Export.Reader, Export.Split, Export.Susz]
+    depends [Bytes, Json.Line, Json.Access, Core.Names, Core.Lazy, Core.Exprs, Core.Decls, Export.Reader, Export.Lines, Export.Split, Export.Susz]
     effects [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
 
 record P
@@ -161,7 +161,7 @@ fn onePacked(src: String) -> Result<Laid, String>
     ? "The ndjson export at src packed into version 2 in one step (OneStepPack)."
     ! [Disk.readBytesAt, Disk.size]
     size = Disk.size(src)?
-    o = oneChunked(src, 0, "", Option.None, x0(slotsFor(size))?, 1)?
+    o = bChunked(src, 0, chunkBytes(), Option.None, x0(slotsFor(size))?, 1)?
     oneLaid(o)
 
 record One
@@ -174,30 +174,67 @@ fn oneLaid(o: One) -> Result<Laid, String>
     a = A(eoff = o.x.eoff, owner = o.x.owner, names = Vector.fromList(List.take(List.fromVector(o.x.names), o.q.names)), known = o.x.known, exprs = o.q.exprs, decls = o.q.decls)
     Export.Split.laidAfter(b, o.q.start, Bytes.len(b), o.q.names, o.q.levels, o.q.decls, o.q.exprs, a)
 
-fn oneChunked(src: String, offset: Int, carry: String, p: Option<P>, x: X, line: Int) -> Result<One, String>
-    ? "Reads the chunk at offset, as chunked does, noting what the split needs (OneStepPack)."
+fn bChunked(src: String, offset: Int, size: Int, p: Option<P>, x: X, line: Int) -> Result<One, String>
+    ? "Reads size bytes at offset, where a line starts, and packs the lines they hold (LinesFromBytes in Export.Lines); fewer bytes than asked for are the end of the file."
     ! [Disk.readBytesAt]
-    match Disk.readBytesAt(src, offset, chunkBytes())
+    match Disk.readBytesAt(src, offset, size)
         Result.Err(e) -> Result.Err("cannot read {src}: {e}")
-        Result.Ok(b) -> match Bytes.len(b) == 0
-            true -> oneFinished(oneLines(p, x, [carry], line))
-            false -> oneDecoded(src, offset, carry, p, x, line, b, 0)
+        Result.Ok(b) -> bLines(src, offset, b, Bytes.len(b) < size, Export.Lines.offAt(0), p, x, line)
 
-fn oneDecoded(src: String, offset: Int, carry: String, p: Option<P>, x: X, line: Int, b: Bytes, cut: Int) -> Result<One, String>
-    ? "The chunk as text, as decoded does."
+fn bLines(src: String, offset: Int, b: Bytes, eof: Bool, s: Off, p: Option<P>, x: X, line: Int) -> Result<One, String>
+    ? "The line starting at s: read from the bytes when it is in a common form, else cut out and read as text. Past the last newline of a chunk the next chunk is read from where its line starts; at the end of the file what is left is the last line, as for the text reader."
     ! [Disk.readBytesAt]
-    match String.fromUtf8(Bytes.take(b, Bytes.len(b) - cut))
-        Result.Err(e) -> match cut >= 3
-            true -> Result.Err("cannot read {src}: {e}")
-            false -> oneDecoded(src, offset, carry, p, x, line, b, cut + 1)
-        Result.Ok(t) -> oneSplit(src, offset + Bytes.len(b) - cut, joined(carry, String.split(t, "\n")), p, x, line)
+    match Export.Lines.offValue(s) >= Bytes.len(b)
+        true -> match eof
+            true -> oneFinished(oneLines(p, x, [""], line))
+            false -> bChunked(src, offset + Bytes.len(b), chunkBytes(), p, x, line)
+        false -> match p
+            Option.None -> bText(src, offset, b, eof, s, Option.None, x, line, Export.Lines.newlineFrom(b, s))
+            Option.Some(q) -> match Export.Lines.lineAt(b, s)
+                Option.Some(la) -> bLine(src, offset, b, eof, la.next, q, x, la.line, line)
+                Option.None -> bText(src, offset, b, eof, s, Option.Some(q), x, line, Export.Lines.newlineFrom(b, s))
 
-fn oneSplit(src: String, next: Int, parts: List<String>, p: Option<P>, x: X, line: Int) -> Result<One, String>
-    ? "The complete lines of a chunk; the last part waits for the next chunk."
+fn bLine(src: String, offset: Int, b: Bytes, eof: Bool, next: Off, q: P, x: X, l: Line, line: Int) -> Result<One, String>
+    ? "A line read from the bytes, packed and noted."
     ! [Disk.readBytesAt]
-    match oneLines(p, x, List.take(parts, List.len(parts) - 1), line)
+    e0 = q.exprs
+    n0 = q.names
+    d0 = q.decls
+    before = List.len(q.out)
+    match lineOf(q, l)
+        Result.Err(e) -> Result.Err("line {line}: {e}")
+        Result.Ok(r) -> match noted(x, r, e0, n0, d0, before)
+            Result.Err(e) -> Result.Err("line {line}: {e}")
+            Result.Ok(y) -> bLines(src, offset, b, eof, next, Option.Some(r), y, line + 1)
+
+fn bText(src: String, offset: Int, b: Bytes, eof: Bool, s: Off, p: Option<P>, x: X, line: Int, nl: Off) -> Result<One, String>
+    ? "A line read as text, up to its newline nl. A line the chunk ends inside is read again from its start with the next chunk, or with twice the bytes when it is the chunk's first; at the end of the file it is the last line."
+    ! [Disk.readBytesAt]
+    match Export.Lines.offValue(nl) < 0
+        true -> match eof
+            true -> bLast(src, b, s, p, x, line)
+            false -> match Export.Lines.offValue(s) == 0
+                true -> bChunked(src, offset, 2 * Bytes.len(b), p, x, line)
+                false -> bChunked(src, offset + Export.Lines.offValue(s), chunkBytes(), p, x, line)
+        false -> match String.fromUtf8(Bytes.take(Bytes.drop(b, Export.Lines.offValue(s)), Export.Lines.offValue(nl) - Export.Lines.offValue(s)))
+            Result.Err(e) -> Result.Err("cannot read {src}: {e}")
+            Result.Ok(t) -> bFed(src, offset, b, eof, Export.Lines.fwd(nl, 1), oneLines(p, x, [t], line))
+
+fn bFed(src: String, offset: Int, b: Bytes, eof: Bool, next: Off, l: OneLined) -> Result<One, String>
+    ? "On after a line read as text."
+    ! [Disk.readBytesAt]
+    match l
         OneLined.Bad(e) -> Result.Err(e)
-        OneLined.Done(q, y, at) -> oneChunked(src, next, lastOf(parts), q, y, at)
+        OneLined.Done(p, x, line) -> bLines(src, offset, b, eof, next, p, x, line)
+
+fn bLast(src: String, b: Bytes, s: Off, p: Option<P>, x: X, line: Int) -> Result<One, String>
+    ? "The last line, which no newline ends."
+    match String.fromUtf8(Bytes.drop(b, Export.Lines.offValue(s)))
+        Result.Err(e) -> Result.Err("cannot read {src}: {e}")
+        Result.Ok(t) -> oneFinished(oneLines(p, x, [t], line))
+
+verify bLast
+    bLast("f", Bytes.fromList([]), Export.Lines.offAt(0), Option.None, x00(), 1) => Result.Err("line 1: unexpected end of line at column 0")
 
 type OneLined
     Done(Option<P>, X, Int)
