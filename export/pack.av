@@ -142,21 +142,27 @@ decision OneStepPack
 
 record X
     eoff: Vector<Vector<Int>>
+    c1: Vector<Vector<U32>>
+    c2: Vector<Vector<U32>>
+    kc: Vector<Int>
+    ac: Vector<U32>
+    bc: Vector<U32>
+    run: Int
     owner: Vector<Vector<Int>>
     cap: Int
     names: Vector<Name>
     known: Map<Name, Int>
 
 fn x0(slots: Int) -> Result<X, String>
-    ? "Nothing noted yet: room for slots chunks of 65536 expressions, none made, and for 4096 names."
-    Result.Ok(X(eoff = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, owner = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, cap = 0, names = Vector.new(4096, Core.Names.anon()), known = {}))
+    ? "Nothing noted yet: room for slots chunks of 65536 expressions, none made but the columns' first, and for 4096 names."
+    Result.Ok(X(eoff = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, c1 = Vector.new(Int.max(slots, 1), Export.Split.noChunk32)?, c2 = Vector.new(Int.max(slots, 1), Export.Split.noChunk32)?, kc = Vector.new(65536, 0), ac = Vector.new(65536, Export.Split.nat32(0)), bc = Vector.new(65536, Export.Split.nat32(0)), run = 0, owner = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, cap = 0, names = Vector.new(4096, Core.Names.anon()), known = {}))
 
 verify x0
     capOf(x0(2)) => Result.Ok(0)
 
 fn x00() -> X
     ? "Nothing noted, for examples."
-    X(eoff = Vector.fromList([Export.Split.noChunk]), owner = Vector.fromList([Export.Split.noChunk]), cap = 0, names = Vector.fromList([Core.Names.anon()]), known = {})
+    X(eoff = Vector.fromList([Export.Split.noChunk]), c1 = Vector.fromList([Export.Split.noChunk32]), c2 = Vector.fromList([Export.Split.noChunk32]), kc = Vector.new(65536, 0), ac = Vector.new(65536, Export.Split.nat32(0)), bc = Vector.new(65536, Export.Split.nat32(0)), run = 0, owner = Vector.fromList([Export.Split.noChunk]), cap = 0, names = Vector.fromList([Core.Names.anon()]), known = {})
 
 verify x00
     x00().cap => 0
@@ -392,15 +398,129 @@ verify appliedLines
 
 fn appliedLine(q: P, x: X, l: Line, rest: List<Line>, line: Int) -> Result<St, String>
     ? "One line packed and noted."
+    match packed(q, x, l)
+        Result.Err(e) -> Result.Err("line {line}: {e}")
+        Result.Ok(r) -> appliedLines(r.q, r.x, rest, line + 1)
+
+record QX
+    q: P
+    x: X
+
+fn packed(q: P, x: X, l: Line) -> Result<QX, String>
+    ? "One parsed line packed and noted: an application or a binder into the columns (ExprColumns in Export.Split), any other line as a record, after the run record of the columns' expressions before it."
+    match l
+        Line.App(ie, f, a) -> colApp(q, x, ie, f, a)
+        Line.Bind(bd) -> colBind(q, x, bd)
+        _ -> recorded(flushRun(q, x.run), X.update(x, run = 0), l)
+
+verify packed
+    capOf(packedX(packed(started("", "{{}}"), x00(), Line.App(0, 0, 0)))) => Result.Err("unknown expression index 0")
+    capOf(packedX(packed(started("", "{{}}"), x00(), Line.BVar(0, 0)))) => Result.Ok(65536)
+
+fn packedX(r: Result<QX, String>) -> Result<X, String>
+    ? "The notes after a line, for examples."
+    match r
+        Result.Ok(v) -> Result.Ok(v.x)
+        Result.Err(e) -> Result.Err(e)
+
+verify packedX
+    packedX(Result.Err("x")) => Result.Err("x")
+
+fn recorded(q: P, x: X, l: Line) -> Result<QX, String>
+    ? "A line as a record, then noted."
     e0 = q.exprs
     n0 = q.names
     d0 = q.decls
     before = List.len(q.out)
-    match lineOf(q, l)
-        Result.Err(e) -> Result.Err("line {line}: {e}")
-        Result.Ok(r) -> match noted(x, r, e0, n0, d0, before)
-            Result.Err(e) -> Result.Err("line {line}: {e}")
-            Result.Ok(y) -> appliedLines(r, y, rest, line + 1)
+    r = lineOf(q, l)?
+    y = noted(x, r, e0, n0, d0, before)?
+    Result.Ok(QX(q = r, x = y))
+
+verify recorded
+    capOf(packedX(recorded(started("", "{{}}"), x00(), Line.Bad("x")))) => Result.Err("x")
+
+fn flushRun(q: P, run: Int) -> P
+    ? "The run record of the run expressions of the columns packed since the last record (ExprColumns)."
+    match run > 0
+        true -> P.update(q, out = uv(List.prepend(20, q.out), run))
+        false -> q
+
+verify flushRun
+    flushRun(started("", ""), 3).out => [3, 20, 0, 0, 0, 0, 0, 90, 83, 85, 83]
+    flushRun(started("", ""), 0).out => [0, 0, 0, 0, 0, 90, 83, 85, 83]
+
+fn ref(q: P, e: Int) -> Result<Int, String>
+    ? "The Susz id of expression e, which must be defined."
+    k = lookup(q.er, e)
+    match k < 0
+        true -> Result.Err("unknown expression index {e}")
+        false -> Result.Ok(k)
+
+verify ref
+    ref(started("", ""), 0) => Result.Err("unknown expression index 0")
+
+fn colApp(q: P, x: X, ie: Int, f: Int, a: Int) -> Result<QX, String>
+    ? "An application into the columns: kind word 1, its function and argument by Susz id; the checks and errors of app."
+    _ = fresh(q.er, "expression", ie)?
+    kf = ref(q, f)?
+    ka = ref(q, a)?
+    colDone(q, ie, colSet(roomFor(x, q.exprs), q.exprs, 1, kf, ka))
+
+verify colApp
+    capOf(packedX(colApp(started("", ""), x00(), 0, 0, 0))) => Result.Err("unknown expression index 0")
+
+fn colBind(q: P, x: X, b: BinderIds) -> Result<QX, String>
+    ? "A lambda or a pi into the columns: kind word 2 + annotation for a lambda, 6 + annotation for a pi, plus 16 times its name; its type and body by Susz id; the checks and errors of binder."
+    _ = fresh(q.er, "expression", b.ie)?
+    nn = nm(q, b.nameIdx)?
+    kt = ref(q, b.typeIdx)?
+    kb = ref(q, b.bodyIdx)?
+    colDone(q, b.ie, colSet(roomFor(x, q.exprs), q.exprs, nn * 16 + bindCode(b.isLam) + binderByte(b.bi), kt, kb))
+
+verify colBind
+    capOf(packedX(colBind(started("", ""), x00(), BinderIds(ie = 0, nameIdx = 0, typeIdx = 0, bodyIdx = 0, bi = Binder.Default, isLam = true)))) => Result.Err("unknown expression index 0")
+
+fn bindCode(isLam: Bool) -> Int
+    ? "2 for a lambda, 6 for a pi."
+    match isLam
+        true -> 2
+        false -> 6
+
+verify bindCode
+    bindCode(false) => 6
+
+fn colDone(q: P, ie: Int, x: X) -> Result<QX, String>
+    ? "The expression counted; refused past what a u32 count holds."
+    match q.exprs >= 4294967295
+        true -> Result.Err("too many expressions")
+        false -> Result.Ok(QX(q = P.update(q, exprs = q.exprs + 1, er = define(q.er, ie, q.exprs)), x = x))
+
+verify colDone
+    capOf(packedX(colDone(started("", ""), 0, x00()))) => Result.Ok(0)
+
+fn colSet(x: X, e: Int, k: Int, c1: Int, c2: Int) -> X
+    ? "Expression e's kind word and parts set in the current chunks, each field on its own, and counted in the run."
+    j = Bits.and(e, 65535)
+    x1 = X.update(x, kc = kSet(x.kc, j, k))
+    x2 = X.update(x1, ac = uSet(x1.ac, j, c1))
+    X.update(x2, bc = uSet(x2.bc, j, c2), run = x2.run + 1)
+
+verify colSet
+    colSet(x00(), 0, 1, 0, 0).run => 1
+
+fn kSet(c: Vector<Int>, j: Int, v: Int) -> Vector<Int>
+    ? "c with v at j, in place."
+    Option.withDefault(Vector.set(c, j, v), c)
+
+verify kSet
+    Vector.get(kSet(Vector.fromList([0]), 0, 2), 0) => Option.Some(2)
+
+fn uSet(c: Vector<U32>, j: Int, v: Int) -> Vector<U32>
+    ? "c with v at j, in place."
+    Option.withDefault(Vector.set(c, j, Export.Split.nat32(v)), c)
+
+verify uSet
+    Vector.len(uSet(Vector.fromList([Export.Split.nat32(0)]), 0, 2)) => 1
 
 verify appliedLine
     appliedLine(started("", "{{}}"), x00(), Line.Bad("x"), [], 3) => Result.Err("line 3: x")
@@ -410,10 +530,40 @@ record One
     x: X
 
 fn oneLaid(o: One) -> Result<Laid, String>
-    ? "The split's later passes on the records packed, with what was noted while packing them."
-    b = Bytes.fromList(List.reverse(o.q.out))?
-    a = A(eoff = o.x.eoff, owner = o.x.owner, names = Vector.fromList(List.take(List.fromVector(o.x.names), o.q.names)), known = o.x.known, exprs = o.q.exprs, decls = o.q.decls)
-    Export.Split.laidAfter(b, o.q.start, Bytes.len(b), o.q.names, o.q.levels, o.q.decls, o.q.exprs, a)
+    ? "The split's later passes on the records packed, with what was noted while packing them: the last run record written and the columns' last chunks put in place first."
+    q = flushRun(o.q, o.x.run)
+    x = lastStashed(o.x, q.exprs)
+    b = Bytes.fromList(List.reverse(q.out))?
+    a = A(eoff = x.eoff, c1 = x.c1, c2 = x.c2, owner = x.owner, names = Vector.fromList(List.take(List.fromVector(x.names), q.names)), known = x.known, exprs = q.exprs, decls = q.decls)
+    Export.Split.laidAfter(b, q.start, Bytes.len(b), q.names, q.levels, q.decls, q.exprs, a)
+
+fn lastStashed(x: X, exprs: Int) -> X
+    ? "The current chunks put in place as the last ones, when there are expressions."
+    match exprs > 0
+        true -> stashed(x, Int.div(exprs + 65535, 65536) - 1)
+        false -> x
+
+verify lastStashed
+    lastStashed(x00(), 0) => x00()
+    Vector.len(Option.withDefault(Vector.get(lastStashed(x00(), 1).eoff, 0), Export.Split.noChunk)) => 65536
+
+fn stashed(x: X, ci: Int) -> X
+    ? "The current chunks put in place as chunk ci, each field on its own (ExprColumns)."
+    x1 = X.update(x, eoff = Option.withDefault(Vector.set(x.eoff, ci, x.kc), x.eoff))
+    x2 = X.update(x1, c1 = Option.withDefault(Vector.set(x1.c1, ci, x1.ac), x1.c1))
+    X.update(x2, c2 = Option.withDefault(Vector.set(x2.c2, ci, x2.bc), x2.c2))
+
+verify stashed
+    Vector.len(Option.withDefault(Vector.get(stashed(x00(), 0).c2, 0), Export.Split.noChunk32)) => 65536
+
+fn freshChunks(x: X) -> X
+    ? "New current chunks, each field on its own."
+    x1 = X.update(x, kc = Vector.new(65536, 0))
+    x2 = X.update(x1, ac = Vector.new(65536, Export.Split.nat32(0)))
+    X.update(x2, bc = Vector.new(65536, Export.Split.nat32(0)))
+
+verify freshChunks
+    freshChunks(x00()).run => 0
 
 fn bChunked(src: String, offset: Int, size: Int, p: Option<P>, x: X, line: Int) -> Result<One, String>
     ? "Reads size bytes at offset, where a line starts, and packs the lines they hold (LinesFromBytes in Export.Lines); fewer bytes than asked for are the end of the file."
@@ -438,15 +588,9 @@ fn bLines(src: String, offset: Int, b: Bytes, eof: Bool, s: Off, p: Option<P>, x
 fn bLine(src: String, offset: Int, b: Bytes, eof: Bool, next: Off, q: P, x: X, l: Line, line: Int) -> Result<One, String>
     ? "A line read from the bytes, packed and noted."
     ! [Disk.readBytesAt]
-    e0 = q.exprs
-    n0 = q.names
-    d0 = q.decls
-    before = List.len(q.out)
-    match lineOf(q, l)
+    match packed(q, x, l)
         Result.Err(e) -> Result.Err("line {line}: {e}")
-        Result.Ok(r) -> match noted(x, r, e0, n0, d0, before)
-            Result.Err(e) -> Result.Err("line {line}: {e}")
-            Result.Ok(y) -> bLines(src, offset, b, eof, next, Option.Some(r), y, line + 1)
+        Result.Ok(r) -> bLines(src, offset, b, eof, next, Option.Some(r.q), r.x, line + 1)
 
 fn bText(src: String, offset: Int, b: Bytes, eof: Bool, s: Off, p: Option<P>, x: X, line: Int, nl: Off) -> Result<One, String>
     ? "A line read as text, up to its newline nl. A line the chunk ends inside is read again from its start with the next chunk, or with twice the bytes when it is the chunk's first; at the end of the file it is the last line."
@@ -493,18 +637,12 @@ fn oneLines(p: Option<P>, x: X, ls: List<String>, line: Int) -> OneLined
 
 fn oneLine(q: P, x: X, l: Line, rest: List<String>, line: Int) -> OneLined
     ? "One parsed line packed and noted."
-    e0 = q.exprs
-    n0 = q.names
-    d0 = q.decls
-    before = List.len(q.out)
-    match lineOf(q, l)
-        Result.Ok(r) -> oneNoted(noted(x, r, e0, n0, d0, before), r, rest, line)
-        Result.Err(e) -> OneLined.Bad("line {line}: {e}")
+    oneNoted(packed(q, x, l), rest, line)
 
-fn oneNoted(r: Result<X, String>, q: P, rest: List<String>, line: Int) -> OneLined
-    ? "On to the next line, once the record is noted."
+fn oneNoted(r: Result<QX, String>, rest: List<String>, line: Int) -> OneLined
+    ? "On to the next line, once the line is packed and noted."
     match r
-        Result.Ok(x) -> oneLines(Option.Some(q), x, rest, line + 1)
+        Result.Ok(v) -> oneLines(Option.Some(v.q), v.x, rest, line + 1)
         Result.Err(e) -> OneLined.Bad("line {line}: {e}")
 
 fn oneHeader(l: String, x: X, rest: List<String>, line: Int) -> OneLined
@@ -543,15 +681,24 @@ fn roomFor(x: X, e: Int) -> X
     ? "Expression e's chunk made when it is the first of its chunk."
     match e < x.cap
         true -> x
-        false -> X.update(x, eoff = chunkMade(x.eoff, Int.div(x.cap, 65536), 0), owner = chunkMade(x.owner, Int.div(x.cap, 65536), -1), cap = x.cap + 65536)
+        false -> X.update(chunksMoved(x), owner = chunkMade(x.owner, Int.div(x.cap, 65536), -1), cap = x.cap + 65536)
+
+fn chunksMoved(x: X) -> X
+    ? "Past the first chunk, the current chunks of the columns put in place and new ones begun."
+    match x.cap > 0
+        true -> freshChunks(stashed(x, Int.div(x.cap, 65536) - 1))
+        false -> x
+
+verify chunksMoved
+    chunksMoved(x00()) => x00()
 
 fn chunkMade(v: Vector<Vector<Int>>, ci: Int, init: Int) -> Vector<Vector<Int>>
     ? "Chunk ci made, all init."
     Option.withDefault(Vector.set(v, ci, Vector.new(65536, init)), v)
 
 fn exprNoted(x: X, e: Int, before: Int) -> X
-    ? "Where expression e starts."
-    X.update(x, eoff = Export.Split.cset(x.eoff, e, before))
+    ? "Where expression e starts, as its kind word (ExprColumns)."
+    X.update(x, kc = kSet(x.kc, Bits.and(e, 65535), before * 16))
 
 fn nameNoted(x: X, n: Int, b: Bytes) -> Result<X, String>
     ? "Name n, built from its record b."
@@ -1468,7 +1615,7 @@ verify oneLine
     oneLine(started("", "{{}}"), x00(), Line.Bad("x"), [], 4) => OneLined.Bad("line 4: x")
 
 verify oneNoted
-    oneNoted(Result.Err("x"), started("", "{{}}"), [], 4) => OneLined.Bad("line 4: x")
+    oneNoted(Result.Err("x"), [], 4) => OneLined.Bad("line 4: x")
 
 verify oneHeader
     oneHeader("[]", x00(), [], 1) => OneLined.Bad("line 1: the header is not an object")
@@ -1487,7 +1634,7 @@ verify chunkMade
     Vector.len(Option.withDefault(Vector.get(chunkMade(Vector.fromList([Export.Split.noChunk]), 0, 3), 0), Export.Split.noChunk)) => 65536
 
 verify exprNoted
-    Export.Split.cget(exprNoted(roomFor(x00(), 0), 0, 7).eoff, 0) => 7
+    Vector.get(exprNoted(roomFor(x00(), 0), 0, 7).kc, 0) => Option.Some(112)
 
 verify nameNoted
     capOf(nameNoted(x00(), 1, Bytes.fromList([2, 0, 3]))) => Result.Ok(0)
