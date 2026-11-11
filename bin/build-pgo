@@ -23,6 +23,12 @@ rm -rf "$prof"
 mkdir -p "$prof"
 RUSTFLAGS="$FLAGS -Cprofile-generate=$prof" cargo build --release --target-dir "$root/.build/target-pgo"
 "$root/.build/target-pgo/release/main" "$train" 1 >/dev/null
+# The same export packed into Susz is checked too, so reading Susz is not
+# left cold.
+if [ "$(head -c 4 "$train")" != SUSZ ]; then
+    "$root/.build/target-pgo/release/main" pack "$train" "$root/.build/train.susz" >/dev/null
+    "$root/.build/target-pgo/release/main" "$root/.build/train.susz" 1 >/dev/null
+fi
 profdata=$(command -v llvm-profdata || ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-profdata | head -1)
 "$profdata" merge -o "$prof/merged.profdata" "$prof"
 RUSTFLAGS="$FLAGS -Cprofile-use=$prof/merged.profdata" cargo build --release

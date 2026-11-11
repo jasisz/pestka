@@ -38,14 +38,16 @@ below that profile was made from.
 
 `mathlib` packed into [Susz](susz.md) by `pestka pack` (5.90 GB of ndjson to
 661 MB, in about a minute) and checked from that, with the same build as the
-table above and the same verdict and output:
+table above and the same verdict and output. `bin/build-pgo` also packs the
+export it is given into Susz and checks that, so both readers are in the
+profile: that took 6 G off reading Susz and left ndjson where it was.
 
 | | From ndjson | From Susz |
 |---|---|---|
-| Reading, to the `constants` line, one thread | 24.6 s, 183.5 G | 12.3 s, 101.5 G |
-| Reading, four workers | 15.7 s, 241.2 G | 12.3 s, 101.7 G (read on one thread) |
-| Whole check, four workers | 76.5 s, 7.6 GB, 1314.1 G | 71.5 s, 7.6 GB, 1163.0 G |
-| Whole check, one worker | 187 s, 7.0 GB, 1196.7 G | 178 s, 7.1 GB, 1115.1 G |
+| Reading, to the `constants` line, one thread | 23.8 s, 184.1 G | 11.0 s, 95.3 G |
+| Reading, four workers | 14.6 s, 239.4 G | 10.8 s, 95.3 G (read on one thread) |
+| Whole check, four workers | 76.7 s, 7.6 GB, 1313.7 G | 70.6 s, 7.6 GB, 1155.9 G |
+| Whole check, one worker | 184 s, 7.0 GB, 1196.9 G | 179 s, 7.1 GB, 1108.0 G |
 
 ### As WebAssembly
 

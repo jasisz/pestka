@@ -87,7 +87,7 @@ invalid export accepted by any kernel is kept under `tests/soundness-findings/`.
 `AVER_FLAGS` on to `aver compile`. The workers run on threads of their
 own; the same build serves one worker and many.
 `bin/build-pgo` builds once with instrumentation, checks TRAIN with it on
-one worker, and builds again with the profile that run left; `FLAGS` adds
+one worker, then TRAIN packed into Susz (unless it is Susz already), and builds again with the profile that run left; `FLAGS` adds
 rustc flags to both builds (the Arena gives `-C target-cpu=native`). It needs
 `llvm-profdata`, from rustup's `llvm-tools` component. A profile of a check
 of `init-prelude` alone cuts 12–15% of the instructions on the recorded benchmarks,
