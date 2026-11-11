@@ -9,7 +9,7 @@ module Pack
         "structure only; the reader trusts none of it and computes every hash"
         "and range itself."
     exposes [pack, image]
-    depends [Bytes, Json.Line, Json.Access, Core.Exprs, Core.Decls, Export.Reader, Export.Split, Export.Susz]
+    depends [Bytes, Json.Line, Json.Access, Core.Names, Core.Lazy, Core.Exprs, Core.Decls, Export.Reader, Export.Split, Export.Susz]
     effects [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
 
 record P
@@ -103,11 +103,234 @@ verify lvs
     lvs(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), [3], []) => Result.Err("unknown level index 3")
 
 fn pack(src: String, dst: String, version: Int) -> Result<String, String>
-    ? "Packs src into dst in Susz of version 0 or 2; the counts written, or why not."
+    ? "Packs src into dst in Susz of version 0 or 2; the counts written, or why not. Version 2 is packed in one step (OneStepPack)."
     ! [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     match Disk.writeBytes(dst, Bytes.fromList([]))
         Result.Err(e) -> Result.Err("cannot write {dst}: {e}")
-        Result.Ok(_) -> versioned(trailedTo(chunked(src, dst, 0, "", Option.None, 1)), dst, version)
+        Result.Ok(_) -> match version == 2
+            true -> Export.Split.written2(dst, onePacked(src)?)
+            false -> versioned(trailedTo(chunked(src, dst, 0, "", Option.None, 1)), dst, version)
+
+decision OneStepPack
+    date = "2026-11-11"
+    reason =
+        "Version 2 was packed in two steps: the lines became version 0, and"
+        "Export.Split read version 0 again, a first pass over every record"
+        "finding where each expression starts, building the names, seeding"
+        "owners from the declarations and keeping where each name is first"
+        "placed. The packer knows all of that as it writes each record, so"
+        "it notes it then: where the expression starts, the name it built,"
+        "and a declaration's references, names and skip read from the bytes"
+        "it just wrote, with the decoder the split uses (declOf), so both"
+        "agree. Version 0 is still kept in memory as the records to rewrite,"
+        "and the split's later passes run on it unchanged, so the bytes"
+        "written are those of the two steps."
+    chosen = "OneStepPack"
+    rejected = ["VersionZeroReadAgain"]
+    impacts = [onePacked, X, noted, oneLines]
+
+record X
+    eoff: Vector<Vector<Int>>
+    owner: Vector<Vector<Int>>
+    cap: Int
+    names: Vector<Name>
+    known: Map<Name, Int>
+
+fn x0(slots: Int) -> Result<X, String>
+    ? "Nothing noted yet: room for slots chunks of 65536 expressions, none made, and for 4096 names."
+    Result.Ok(X(eoff = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, owner = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, cap = 0, names = Vector.new(4096, Core.Names.anon()), known = {}))
+
+verify x0
+    capOf(x0(2)) => Result.Ok(0)
+
+fn x00() -> X
+    ? "Nothing noted, for examples."
+    X(eoff = Vector.fromList([Export.Split.noChunk]), owner = Vector.fromList([Export.Split.noChunk]), cap = 0, names = Vector.fromList([Core.Names.anon()]), known = {})
+
+verify x00
+    x00().cap => 0
+
+fn slotsFor(size: Int) -> Int
+    ? "Chunks enough for every expression a file of size bytes may hold: an expression line takes at least 16 bytes."
+    Int.div(Int.div(size, 16), 65536) + 2
+
+verify slotsFor
+    slotsFor(0) => 2
+
+fn onePacked(src: String) -> Result<Laid, String>
+    ? "The ndjson export at src packed into version 2 in one step (OneStepPack)."
+    ! [Disk.readBytesAt, Disk.size]
+    size = Disk.size(src)?
+    o = oneChunked(src, 0, "", Option.None, x0(slotsFor(size))?, 1)?
+    oneLaid(o)
+
+record One
+    q: P
+    x: X
+
+fn oneLaid(o: One) -> Result<Laid, String>
+    ? "The split's later passes on the records packed, with what was noted while packing them."
+    b = Bytes.fromList(List.reverse(o.q.out))?
+    a = A(eoff = o.x.eoff, owner = o.x.owner, names = Vector.fromList(List.take(List.fromVector(o.x.names), o.q.names)), known = o.x.known, exprs = o.q.exprs, decls = o.q.decls)
+    Export.Split.laidAfter(b, o.q.start, Bytes.len(b), o.q.names, o.q.levels, o.q.decls, o.q.exprs, a)
+
+fn oneChunked(src: String, offset: Int, carry: String, p: Option<P>, x: X, line: Int) -> Result<One, String>
+    ? "Reads the chunk at offset, as chunked does, noting what the split needs (OneStepPack)."
+    ! [Disk.readBytesAt]
+    match Disk.readBytesAt(src, offset, chunkBytes())
+        Result.Err(e) -> Result.Err("cannot read {src}: {e}")
+        Result.Ok(b) -> match Bytes.len(b) == 0
+            true -> oneFinished(oneLines(p, x, [carry], line))
+            false -> oneDecoded(src, offset, carry, p, x, line, b, 0)
+
+fn oneDecoded(src: String, offset: Int, carry: String, p: Option<P>, x: X, line: Int, b: Bytes, cut: Int) -> Result<One, String>
+    ? "The chunk as text, as decoded does."
+    ! [Disk.readBytesAt]
+    match String.fromUtf8(Bytes.take(b, Bytes.len(b) - cut))
+        Result.Err(e) -> match cut >= 3
+            true -> Result.Err("cannot read {src}: {e}")
+            false -> oneDecoded(src, offset, carry, p, x, line, b, cut + 1)
+        Result.Ok(t) -> oneSplit(src, offset + Bytes.len(b) - cut, joined(carry, String.split(t, "\n")), p, x, line)
+
+fn oneSplit(src: String, next: Int, parts: List<String>, p: Option<P>, x: X, line: Int) -> Result<One, String>
+    ? "The complete lines of a chunk; the last part waits for the next chunk."
+    ! [Disk.readBytesAt]
+    match oneLines(p, x, List.take(parts, List.len(parts) - 1), line)
+        OneLined.Bad(e) -> Result.Err(e)
+        OneLined.Done(q, y, at) -> oneChunked(src, next, lastOf(parts), q, y, at)
+
+type OneLined
+    Done(Option<P>, X, Int)
+    Bad(String)
+
+fn oneLines(p: Option<P>, x: X, ls: List<String>, line: Int) -> OneLined
+    ? "Packs lines in order, as lines does, noting each record (OneStepPack)."
+    match ls
+        [] -> OneLined.Done(p, x, line)
+        [l, ..rest] -> match p
+            Option.None -> oneHeader(l, x, rest, line)
+            Option.Some(q) -> match l == ""
+                true -> oneLines(p, x, rest, line + 1)
+                false -> oneLine(q, x, Export.Reader.parseLine(l), rest, line)
+
+fn oneLine(q: P, x: X, l: Line, rest: List<String>, line: Int) -> OneLined
+    ? "One parsed line packed and noted."
+    e0 = q.exprs
+    n0 = q.names
+    d0 = q.decls
+    before = List.len(q.out)
+    match lineOf(q, l)
+        Result.Ok(r) -> oneNoted(noted(x, r, e0, n0, d0, before), r, rest, line)
+        Result.Err(e) -> OneLined.Bad("line {line}: {e}")
+
+fn oneNoted(r: Result<X, String>, q: P, rest: List<String>, line: Int) -> OneLined
+    ? "On to the next line, once the record is noted."
+    match r
+        Result.Ok(x) -> oneLines(Option.Some(q), x, rest, line + 1)
+        Result.Err(e) -> OneLined.Bad("line {line}: {e}")
+
+fn oneHeader(l: String, x: X, rest: List<String>, line: Int) -> OneLined
+    ? "The header line, as afterHeader reads it."
+    match Export.Reader.header(l)
+        Result.Err(e) -> OneLined.Bad("line 1: {e}")
+        Result.Ok(v) -> match Export.Reader.supported(v)
+            false -> OneLined.Bad("format version {v} is not supported")
+            true -> oneLines(Option.Some(started("", metaText(l))), x, rest, line + 1)
+
+fn oneFinished(l: OneLined) -> Result<One, String>
+    ? "The packer and its notes after the last record."
+    match l
+        OneLined.Bad(e) -> Result.Err(e)
+        OneLined.Done(Option.None, _, _) -> Result.Err("empty file")
+        OneLined.Done(Option.Some(q), x, _) -> Result.Ok(One(q = q, x = x))
+
+fn noted(x: X, q: P, e0: Int, n0: Int, d0: Int, before: Int) -> Result<X, String>
+    ? "What the record just packed at before tells the split: an expression where it starts, a name its value, a declaration its references, its names and whether it is skipped (OneStepPack)."
+    match q.exprs > e0
+        true -> Result.Ok(exprNoted(roomFor(x, e0), e0, before))
+        false -> match q.names > n0
+            true -> nameNoted(x, n0, newBytes(q.out, List.len(q.out) - before))
+            false -> match q.decls > d0
+                true -> Result.Ok(declNoted(x, d0, Export.Split.declOf(newBytes(q.out, List.len(q.out) - before), Export.Split.at(1), e0)))
+                false -> Result.Ok(x)
+
+fn newBytes(out: List<Int>, n: Int) -> Bytes
+    ? "The last n bytes packed, the record just written."
+    Result.withDefault(Bytes.fromList(List.reverse(List.take(out, n))), Bytes.fromList([]))
+
+verify newBytes
+    newBytes([3, 2, 1], 2) => Bytes.fromList([2, 3])
+
+fn roomFor(x: X, e: Int) -> X
+    ? "Expression e's chunk made when it is the first of its chunk."
+    match e < x.cap
+        true -> x
+        false -> X.update(x, eoff = chunkMade(x.eoff, Int.div(x.cap, 65536), 0), owner = chunkMade(x.owner, Int.div(x.cap, 65536), -1), cap = x.cap + 65536)
+
+fn chunkMade(v: Vector<Vector<Int>>, ci: Int, init: Int) -> Vector<Vector<Int>>
+    ? "Chunk ci made, all init."
+    Option.withDefault(Vector.set(v, ci, Vector.new(65536, init)), v)
+
+fn exprNoted(x: X, e: Int, before: Int) -> X
+    ? "Where expression e starts."
+    X.update(x, eoff = Export.Split.cset(x.eoff, e, before))
+
+fn nameNoted(x: X, n: Int, b: Bytes) -> Result<X, String>
+    ? "Name n, built from its record b."
+    match Bytes.get(b, 0)
+        Option.Some(1) -> nameSet(x, n, Export.Split.nameStrAt(b, Export.Split.at(0), x.names))
+        _ -> nameSet(x, n, Export.Split.nameNumAt(b, Export.Split.at(0), x.names))
+
+fn nameSet(x: X, n: Int, v: Name) -> Result<X, String>
+    ? "v as name n, the vector doubled when it is full."
+    match n < Vector.len(x.names)
+        true -> Result.Ok(X.update(x, names = Option.withDefault(Vector.set(x.names, n, v), x.names)))
+        false -> nameGrown(x, n, v, Vector.new(2 * Vector.len(x.names), Core.Names.anon())?)
+
+fn nameGrown(x: X, n: Int, v: Name, w: Vector<Name>) -> Result<X, String>
+    ? "The names copied into w, twice as long, then v set."
+    nameSet(X.update(x, names = doubled(x.names, w, 0)), n, v)
+
+fn doubled(v: Vector<Name>, w: Vector<Name>, i: Int) -> Vector<Name>
+    ? "w with v's names copied to its first places."
+    match Vector.get(v, i)
+        Option.None -> w
+        Option.Some(n) -> doubled(v, Option.withDefault(Vector.set(w, i, n), w), i + 1)
+
+fn declNoted(x: X, di: Int, d: DeclP) -> X
+    ? "A declaration's references seed their owners, and the names it places keep its code unless it is skipped."
+    knownNoted(X.update(x, owner = Export.Split.seeded(x.owner, d.pieces, d.value, di)), di, d)
+
+fn knownNoted(x: X, di: Int, d: DeclP) -> X
+    ? "The names d places with its code, unless it is skipped: the names are read first and the map written after, each field of x on its own, so that neither is copied."
+    ns = placedNames(x.names, d.names, d.skip, [])
+    X.update(x, known = placedList(x.known, ns, Core.Lazy.codeOf(di, d.kind == 5)))
+
+verify knownNoted
+    Map.len(knownNoted(x00(), 0, Export.Split.declOf(Bytes.fromList([18, 0, 0, 0, 1, 0]), Export.Split.at(1), 1)).known) => 1
+
+fn placedNames(names: Vector<Name>, ns: List<Int>, skip: Bool, acc: List<Name>) -> List<Name>
+    ? "The names of ids ns, none when the declaration is skipped."
+    match skip
+        true -> []
+        false -> match ns
+            [] -> acc
+            [n, ..rest] -> placedNames(names, rest, skip, List.prepend(Option.withDefault(Vector.get(names, n), Core.Names.anon()), acc))
+
+verify placedNames
+    placedNames(Vector.fromList([Core.Names.anon()]), [0], true, []) => []
+    List.len(placedNames(Vector.fromList([Core.Names.anon()]), [0], false, [])) => 1
+
+fn placedList(known: Map<Name, Int>, ns: List<Name>, code: Int) -> Map<Name, Int>
+    ? "Each name placed with code, unless placed before."
+    match ns
+        [] -> known
+        [n, ..rest] -> match Map.has(known, n)
+            true -> placedList(known, rest, code)
+            false -> placedList(Map.set(known, n, code), rest, code)
+
+verify placedList
+    Map.get(placedList({}, [Core.Names.anon()], 4), Core.Names.anon()) => Option.Some(4)
 
 decision PackedInMemory
     date = "2026-11-11"
@@ -121,21 +344,12 @@ decision PackedInMemory
         "runs and before checking."
     chosen = "PackedInMemory"
     rejected = ["TemporaryFile"]
-    impacts = [image, written, imageOf]
+    impacts = [image, written, onePacked]
 
 fn image(src: String) -> Result<Image, String>
-    ? "The ndjson export at src packed into Susz of version 2 in memory (PackedInMemory); the packer's writes are never made, as it has no path."
-    ! [Disk.readBytesAt, Disk.writeBytes, Disk.appendBytes]
-    q = chunked(src, "", 0, "", Option.None, 1)?
-    Export.Split.image(imageOf(q)?)
-
-fn imageOf(q: P) -> Result<Bytes, String>
-    ? "Version 0 from what the packer kept: its records, then the trailer (PackedInMemory)."
-    all = P.update(q, written = List.len(q.out))
-    Bytes.fromList(List.reverse(List.concat(trailer(all), q.out)))
-
-verify imageOf
-    Result.withDefault(imageOf(P(path = "", out = [7], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {}))), Bytes.fromList([])) == Bytes.fromList([]) => false
+    ? "The ndjson export at src packed into Susz of version 2 in memory (PackedInMemory), in one step (OneStepPack)."
+    ! [Disk.readBytesAt, Disk.size]
+    Export.Split.imageOf(onePacked(src)?)
 
 fn trailedTo(r: Result<P, String>) -> Result<String, String>
     ? "The last bytes and the trailer appended to the file."
@@ -945,3 +1159,59 @@ fn rulesOnto(q: P, acc: List<Int>, xs: List<J>) -> Result<List<Int>, String>
 verify rulesOnto
     rulesOnto(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), [], [J.JNull]) => Result.Err("expected an object")
 
+
+verify oneLaid
+    Export.Split.laidMessage2(oneLaid(One(q = started("", "{{}}"), x = x00()))) == "" => false
+
+fn capOf(r: Result<X, String>) -> Result<Int, String>
+    ? "How many expressions x has room for, or why there is no x, for examples."
+    match r
+        Result.Ok(x) -> Result.Ok(x.cap)
+        Result.Err(e) -> Result.Err(e)
+
+verify capOf
+    capOf(Result.Err("x")) => Result.Err("x")
+
+verify oneLines
+    oneLines(Option.None, x00(), [], 3) => OneLined.Done(Option.None, x00(), 3)
+    oneLines(Option.None, x00(), ["[]"], 1) => OneLined.Bad("line 1: the header is not an object")
+
+verify oneLine
+    oneLine(started("", "{{}}"), x00(), Line.Bad("x"), [], 4) => OneLined.Bad("line 4: x")
+
+verify oneNoted
+    oneNoted(Result.Err("x"), started("", "{{}}"), [], 4) => OneLined.Bad("line 4: x")
+
+verify oneHeader
+    oneHeader("[]", x00(), [], 1) => OneLined.Bad("line 1: the header is not an object")
+
+verify oneFinished
+    oneFinished(OneLined.Bad("x")) => Result.Err("x")
+    oneFinished(OneLined.Done(Option.None, x00(), 1)) => Result.Err("empty file")
+
+verify noted
+    capOf(noted(x00(), started("", "{{}}"), 0, 1, 0, 0)) => Result.Ok(0)
+
+verify roomFor
+    roomFor(x00(), 0).cap => 65536
+
+verify chunkMade
+    Vector.len(Option.withDefault(Vector.get(chunkMade(Vector.fromList([Export.Split.noChunk]), 0, 3), 0), Export.Split.noChunk)) => 65536
+
+verify exprNoted
+    Export.Split.cget(exprNoted(roomFor(x00(), 0), 0, 7).eoff, 0) => 7
+
+verify nameNoted
+    capOf(nameNoted(x00(), 1, Bytes.fromList([2, 0, 3]))) => Result.Ok(0)
+
+verify nameSet
+    capOf(nameSet(x00(), 3, Core.Names.anon())) => Result.Ok(0)
+
+verify nameGrown
+    capOf(nameGrown(x00(), 1, Core.Names.anon(), Vector.fromList([Core.Names.anon(), Core.Names.anon()]))) => Result.Ok(0)
+
+verify doubled
+    Vector.len(doubled(Vector.fromList([Core.Names.anon()]), Vector.fromList([Core.Names.anon(), Core.Names.anon()]), 0)) => 2
+
+verify declNoted
+    Export.Split.cget(declNoted(roomFor(x00(), 0), 0, Export.Split.declOf(Bytes.fromList([18, 2, 0, 0, 1, 1, 0]), Export.Split.at(1), 1)).owner, 0) => -2

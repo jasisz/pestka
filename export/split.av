@@ -13,7 +13,7 @@ module Split
         "expression's owner to its parts; one numbers expressions in the main"
         "block and in their blocks and finds the frontier; the last writes."
         "The writer is deterministic: the same file gives the same bytes."
-    exposes [split, image]
+    exposes [split, image, imageOf, laidMessage2, written2, laidAfter, Laid, A, DeclP, declOf, seeded, placedUnlessSkipped, nameStrAt, nameNumAt, at, cset, cget, noChunk]
     exposes opaque [Ix]
     depends [Bytes, Core.Names, Core.Lazy, Export.Susz]
     effects [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
@@ -779,8 +779,17 @@ fn split(path: String) -> Result<String, String>
 
 fn image(b: Bytes) -> Result<Image, String>
     ? "The Susz bytes of version 0 in b as an image of version 2 in memory, its two runs joined (BytesFromFileOrMemory in Export.Susz): the header and the main block, then the proof section and the trailer. What the split builds is freed before the runs are joined."
-    l = laidFrom(b)?
+    imageOf(laidFrom(b)?)
+
+fn imageOf(l: Laid) -> Result<Image, String>
+    ? "A file laid out as version 2, as an image in memory: the header and the main block, then the proof section and the trailer."
     Result.Ok(Image(front = joinAll(List.prepend(l.hd, l.mains)), back = joinAll(l.proofs)))
+
+fn written2(path: String, l: Laid) -> Result<String, String>
+    ? "A file laid out as version 2, written to path; the counts it holds."
+    ! [Disk.writeBytes, Disk.appendBytes]
+    _ = appendAll(path, List.concat(l.mains, l.proofs), l.hd)?
+    Result.Ok(l.message)
 
 fn joinAll(bs: List<Bytes>) -> Bytes
     ? "The bytes one after another, joined two by two in rounds, so that each byte is copied once a round, as many rounds as halvings of the count."
@@ -829,11 +838,15 @@ fn withV0(b: Bytes, tr: Bytes) -> Result<Laid, String>
     len = u64At(tr, 28)
     nv = Vector.new(names, Core.Names.anon())?
     a = scanned(b, at(base), at(base + len), 0, 0, 1, cnew(exprs, 0), cnew(exprs, -1), nv, {})
+    laidAfter(b, base, base + len, names, u32At(tr, 4), decls, exprs, a)
+
+fn laidAfter(b: Bytes, base: Int, end: Int, names: Int, levels: Int, decls: Int, exprs: Int, a: A) -> Result<Laid, String>
+    ? "The passes after the first, from what the first found in b, the records of version 0 from base to end, of these counts (OneStepPack in Export.Pack): owners handed back, numbers, then the writing."
     owner = walkBack(b, a.exprs - 1, a.eoff, a.owner)
-    nm = numbered(b, 0, a.exprs, a.eoff, owner, Vector.new(decls, 0)?, Vector.new(names, -2)?, Vector.new(u32At(tr, 4), -2)?, 0)
+    nm = numbered(b, 0, a.exprs, a.eoff, owner, Vector.new(decls, 0)?, Vector.new(names, -2)?, Vector.new(levels, -2)?, 0)
     codes = Codes(names = Vector.fromList(codesOf(a.known, List.fromVector(a.names), [])), nat = codeIn(a.known, Core.Names.str(Core.Names.anon(), "Nat")), str = codesOf(a.known, litNames, []))
-    w = written(b, at(base), at(base + len), zeroes(W.update(fresh(), open = Vector.new(decls, acc0())?), geti(nm.nameF, 0) == -1, geti(nm.levelF, 0) == -1), nm.owner, nm.ids, zeroed(nm.nameF), zeroed(nm.levelF), nm.count, codes)?
-    laid(Bytes.take(Bytes.drop(b, 8), base - 8), u32At(tr, 0), u32At(tr, 4), decls, exprs, w)
+    w = written(b, at(base), at(end), zeroes(W.update(fresh(), open = Vector.new(decls, acc0())?), geti(nm.nameF, 0) == -1, geti(nm.levelF, 0) == -1), nm.owner, nm.ids, zeroed(nm.nameF), zeroed(nm.levelF), nm.count, codes)?
+    laid(Bytes.take(Bytes.drop(b, 8), base - 8), names, levels, decls, exprs, w)
 
 litNames: List<Name> = [Core.Names.str(Core.Names.anon(), "Nat"), Core.Names.str(Core.Names.anon(), "String"), Core.Names.str(Core.Names.str(Core.Names.anon(), "String"), "ofList"), Core.Names.str(Core.Names.anon(), "List"), Core.Names.str(Core.Names.anon(), "Char"), Core.Names.str(Core.Names.str(Core.Names.anon(), "Char"), "ofNat")]
 
@@ -1353,3 +1366,18 @@ verify withV0
 
 verify laid
     List.len(Result.withDefault(laid(Bytes.fromList([]), 1, 1, 0, 0, fresh()), Laid(hd = Bytes.fromList([]), mains = [], proofs = [], message = "")).proofs) => 1
+
+verify laidAfter
+    laidMessage2(laidAfter(Bytes.fromList([83, 85, 83, 90, 0, 0, 0, 0, 0]), 9, 9, 1, 1, 0, 0, A(eoff = cnew(0, 0), owner = cnew(0, -1), names = Vector.fromList([Core.Names.anon()]), known = {}, exprs = 0, decls = 0))) == "" => false
+
+fn laidMessage2(r: Result<Laid, String>) -> String
+    ? "What a laid file says of itself, or why there is none, for examples."
+    match r
+        Result.Ok(l) -> l.message
+        Result.Err(e) -> e
+
+verify laidMessage2
+    laidMessage2(Result.Err("x")) => "x"
+
+verify imageOf
+    imageOf(Laid(hd = Bytes.fromList([1]), mains = [], proofs = [], message = "")) == Result.Err("") => false
