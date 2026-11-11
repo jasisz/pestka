@@ -58,14 +58,52 @@ verify offValue
     offValue(offAt(5)) => 5
 
 fn fwd(p: Off, k: Int) -> Off
-    ? "k bytes past p; none stays none."
-    match p.value < 0
-        true -> p
-        false -> offAt(p.value + k)
+    ? "k bytes past p, for k from 0 to 1024; none stays none, and so does a place past the range. Reckoned on the machine word p holds (WordSteps)."
+    match Bool.and(p.value >= 0, Bool.and(k >= 0, k <= 1024))
+        true -> placeAt(p.value + k)
+        false -> Off(value = -1)
+
+fn placeOf(n: Int) -> Result<Off, String>
+    ? "A place reckoned on a machine word: the bound of offOf, a constructor of its own so that its argument stays a word (WordSteps)."
+    match Bool.and(n >= -1, n <= 4611686018427387903)
+        true -> Result.Ok(Off(value = n))
+        false -> Result.Err("offset out of range")
+
+verify placeOf
+    placeOf(-2) => Result.Err("offset out of range")
+
+fn placeAt(n: Int) -> Off
+    ? "The place n, none when it is not one."
+    match placeOf(n)
+        Result.Ok(o) -> o
+        Result.Err(_) -> Off(value = -1)
+
+verify placeAt
+    placeAt(4).value => 4
 
 verify fwd
     fwd(offAt(2), 3) => offAt(5)
     fwd(offAt(-1), 3) => offAt(-1)
+    fwd(offAt(2), 2000) => offAt(-1)
+
+decision WordSteps
+    date = "2026-11-12"
+    reason =
+        "A step past a place went through offAt, whose parameter is a"
+        "general Int: the machine word the place holds was made an Int,"
+        "compared as one and narrowed back, at every digit of every number"
+        "read. A step and a digit pushed onto a sum are now operations of"
+        "their own types (fwd, after, pushDigit), checked on the word."
+    chosen = "WordSteps"
+    rejected = ["StepsThroughInt"]
+    impacts = [fwd, after, pushDigit, digits, canon]
+
+fn after(p: Off) -> Off
+    ? "One byte past p (WordSteps)."
+    fwd(p, 1)
+
+verify after
+    after(offAt(4)) => offAt(5)
 
 record Small
     value: Int
@@ -79,6 +117,16 @@ fn smallOf(n: Int) -> Result<Small, String>
 verify smallOf
     smallOf(-1) => Result.Err("too large")
     smallOf(12) => smallAt(12)
+
+fn pushDigit(acc: Small, x: Int) -> Small
+    ? "acc with the digit of byte x after it, acc of at most 16 digits and x a digit's byte; 0 otherwise (WordSteps)."
+    match Bool.and(acc.value < 10000000000000000, Bool.and(x >= 48, x <= 57))
+        true -> smallAt(acc.value * 10 + x - 48)
+        false -> smallAt(0)
+
+verify pushDigit
+    pushDigit(smallAt(12), 51).value => 123
+    pushDigit(smallAt(12), 1).value => 0
 
 fn smallAt(n: Int) -> Small
     ? "n, or 0 when it is out of range."
@@ -109,7 +157,7 @@ fn digits(b: Bytes, p: Off, acc: Small) -> Num
     match Bytes.get(b, p.value)
         Option.Some(x) -> match Bool.and(x >= 48, x <= 57)
             true -> match acc.value < 10000000000000000
-                true -> digits(b, offAt(p.value + 1), smallAt(acc.value * 10 + x - 48))
+                true -> digits(b, after(p), pushDigit(acc, x))
                 false -> none()
             false -> Num(value = acc, end = p)
         Option.None -> Num(value = acc, end = p)
@@ -123,7 +171,7 @@ fn canon(b: Bytes, p: Off) -> Num
     match Bytes.get(b, p.value)
         Option.Some(48) -> zeroEnd(b, p)
         Option.Some(x) -> match Bool.and(x >= 49, x <= 57)
-            true -> digits(b, offAt(p.value + 1), smallAt(x - 48))
+            true -> digits(b, after(p), pushDigit(smallAt(0), x))
             false -> none()
         Option.None -> none()
 
@@ -139,8 +187,8 @@ fn zeroEnd(b: Bytes, p: Off) -> Num
     match Bytes.get(b, p.value + 1)
         Option.Some(x) -> match Bool.and(x >= 48, x <= 57)
             true -> none()
-            false -> Num(value = smallAt(0), end = offAt(p.value + 1))
-        Option.None -> Num(value = smallAt(0), end = offAt(p.value + 1))
+            false -> Num(value = smallAt(0), end = after(p))
+        Option.None -> Num(value = smallAt(0), end = after(p))
 
 verify zeroEnd
     zeroEnd(Bytes.fromList([48]), offAt(0)) => Num(value = smallAt(0), end = offAt(1))
@@ -169,7 +217,7 @@ fn newlineFrom(b: Bytes, p: Off) -> Off
     ? "The first newline at p or after it, none when the bytes end first."
     match Bytes.get(b, p.value)
         Option.Some(10) -> p
-        Option.Some(_) -> newlineFrom(b, offAt(p.value + 1))
+        Option.Some(_) -> newlineFrom(b, after(p))
         Option.None -> offAt(-1)
 
 verify newlineFrom
@@ -180,21 +228,21 @@ fn lineAt(b: Bytes, p: Off) -> Option<LineAt>
     ? "The line at p when it is an application, a lambda, a pi, a name or a constant in the exact form lean4export writes and ends with a newline; none for any other, which the caller reads as text (LinesFromBytes)."
     match Bytes.get(b, p.value + 2)
         Option.Some(97) -> match litApp(b, p)
-            true -> appArg(b, canon(b, offAt(p.value + 14)))
+            true -> appArg(b, canon(b, fwd(p, 14)))
             false -> Option.None
         Option.Some(105) -> match Bytes.get(b, p.value + 3)
             Option.Some(101) -> match litIe(b, p)
-                true -> lamAfterIe(b, canon(b, offAt(p.value + 6)))
+                true -> lamAfterIe(b, canon(b, fwd(p, 6)))
                 false -> Option.None
             Option.Some(110) -> match litIn(b, p)
-                true -> nameAfter(b, canon(b, offAt(p.value + 6)))
+                true -> nameAfter(b, canon(b, fwd(p, 6)))
                 false -> Option.None
             _ -> Option.None
         Option.Some(102) -> match litPi(b, p)
-            true -> piAfter(b, binderAt(b, offAt(p.value + 26)))
+            true -> piAfter(b, binderAt(b, fwd(p, 26)))
             false -> Option.None
         Option.Some(99) -> match litConst(b, p)
-            true -> constAfter(b, canon(b, offAt(p.value + 17)))
+            true -> constAfter(b, canon(b, fwd(p, 17)))
             false -> Option.None
         _ -> Option.None
 
@@ -344,7 +392,7 @@ fn quoteFrom(b: Bytes, p: Off) -> Off
     match Bytes.get(b, p.value)
         Option.Some(34) -> p
         Option.Some(92) -> offAt(-1)
-        Option.Some(_) -> quoteFrom(b, offAt(p.value + 1))
+        Option.Some(_) -> quoteFrom(b, after(p))
         Option.None -> offAt(-1)
 
 verify quoteFrom
