@@ -253,6 +253,11 @@ in export order, after a mark record wherever its mark changes; the rest
 stays in the main block, renumbered densely, each frontier entry right
 after its item (the anonymous name's and level zero's first). An
 expression no declaration reaches stays in the main block.
+Version 2 is packed in one step (`OneStepPack` in `Export.Pack`):
+applications, lambdas and pis, 98% of the expressions, are not encoded as
+records of version 0 on the way but kept as numbers, a kind word and two
+part ids each, which the later passes read directly (`ExprColumns` in
+`Export.Split`); the bytes written are those of version 0 rewritten.
 `proto/lazypack` writes the same bytes from a version-0 file, apart from
 Pestka, as a check of both.
 
