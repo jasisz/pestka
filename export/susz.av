@@ -8,6 +8,7 @@ module Susz
         "the same. Nothing in the file is trusted: every id is looked up as"
         "a line's would be, and every hash and range is computed here."
     exposes [isSusz, readFile]
+    exposes opaque [Pos]
     depends [Bytes, Core.Names, Core.Exprs, Core.Decls, Export.Tables, Export.Items, Export.Declarations, Export.Reader, Export.Stream]
     effects [Disk.readBytesAt, Disk.size]
 
@@ -53,13 +54,50 @@ record Rd
     stop: Int
     n: Int
 
+decision PositionsInRange
+    date = "2026-11-11"
+    reason =
+        "A position is where in a chunk or in the header reading has got to,"
+        "or -1 for a field that runs past its end: never below -1 and never"
+        "past the length of the bytes read, which is below 2^62. It is a Pos"
+        "holding that range, so compiled Aver holds every position as a"
+        "machine word, and so do the offsets a few bytes after one at which"
+        "the fields of a record are read. A position is only ever made by"
+        "posOf, from a position and the length of what was read at it."
+    chosen = "PositionsInRange"
+    rejected = ["PositionsAsInts"]
+    impacts = [Pos, posOf, orNone, At, Ids, Done, Got]
+
+record Pos
+    value: Int
+
+fn posOf(n: Int) -> Result<Pos, String>
+    ? "A position: -1 for none, otherwise below 2^62 (PositionsInRange)."
+    match Bool.and(n >= -1, n <= 4611686018427387903)
+        true -> Result.Ok(Pos(value = n))
+        false -> Result.Err("position out of range")
+
+verify posOf
+    posOf(-2) => Result.Err("position out of range")
+    posOf(4611686018427387904) => Result.Err("position out of range")
+
+fn orNone(r: Result<Pos, String>) -> Pos
+    ? "A position made by posOf, which reading always keeps in range; anything else would read as none, which only ever stops reading. Callers call posOf themselves, so that it checks the machine word they hold (PositionsInRange)."
+    match r
+        Result.Ok(p) -> p
+        Result.Err(_) -> Pos(value = -1)
+
+verify orNone
+    orNone(Result.Ok(Pos(value = 3))).value => 3
+    orNone(posOf(-5)).value => -1
+
 record At
     value: Int
-    at: Int
+    at: Pos
 
 record Ids
     ids: List<Int>
-    at: Int
+    at: Pos
 
 record Trailer
     names: Int
@@ -113,8 +151,8 @@ fn withTrailer(path: String, end: Int, tr: Option<Trailer>) -> Outcome
 fn header(path: String, tr: Trailer, h: Bytes) -> Outcome
     ? "Signature, version 0, three zero bytes, and the meta text, checked as the ndjson header line is; then the block's records."
     ! [Disk.readBytesAt]
-    m = vAt(h, 8)
-    match Bool.and(Bytes.take(h, 8) == Bytes.fromList([83, 85, 83, 90, 0, 0, 0, 0]), m.at + m.value == Bytes.len(h))
+    m = vAt(h, posOf(8))
+    match Bool.and(Bytes.take(h, 8) == Bytes.fromList([83, 85, 83, 90, 0, 0, 0, 0]), m.at.value + m.value == Bytes.len(h))
         false -> Outcome.Rejected("not a Susz file of version 0")
         true -> match textAt(h, m)
             Result.Err(e) -> Outcome.Rejected("meta: {e}")
@@ -129,40 +167,40 @@ fn refill(r: Rd, t: Tables, offset: Int, tr: Trailer) -> Outcome
     ! [Disk.readBytesAt]
     match Disk.readBytesAt(r.path, offset, Int.min(chunkBytes(), r.stop - offset))
         Result.Err(e) -> Outcome.Declined("cannot read {r.path}: {e}")
-        Result.Ok(b) -> records(Rd(path = r.path, b = b, base = offset, stop = r.stop, n = r.n), t, 0, tr)
+        Result.Ok(b) -> records(Rd(path = r.path, b = b, base = offset, stop = r.stop, n = r.n), t, posOf(0), tr)
 
-fn records(r: Rd, t: Tables, i: Int, tr: Trailer) -> Outcome
+fn records(r: Rd, t: Tables, i: Pos, tr: Trailer) -> Outcome
     ? "The record at i; the tables are passed apart from the reading state so that they have one owner and grow in place. At the end of the block the counts are checked; a chunk with less than the margin left is first replaced (ChunkWithMargin)."
     ! [Disk.readBytesAt]
-    match r.base + i == r.stop
+    match r.base + i.value == r.stop
         true -> ended(t, tr)
-        false -> match Bool.and(r.base + Bytes.len(r.b) < r.stop, Bytes.len(r.b) - i < marginBytes())
-            true -> refill(r, t, r.base + i, tr)
+        false -> match Bool.and(r.base + Bytes.len(r.b) < r.stop, Bytes.len(r.b) - i.value < marginBytes())
+            true -> refill(r, t, r.base + i.value, tr)
             false -> step(r, t, i, tr)
 
-fn step(r: Rd, t: Tables, i: Int, tr: Trailer) -> Outcome
+fn step(r: Rd, t: Tables, i: Pos, tr: Trailer) -> Outcome
     ? "One record."
     ! [Disk.readBytesAt]
-    match Bytes.get(r.b, i)
-        Option.None -> short(r, i)
-        Option.Some(tag) -> stepped(r, i, tr, recordAt(t, r.b, tag, i + 1))
+    match Bytes.get(r.b, i.value)
+        Option.None -> short(r)
+        Option.Some(tag) -> stepped(r, tr, recordAt(t, r.b, tag, orNone(posOf(i.value + 1))))
 
-fn stepped(r: Rd, i: Int, tr: Trailer, d: Done) -> Outcome
+fn stepped(r: Rd, tr: Trailer, d: Done) -> Outcome
     ? "Goes on after a record, or stops at a bad one. A bad record is named by its number in the block, which does not depend on how the file is read."
     ! [Disk.readBytesAt]
     match d
         Done.Next(t, at) -> records(Rd(path = r.path, b = r.b, base = r.base, stop = r.stop, n = r.n + 1), t, at, tr)
-        Done.Short -> short(r, i)
+        Done.Short -> short(r)
         Done.Bad(e) -> Outcome.Rejected("record {r.n + 1}: {e}")
 
-fn short(r: Rd, i: Int) -> Outcome
+fn short(r: Rd) -> Outcome
     ? "A record that runs past the end of the chunk (ChunkWithMargin)."
     match r.base + Bytes.len(r.b) >= r.stop
         true -> Outcome.Rejected("record {r.n + 1}: the block ends inside it")
         false -> Outcome.Declined("record {r.n + 1} is longer than {marginBytes()} bytes")
 
 verify short
-    short(Rd(path = "f", b = Bytes.fromList([]), base = 4, stop = 4, n = 2), 0) => Outcome.Rejected("record 3: the block ends inside it")
+    short(Rd(path = "f", b = Bytes.fromList([]), base = 4, stop = 4, n = 2)) => Outcome.Rejected("record 3: the block ends inside it")
 
 fn ended(t: Tables, tr: Trailer) -> Outcome
     ? "The trailer's counts must be the block's."
@@ -204,7 +242,7 @@ verify octet
     octet(Bytes.fromList([7]), 0) => 7
 
 type Done
-    Next(Tables, Int)
+    Next(Tables, Pos)
     Short
     Bad(String)
 
@@ -215,80 +253,182 @@ decision VarintsByValue
         "another follows, at most 10 bytes. Decoding 10 M of them in Aver"
         "took 82 instructions each against 116 for four-byte fixed-width"
         "numbers, each byte read costing about 25, and with expressions"
-        "named by how far back they are the file is half as big. The value"
-        "is accumulated by multiplying, so any value is read exactly."
+        "named by how far back they are the file is half as big. Each byte's"
+        "low seven bits are multiplied by the weight of their place, 128 to"
+        "the power of the byte's number, so any value is read exactly. The"
+        "first nine bytes hold 63 bits, a value below 2^63 that every partial"
+        "sum stays below; only the tenth, of weight 2^63, takes a value past"
+        "it, and it is read in a function of its own."
     chosen = "VarintsByValue"
     rejected = ["FixedWidth", "VarintsByShifts"]
-    impacts = [vAt, vMore]
+    impacts = [vAt, v1, v2, v3, v4, v5, v6, v7, v8, v9]
 
-fn vAt(b: Bytes, i: Int) -> At
+fn vAt(b: Bytes, i: Pos) -> At
     ? "The varint at i and where the next field starts; at is -1 when there is none (VarintsByValue)."
-    match Bytes.get(b, i)
-        Option.None -> At(value = 0, at = -1)
+    match Bytes.get(b, i.value)
+        Option.None -> At(value = 0, at = Pos(value = -1))
         Option.Some(x) -> match x < 128
-            true -> At(value = x, at = i + 1)
-            false -> vMore(b, i + 1, x - 128, 128, 1)
+            true -> At(value = x, at = orNone(posOf(i.value + 1)))
+            false -> v1(b, i, Bits.and(x, 127))
 
 verify vAt
-    vAt(Bytes.fromList([5]), 0) => At(value = 5, at = 1)
-    vAt(Bytes.fromList([172, 2]), 0) => At(value = 300, at = 2)
-    vAt(Bytes.fromList([128]), 0).at => -1
-    vAt(Bytes.fromList([5]), -1).at => -1
+    vAt(Bytes.fromList([5]), Pos(value = 0)) => At(value = 5, at = Pos(value = 1))
+    vAt(Bytes.fromList([172, 2]), Pos(value = 0)) => At(value = 300, at = Pos(value = 2))
+    vAt(Bytes.fromList([128]), Pos(value = 0)).at.value => -1
+    vAt(Bytes.fromList([5]), Pos(value = -1)).at.value => -1
+    vAt(Bytes.fromList([255, 255, 255, 255, 255, 255, 255, 255, 127]), Pos(value = 0)) => At(value = 9223372036854775807, at = Pos(value = 9))
+    vAt(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 1]), Pos(value = 0)) => At(value = 9223372036854775808, at = Pos(value = 10))
+    vAt(Bytes.fromList([255, 255, 255, 255, 255, 255, 255, 255, 255, 127]), Pos(value = 0)) => At(value = 1180591620717411303423, at = Pos(value = 10))
+    vAt(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 1]), Pos(value = 0)).at.value => -1
 
-fn vMore(b: Bytes, i: Int, acc: Int, scale: Int, n: Int) -> At
-    ? "The rest of a varint: acc so far, scale the weight of the next seven bits, n the bytes read."
-    match n >= 10
-        true -> At(value = 0, at = -1)
-        false -> match Bytes.get(b, i)
-            Option.None -> At(value = 0, at = -1)
-            Option.Some(x) -> match x < 128
-                true -> At(value = acc + x * scale, at = i + 1)
-                false -> vMore(b, i + 1, acc + (x - 128) * scale, scale * 128, n + 1)
+fn v1(b: Bytes, i: Pos, acc: Int) -> At
+    ? "The second byte of the varint at i, of weight 128^1; acc is the value of the bytes before it (VarintsByValue)."
+    match Bytes.get(b, i.value + 1)
+        Option.None -> At(value = 0, at = Pos(value = -1))
+        Option.Some(x) -> match x < 128
+            true -> At(value = acc + Bits.and(x, 127) * 128, at = orNone(posOf(i.value + 2)))
+            false -> v2(b, i, acc + Bits.and(x, 127) * 128)
 
-verify vMore
-    vMore(Bytes.fromList([2]), 0, 44, 128, 1) => At(value = 300, at = 1)
-    vMore(Bytes.fromList([2]), 0, 0, 1, 10).at => -1
+verify v1
+    v1(Bytes.fromList([128, 1]), Pos(value = 0), 0) => At(value = 128, at = Pos(value = 2))
+    v1(Bytes.fromList([128]), Pos(value = 0), 0).at.value => -1
+
+fn v2(b: Bytes, i: Pos, acc: Int) -> At
+    ? "The third byte of the varint at i, of weight 128^2; acc is the value of the bytes before it (VarintsByValue)."
+    match Bytes.get(b, i.value + 2)
+        Option.None -> At(value = 0, at = Pos(value = -1))
+        Option.Some(x) -> match x < 128
+            true -> At(value = acc + Bits.and(x, 127) * 16384, at = orNone(posOf(i.value + 3)))
+            false -> v3(b, i, acc + Bits.and(x, 127) * 16384)
+
+verify v2
+    v2(Bytes.fromList([128, 128, 1]), Pos(value = 0), 0) => At(value = 16384, at = Pos(value = 3))
+    v2(Bytes.fromList([128]), Pos(value = 0), 0).at.value => -1
+
+fn v3(b: Bytes, i: Pos, acc: Int) -> At
+    ? "The fourth byte of the varint at i, of weight 128^3; acc is the value of the bytes before it (VarintsByValue)."
+    match Bytes.get(b, i.value + 3)
+        Option.None -> At(value = 0, at = Pos(value = -1))
+        Option.Some(x) -> match x < 128
+            true -> At(value = acc + Bits.and(x, 127) * 2097152, at = orNone(posOf(i.value + 4)))
+            false -> v4(b, i, acc + Bits.and(x, 127) * 2097152)
+
+verify v3
+    v3(Bytes.fromList([128, 128, 128, 1]), Pos(value = 0), 0) => At(value = 2097152, at = Pos(value = 4))
+    v3(Bytes.fromList([128]), Pos(value = 0), 0).at.value => -1
+
+fn v4(b: Bytes, i: Pos, acc: Int) -> At
+    ? "The fifth byte of the varint at i, of weight 128^4; acc is the value of the bytes before it (VarintsByValue)."
+    match Bytes.get(b, i.value + 4)
+        Option.None -> At(value = 0, at = Pos(value = -1))
+        Option.Some(x) -> match x < 128
+            true -> At(value = acc + Bits.and(x, 127) * 268435456, at = orNone(posOf(i.value + 5)))
+            false -> v5(b, i, acc + Bits.and(x, 127) * 268435456)
+
+verify v4
+    v4(Bytes.fromList([128, 128, 128, 128, 1]), Pos(value = 0), 0) => At(value = 268435456, at = Pos(value = 5))
+    v4(Bytes.fromList([128]), Pos(value = 0), 0).at.value => -1
+
+fn v5(b: Bytes, i: Pos, acc: Int) -> At
+    ? "The sixth byte of the varint at i, of weight 128^5; acc is the value of the bytes before it (VarintsByValue)."
+    match Bytes.get(b, i.value + 5)
+        Option.None -> At(value = 0, at = Pos(value = -1))
+        Option.Some(x) -> match x < 128
+            true -> At(value = acc + Bits.and(x, 127) * 34359738368, at = orNone(posOf(i.value + 6)))
+            false -> v6(b, i, acc + Bits.and(x, 127) * 34359738368)
+
+verify v5
+    v5(Bytes.fromList([128, 128, 128, 128, 128, 1]), Pos(value = 0), 0) => At(value = 34359738368, at = Pos(value = 6))
+    v5(Bytes.fromList([128]), Pos(value = 0), 0).at.value => -1
+
+fn v6(b: Bytes, i: Pos, acc: Int) -> At
+    ? "The seventh byte of the varint at i, of weight 128^6; acc is the value of the bytes before it (VarintsByValue)."
+    match Bytes.get(b, i.value + 6)
+        Option.None -> At(value = 0, at = Pos(value = -1))
+        Option.Some(x) -> match x < 128
+            true -> At(value = acc + Bits.and(x, 127) * 4398046511104, at = orNone(posOf(i.value + 7)))
+            false -> v7(b, i, acc + Bits.and(x, 127) * 4398046511104)
+
+verify v6
+    v6(Bytes.fromList([128, 128, 128, 128, 128, 128, 1]), Pos(value = 0), 0) => At(value = 4398046511104, at = Pos(value = 7))
+    v6(Bytes.fromList([128]), Pos(value = 0), 0).at.value => -1
+
+fn v7(b: Bytes, i: Pos, acc: Int) -> At
+    ? "The eighth byte of the varint at i, of weight 128^7; acc is the value of the bytes before it (VarintsByValue)."
+    match Bytes.get(b, i.value + 7)
+        Option.None -> At(value = 0, at = Pos(value = -1))
+        Option.Some(x) -> match x < 128
+            true -> At(value = acc + Bits.and(x, 127) * 562949953421312, at = orNone(posOf(i.value + 8)))
+            false -> v8(b, i, acc + Bits.and(x, 127) * 562949953421312)
+
+verify v7
+    v7(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 1]), Pos(value = 0), 0) => At(value = 562949953421312, at = Pos(value = 8))
+    v7(Bytes.fromList([128]), Pos(value = 0), 0).at.value => -1
+
+fn v8(b: Bytes, i: Pos, acc: Int) -> At
+    ? "The ninth byte of the varint at i, of weight 128^8; acc is the value of the bytes before it (VarintsByValue)."
+    match Bytes.get(b, i.value + 8)
+        Option.None -> At(value = 0, at = Pos(value = -1))
+        Option.Some(x) -> match x < 128
+            true -> At(value = acc + Bits.and(x, 127) * 72057594037927936, at = orNone(posOf(i.value + 9)))
+            false -> v9(b, i, acc + Bits.and(x, 127) * 72057594037927936)
+
+verify v8
+    v8(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 1]), Pos(value = 0), 0) => At(value = 72057594037927936, at = Pos(value = 9))
+    v8(Bytes.fromList([128]), Pos(value = 0), 0).at.value => -1
+
+fn v9(b: Bytes, i: Pos, acc: Int) -> At
+    ? "The tenth and last byte of the varint at i, of weight 2^63, the only one that takes the value past 2^63; acc is the value of the nine before it. A tenth byte saying another follows makes no varint (VarintsByValue)."
+    match Bytes.get(b, i.value + 9)
+        Option.None -> At(value = 0, at = Pos(value = -1))
+        Option.Some(x) -> match x < 128
+            true -> At(value = acc + x * 9223372036854775808, at = orNone(posOf(i.value + 10)))
+            false -> At(value = 0, at = Pos(value = -1))
+
+verify v9
+    v9(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 2]), Pos(value = 0), 5) => At(value = 18446744073709551621, at = Pos(value = 10))
+    v9(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 128]), Pos(value = 0), 0).at.value => -1
 
 fn textAt(b: Bytes, n: At) -> Result<String, String>
-    ? "The n.value bytes at n.at as UTF-8 text."
-    match Bool.and(n.at >= 0, n.at + n.value <= Bytes.len(b))
+    ? "The n.value bytes at n.at.value as UTF-8 text."
+    match Bool.and(n.at.value >= 0, n.at.value + n.value <= Bytes.len(b))
         false -> Result.Err("a string runs past the chunk")
-        true -> match String.fromUtf8(Bytes.take(Bytes.drop(b, n.at), n.value))
+        true -> match String.fromUtf8(Bytes.take(Bytes.drop(b, n.at.value), n.value))
             Result.Ok(s) -> Result.Ok(s)
             Result.Err(e) -> Result.Err("a string is not UTF-8: {e}")
 
 verify textAt
-    textAt(Bytes.fromList([2, 104, 105]), At(value = 2, at = 1)) => Result.Ok("hi")
-    textAt(Bytes.fromList([2, 104]), At(value = 2, at = 1)) => Result.Err("a string runs past the chunk")
+    textAt(Bytes.fromList([2, 104, 105]), At(value = 2, at = Pos(value = 1))) => Result.Ok("hi")
+    textAt(Bytes.fromList([2, 104]), At(value = 2, at = Pos(value = 1))) => Result.Err("a string runs past the chunk")
 
-fn idsAt(b: Bytes, i: Int) -> Ids
+fn idsAt(b: Bytes, i: Pos) -> Ids
     ? "A list of varints: its length, then its elements; at is -1 when it runs past the chunk."
     n = vAt(b, i)
-    match n.at < 0
-        true -> Ids(ids = [], at = -1)
+    match n.at.value < 0
+        true -> Ids(ids = [], at = Pos(value = -1))
         false -> idsFrom(b, n.at, n.value, [])
 
 verify idsAt
-    idsAt(Bytes.fromList([2, 7, 9]), 0) => Ids(ids = [7, 9], at = 3)
-    idsAt(Bytes.fromList([2, 7]), 0).at => -1
+    idsAt(Bytes.fromList([2, 7, 9]), Pos(value = 0)) => Ids(ids = [7, 9], at = Pos(value = 3))
+    idsAt(Bytes.fromList([2, 7]), Pos(value = 0)).at.value => -1
 
-fn idsFrom(b: Bytes, i: Int, n: Int, acc: List<Int>) -> Ids
+fn idsFrom(b: Bytes, i: Pos, n: Int, acc: List<Int>) -> Ids
     ? "n more elements."
     match n <= 0
         true -> Ids(ids = List.reverse(acc), at = i)
         false -> idsNext(b, vAt(b, i), n, acc)
 
 verify idsFrom
-    idsFrom(Bytes.fromList([4]), 0, 1, []) => Ids(ids = [4], at = 1)
+    idsFrom(Bytes.fromList([4]), Pos(value = 0), 1, []) => Ids(ids = [4], at = Pos(value = 1))
 
 fn idsNext(b: Bytes, x: At, n: Int, acc: List<Int>) -> Ids
     ? "One element read; the rest follow."
-    match x.at < 0
-        true -> Ids(ids = [], at = -1)
+    match x.at.value < 0
+        true -> Ids(ids = [], at = Pos(value = -1))
         false -> idsFrom(b, x.at, n - 1, List.prepend(x.value, acc))
 
 verify idsNext
-    idsNext(Bytes.fromList([]), At(value = 0, at = -1), 1, []).at => -1
+    idsNext(Bytes.fromList([]), At(value = 0, at = Pos(value = -1)), 1, []).at.value => -1
 
 fn back(t: Tables, d: Int) -> Int
     ? "The expression d back from the next one; 0 back names none and gives -1, which the tables then report as unknown."
@@ -299,7 +439,7 @@ fn back(t: Tables, d: Int) -> Int
 verify back
     back(Export.Tables.empty(), 0) => -1
 
-fn recordAt(t: Tables, b: Bytes, tag: Int, i: Int) -> Done
+fn recordAt(t: Tables, b: Bytes, tag: Int, i: Pos) -> Done
     ? "The record with tag at the byte before i; applications first, the most common."
     match tag
         10 -> app(t, b, vAt(b, i))
@@ -323,18 +463,18 @@ fn recordAt(t: Tables, b: Bytes, tag: Int, i: Int) -> Done
         _ -> Done.Bad("unknown record tag {tag}")
 
 verify recordAt
-    recordAt(Export.Tables.empty(), Bytes.fromList([]), 99, 0) => Done.Bad("unknown record tag 99")
-    recordAt(Export.Tables.empty(), Bytes.fromList([0]), 7, 0) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.bvar(0)), Export.Tables.empty()), 1)
-    recordAt(Export.Tables.empty(), Bytes.fromList([1, 1]), 10, 0) => Done.Bad("unknown expression index -1")
+    recordAt(Export.Tables.empty(), Bytes.fromList([]), 99, Pos(value = 0)) => Done.Bad("unknown record tag 99")
+    recordAt(Export.Tables.empty(), Bytes.fromList([0]), 7, Pos(value = 0)) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.bvar(0)), Export.Tables.empty()), Pos(value = 1))
+    recordAt(Export.Tables.empty(), Bytes.fromList([1, 1]), 10, Pos(value = 0)) => Done.Bad("unknown expression index -1")
 
-fn added(r: Result<Tables, String>, at: Int) -> Done
+fn added(r: Result<Tables, String>, at: Pos) -> Done
     ? "A record added, going on at at."
     match r
         Result.Ok(t) -> Done.Next(t, at)
         Result.Err(e) -> Done.Bad(e)
 
 verify added
-    added(Result.Err("x"), 3) => Done.Bad("x")
+    added(Result.Err("x"), Pos(value = 3)) => Done.Bad("x")
 
 fn app(t: Tables, b: Bytes, f: At) -> Done
     ? "10: how far back the function and the argument are."
@@ -342,29 +482,29 @@ fn app(t: Tables, b: Bytes, f: At) -> Done
     ie = t.nextExpr
     fi = back(t, f.value)
     ai = back(t, a.value)
-    match Bool.or(f.at < 0, a.at < 0)
+    match Bool.or(f.at.value < 0, a.at.value < 0)
         true -> Done.Short
         false -> added(Export.Items.appAt(t, ie, fi, ai), a.at)
 
 verify app
-    app(Export.Tables.empty(), Bytes.fromList([1]), At(value = 1, at = 1)) => Done.Short
+    app(Export.Tables.empty(), Bytes.fromList([1]), At(value = 1, at = Pos(value = 1))) => Done.Short
 
-fn binder(t: Tables, b: Bytes, i: Int, isLam: Bool) -> Done
+fn binder(t: Tables, b: Bytes, i: Pos, isLam: Bool) -> Done
     ? "11 lambda, 12 pi: the binder annotation, the name, how far back the type and the body are."
-    n = vAt(b, i + 1)
+    n = vAt(b, orNone(posOf(i.value + 1)))
     ty = vAt(b, n.at)
     body = vAt(b, ty.at)
     ie = t.nextExpr
     ti = back(t, ty.value)
     bo = back(t, body.value)
-    match Bool.or(Bool.or(n.at < 0, ty.at < 0), body.at < 0)
+    match Bool.or(Bool.or(n.at.value < 0, ty.at.value < 0), body.at.value < 0)
         true -> Done.Short
-        false -> match binderInfo(octet(b, i))
-            Option.None -> Done.Bad("unknown binder annotation {octet(b, i)}")
+        false -> match binderInfo(octet(b, i.value))
+            Option.None -> Done.Bad("unknown binder annotation {octet(b, i.value)}")
             Option.Some(bi) -> added(Export.Items.binderAt(t, ie, n.value, ti, bo, bi, isLam), body.at)
 
 verify binder
-    binder(Export.Tables.empty(), Bytes.fromList([9, 0, 1, 1]), 0, true) => Done.Bad("unknown binder annotation 9")
+    binder(Export.Tables.empty(), Bytes.fromList([9, 0, 1, 1]), Pos(value = 0), true) => Done.Bad("unknown binder annotation 9")
 
 fn binderInfo(k: Int) -> Option<Binder>
     ? "0 default, 1 implicit, 2 strict implicit, 3 instance implicit."
@@ -382,33 +522,33 @@ verify binderInfo
 fn bvar(t: Tables, k: At) -> Done
     ? "7: a bound variable."
     ie = t.nextExpr
-    match k.at < 0
+    match k.at.value < 0
         true -> Done.Short
         false -> added(Export.Tables.addExpr(t, ie, Core.Exprs.bvar(k.value)), k.at)
 
 verify bvar
-    bvar(Export.Tables.empty(), At(value = 0, at = -1)) => Done.Short
+    bvar(Export.Tables.empty(), At(value = 0, at = Pos(value = -1))) => Done.Short
 
 fn sort(t: Tables, l: At) -> Done
     ? "8: the sort of a level."
     ie = t.nextExpr
-    match l.at < 0
+    match l.at.value < 0
         true -> Done.Short
         false -> added(Export.Items.sortAt(t, ie, l.value), l.at)
 
 verify sort
-    sort(Export.Tables.empty(), At(value = 9, at = 1)) => Done.Bad("unknown level index 9")
+    sort(Export.Tables.empty(), At(value = 9, at = Pos(value = 1))) => Done.Bad("unknown level index 9")
 
 fn cnst(t: Tables, b: Bytes, n: At) -> Done
     ? "9: a constant, its name and levels."
     us = idsAt(b, n.at)
     ie = t.nextExpr
-    match Bool.or(n.at < 0, us.at < 0)
+    match Bool.or(n.at.value < 0, us.at.value < 0)
         true -> Done.Short
         false -> added(Export.Items.constAt(t, ie, n.value, us.ids), us.at)
 
 verify cnst
-    cnst(Export.Tables.empty(), Bytes.fromList([0, 0]), At(value = 0, at = 1)) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.cnst(Core.Names.anon(), [])), Export.Tables.empty()), 2)
+    cnst(Export.Tables.empty(), Bytes.fromList([0, 0]), At(value = 0, at = Pos(value = 1))) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.cnst(Core.Names.anon(), [])), Export.Tables.empty()), Pos(value = 2))
 
 fn letE(t: Tables, b: Bytes, n: At) -> Done
     ? "13: a let, its name, how far back its type, value and body are."
@@ -419,21 +559,21 @@ fn letE(t: Tables, b: Bytes, n: At) -> Done
     ti = back(t, ty.value)
     vi = back(t, v.value)
     bo = back(t, body.value)
-    match Bool.or(Bool.or(n.at < 0, ty.at < 0), Bool.or(v.at < 0, body.at < 0))
+    match Bool.or(Bool.or(n.at.value < 0, ty.at.value < 0), Bool.or(v.at.value < 0, body.at.value < 0))
         true -> Done.Short
         false -> added(Export.Items.letAt(t, ie, n.value, ti, vi, bo), body.at)
 
 verify letE
-    letE(Export.Tables.empty(), Bytes.fromList([0, 1, 1, 1]), At(value = 0, at = 1)) => Done.Bad("unknown expression index -1")
+    letE(Export.Tables.empty(), Bytes.fromList([0, 1, 1, 1]), At(value = 0, at = Pos(value = 1))) => Done.Bad("unknown expression index -1")
 
 fn lit(t: Tables, b: Bytes, n: At, isNat: Bool) -> Done
     ? "14 a Nat by its decimal digits, 15 a string."
     match textAt(b, n)
         Result.Err(e) -> Done.Bad(e)
-        Result.Ok(s) -> added(litOf(t, s, isNat), n.at + n.value)
+        Result.Ok(s) -> added(litOf(t, s, isNat), orNone(posOf(n.at.value + n.value)))
 
 verify lit
-    lit(Export.Tables.empty(), Bytes.fromList([1, 55]), At(value = 1, at = 1), true) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.natLit(7)), Export.Tables.empty()), 2)
+    lit(Export.Tables.empty(), Bytes.fromList([1, 55]), At(value = 1, at = Pos(value = 1)), true) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.natLit(7)), Export.Tables.empty()), Pos(value = 2))
 
 fn litOf(t: Tables, s: String, isNat: Bool) -> Result<Tables, String>
     ? "The literal, a Nat checked as the ndjson reader checks it."
@@ -450,12 +590,12 @@ fn proj(t: Tables, b: Bytes, n: At) -> Done
     k = vAt(b, n.at)
     s = vAt(b, k.at)
     si = back(t, s.value)
-    match Bool.or(n.at < 0, Bool.or(k.at < 0, s.at < 0))
+    match Bool.or(n.at.value < 0, Bool.or(k.at.value < 0, s.at.value < 0))
         true -> Done.Short
         false -> added(projOf(t, n.value, k.value, si), s.at)
 
 verify proj
-    proj(Export.Tables.empty(), Bytes.fromList([0, 0, 1]), At(value = 0, at = 1)) => Done.Bad("unknown expression index -1")
+    proj(Export.Tables.empty(), Bytes.fromList([0, 0, 1]), At(value = 0, at = Pos(value = 1))) => Done.Bad("unknown expression index -1")
 
 fn projOf(t: Tables, n: Int, k: Int, s: Int) -> Result<Tables, String>
     ? "The projection, its parts looked up in the order the ndjson reader looks them up."
@@ -470,12 +610,12 @@ verify projOf
 fn mdata(t: Tables, d: At) -> Done
     ? "17: metadata, which stands for the expression it wraps."
     x = back(t, d.value)
-    match d.at < 0
+    match d.at.value < 0
         true -> Done.Short
         false -> added(mdataOf(t, x), d.at)
 
 verify mdata
-    mdata(Export.Tables.empty(), At(value = 1, at = 1)) => Done.Bad("unknown expression index -1")
+    mdata(Export.Tables.empty(), At(value = 1, at = Pos(value = 1))) => Done.Bad("unknown expression index -1")
 
 fn mdataOf(t: Tables, x: Int) -> Result<Tables, String>
     ? "Expression x again under the next id."
@@ -489,128 +629,128 @@ verify mdataOf
 fn nameStr(t: Tables, b: Bytes, pre: At) -> Done
     ? "1: a name, its prefix and a string."
     s = vAt(b, pre.at)
-    match Bool.or(pre.at < 0, s.at < 0)
+    match Bool.or(pre.at.value < 0, s.at.value < 0)
         true -> Done.Short
         false -> match textAt(b, s)
             Result.Err(e) -> Done.Bad(e)
-            Result.Ok(x) -> nameAdded(t, pre.value, x, s.at + s.value)
+            Result.Ok(x) -> nameAdded(t, pre.value, x, orNone(posOf(s.at.value + s.value)))
 
 verify nameStr
-    nameStr(Export.Tables.empty(), Bytes.fromList([0, 1, 97]), At(value = 0, at = 1)) => Done.Next(Result.withDefault(Export.Items.nameStrAt(Export.Tables.empty(), 1, 0, "a"), Export.Tables.empty()), 3)
+    nameStr(Export.Tables.empty(), Bytes.fromList([0, 1, 97]), At(value = 0, at = Pos(value = 1))) => Done.Next(Result.withDefault(Export.Items.nameStrAt(Export.Tables.empty(), 1, 0, "a"), Export.Tables.empty()), Pos(value = 3))
 
-fn nameAdded(t: Tables, pre: Int, x: String, at: Int) -> Done
+fn nameAdded(t: Tables, pre: Int, x: String, at: Pos) -> Done
     ? "The name added under the next id, read before the tables are handed on."
     i = t.nextName
     added(Export.Items.nameStrAt(t, i, pre, x), at)
 
 verify nameAdded
-    nameAdded(Export.Tables.empty(), 4, "a", 0) => Done.Bad("unknown name index 4")
+    nameAdded(Export.Tables.empty(), 4, "a", Pos(value = 0)) => Done.Bad("unknown name index 4")
 
 fn nameNum(t: Tables, b: Bytes, pre: At) -> Done
     ? "2: a name, its prefix and a number."
     k = vAt(b, pre.at)
     i = t.nextName
-    match Bool.or(pre.at < 0, k.at < 0)
+    match Bool.or(pre.at.value < 0, k.at.value < 0)
         true -> Done.Short
         false -> added(Export.Items.nameNumAt(t, i, pre.value, k.value), k.at)
 
 verify nameNum
-    nameNum(Export.Tables.empty(), Bytes.fromList([0, 3]), At(value = 7, at = 1)) => Done.Bad("unknown name index 7")
+    nameNum(Export.Tables.empty(), Bytes.fromList([0, 3]), At(value = 7, at = Pos(value = 1))) => Done.Bad("unknown name index 7")
 
 fn succ(t: Tables, l: At) -> Done
     ? "3: the successor of a level."
     i = t.nextLevel
-    match l.at < 0
+    match l.at.value < 0
         true -> Done.Short
         false -> added(Export.Items.succAdded(t, i, l.value), l.at)
 
 verify succ
-    succ(Export.Tables.empty(), At(value = 4, at = 1)) => Done.Bad("unknown level index 4")
+    succ(Export.Tables.empty(), At(value = 4, at = Pos(value = 1))) => Done.Bad("unknown level index 4")
 
 fn pair(t: Tables, b: Bytes, a: At, isMax: Bool) -> Done
     ? "4 max, 5 imax of two levels."
     c = vAt(b, a.at)
     i = t.nextLevel
-    match Bool.or(a.at < 0, c.at < 0)
+    match Bool.or(a.at.value < 0, c.at.value < 0)
         true -> Done.Short
         false -> added(Export.Items.levelsRead(t, i, a.value, c.value, isMax), c.at)
 
 verify pair
-    pair(Export.Tables.empty(), Bytes.fromList([0, 7]), At(value = 0, at = 1), true) => Done.Bad("unknown level index 7")
+    pair(Export.Tables.empty(), Bytes.fromList([0, 7]), At(value = 0, at = Pos(value = 1)), true) => Done.Bad("unknown level index 7")
 
 fn param(t: Tables, n: At) -> Done
     ? "6: a universe parameter by its name."
     i = t.nextLevel
-    match n.at < 0
+    match n.at.value < 0
         true -> Done.Short
         false -> added(Export.Items.paramAdded(t, i, n.value), n.at)
 
 verify param
-    param(Export.Tables.empty(), At(value = 4, at = 1)) => Done.Bad("unknown name index 4")
+    param(Export.Tables.empty(), At(value = 4, at = Pos(value = 1))) => Done.Bad("unknown name index 4")
 
-fn decl(t: Tables, b: Bytes, i: Int) -> Done
+fn decl(t: Tables, b: Bytes, i: Pos) -> Done
     ? "18: a declaration, its kind first; every kind but an inductive block then has a head."
-    match Bytes.get(b, i)
+    match Bytes.get(b, i.value)
         Option.None -> Done.Short
-        Option.Some(5) -> inductiveFrom(t, b, i + 1)
-        Option.Some(k) -> match headAt(t, b, i + 1)
+        Option.Some(5) -> inductiveFrom(t, b, orNone(posOf(i.value + 1)))
+        Option.Some(k) -> match headAt(t, b, orNone(posOf(i.value + 1)))
             Got.GotShort -> Done.Short
             Got.GotBad(e) -> Done.Bad(e)
             Got.GHead(head, j) -> declKind(t, b, k, head, j)
             _ -> Done.Bad("malformed")
 
 verify decl
-    decl(Export.Tables.empty(), Bytes.fromList([0, 7, 0, 1]), 0) => Done.Bad("unknown name index 7")
-    decl(Export.Tables.empty(), Bytes.fromList([5, 0, 0, 0]), 0) => Done.Next(Export.Tables.addDecl(Export.Tables.empty(), Decl.Induct([], [], [])), 4)
+    decl(Export.Tables.empty(), Bytes.fromList([0, 7, 0, 1]), Pos(value = 0)) => Done.Bad("unknown name index 7")
+    decl(Export.Tables.empty(), Bytes.fromList([5, 0, 0, 0]), Pos(value = 0)) => Done.Next(Export.Tables.addDecl(Export.Tables.empty(), Decl.Induct([], [], [])), Pos(value = 4))
 
 type Got
-    GHead(Head, Int)
-    GTypes(List<IndType>, Int)
-    GType(IndType, Int)
-    GCtors(List<Ctor>, Int)
-    GCtor(Ctor, Int)
-    GRecs(List<Rec>, Int)
-    GRec(Rec, Int)
-    GRules(List<RecRule>, Int)
+    GHead(Head, Pos)
+    GTypes(List<IndType>, Pos)
+    GType(IndType, Pos)
+    GCtors(List<Ctor>, Pos)
+    GCtor(Ctor, Pos)
+    GRecs(List<Rec>, Pos)
+    GRec(Rec, Pos)
+    GRules(List<RecRule>, Pos)
     GotShort
     GotBad(String)
 
-fn headAt(t: Tables, b: Bytes, i: Int) -> Got
+fn headAt(t: Tables, b: Bytes, i: Pos) -> Got
     ? "A declaration's name, universe parameters and how far back its type is, looked up in the order the ndjson reader looks them up."
     n = vAt(b, i)
     ps = idsAt(b, n.at)
     ty = vAt(b, ps.at)
     ti = back(t, ty.value)
-    match Bool.or(n.at < 0, Bool.or(ps.at < 0, ty.at < 0))
+    match Bool.or(n.at.value < 0, Bool.or(ps.at.value < 0, ty.at.value < 0))
         true -> Got.GotShort
         false -> match Export.Declarations.headOf(t, n.value, ps.ids, ti)
             Result.Ok(h) -> Got.GHead(h, ty.at)
             Result.Err(e) -> Got.GotBad(e)
 
 verify headAt
-    headAt(Export.Tables.empty(), Bytes.fromList([0, 0, 1]), 0) => Got.GotBad("unknown expression index -1")
+    headAt(Export.Tables.empty(), Bytes.fromList([0, 0, 1]), Pos(value = 0)) => Got.GotBad("unknown expression index -1")
 
-fn declKind(t: Tables, b: Bytes, k: Int, head: Head, i: Int) -> Done
+fn declKind(t: Tables, b: Bytes, k: Int, head: Head, i: Pos) -> Done
     ? "0 axiom, 1 definition, 2 theorem, 3 opaque, 4 quotient, 5 inductive block."
     match k
-        0 -> axiom(t, head, boolAt(b, i), i + 1)
+        0 -> axiom(t, head, boolAt(b, i.value), orNone(posOf(i.value + 1)))
         1 -> defn(t, b, head, vAt(b, i))
         2 -> thm(t, b, head, vAt(b, i))
         3 -> opaq(t, b, head, vAt(b, i))
-        4 -> quot(t, head, octet(b, i), i + 1, i < Bytes.len(b))
+        4 -> quot(t, head, octet(b, i.value), orNone(posOf(i.value + 1)), i.value < Bytes.len(b))
         _ -> Done.Bad("unknown declaration kind {k}")
 
 verify declKind
-    declKind(Export.Tables.empty(), Bytes.fromList([]), 9, Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0) => Done.Bad("unknown declaration kind 9")
+    declKind(Export.Tables.empty(), Bytes.fromList([]), 9, Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Pos(value = 0)) => Done.Bad("unknown declaration kind 9")
 
-fn declAdded(t: Tables, d: Result<Decl, String>, at: Int) -> Done
+fn declAdded(t: Tables, d: Result<Decl, String>, at: Pos) -> Done
     ? "A declaration added, going on at at."
     match d
         Result.Ok(x) -> Done.Next(Export.Tables.addDecl(t, x), at)
         Result.Err(e) -> Done.Bad(e)
 
 verify declAdded
-    declAdded(Export.Tables.empty(), Result.Err("x"), 0) => Done.Bad("x")
+    declAdded(Export.Tables.empty(), Result.Err("x"), Pos(value = 0)) => Done.Bad("x")
 
 fn boolAt(b: Bytes, i: Int) -> Int
     ? "A bool byte at i: 0 false, 1 true, 2 any other byte, -1 past the chunk."
@@ -625,7 +765,7 @@ verify boolAt
     boolAt(Bytes.fromList([5]), 0) => 2
     boolAt(Bytes.fromList([]), 0) => -1
 
-fn axiom(t: Tables, head: Head, u: Int, at: Int) -> Done
+fn axiom(t: Tables, head: Head, u: Int, at: Pos) -> Done
     ? "Axiom: whether it is unsafe."
     match u < 0
         true -> Done.Short
@@ -634,42 +774,42 @@ fn axiom(t: Tables, head: Head, u: Int, at: Int) -> Done
             false -> declAdded(t, Result.Ok(Decl.Axiom(head, u == 1)), at)
 
 verify axiom
-    axiom(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 2, 1) => Done.Bad("a bool byte is neither 0 nor 1")
+    axiom(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 2, Pos(value = 1)) => Done.Bad("a bool byte is neither 0 nor 1")
 
 fn defn(t: Tables, b: Bytes, head: Head, v: At) -> Done
     ? "Definition: how far back its value is, its hints (0 opaque, 1 abbrev, 2 regular and the height), its safety (0 safe, 1 unsafe, 2 partial) and its group."
     vi = back(t, v.value)
-    match v.at < 0
+    match v.at.value < 0
         true -> Done.Short
-        false -> match octet(b, v.at)
-            0 -> defSafety(t, b, head, vi, Hints.Opaque, v.at + 1)
-            1 -> defSafety(t, b, head, vi, Hints.Abbrev, v.at + 1)
-            2 -> defRegular(t, b, head, vi, vAt(b, v.at + 1))
+        false -> match octet(b, v.at.value)
+            0 -> defSafety(t, b, head, vi, Hints.Opaque, orNone(posOf(v.at.value + 1)))
+            1 -> defSafety(t, b, head, vi, Hints.Abbrev, orNone(posOf(v.at.value + 1)))
+            2 -> defRegular(t, b, head, vi, vAt(b, orNone(posOf(v.at.value + 1))))
             k -> Done.Bad("unknown hints {k}")
 
 verify defn
-    defn(Export.Tables.empty(), Bytes.fromList([1, 7]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 1, at = 1)) => Done.Bad("unknown hints 7")
+    defn(Export.Tables.empty(), Bytes.fromList([1, 7]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 1, at = Pos(value = 1))) => Done.Bad("unknown hints 7")
 
 fn defRegular(t: Tables, b: Bytes, head: Head, v: Int, h: At) -> Done
     ? "Regular hints with their height."
-    match h.at < 0
+    match h.at.value < 0
         true -> Done.Short
         false -> defSafety(t, b, head, v, Hints.Regular(h.value), h.at)
 
 verify defRegular
-    defRegular(Export.Tables.empty(), Bytes.fromList([]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0, At(value = 0, at = -1)) => Done.Short
+    defRegular(Export.Tables.empty(), Bytes.fromList([]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0, At(value = 0, at = Pos(value = -1))) => Done.Short
 
-fn defSafety(t: Tables, b: Bytes, head: Head, v: Int, hints: Hints, i: Int) -> Done
+fn defSafety(t: Tables, b: Bytes, head: Head, v: Int, hints: Hints, i: Pos) -> Done
     ? "Safety, then the group."
-    all = idsAt(b, i + 1)
-    match Bool.or(i >= Bytes.len(b), all.at < 0)
+    all = idsAt(b, orNone(posOf(i.value + 1)))
+    match Bool.or(i.value >= Bytes.len(b), all.at.value < 0)
         true -> Done.Short
-        false -> match safetyOf(octet(b, i))
-            Option.None -> Done.Bad("unknown safety {octet(b, i)}")
+        false -> match safetyOf(octet(b, i.value))
+            Option.None -> Done.Bad("unknown safety {octet(b, i.value)}")
             Option.Some(s) -> defAdded(t, head, v, hints, s, all)
 
 verify defSafety
-    defSafety(Export.Tables.empty(), Bytes.fromList([7, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0, Hints.Opaque, 0) => Done.Bad("unknown safety 7")
+    defSafety(Export.Tables.empty(), Bytes.fromList([7, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0, Hints.Opaque, Pos(value = 0)) => Done.Bad("unknown safety 7")
 
 fn defAdded(t: Tables, head: Head, v: Int, hints: Hints, s: Safety, all: Ids) -> Done
     ? "The definition built, then added: the tables are read before they are handed on."
@@ -677,7 +817,7 @@ fn defAdded(t: Tables, head: Head, v: Int, hints: Hints, s: Safety, all: Ids) ->
     declAdded(t, d, all.at)
 
 verify defAdded
-    defAdded(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 3, Hints.Opaque, Safety.Safe, Ids(ids = [], at = 0)) => Done.Bad("unknown expression index 3")
+    defAdded(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 3, Hints.Opaque, Safety.Safe, Ids(ids = [], at = Pos(value = 0))) => Done.Bad("unknown expression index 3")
 
 fn safetyOf(k: Int) -> Option<Safety>
     ? "0 safe, 1 unsafe, 2 partial."
@@ -702,12 +842,12 @@ fn thm(t: Tables, b: Bytes, head: Head, v: At) -> Done
     ? "Theorem: how far back its value is and its group."
     all = idsAt(b, v.at)
     vi = back(t, v.value)
-    match Bool.or(v.at < 0, all.at < 0)
+    match Bool.or(v.at.value < 0, all.at.value < 0)
         true -> Done.Short
         false -> thmAdded(t, head, vi, all)
 
 verify thm
-    thm(Export.Tables.empty(), Bytes.fromList([1, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 1, at = 1)) => Done.Bad("unknown expression index -1")
+    thm(Export.Tables.empty(), Bytes.fromList([1, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 1, at = Pos(value = 1))) => Done.Bad("unknown expression index -1")
 
 fn thmAdded(t: Tables, head: Head, v: Int, all: Ids) -> Done
     ? "The theorem built, then added."
@@ -715,7 +855,7 @@ fn thmAdded(t: Tables, head: Head, v: Int, all: Ids) -> Done
     declAdded(t, d, all.at)
 
 verify thmAdded
-    thmAdded(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 3, Ids(ids = [], at = 0)) => Done.Bad("unknown expression index 3")
+    thmAdded(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 3, Ids(ids = [], at = Pos(value = 0))) => Done.Bad("unknown expression index 3")
 
 fn thmOf(t: Tables, head: Head, v: Int, all: List<Int>) -> Result<Decl, String>
     ? "The theorem."
@@ -727,17 +867,17 @@ verify thmOf
 
 fn opaq(t: Tables, b: Bytes, head: Head, v: At) -> Done
     ? "Opaque constant: how far back its value is, whether it is unsafe and its group."
-    u = boolAt(b, v.at)
-    all = idsAt(b, v.at + 1)
+    u = boolAt(b, v.at.value)
+    all = idsAt(b, orNone(posOf(v.at.value + 1)))
     vi = back(t, v.value)
-    match Bool.or(Bool.or(v.at < 0, u < 0), all.at < 0)
+    match Bool.or(Bool.or(v.at.value < 0, u < 0), all.at.value < 0)
         true -> Done.Short
         false -> match u > 1
             true -> Done.Bad("a bool byte is neither 0 nor 1")
             false -> opaqAdded(t, head, vi, u == 1, all)
 
 verify opaq
-    opaq(Export.Tables.empty(), Bytes.fromList([1, 5, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 1, at = 1)) => Done.Bad("a bool byte is neither 0 nor 1")
+    opaq(Export.Tables.empty(), Bytes.fromList([1, 5, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 1, at = Pos(value = 1))) => Done.Bad("a bool byte is neither 0 nor 1")
 
 fn opaqAdded(t: Tables, head: Head, v: Int, isUnsafe: Bool, all: Ids) -> Done
     ? "The opaque constant built, then added."
@@ -745,7 +885,7 @@ fn opaqAdded(t: Tables, head: Head, v: Int, isUnsafe: Bool, all: Ids) -> Done
     declAdded(t, d, all.at)
 
 verify opaqAdded
-    opaqAdded(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 3, false, Ids(ids = [], at = 0)) => Done.Bad("unknown expression index 3")
+    opaqAdded(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 3, false, Ids(ids = [], at = Pos(value = 0))) => Done.Bad("unknown expression index 3")
 
 fn opaqOf(t: Tables, head: Head, v: Int, isUnsafe: Bool, all: List<Int>) -> Result<Decl, String>
     ? "The opaque constant, looked up in the order the ndjson reader looks it up."
@@ -755,7 +895,7 @@ fn opaqOf(t: Tables, head: Head, v: Int, isUnsafe: Bool, all: List<Int>) -> Resu
 verify opaqOf
     opaqOf(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0, false, []) => Result.Err("unknown expression index 0")
 
-fn quot(t: Tables, head: Head, k: Int, at: Int, there: Bool) -> Done
+fn quot(t: Tables, head: Head, k: Int, at: Pos, there: Bool) -> Done
     ? "Quotient constant: 0 the type, 1 the constructor, 2 lift, 3 ind."
     match there
         false -> Done.Short
@@ -767,17 +907,17 @@ fn quot(t: Tables, head: Head, k: Int, at: Int, there: Bool) -> Done
             _ -> Done.Bad("unknown quot kind {k}")
 
 verify quot
-    quot(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 7, 1, true) => Done.Bad("unknown quot kind 7")
+    quot(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 7, Pos(value = 1), true) => Done.Bad("unknown quot kind 7")
 
-fn inductiveFrom(t: Tables, b: Bytes, i: Int) -> Done
+fn inductiveFrom(t: Tables, b: Bytes, i: Pos) -> Done
     ? "Inductive block: the types, the constructors and the recursors, each list with its length first."
     n = vAt(b, i)
-    match n.at < 0
+    match n.at.value < 0
         true -> Done.Short
         false -> afterTypes(t, b, typesAt(t, b, n.at, n.value, []))
 
 verify inductiveFrom
-    inductiveFrom(Export.Tables.empty(), Bytes.fromList([0, 0, 0]), 0) => Done.Next(Export.Tables.addDecl(Export.Tables.empty(), Decl.Induct([], [], [])), 3)
+    inductiveFrom(Export.Tables.empty(), Bytes.fromList([0, 0, 0]), Pos(value = 0)) => Done.Next(Export.Tables.addDecl(Export.Tables.empty(), Decl.Induct([], [], [])), Pos(value = 3))
 
 fn afterTypes(t: Tables, b: Bytes, ts: Got) -> Done
     ? "The types read; the constructors next."
@@ -792,12 +932,12 @@ verify afterTypes
 
 fn ctorsCounted(t: Tables, b: Bytes, n: At) -> Got
     ? "The constructors after their count."
-    match n.at < 0
+    match n.at.value < 0
         true -> Got.GotShort
         false -> ctorsAt(t, b, n.at, n.value, [])
 
 verify ctorsCounted
-    ctorsCounted(Export.Tables.empty(), Bytes.fromList([]), At(value = 0, at = -1)) => Got.GotShort
+    ctorsCounted(Export.Tables.empty(), Bytes.fromList([]), At(value = 0, at = Pos(value = -1))) => Got.GotShort
 
 fn afterCtors(t: Tables, b: Bytes, types: List<IndType>, cs: Got) -> Done
     ? "The constructors read; the recursors next."
@@ -812,12 +952,12 @@ verify afterCtors
 
 fn recsCounted(t: Tables, b: Bytes, n: At) -> Got
     ? "The recursors after their count."
-    match n.at < 0
+    match n.at.value < 0
         true -> Got.GotShort
         false -> recsAt(t, b, n.at, n.value, [])
 
 verify recsCounted
-    recsCounted(Export.Tables.empty(), Bytes.fromList([]), At(value = 0, at = -1)) => Got.GotShort
+    recsCounted(Export.Tables.empty(), Bytes.fromList([]), At(value = 0, at = Pos(value = -1))) => Got.GotShort
 
 fn afterRecs(t: Tables, types: List<IndType>, ctors: List<Ctor>, rs: Got) -> Done
     ? "The block."
@@ -830,7 +970,7 @@ fn afterRecs(t: Tables, types: List<IndType>, ctors: List<Ctor>, rs: Got) -> Don
 verify afterRecs
     afterRecs(Export.Tables.empty(), [], [], Got.GotBad("x")) => Done.Bad("x")
 
-fn typesAt(t: Tables, b: Bytes, i: Int, n: Int, acc: List<IndType>) -> Got
+fn typesAt(t: Tables, b: Bytes, i: Pos, n: Int, acc: List<IndType>) -> Got
     ? "n more inductive types."
     match n <= 0
         true -> Got.GTypes(List.reverse(acc), i)
@@ -841,7 +981,7 @@ fn typesAt(t: Tables, b: Bytes, i: Int, n: Int, acc: List<IndType>) -> Got
             _ -> Got.GotBad("malformed")
 
 verify typesAt
-    typesAt(Export.Tables.empty(), Bytes.fromList([]), 0, 0, []) => Got.GTypes([], 0)
+    typesAt(Export.Tables.empty(), Bytes.fromList([]), Pos(value = 0), 0, []) => Got.GTypes([], Pos(value = 0))
 
 fn indType(t: Tables, b: Bytes, h: Got) -> Got
     ? "A type: whether it is unsafe, numParams, numIndices, its group, its constructors, numNested, isRec and isReflexive."
@@ -854,26 +994,26 @@ fn indType(t: Tables, b: Bytes, h: Got) -> Got
 verify indType
     indType(Export.Tables.empty(), Bytes.fromList([]), Got.GotShort) => Got.GotShort
 
-fn indTypeRest(t: Tables, b: Bytes, head: Head, i: Int) -> Got
+fn indTypeRest(t: Tables, b: Bytes, head: Head, i: Pos) -> Got
     ? "The fields after the head."
-    u = boolAt(b, i)
-    np = vAt(b, i + 1)
+    u = boolAt(b, i.value)
+    np = vAt(b, orNone(posOf(i.value + 1)))
     ni = vAt(b, np.at)
     all = idsAt(b, ni.at)
     cs = idsAt(b, all.at)
     nn = vAt(b, cs.at)
-    r = boolAt(b, nn.at)
-    rf = boolAt(b, nn.at + 1)
-    match Bool.or(Bool.or(Bool.or(u < 0, np.at < 0), Bool.or(ni.at < 0, all.at < 0)), Bool.or(Bool.or(cs.at < 0, nn.at < 0), Bool.or(r < 0, rf < 0)))
+    r = boolAt(b, nn.at.value)
+    rf = boolAt(b, nn.at.value + 1)
+    match Bool.or(Bool.or(Bool.or(u < 0, np.at.value < 0), Bool.or(ni.at.value < 0, all.at.value < 0)), Bool.or(Bool.or(cs.at.value < 0, nn.at.value < 0), Bool.or(r < 0, rf < 0)))
         true -> Got.GotShort
         false -> match Bool.or(Bool.or(u > 1, r > 1), rf > 1)
             true -> Got.GotBad("a bool byte is neither 0 nor 1")
-            false -> indTypeOf(t, head, u == 1, np.value, ni.value, all.ids, cs.ids, nn.value, r == 1, rf == 1, nn.at + 2)
+            false -> indTypeOf(t, head, u == 1, np.value, ni.value, all.ids, cs.ids, nn.value, r == 1, rf == 1, orNone(posOf(nn.at.value + 2)))
 
 verify indTypeRest
-    indTypeRest(Export.Tables.empty(), Bytes.fromList([0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0) => Got.GotShort
+    indTypeRest(Export.Tables.empty(), Bytes.fromList([0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Pos(value = 0)) => Got.GotShort
 
-fn indTypeOf(t: Tables, head: Head, isUnsafe: Bool, np: Int, ni: Int, all: List<Int>, cs: List<Int>, nn: Int, isRec: Bool, isReflexive: Bool, at: Int) -> Got
+fn indTypeOf(t: Tables, head: Head, isUnsafe: Bool, np: Int, ni: Int, all: List<Int>, cs: List<Int>, nn: Int, isRec: Bool, isReflexive: Bool, at: Pos) -> Got
     ? "The type, its constructors and group looked up in the order the ndjson reader looks them up."
     match Export.Tables.names(t, cs)
         Result.Err(e) -> Got.GotBad(e)
@@ -882,9 +1022,9 @@ fn indTypeOf(t: Tables, head: Head, isUnsafe: Bool, np: Int, ni: Int, all: List<
             Result.Ok(group) -> Got.GType(IndType(head = head, numParams = np, numIndices = ni, all = group, ctors = ctors, numNested = nn, isRec = isRec, isUnsafe = isUnsafe, isReflexive = isReflexive), at)
 
 verify indTypeOf
-    indTypeOf(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false, 0, 0, [], [9], 0, false, false, 1) => Got.GotBad("unknown name index 9")
+    indTypeOf(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false, 0, 0, [], [9], 0, false, false, Pos(value = 1)) => Got.GotBad("unknown name index 9")
 
-fn ctorsAt(t: Tables, b: Bytes, i: Int, n: Int, acc: List<Ctor>) -> Got
+fn ctorsAt(t: Tables, b: Bytes, i: Pos, n: Int, acc: List<Ctor>) -> Got
     ? "n more constructors."
     match n <= 0
         true -> Got.GCtors(List.reverse(acc), i)
@@ -895,7 +1035,7 @@ fn ctorsAt(t: Tables, b: Bytes, i: Int, n: Int, acc: List<Ctor>) -> Got
             _ -> Got.GotBad("malformed")
 
 verify ctorsAt
-    ctorsAt(Export.Tables.empty(), Bytes.fromList([]), 0, 0, []) => Got.GCtors([], 0)
+    ctorsAt(Export.Tables.empty(), Bytes.fromList([]), Pos(value = 0), 0, []) => Got.GCtors([], Pos(value = 0))
 
 fn ctorOf(t: Tables, b: Bytes, h: Got) -> Got
     ? "A constructor: whether it is unsafe, its type's name, cidx, numParams and numFields."
@@ -908,14 +1048,14 @@ fn ctorOf(t: Tables, b: Bytes, h: Got) -> Got
 verify ctorOf
     ctorOf(Export.Tables.empty(), Bytes.fromList([]), Got.GotBad("x")) => Got.GotBad("x")
 
-fn ctorRest(t: Tables, b: Bytes, head: Head, i: Int) -> Got
+fn ctorRest(t: Tables, b: Bytes, head: Head, i: Pos) -> Got
     ? "The fields after the head; the type's name is looked up as the ndjson reader looks it up."
-    u = boolAt(b, i)
-    ind = vAt(b, i + 1)
+    u = boolAt(b, i.value)
+    ind = vAt(b, orNone(posOf(i.value + 1)))
     ci = vAt(b, ind.at)
     np = vAt(b, ci.at)
     nf = vAt(b, np.at)
-    match Bool.or(Bool.or(u < 0, ind.at < 0), Bool.or(Bool.or(ci.at < 0, np.at < 0), nf.at < 0))
+    match Bool.or(Bool.or(u < 0, ind.at.value < 0), Bool.or(Bool.or(ci.at.value < 0, np.at.value < 0), nf.at.value < 0))
         true -> Got.GotShort
         false -> match u > 1
             true -> Got.GotBad("a bool byte is neither 0 nor 1")
@@ -924,9 +1064,9 @@ fn ctorRest(t: Tables, b: Bytes, head: Head, i: Int) -> Got
                 Result.Ok(induct) -> Got.GCtor(Ctor(head = head, induct = induct, cidx = ci.value, numParams = np.value, numFields = nf.value, isUnsafe = u == 1), nf.at)
 
 verify ctorRest
-    ctorRest(Export.Tables.empty(), Bytes.fromList([0, 9, 0, 0, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0) => Got.GotBad("unknown name index 9")
+    ctorRest(Export.Tables.empty(), Bytes.fromList([0, 9, 0, 0, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Pos(value = 0)) => Got.GotBad("unknown name index 9")
 
-fn recsAt(t: Tables, b: Bytes, i: Int, n: Int, acc: List<Rec>) -> Got
+fn recsAt(t: Tables, b: Bytes, i: Pos, n: Int, acc: List<Rec>) -> Got
     ? "n more recursors."
     match n <= 0
         true -> Got.GRecs(List.reverse(acc), i)
@@ -937,7 +1077,7 @@ fn recsAt(t: Tables, b: Bytes, i: Int, n: Int, acc: List<Rec>) -> Got
             _ -> Got.GotBad("malformed")
 
 verify recsAt
-    recsAt(Export.Tables.empty(), Bytes.fromList([]), 0, 0, []) => Got.GRecs([], 0)
+    recsAt(Export.Tables.empty(), Bytes.fromList([]), Pos(value = 0), 0, []) => Got.GRecs([], Pos(value = 0))
 
 fn recOf(t: Tables, b: Bytes, h: Got) -> Got
     ? "A recursor: whether it is unsafe, its group, numParams, numIndices, numMotives, numMinors, its rules and k."
@@ -950,36 +1090,36 @@ fn recOf(t: Tables, b: Bytes, h: Got) -> Got
 verify recOf
     recOf(Export.Tables.empty(), Bytes.fromList([]), Got.GotShort) => Got.GotShort
 
-fn recRest(t: Tables, b: Bytes, head: Head, i: Int) -> Got
+fn recRest(t: Tables, b: Bytes, head: Head, i: Pos) -> Got
     ? "The fields after the head."
-    u = boolAt(b, i)
-    all = idsAt(b, i + 1)
+    u = boolAt(b, i.value)
+    all = idsAt(b, orNone(posOf(i.value + 1)))
     np = vAt(b, all.at)
     ni = vAt(b, np.at)
     nm = vAt(b, ni.at)
     nmi = vAt(b, nm.at)
     nr = vAt(b, nmi.at)
-    match Bool.or(Bool.or(Bool.or(u < 0, all.at < 0), Bool.or(np.at < 0, ni.at < 0)), Bool.or(Bool.or(nm.at < 0, nmi.at < 0), nr.at < 0))
+    match Bool.or(Bool.or(Bool.or(u < 0, all.at.value < 0), Bool.or(np.at.value < 0, ni.at.value < 0)), Bool.or(Bool.or(nm.at.value < 0, nmi.at.value < 0), nr.at.value < 0))
         true -> Got.GotShort
         false -> match u > 1
             true -> Got.GotBad("a bool byte is neither 0 nor 1")
             false -> recRules(t, b, head, u == 1, all.ids, [np.value, ni.value, nm.value, nmi.value], rulesAt(t, b, nr.at, nr.value, []))
 
 verify recRest
-    recRest(Export.Tables.empty(), Bytes.fromList([0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0) => Got.GotShort
+    recRest(Export.Tables.empty(), Bytes.fromList([0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Pos(value = 0)) => Got.GotShort
 
 fn recRules(t: Tables, b: Bytes, head: Head, isUnsafe: Bool, all: List<Int>, nums: List<Int>, rs: Got) -> Got
     ? "The rules read; k last. nums are numParams, numIndices, numMotives and numMinors; the rules are looked up before the group, as the ndjson reader does."
     match rs
         Got.GotShort -> Got.GotShort
         Got.GotBad(e) -> Got.GotBad(e)
-        Got.GRules(rules, i) -> recWithK(t, head, isUnsafe, all, nums, rules, boolAt(b, i), i + 1)
+        Got.GRules(rules, i) -> recWithK(t, head, isUnsafe, all, nums, rules, boolAt(b, i.value), orNone(posOf(i.value + 1)))
         _ -> Got.GotBad("malformed")
 
 verify recRules
     recRules(Export.Tables.empty(), Bytes.fromList([]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false, [], [], Got.GotBad("x")) => Got.GotBad("x")
 
-fn recWithK(t: Tables, head: Head, isUnsafe: Bool, all: List<Int>, nums: List<Int>, rules: List<RecRule>, k: Int, at: Int) -> Got
+fn recWithK(t: Tables, head: Head, isUnsafe: Bool, all: List<Int>, nums: List<Int>, rules: List<RecRule>, k: Int, at: Pos) -> Got
     ? "The recursor once k is read; its group is looked up after the rules, as the ndjson reader does."
     match k < 0
         true -> Got.GotShort
@@ -992,9 +1132,9 @@ fn recWithK(t: Tables, head: Head, isUnsafe: Bool, all: List<Int>, nums: List<In
                     _ -> Got.GotBad("a recursor needs four numbers")
 
 verify recWithK
-    recWithK(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false, [], [], [], 3, 0) => Got.GotBad("a bool byte is neither 0 nor 1")
+    recWithK(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false, [], [], [], 3, Pos(value = 0)) => Got.GotBad("a bool byte is neither 0 nor 1")
 
-fn rulesAt(t: Tables, b: Bytes, i: Int, n: Int, acc: List<RecRule>) -> Got
+fn rulesAt(t: Tables, b: Bytes, i: Pos, n: Int, acc: List<RecRule>) -> Got
     ? "n more rules: the constructor, nfields and how far back the right-hand side is; the constructor is looked up first."
     c = vAt(b, i)
     nf = vAt(b, c.at)
@@ -1002,14 +1142,14 @@ fn rulesAt(t: Tables, b: Bytes, i: Int, n: Int, acc: List<RecRule>) -> Got
     ri = back(t, rhs.value)
     match n <= 0
         true -> Got.GRules(List.reverse(acc), i)
-        false -> match Bool.or(c.at < 0, Bool.or(nf.at < 0, rhs.at < 0))
+        false -> match Bool.or(c.at.value < 0, Bool.or(nf.at.value < 0, rhs.at.value < 0))
             true -> Got.GotShort
             false -> match ruleOf(t, c.value, nf.value, ri)
                 Result.Err(e) -> Got.GotBad(e)
                 Result.Ok(r) -> rulesAt(t, b, rhs.at, n - 1, List.prepend(r, acc))
 
 verify rulesAt
-    rulesAt(Export.Tables.empty(), Bytes.fromList([]), 0, 0, []) => Got.GRules([], 0)
+    rulesAt(Export.Tables.empty(), Bytes.fromList([]), Pos(value = 0), 0, []) => Got.GRules([], Pos(value = 0))
 
 fn ruleOf(t: Tables, c: Int, nf: Int, rhs: Int) -> Result<RecRule, String>
     ? "One rule."
