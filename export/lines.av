@@ -6,9 +6,9 @@ module Lines
         "chunk, as Export.Reader reads them from text, and give the same"
         "Line; any other line gives none and is read as text by"
         "Export.Reader.parseLine."
-    exposes [lineAt, LineAt, offAt, offValue, fwd, newlineFrom]
-    exposes opaque [Off, Small]
-    depends [Bytes, Core.Exprs, Export.Reader]
+    exposes [lineAt, lineOf, numOf, nameAt, LineAt, offAt, offValue, fwd, newlineFrom]
+    exposes opaque [Off, Small, Lit]
+    depends [Bytes, Core.Decls, Core.Exprs, Export.Reader]
     effects []
 
 decision LinesFromBytes
@@ -30,14 +30,14 @@ decision LinesFromBytes
 record Off
     value: Int
 
-fn offOf(n: Int) -> Result<Off, String>
+fn offOf(n: Int) -> Result<Off, Bool>
     ? "A place in a chunk: -1 for none, otherwise below 2^62."
     match Bool.and(n >= -1, n <= 4611686018427387903)
         true -> Result.Ok(Off(value = n))
-        false -> Result.Err("offset out of range")
+        false -> Result.Err(false)
 
 verify offOf
-    offOf(-2) => Result.Err("offset out of range")
+    offOf(-2) => Result.Err(false)
     offOf(3) => offAt(3)
 
 fn offAt(n: Int) -> Off
@@ -63,14 +63,14 @@ fn fwd(p: Off, k: Int) -> Off
         true -> placeAt(p.value + k)
         false -> Off(value = -1)
 
-fn placeOf(n: Int) -> Result<Off, String>
+fn placeOf(n: Int) -> Result<Off, Bool>
     ? "A place reckoned on a machine word: the bound of offOf, a constructor of its own so that its argument stays a word (WordSteps)."
     match Bool.and(n >= -1, n <= 4611686018427387903)
         true -> Result.Ok(Off(value = n))
-        false -> Result.Err("offset out of range")
+        false -> Result.Err(false)
 
 verify placeOf
-    placeOf(-2) => Result.Err("offset out of range")
+    placeOf(-2) => Result.Err(false)
 
 fn placeAt(n: Int) -> Off
     ? "The place n, none when it is not one."
@@ -108,14 +108,14 @@ verify after
 record Small
     value: Int
 
-fn smallOf(n: Int) -> Result<Small, String>
+fn smallOf(n: Int) -> Result<Small, Bool>
     ? "A number of at most 17 digits, which a step of reading one more digit keeps a machine word."
     match Bool.and(n >= 0, n <= 99999999999999999)
         true -> Result.Ok(Small(value = n))
-        false -> Result.Err("too large")
+        false -> Result.Err(false)
 
 verify smallOf
-    smallOf(-1) => Result.Err("too large")
+    smallOf(-1) => Result.Err(false)
     smallOf(12) => smallAt(12)
 
 fn pushDigit(acc: Small, x: Int) -> Small
@@ -144,6 +144,42 @@ record Num
 record LineAt
     line: Line
     next: Off
+    kind: Small
+    n1: Small
+    n2: Small
+    n3: Small
+    n4: Small
+    bi: Binder
+    lam: Bool
+
+decision AppsUnboxed
+    date = "2026-11-12"
+    reason =
+        "Nine lines in ten are applications, lambdas and pis, and each was"
+        "read into a Line on the heap only for the packer to take its"
+        "numbers out and drop it. A line read gives them in the LineAt"
+        "itself, by its kind: 1 an application, its index, function and"
+        "argument; 2 a lambda or a pi, its index, name, type and body, its"
+        "annotation and which of the two; 0 any other line, in its Line."
+        "The packer takes the numbers as they are, from a chunk read line"
+        "by line and from the lines parsed ahead in rounds alike."
+    chosen = "AppsUnboxed"
+    rejected = ["AppsAsLines", "AppsApart"]
+    impacts = [lineAt, lineOf]
+
+fn lineOf(l: Line, next: Off) -> LineAt
+    ? "A line read as the Line l, the next starting at next."
+    LineAt(line = l, next = next, kind = smallAt(0), n1 = smallAt(0), n2 = smallAt(0), n3 = smallAt(0), n4 = smallAt(0), bi = Binder.Default, lam = false)
+
+verify lineOf
+    numOf(lineOf(Line.Blank, offAt(3)).kind) => 0
+
+fn numOf(s: Small) -> Int
+    ? "The number s holds."
+    s.value
+
+verify numOf
+    numOf(smallAt(7)) => 7
 
 fn none() -> Num
     ? "No number."
@@ -225,19 +261,18 @@ verify newlineFrom
     newlineFrom(Bytes.fromList([1]), offAt(0)) => offAt(-1)
 
 fn lineAt(b: Bytes, p: Off) -> Option<LineAt>
-    ? "The line at p when it is an application, a lambda, a pi, a name or a constant in the exact form lean4export writes and ends with a newline; none for any other, which the caller reads as text (LinesFromBytes)."
+    ? "The line at p when it is an application, a lambda, a pi, a constant, a let, a theorem or a definition in the exact form lean4export writes and ends with a newline; none for any other, which the caller reads by nameAt or as text (LinesFromBytes). It only reads the bytes, so the caller lends them (NamesApart)."
     match Bytes.get(b, p.value + 2)
         Option.Some(97) -> match litApp(b, p)
             true -> appArg(b, canon(b, fwd(p, 14)))
             false -> Option.None
         Option.Some(105) -> match Bytes.get(b, p.value + 3)
             Option.Some(101) -> match litIe(b, p)
-                true -> lamAfterIe(b, canon(b, fwd(p, 6)))
-                false -> Option.None
-            Option.Some(110) -> match litIn(b, p)
-                true -> nameAfter(b, canon(b, fwd(p, 6)))
+                true -> ieAfter(b, canon(b, fwd(p, 6)))
                 false -> Option.None
             _ -> Option.None
+        Option.Some(116) -> thmAt(b, p)
+        Option.Some(100) -> defAt(b, p)
         Option.Some(102) -> match litPi(b, p)
             true -> piAfter(b, binderAt(b, fwd(p, 26)))
             false -> Option.None
@@ -247,9 +282,37 @@ fn lineAt(b: Bytes, p: Off) -> Option<LineAt>
         _ -> Option.None
 
 verify lineAt
-    lineAt(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58, 51, 44, 34, 102, 110, 34, 58, 52, 125, 44, 34, 105, 101, 34, 58, 49, 50, 125, 10]), offAt(0)) => Option.Some(LineAt(line = Line.App(12, 4, 3), next = offAt(33)))
+    lineAt(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58, 51, 44, 34, 102, 110, 34, 58, 52, 125, 44, 34, 105, 101, 34, 58, 49, 50, 125, 10]), offAt(0)) => Option.Some(LineAt(line = Line.Blank, next = offAt(33), kind = smallAt(1), n1 = smallAt(12), n2 = smallAt(4), n3 = smallAt(3), n4 = smallAt(0), bi = Binder.Default, lam = false))
     lineAt(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58, 51, 44, 34, 102, 110, 34, 58, 52, 125, 44, 34, 105, 101, 34, 58, 49, 50, 125]), offAt(0)) => Option.None
     lineAt(Bytes.fromList([]), offAt(0)) => Option.None
+    lineAt(Bytes.fromList([123, 34, 105, 101, 34, 58, 55, 44, 34, 108, 97, 109, 34, 58, 123, 34, 98, 105, 110, 100, 101, 114, 73, 110, 102, 111, 34, 58, 34, 100, 101, 102, 97, 117, 108, 116, 34, 44, 34, 98, 111, 100, 121, 34, 58, 49, 44, 34, 110, 97, 109, 101, 34, 58, 50, 44, 34, 116, 121, 112, 101, 34, 58, 51, 125, 125, 10]), offAt(0)) => Option.Some(LineAt(line = Line.Blank, next = offAt(67), kind = smallAt(2), n1 = smallAt(7), n2 = smallAt(2), n3 = smallAt(3), n4 = smallAt(1), bi = Binder.Default, lam = true))
+    lineAt(Bytes.fromList([123, 34, 102, 111, 114, 97, 108, 108, 69, 34, 58, 123, 34, 98, 105, 110, 100, 101, 114, 73, 110, 102, 111, 34, 58, 34, 105, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34, 58, 53, 44, 34, 110, 97, 109, 101, 34, 58, 51, 44, 34, 116, 121, 112, 101, 34, 58, 48, 125, 44, 34, 105, 101, 34, 58, 54, 125, 10]), offAt(0)) => Option.Some(LineAt(line = Line.Blank, next = offAt(72), kind = smallAt(2), n1 = smallAt(6), n2 = smallAt(3), n3 = smallAt(0), n4 = smallAt(5), bi = Binder.Implicit, lam = false))
+
+decision NamesApart
+    date = "2026-11-12"
+    reason =
+        "A Name.str line is the one common line whose reading cuts its text"
+        "out of the chunk, which takes the chunk's bytes as a value of its"
+        "own: read in lineAt, every line of a chunk paid for a copy of the"
+        "chunk's handle, two atomic counts. Names are read by nameAt, which"
+        "the caller tries only after lineAt gave none, so lineAt borrows the"
+        "bytes."
+    chosen = "NamesApart"
+    rejected = ["NamesInLineAt"]
+    impacts = [lineAt, nameAt]
+
+fn nameAt(b: Bytes, p: Off) -> Option<LineAt>
+    ? "The line at p when it is a Name.str or a Name.num in the exact form lean4export writes and ends with a newline; none for any other (NamesApart)."
+    match Bool.and(byteIs(b, p.value + 2, 105), byteIs(b, p.value + 3, 110))
+        true -> match litIn(b, p)
+            true -> nameAfter(b, canon(b, fwd(p, 6)))
+            false -> Option.None
+        false -> Option.None
+
+verify nameAt
+    nameAt(Bytes.fromList([123, 34, 105, 110, 34, 58, 57, 44, 34, 110, 117, 109, 34, 58, 123, 34, 105, 34, 58, 48, 44, 34, 112, 114, 101, 34, 58, 56, 125, 125, 10]), offAt(0)) => Option.Some(lineOf(Line.NameNum(9, 8, 0), offAt(31)))
+    nameAt(Bytes.fromList([123, 34, 105, 110, 34, 58, 49, 44, 34, 115, 116, 114, 34, 58, 123, 34, 112, 114, 101, 34, 58, 48, 44, 34, 115, 116, 114, 34, 58, 34, 117, 34, 125, 125, 10]), offAt(0)) => Option.Some(lineOf(Line.NameStr(1, 0, "u"), offAt(35)))
+    nameAt(Bytes.fromList([123, 34, 97, 112, 112]), offAt(0)) => Option.None
 
 fn appArg(b: Bytes, a: Num) -> Option<LineAt>
     ? "The function's index after the argument's."
@@ -263,20 +326,20 @@ verify appArg
 fn appFn(b: Bytes, a: Num, f: Num) -> Option<LineAt>
     ? "The line's own index after the function's."
     match litIeClose(b, f.end)
-        true -> appEnd(a, f, canon(b, fwd(f.end, 7)), closedNl(b, canon(b, fwd(f.end, 7)).end))
+        true -> appEnd(b, a, f, canon(b, fwd(f.end, 7)))
         false -> Option.None
 
 verify appFn
     appFn(Bytes.fromList([]), none(), none()) => Option.None
 
-fn appEnd(a: Num, f: Num, i: Num, closed: Bool) -> Option<LineAt>
+fn appEnd(b: Bytes, a: Num, f: Num, i: Num) -> Option<LineAt>
     ? "The application, once its brace and newline end it."
-    match closed
-        true -> Option.Some(LineAt(line = Line.App(i.value.value, f.value.value, a.value.value), next = fwd(i.end, 2)))
+    match closedNl(b, i.end)
+        true -> Option.Some(LineAt(line = Line.Blank, next = fwd(i.end, 2), kind = smallAt(1), n1 = i.value, n2 = f.value, n3 = a.value, n4 = smallAt(0), bi = Binder.Default, lam = false))
         false -> Option.None
 
 verify appEnd
-    appEnd(none(), none(), none(), false) => Option.None
+    appEnd(Bytes.fromList([]), none(), none(), none()) => Option.None
 
 record BAt
     bi: Binder
@@ -327,6 +390,16 @@ fn binderType(b: Bytes, bi: Binder, d: Num, n: Num, t: Num) -> Option<BAt>
 verify binderType
     binderType(Bytes.fromList([]), Binder.Default, none(), none(), none()) => Option.None
 
+fn ieAfter(b: Bytes, i: Num) -> Option<LineAt>
+    ? "A lambda or a let after the line's index, told apart by the key's second letter."
+    match Bytes.get(b, i.end.value + 3)
+        Option.Some(97) -> lamAfterIe(b, i)
+        Option.Some(101) -> letAfter(b, i)
+        _ -> Option.None
+
+verify ieAfter
+    ieAfter(Bytes.fromList([]), none()) => Option.None
+
 fn lamAfterIe(b: Bytes, i: Num) -> Option<LineAt>
     ? "A lambda's binder after its index."
     match litLam(b, i.end)
@@ -341,7 +414,7 @@ fn lamEnd(b: Bytes, i: Num, x: Option<BAt>) -> Option<LineAt>
     match x
         Option.None -> Option.None
         Option.Some(y) -> match closedNl(b, y.end)
-            true -> Option.Some(LineAt(line = Line.Bind(BinderIds(ie = i.value.value, nameIdx = y.name.value, typeIdx = y.ty.value, bodyIdx = y.body.value, bi = y.bi, isLam = true)), next = fwd(y.end, 2)))
+            true -> Option.Some(LineAt(line = Line.Blank, next = fwd(y.end, 2), kind = smallAt(2), n1 = i.value, n2 = y.name, n3 = y.ty, n4 = y.body, bi = y.bi, lam = true))
             false -> Option.None
 
 verify lamEnd
@@ -361,7 +434,7 @@ verify piAfter
 fn piEnd(b: Bytes, y: BAt, i: Num) -> Option<LineAt>
     ? "The pi line's closing brace and newline."
     match closedNl(b, i.end)
-        true -> Option.Some(LineAt(line = Line.Bind(BinderIds(ie = i.value.value, nameIdx = y.name.value, typeIdx = y.ty.value, bodyIdx = y.body.value, bi = y.bi, isLam = false)), next = fwd(i.end, 2)))
+        true -> Option.Some(LineAt(line = Line.Blank, next = fwd(i.end, 2), kind = smallAt(2), n1 = i.value, n2 = y.name, n3 = y.ty, n4 = y.body, bi = y.bi, lam = false))
         false -> Option.None
 
 verify piEnd
@@ -404,7 +477,7 @@ fn nameText(b: Bytes, i: Num, pre: Num, s: Off, q: Off) -> Option<LineAt>
     match Bool.and(q.value >= 0, Bool.and(byteIs(b, q.value + 1, 125), closedNl(b, fwd(q, 2))))
         false -> Option.None
         true -> match String.fromUtf8(Bytes.take(Bytes.drop(b, s.value), q.value - s.value))
-            Result.Ok(t) -> Option.Some(LineAt(line = Line.NameStr(i.value.value, pre.value.value, t), next = fwd(q, 4)))
+            Result.Ok(t) -> Option.Some(lineOf(Line.NameStr(i.value.value, pre.value.value, t), fwd(q, 4)))
             Result.Err(_) -> Option.None
 
 verify nameText
@@ -422,7 +495,7 @@ verify nameNumAfter
 fn nameNumEnd(b: Bytes, i: Num, k: Num, pre: Num) -> Option<LineAt>
     ? "The two closing braces and the newline."
     match Bool.and(byteIs(b, pre.end.value, 125), closedNl(b, fwd(pre.end, 1)))
-        true -> Option.Some(LineAt(line = Line.NameNum(i.value.value, pre.value.value, k.value.value), next = fwd(pre.end, 3)))
+        true -> Option.Some(lineOf(Line.NameNum(i.value.value, pre.value.value, k.value.value), fwd(pre.end, 3)))
         false -> Option.None
 
 verify nameNumEnd
@@ -476,177 +549,603 @@ verify constIe
 fn constEnd(b: Bytes, n: Num, us: UsAt, i: Num) -> Option<LineAt>
     ? "The closing brace and the newline."
     match closedNl(b, i.end)
-        true -> Option.Some(LineAt(line = Line.Const(i.value.value, n.value.value, us.us), next = fwd(i.end, 2)))
+        true -> Option.Some(lineOf(Line.Const(i.value.value, n.value.value, us.us), fwd(i.end, 2)))
         false -> Option.None
 
 verify constEnd
     constEnd(Bytes.fromList([]), none(), UsAt(us = [], end = offAt(0)), none()) => Option.None
 
-fn byteAt(b: Bytes, p: Off, k: Int, c: Int) -> Bool
-    ? "Whether the byte k past p is c, read where it lies."
-    match Bytes.get(b, p.value + k)
-        Option.Some(x) -> x == c
-        Option.None -> false
+decision DeclsFromBytes
+    date = "2026-11-12"
+    reason =
+        "Theorem, definition and let lines, about one line in a hundred,"
+        "were cut out, decoded as text and read by Export.Reader, at some"
+        "5000 instructions a line: a twentieth of reading init. They are now"
+        "read from the bytes as the other common lines are, in the exact"
+        "form Export.Reader reads by position, to the same Line."
+    chosen = "DeclsFromBytes"
+    rejected = ["DeclsAsText"]
+    impacts = [thmAt, defAt, letAfter]
 
-verify byteAt
-    byteAt(Bytes.fromList([7, 8]), offAt(0), 1, 8) => true
-    byteAt(Bytes.fromList([7]), offAt(-1), 0, 7) => false
+record TV
+    ty: Small
+    value: Small
+    next: Off
+
+fn tvAt(b: Bytes, p: Off) -> Option<TV>
+    ? "A declaration's type and value from p and the two braces and the newline that end its line: ,\"type\":T,\"value\":V}}}}."
+    match litType(b, p)
+        true -> tvType(b, canon(b, fwd(p, 8)))
+        false -> Option.None
+
+verify tvAt
+    tvAt(Bytes.fromList([44, 34, 116, 121, 112, 101, 34, 58, 51, 44, 34, 118, 97, 108, 117, 101, 34, 58, 52, 125, 125, 10]), offAt(0)) => Option.Some(TV(ty = smallAt(3), value = smallAt(4), next = offAt(22)))
+    tvAt(Bytes.fromList([44, 34, 116, 121, 112, 101, 34, 58, 51, 44, 34, 118, 97, 108, 117, 101, 34, 58, 52, 125, 125]), offAt(0)) => Option.None
+
+fn tvType(b: Bytes, t: Num) -> Option<TV>
+    ? "The value after the type."
+    match litValue(b, t.end)
+        true -> tvEnd(b, t, canon(b, fwd(t.end, 9)))
+        false -> Option.None
+
+verify tvType
+    tvType(Bytes.fromList([]), none()) => Option.None
+
+fn tvEnd(b: Bytes, t: Num, v: Num) -> Option<TV>
+    ? "The two closing braces and the newline."
+    match Bool.and(byteIs(b, v.end.value, 125), closedNl(b, fwd(v.end, 1)))
+        true -> Option.Some(TV(ty = t.value, value = v.value, next = fwd(v.end, 3)))
+        false -> Option.None
+
+verify tvEnd
+    tvEnd(Bytes.fromList([]), none(), none()) => Option.None
+
+record HB
+    params: List<Int>
+    name: Small
+    end: Off
+
+fn headAt(b: Bytes, p: Off) -> Option<HB>
+    ? "A declaration's universe parameters and name from p: ,\"levelParams\":[..],\"name\":N."
+    match litParams(b, p)
+        true -> headParams(b, usFirst(b, fwd(p, 16)))
+        false -> Option.None
+
+verify headAt
+    headAt(Bytes.fromList([44, 34, 108, 101, 118, 101, 108, 80, 97, 114, 97, 109, 115, 34, 58, 91, 49, 93, 44, 34, 110, 97, 109, 101, 34, 58, 52, 44]), offAt(0)) => Option.Some(HB(params = [1], name = smallAt(4), end = offAt(27)))
+    headAt(Bytes.fromList([44, 34, 108, 101, 118, 101, 108, 80, 97, 114, 97, 109, 115, 34, 58, 91, 49, 93, 44, 34, 110, 97, 109, 101, 34, 58, 48, 52]), offAt(0)) => Option.None
+
+fn headParams(b: Bytes, ps: UsAt) -> Option<HB>
+    ? "The name after the universe parameters."
+    match litName(b, ps.end)
+        true -> headName(ps, canon(b, fwd(ps.end, 8)))
+        false -> Option.None
+
+verify headParams
+    headParams(Bytes.fromList([]), UsAt(us = [], end = offAt(-1))) => Option.None
+
+fn headName(ps: UsAt, n: Num) -> Option<HB>
+    ? "The head, when the name is a number."
+    match n.end.value < 0
+        true -> Option.None
+        false -> Option.Some(HB(params = ps.us, name = n.value, end = n.end))
+
+verify headName
+    headName(UsAt(us = [], end = offAt(0)), none()) => Option.None
+
+fn thmAt(b: Bytes, p: Off) -> Option<LineAt>
+    ? "A theorem line at p: {{\"thm\":{{\"all\":[..],\"levelParams\":[..],\"name\":N,\"type\":T,\"value\":V}}}} and its newline (DeclsFromBytes)."
+    match litThm(b, p)
+        true -> thmAll(b, usFirst(b, fwd(p, 15)))
+        false -> Option.None
+
+verify thmAt
+    thmAt(Bytes.fromList([123, 34, 116, 104, 109, 34, 58, 123, 34, 97, 108, 108, 34, 58, 91, 53, 93, 44, 34, 108, 101, 118, 101, 108, 80, 97, 114, 97, 109, 115, 34, 58, 91, 93, 44, 34, 110, 97, 109, 101, 34, 58, 53, 44, 34, 116, 121, 112, 101, 34, 58, 54, 44, 34, 118, 97, 108, 117, 101, 34, 58, 55, 125, 125, 10]), offAt(0)) => Option.Some(lineOf(Line.Thm(Export.Reader.DeclIds(name = 5, params = [], ty = 6, value = 7, all = [5])), offAt(65)))
+    thmAt(Bytes.fromList([123, 34, 116, 104, 109, 34, 58, 123, 34, 97, 108, 108, 34, 58, 91, 53, 93, 44, 34, 108, 101, 118, 101, 108, 80, 97, 114, 97, 109, 115, 34, 58, 91, 93, 44, 34, 110, 97, 109, 101, 34, 58, 53, 44, 34, 116, 121, 112, 101, 34, 58, 54, 44, 34, 118, 97, 108, 117, 101, 34, 58, 55, 125, 125]), offAt(0)) => Option.None
+
+fn thmAll(b: Bytes, all: UsAt) -> Option<LineAt>
+    ? "The theorem's head after the names of its mutual group."
+    match all.end.value < 0
+        true -> Option.None
+        false -> thmHead(b, all, headAt(b, all.end))
+
+verify thmAll
+    thmAll(Bytes.fromList([]), UsAt(us = [], end = offAt(-1))) => Option.None
+
+fn thmHead(b: Bytes, all: UsAt, h: Option<HB>) -> Option<LineAt>
+    ? "The theorem's type and value after its head."
+    match h
+        Option.None -> Option.None
+        Option.Some(x) -> thmEnd(all, x, tvAt(b, x.end))
+
+verify thmHead
+    thmHead(Bytes.fromList([]), UsAt(us = [], end = offAt(0)), Option.None) => Option.None
+
+fn thmEnd(all: UsAt, h: HB, tv: Option<TV>) -> Option<LineAt>
+    ? "The theorem, once its type and value end the line."
+    match tv
+        Option.None -> Option.None
+        Option.Some(y) -> Option.Some(lineOf(Line.Thm(Export.Reader.DeclIds(name = h.name.value, params = h.params, ty = y.ty.value, value = y.value.value, all = all.us)), y.next))
+
+verify thmEnd
+    thmEnd(UsAt(us = [], end = offAt(0)), HB(params = [], name = smallAt(0), end = offAt(0)), Option.None) => Option.None
+
+record HintsB
+    hints: Hints
+    end: Off
+
+fn defAt(b: Bytes, p: Off) -> Option<LineAt>
+    ? "A definition line at p: {{\"def\":{{\"all\":[..],\"hints\":H,\"levelParams\":[..],\"name\":N,\"safety\":S,\"type\":T,\"value\":V}}}} and its newline (DeclsFromBytes)."
+    match litDef(b, p)
+        true -> defAll(b, usFirst(b, fwd(p, 15)))
+        false -> Option.None
+
+verify defAt
+    defAt(Bytes.fromList([123, 34, 100, 101, 102, 34, 58, 123, 34, 97, 108, 108, 34, 58, 91, 50, 50, 93, 44, 34, 104, 105, 110, 116, 115, 34, 58, 123, 34, 114, 101, 103, 117, 108, 97, 114, 34, 58, 49, 125, 44, 34, 108, 101, 118, 101, 108, 80, 97, 114, 97, 109, 115, 34, 58, 91, 50, 93, 44, 34, 110, 97, 109, 101, 34, 58, 50, 50, 44, 34, 115, 97, 102, 101, 116, 121, 34, 58, 34, 115, 97, 102, 101, 34, 44, 34, 116, 121, 112, 101, 34, 58, 54, 55, 44, 34, 118, 97, 108, 117, 101, 34, 58, 55, 52, 125, 125, 10]), offAt(0)) => Option.Some(lineOf(Line.Defn(Export.Reader.DeclIds(name = 22, params = [2], ty = 67, value = 74, all = [22]), Hints.Regular(1), Safety.Safe), offAt(108)))
+    defAt(Bytes.fromList([123, 34, 100, 101, 102, 34, 58, 123, 34, 97, 108, 108, 34, 58, 91, 50, 50, 93, 44, 34, 104, 105, 110, 116, 115, 34, 58, 34, 97, 98, 98, 114, 101, 118, 34, 44, 34, 108, 101, 118, 101, 108, 80, 97, 114, 97, 109, 115, 34, 58, 91, 93, 44, 34, 110, 97, 109, 101, 34, 58, 50, 50, 44, 34, 115, 97, 102, 101, 116, 121, 34, 58, 34, 112, 97, 114, 116, 105, 97, 108, 34, 44, 34, 116, 121, 112, 101, 34, 58, 54, 55, 44, 34, 118, 97, 108, 117, 101, 34, 58, 55, 52, 125, 125, 10]), offAt(0)) => Option.Some(lineOf(Line.Defn(Export.Reader.DeclIds(name = 22, params = [], ty = 67, value = 74, all = [22]), Hints.Abbrev, Safety.Partial), offAt(105)))
+
+fn defAll(b: Bytes, all: UsAt) -> Option<LineAt>
+    ? "The definition's hints after the names of its mutual group."
+    match litHints(b, all.end)
+        true -> defHints(b, all, hintsAt(b, fwd(all.end, 9)))
+        false -> Option.None
+
+verify defAll
+    defAll(Bytes.fromList([]), UsAt(us = [], end = offAt(-1))) => Option.None
+
+fn hintsAt(b: Bytes, p: Off) -> Option<HintsB>
+    ? "The hints at p: \"abbrev\", \"opaque\" or {{\"regular\":H}}."
+    match Bytes.get(b, p.value)
+        Option.Some(123) -> match litRegular(b, p)
+            true -> regularEnd(b, canon(b, fwd(p, 11)))
+            false -> Option.None
+        Option.Some(34) -> match litAbbrev(b, p)
+            true -> Option.Some(HintsB(hints = Hints.Abbrev, end = fwd(p, 8)))
+            false -> match litOpaque(b, p)
+                true -> Option.Some(HintsB(hints = Hints.Opaque, end = fwd(p, 8)))
+                false -> Option.None
+        _ -> Option.None
+
+verify hintsAt
+    hintsAt(Bytes.fromList([34, 111, 112, 97, 113, 117, 101, 34]), offAt(0)) => Option.Some(HintsB(hints = Hints.Opaque, end = offAt(8)))
+    hintsAt(Bytes.fromList([34, 111, 116, 104, 101, 114, 34, 44]), offAt(0)) => Option.None
+    hintsAt(Bytes.fromList([123, 34, 114, 101, 103, 117, 108, 97, 114, 34, 58, 49, 50, 125]), offAt(0)) => Option.Some(HintsB(hints = Hints.Regular(12), end = offAt(14)))
+
+fn regularEnd(b: Bytes, h: Num) -> Option<HintsB>
+    ? "The height's closing brace."
+    match byteIs(b, h.end.value, 125)
+        true -> Option.Some(HintsB(hints = Hints.Regular(h.value.value), end = fwd(h.end, 1)))
+        false -> Option.None
+
+verify regularEnd
+    regularEnd(Bytes.fromList([]), none()) => Option.None
+
+fn defHints(b: Bytes, all: UsAt, h: Option<HintsB>) -> Option<LineAt>
+    ? "The definition's head after its hints."
+    match h
+        Option.None -> Option.None
+        Option.Some(x) -> defHead(b, all, x.hints, headAt(b, x.end))
+
+verify defHints
+    defHints(Bytes.fromList([]), UsAt(us = [], end = offAt(0)), Option.None) => Option.None
+
+fn defHead(b: Bytes, all: UsAt, hints: Hints, hd: Option<HB>) -> Option<LineAt>
+    ? "The definition's safety after its head: the first letter of the value picks the text to look for."
+    match hd
+        Option.None -> Option.None
+        Option.Some(y) -> match Bytes.get(b, y.end.value + 11)
+            Option.Some(115) -> defSafe(b, all, hints, y, litSafe(b, y.end), Safety.Safe, fwd(y.end, 16))
+            Option.Some(117) -> defSafe(b, all, hints, y, litUnsafe(b, y.end), Safety.Unsafe, fwd(y.end, 18))
+            Option.Some(112) -> defSafe(b, all, hints, y, litPartial(b, y.end), Safety.Partial, fwd(y.end, 19))
+            _ -> Option.None
+
+verify defHead
+    defHead(Bytes.fromList([]), UsAt(us = [], end = offAt(0)), Hints.Abbrev, Option.None) => Option.None
+
+fn defSafe(b: Bytes, all: UsAt, hints: Hints, hd: HB, found: Bool, sa: Safety, p: Off) -> Option<LineAt>
+    ? "The type and value after the safety, when its text was found."
+    match found
+        false -> Option.None
+        true -> defEnd(all, hints, hd, sa, tvAt(b, p))
+
+verify defSafe
+    defSafe(Bytes.fromList([]), UsAt(us = [], end = offAt(0)), Hints.Abbrev, HB(params = [], name = smallAt(0), end = offAt(0)), false, Safety.Safe, offAt(0)) => Option.None
+
+fn defEnd(all: UsAt, hints: Hints, hd: HB, sa: Safety, tv: Option<TV>) -> Option<LineAt>
+    ? "The definition, once its type and value end the line."
+    match tv
+        Option.None -> Option.None
+        Option.Some(y) -> Option.Some(lineOf(Line.Defn(Export.Reader.DeclIds(name = hd.name.value, params = hd.params, ty = y.ty.value, value = y.value.value, all = all.us), hints, sa), y.next))
+
+verify defEnd
+    defEnd(UsAt(us = [], end = offAt(0)), Hints.Abbrev, HB(params = [], name = smallAt(0), end = offAt(0)), Safety.Safe, Option.None) => Option.None
+
+fn letAfter(b: Bytes, i: Num) -> Option<LineAt>
+    ? "A let after the line's index: ,\"letE\":{{\"body\":B,\"name\":N,\"nondep\":F,\"type\":T,\"value\":V}}}} and its newline (DeclsFromBytes)."
+    match litLet(b, i.end)
+        true -> letBody(b, i, canon(b, fwd(i.end, 16)))
+        false -> Option.None
+
+verify letAfter
+    letAfter(Bytes.fromList([]), none()) => Option.None
+
+fn letBody(b: Bytes, i: Num, bd: Num) -> Option<LineAt>
+    ? "The let's name after its body."
+    match litName(b, bd.end)
+        true -> letName(b, i, bd, canon(b, fwd(bd.end, 8)))
+        false -> Option.None
+
+verify letBody
+    letBody(Bytes.fromList([]), none(), none()) => Option.None
+
+fn letName(b: Bytes, i: Num, bd: Num, n: Num) -> Option<LineAt>
+    ? "The let's nondep flag, which is not kept, and the type's key after it; the flag's first letter picks the text to look for."
+    match Bytes.get(b, n.end.value + 10)
+        Option.Some(102) -> letType(b, i, bd, n, litFalse(b, n.end), fwd(n.end, 23))
+        Option.Some(116) -> letType(b, i, bd, n, litTrue(b, n.end), fwd(n.end, 22))
+        _ -> Option.None
+
+verify letName
+    letName(Bytes.fromList([]), none(), none(), none()) => Option.None
+
+fn letType(b: Bytes, i: Num, bd: Num, n: Num, found: Bool, p: Off) -> Option<LineAt>
+    ? "The let's type and value at p, when the flag and the type's key were found."
+    match found
+        false -> Option.None
+        true -> letValue(b, i, bd, n, canon(b, p))
+
+verify letType
+    letType(Bytes.fromList([]), none(), none(), none(), false, offAt(0)) => Option.None
+
+fn letValue(b: Bytes, i: Num, bd: Num, n: Num, t: Num) -> Option<LineAt>
+    ? "The let's value after its type."
+    match litValue(b, t.end)
+        true -> letEnd(b, i, bd, n, t, canon(b, fwd(t.end, 9)))
+        false -> Option.None
+
+verify letValue
+    letValue(Bytes.fromList([]), none(), none(), none(), none()) => Option.None
+
+fn letEnd(b: Bytes, i: Num, bd: Num, n: Num, t: Num, v: Num) -> Option<LineAt>
+    ? "The two closing braces and the newline."
+    match Bool.and(byteIs(b, v.end.value, 125), closedNl(b, fwd(v.end, 1)))
+        true -> Option.Some(lineOf(Line.LetE(i.value.value, n.value.value, t.value.value, v.value.value, bd.value.value), fwd(v.end, 3)))
+        false -> Option.None
+
+verify letEnd
+    letEnd(Bytes.fromList([]), none(), none(), none(), none(), none()) => Option.None
+
+fn litThm(b: Bytes, p: Off) -> Bool
+    ? "Whether the 15 bytes of {{\"thm\":{{\"all\":[ stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 16363401948439163)), litRun(b, p, smallAt(7), Lit(value = 16363397719335547))), litRun(b, p, smallAt(14), Lit(value = 91)))
+
+verify litThm
+    litThm(Bytes.fromList([123, 34, 116, 104, 109, 34, 58, 123, 34, 97, 108, 108, 34, 58, 91]), offAt(0)) => true
+    litThm(Bytes.fromList([123, 34, 116, 104, 109, 34, 58, 123, 34, 97, 108, 108, 34, 58]), offAt(0)) => false
+
+fn litDef(b: Bytes, p: Off) -> Bool
+    ? "Whether the 15 bytes of {{\"def\":{{\"all\":[ stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 16363371832287867)), litRun(b, p, smallAt(7), Lit(value = 16363397719335547))), litRun(b, p, smallAt(14), Lit(value = 91)))
+
+verify litDef
+    litDef(Bytes.fromList([123, 34, 100, 101, 102, 34, 58, 123, 34, 97, 108, 108, 34, 58, 91]), offAt(0)) => true
+    litDef(Bytes.fromList([123, 34, 100, 101, 102, 34, 58, 123, 34, 97, 108, 108, 34, 58]), offAt(0)) => false
+
+fn litParams(b: Bytes, p: Off) -> Bool
+    ? "Whether the 16 bytes of ,\"levelParams\":[ stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 30510856666882604)), litRun(b, p, smallAt(7), Lit(value = 9697062831677776))), litRun(b, p, smallAt(14), Lit(value = 23354)))
+
+verify litParams
+    litParams(Bytes.fromList([44, 34, 108, 101, 118, 101, 108, 80, 97, 114, 97, 109, 115, 34, 58, 91]), offAt(0)) => true
+    litParams(Bytes.fromList([44, 34, 108, 101, 118, 101, 108, 80, 97, 114, 97, 109, 115, 34, 58]), offAt(0)) => false
+
+fn litValue(b: Bytes, p: Off) -> Bool
+    ? "Whether the 9 bytes of ,\"value\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(litRun(b, p, smallAt(0), Lit(value = 28558080999825964)), litRun(b, p, smallAt(7), Lit(value = 14882)))
+
+verify litValue
+    litValue(Bytes.fromList([44, 34, 118, 97, 108, 117, 101, 34, 58]), offAt(0)) => true
+    litValue(Bytes.fromList([44, 34, 118, 97, 108, 117, 101, 34]), offAt(0)) => false
+
+fn litHints(b: Bytes, p: Off) -> Bool
+    ? "Whether the 9 bytes of ,\"hints\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(litRun(b, p, smallAt(0), Lit(value = 32497639885382188)), litRun(b, p, smallAt(7), Lit(value = 14882)))
+
+verify litHints
+    litHints(Bytes.fromList([44, 34, 104, 105, 110, 116, 115, 34, 58]), offAt(0)) => true
+    litHints(Bytes.fromList([44, 34, 104, 105, 110, 116, 115, 34]), offAt(0)) => false
+
+fn litRegular(b: Bytes, p: Off) -> Bool
+    ? "Whether the 11 bytes of {{\"regular\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(litRun(b, p, smallAt(0), Lit(value = 30528384428810875)), litRun(b, p, smallAt(7), Lit(value = 975336033)))
+
+verify litRegular
+    litRegular(Bytes.fromList([123, 34, 114, 101, 103, 117, 108, 97, 114, 34, 58]), offAt(0)) => true
+    litRegular(Bytes.fromList([123, 34, 114, 101, 103, 117, 108, 97, 114, 34]), offAt(0)) => false
+
+fn litAbbrev(b: Bytes, p: Off) -> Bool
+    ? "Whether the 8 bytes of \"abbrev\" stand at p, compared by litRun (LiteralWords)."
+    Bool.and(litRun(b, p, smallAt(0), Lit(value = 33325589203149090)), litRun(b, p, smallAt(7), Lit(value = 34)))
+
+verify litAbbrev
+    litAbbrev(Bytes.fromList([34, 97, 98, 98, 114, 101, 118, 34]), offAt(0)) => true
+    litAbbrev(Bytes.fromList([34, 97, 98, 98, 114, 101, 118]), offAt(0)) => false
+
+fn litOpaque(b: Bytes, p: Off) -> Bool
+    ? "Whether the 8 bytes of \"opaque\" stand at p, compared by litRun (LiteralWords)."
+    Bool.and(litRun(b, p, smallAt(0), Lit(value = 28558102474288930)), litRun(b, p, smallAt(7), Lit(value = 34)))
+
+verify litOpaque
+    litOpaque(Bytes.fromList([34, 111, 112, 97, 113, 117, 101, 34]), offAt(0)) => true
+    litOpaque(Bytes.fromList([34, 111, 112, 97, 113, 117, 101]), offAt(0)) => false
+
+fn litSafe(b: Bytes, p: Off) -> Bool
+    ? "Whether the 16 bytes of ,\"safety\":\"safe\" stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 32762587694441004)), litRun(b, p, smallAt(7), Lit(value = 28817594747855481))), litRun(b, p, smallAt(14), Lit(value = 8805)))
+
+verify litSafe
+    litSafe(Bytes.fromList([44, 34, 115, 97, 102, 101, 116, 121, 34, 58, 34, 115, 97, 102, 101, 34]), offAt(0)) => true
+    litSafe(Bytes.fromList([44, 34, 115, 97, 102, 101, 116, 121, 34, 58, 34, 115, 97, 102, 101]), offAt(0)) => false
+
+fn litUnsafe(b: Bytes, p: Off) -> Bool
+    ? "Whether the 18 bytes of ,\"safety\":\"unsafe\" stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 32762587694441004)), litRun(b, p, smallAt(7), Lit(value = 32491071686189689))), litRun(b, p, smallAt(14), Lit(value = 577070689)))
+
+verify litUnsafe
+    litUnsafe(Bytes.fromList([44, 34, 115, 97, 102, 101, 116, 121, 34, 58, 34, 117, 110, 115, 97, 102, 101, 34]), offAt(0)) => true
+    litUnsafe(Bytes.fromList([44, 34, 115, 97, 102, 101, 116, 121, 34, 58, 34, 117, 110, 115, 97, 102, 101]), offAt(0)) => false
+
+fn litPartial(b: Bytes, p: Off) -> Bool
+    ? "Whether the 19 bytes of ,\"safety\":\"partial\" stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 32762587694441004)), litRun(b, p, smallAt(7), Lit(value = 32195281583481465))), litRun(b, p, smallAt(14), Lit(value = 147847211380)))
+
+verify litPartial
+    litPartial(Bytes.fromList([44, 34, 115, 97, 102, 101, 116, 121, 34, 58, 34, 112, 97, 114, 116, 105, 97, 108, 34]), offAt(0)) => true
+    litPartial(Bytes.fromList([44, 34, 115, 97, 102, 101, 116, 121, 34, 58, 34, 112, 97, 114, 116, 105, 97, 108]), offAt(0)) => false
+
+fn litLet(b: Bytes, p: Off) -> Bool
+    ? "Whether the 16 bytes of ,\"letE\":{{\"body\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 9646515428270636)), litRun(b, p, smallAt(7), Lit(value = 34168901732563770))), litRun(b, p, smallAt(14), Lit(value = 14882)))
+
+verify litLet
+    litLet(Bytes.fromList([44, 34, 108, 101, 116, 69, 34, 58, 123, 34, 98, 111, 100, 121, 34, 58]), offAt(0)) => true
+    litLet(Bytes.fromList([44, 34, 108, 101, 116, 69, 34, 58, 123, 34, 98, 111, 100, 121, 34]), offAt(0)) => false
+
+fn litFalse(b: Bytes, p: Off) -> Bool
+    ? "Whether the 23 bytes of ,\"nondep\":false,\"type\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 28539398126445100)), litRun(b, p, smallAt(7), Lit(value = 32488787904438896))), litRun(b, p, smallAt(14), Lit(value = 28552639589526629))), litRun(b, p, smallAt(21), Lit(value = 14882)))
+
+verify litFalse
+    litFalse(Bytes.fromList([44, 34, 110, 111, 110, 100, 101, 112, 34, 58, 102, 97, 108, 115, 101, 44, 34, 116, 121, 112, 101, 34, 58]), offAt(0)) => true
+    litFalse(Bytes.fromList([44, 34, 110, 111, 110, 100, 101, 112, 34, 58, 102, 97, 108, 115, 101, 44, 34, 116, 121, 112, 101, 34]), offAt(0)) => false
+
+fn litTrue(b: Bytes, p: Off) -> Bool
+    ? "Whether the 22 bytes of ,\"nondep\":true,\"type\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 28539398126445100)), litRun(b, p, smallAt(7), Lit(value = 28558107084464752))), litRun(b, p, smallAt(14), Lit(value = 9681682956558892))), litRun(b, p, smallAt(21), Lit(value = 58)))
+
+verify litTrue
+    litTrue(Bytes.fromList([44, 34, 110, 111, 110, 100, 101, 112, 34, 58, 116, 114, 117, 101, 44, 34, 116, 121, 112, 101, 34, 58]), offAt(0)) => true
+    litTrue(Bytes.fromList([44, 34, 110, 111, 110, 100, 101, 112, 34, 58, 116, 114, 117, 101, 44, 34, 116, 121, 112, 101, 34]), offAt(0)) => false
+
+
+fn byteOf(b: Bytes, i: Int) -> Int
+    ? "The byte at i, read where it lies; -1, which no byte is, when there is none."
+    match Bytes.get(b, i)
+        Option.Some(x) -> x
+        Option.None -> -1
+
+verify byteOf
+    byteOf(Bytes.fromList([7, 8]), 1) => 8
+    byteOf(Bytes.fromList([7]), -1) => -1
+    byteOf(Bytes.fromList([7]), 1) => -1
+
+decision LiteralWords
+    date = "2026-11-12"
+    reason =
+        "The fixed text of a line was compared one byte at a time, each"
+        "comparison a read of its own written out in a chain: the generated"
+        "code took the chunk's place and length afresh for every byte, and"
+        "past a few bytes called the read instead of inlining it, about 20"
+        "instructions a byte of the 30 fixed bytes of an application line."
+        "Up to 7 bytes of the text are now one word, lowest byte first, and"
+        "litRun compares the bytes with it in one loop, which reads the"
+        "chunk's place once. The bytes compared and the answer are the same."
+    chosen = "LiteralWords"
+    rejected = ["ByteChains", "OrOfDifferences"]
+    impacts = [litRun]
+
+record Lit
+    value: Int
+
+fn litOf(n: Int) -> Result<Lit, Bool>
+    ? "Up to 7 bytes of fixed text in one word, the first the lowest (LiteralWords)."
+    match Bool.and(n >= 0, n <= 72057594037927935)
+        true -> Result.Ok(Lit(value = n))
+        false -> Result.Err(false)
+
+verify litOf
+    litOf(-1) => Result.Err(false)
+
+fn litRest(w: Lit) -> Lit
+    ? "The text after w's first byte."
+    match litOf(Bits.shiftRight(w.value, 8))
+        Result.Ok(v) -> v
+        Result.Err(_) -> Lit(value = 0)
+
+verify litRest
+    litRest(Lit(value = 513)).value => 2
+
+fn litRun(b: Bytes, p: Off, k: Small, w: Lit) -> Bool
+    ? "Whether the bytes from k past p are those of w, its lowest byte first, up to its highest byte that is not 0 (LiteralWords). The first byte read is at p itself, so a p that is none gives false."
+    match w.value == 0
+        true -> true
+        false -> match byteOf(b, p.value + k.value) == Bits.and(w.value, 255)
+            true -> litRun(b, p, smallAt(k.value + 1), litRest(w))
+            false -> false
+
+verify litRun
+    litRun(Bytes.fromList([1, 2, 3]), offAt(0), smallAt(0), Lit(value = 513)) => true
+    litRun(Bytes.fromList([1, 2, 3]), offAt(1), smallAt(0), Lit(value = 770)) => true
+    litRun(Bytes.fromList([1, 2, 3]), offAt(1), smallAt(0), Lit(value = 513)) => false
+    litRun(Bytes.fromList([1, 2]), offAt(1), smallAt(0), Lit(value = 770)) => false
+    litRun(Bytes.fromList([1]), offAt(-1), smallAt(0), Lit(value = 1)) => false
+    litRun(Bytes.fromList([1, 2, 3]), offAt(0), smallAt(1), Lit(value = 770)) => true
 
 fn litApp(b: Bytes, p: Off) -> Bool
-    ? "Whether the 14 bytes of {{\"app\":{{\"arg\": stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 123), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 97))), Bool.and(Bool.and(byteAt(b, p, 3, 112), byteAt(b, p, 4, 112)), Bool.and(byteAt(b, p, 5, 34), byteAt(b, p, 6, 58)))), Bool.and(Bool.and(byteAt(b, p, 7, 123), Bool.and(byteAt(b, p, 8, 34), byteAt(b, p, 9, 97))), Bool.and(Bool.and(byteAt(b, p, 10, 114), byteAt(b, p, 11, 103)), Bool.and(byteAt(b, p, 12, 34), byteAt(b, p, 13, 58)))))
+    ? "Whether the 14 bytes of {{\"app\":{{\"arg\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(litRun(b, p, smallAt(0), Lit(value = 16363414966313595)), litRun(b, p, smallAt(7), Lit(value = 16363376345162363)))
 
 verify litApp
     litApp(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58]), offAt(0)) => true
     litApp(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34]), offAt(0)) => false
 
 fn litFn(b: Bytes, p: Off) -> Bool
-    ? "Whether the 6 bytes of ,\"fn\": stand at p, each read where it lies."
-    Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 102))), Bool.and(byteAt(b, p, 3, 110), Bool.and(byteAt(b, p, 4, 34), byteAt(b, p, 5, 58))))
+    ? "Whether the 6 bytes of ,\"fn\": stand at p, compared by litRun (LiteralWords)."
+    litRun(b, p, smallAt(0), Lit(value = 63919555486252))
 
 verify litFn
     litFn(Bytes.fromList([44, 34, 102, 110, 34, 58]), offAt(0)) => true
     litFn(Bytes.fromList([44, 34, 102, 110, 34]), offAt(0)) => false
 
 fn litIeClose(b: Bytes, p: Off) -> Bool
-    ? "Whether the 7 bytes of }},\"ie\": stand at p, each read where it lies."
-    Bool.and(Bool.and(byteAt(b, p, 0, 125), Bool.and(byteAt(b, p, 1, 44), byteAt(b, p, 2, 34))), Bool.and(Bool.and(byteAt(b, p, 3, 105), byteAt(b, p, 4, 101)), Bool.and(byteAt(b, p, 5, 34), byteAt(b, p, 6, 58))))
+    ? "Whether the 7 bytes of }},\"ie\": stand at p, compared by litRun (LiteralWords)."
+    litRun(b, p, smallAt(0), Lit(value = 16363367600106621))
 
 verify litIeClose
     litIeClose(Bytes.fromList([125, 44, 34, 105, 101, 34, 58]), offAt(0)) => true
     litIeClose(Bytes.fromList([125, 44, 34, 105, 101, 34]), offAt(0)) => false
 
 fn litIe(b: Bytes, p: Off) -> Bool
-    ? "Whether the 6 bytes of {{\"ie\": stand at p, each read where it lies."
-    Bool.and(Bool.and(byteAt(b, p, 0, 123), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 105))), Bool.and(byteAt(b, p, 3, 101), Bool.and(byteAt(b, p, 4, 34), byteAt(b, p, 5, 58))))
+    ? "Whether the 6 bytes of {{\"ie\": stand at p, compared by litRun (LiteralWords)."
+    litRun(b, p, smallAt(0), Lit(value = 63919404687995))
 
 verify litIe
     litIe(Bytes.fromList([123, 34, 105, 101, 34, 58]), offAt(0)) => true
     litIe(Bytes.fromList([123, 34, 105, 101, 34]), offAt(0)) => false
 
 fn litLam(b: Bytes, p: Off) -> Bool
-    ? "Whether the 22 bytes of ,\"lam\":{{\"binderInfo\":\" stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), byteAt(b, p, 1, 34)), Bool.and(byteAt(b, p, 2, 108), Bool.and(byteAt(b, p, 3, 97), byteAt(b, p, 4, 109)))), Bool.and(Bool.and(byteAt(b, p, 5, 34), Bool.and(byteAt(b, p, 6, 58), byteAt(b, p, 7, 123))), Bool.and(byteAt(b, p, 8, 34), Bool.and(byteAt(b, p, 9, 98), byteAt(b, p, 10, 105))))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 11, 110), byteAt(b, p, 12, 100)), Bool.and(byteAt(b, p, 13, 101), Bool.and(byteAt(b, p, 14, 114), byteAt(b, p, 15, 73)))), Bool.and(Bool.and(byteAt(b, p, 16, 110), Bool.and(byteAt(b, p, 17, 102), byteAt(b, p, 18, 111))), Bool.and(byteAt(b, p, 19, 34), Bool.and(byteAt(b, p, 20, 58), byteAt(b, p, 21, 34))))))
+    ? "Whether the 22 bytes of ,\"lam\":{{\"binderInfo\":\" stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 16363401830474284)), litRun(b, p, smallAt(7), Lit(value = 28539398024995451))), litRun(b, p, smallAt(14), Lit(value = 16363410504436082))), litRun(b, p, smallAt(21), Lit(value = 34)))
 
 verify litLam
     litLam(Bytes.fromList([44, 34, 108, 97, 109, 34, 58, 123, 34, 98, 105, 110, 100, 101, 114, 73, 110, 102, 111, 34, 58, 34]), offAt(0)) => true
     litLam(Bytes.fromList([44, 34, 108, 97, 109, 34, 58, 123, 34, 98, 105, 110, 100, 101, 114, 73, 110, 102, 111, 34, 58]), offAt(0)) => false
 
 fn litPi(b: Bytes, p: Off) -> Bool
-    ? "Whether the 26 bytes of {{\"forallE\":{{\"binderInfo\":\" stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 123), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 102))), Bool.and(byteAt(b, p, 3, 111), Bool.and(byteAt(b, p, 4, 114), byteAt(b, p, 5, 97)))), Bool.and(Bool.and(byteAt(b, p, 6, 108), Bool.and(byteAt(b, p, 7, 108), byteAt(b, p, 8, 69))), Bool.and(Bool.and(byteAt(b, p, 9, 34), byteAt(b, p, 10, 58)), Bool.and(byteAt(b, p, 11, 123), byteAt(b, p, 12, 34))))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 13, 98), Bool.and(byteAt(b, p, 14, 105), byteAt(b, p, 15, 110))), Bool.and(byteAt(b, p, 16, 100), Bool.and(byteAt(b, p, 17, 101), byteAt(b, p, 18, 114)))), Bool.and(Bool.and(byteAt(b, p, 19, 73), Bool.and(byteAt(b, p, 20, 110), byteAt(b, p, 21, 102))), Bool.and(Bool.and(byteAt(b, p, 22, 111), byteAt(b, p, 23, 34)), Bool.and(byteAt(b, p, 24, 58), byteAt(b, p, 25, 34))))))
+    ? "Whether the 26 bytes of {{\"forallE\":{{\"binderInfo\":\" stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 30506441607881339)), litRun(b, p, smallAt(7), Lit(value = 27622460369290604))), litRun(b, p, smallAt(14), Lit(value = 31043003114352233))), litRun(b, p, smallAt(21), Lit(value = 147004223334)))
 
 verify litPi
     litPi(Bytes.fromList([123, 34, 102, 111, 114, 97, 108, 108, 69, 34, 58, 123, 34, 98, 105, 110, 100, 101, 114, 73, 110, 102, 111, 34, 58, 34]), offAt(0)) => true
     litPi(Bytes.fromList([123, 34, 102, 111, 114, 97, 108, 108, 69, 34, 58, 123, 34, 98, 105, 110, 100, 101, 114, 73, 110, 102, 111, 34, 58]), offAt(0)) => false
 
 fn litDefault(b: Bytes, p: Off) -> Bool
-    ? "Whether the 16 bytes of default\",\"body\": stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 100), byteAt(b, p, 1, 101)), Bool.and(byteAt(b, p, 2, 102), byteAt(b, p, 3, 97))), Bool.and(Bool.and(byteAt(b, p, 4, 117), byteAt(b, p, 5, 108)), Bool.and(byteAt(b, p, 6, 116), byteAt(b, p, 7, 34)))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 8, 44), byteAt(b, p, 9, 34)), Bool.and(byteAt(b, p, 10, 98), byteAt(b, p, 11, 111))), Bool.and(Bool.and(byteAt(b, p, 12, 100), byteAt(b, p, 13, 121)), Bool.and(byteAt(b, p, 14, 34), byteAt(b, p, 15, 58)))))
+    ? "Whether the 16 bytes of default\",\"body\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 32770348699510116)), litRun(b, p, smallAt(7), Lit(value = 34168901732543522))), litRun(b, p, smallAt(14), Lit(value = 14882)))
 
 verify litDefault
     litDefault(Bytes.fromList([100, 101, 102, 97, 117, 108, 116, 34, 44, 34, 98, 111, 100, 121, 34, 58]), offAt(0)) => true
     litDefault(Bytes.fromList([100, 101, 102, 97, 117, 108, 116, 34, 44, 34, 98, 111, 100, 121, 34]), offAt(0)) => false
 
 fn litImplicit(b: Bytes, p: Off) -> Bool
-    ? "Whether the 17 bytes of implicit\",\"body\": stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 105), byteAt(b, p, 1, 109)), Bool.and(byteAt(b, p, 2, 112), byteAt(b, p, 3, 108))), Bool.and(Bool.and(byteAt(b, p, 4, 105), byteAt(b, p, 5, 99)), Bool.and(byteAt(b, p, 6, 105), byteAt(b, p, 7, 116)))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 8, 34), byteAt(b, p, 9, 44)), Bool.and(byteAt(b, p, 10, 34), byteAt(b, p, 11, 98))), Bool.and(Bool.and(byteAt(b, p, 12, 111), byteAt(b, p, 13, 100)), Bool.and(byteAt(b, p, 14, 121), Bool.and(byteAt(b, p, 15, 34), byteAt(b, p, 16, 58))))))
+    ? "Whether the 17 bytes of implicit\",\"body\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 29664176996642153)), litRun(b, p, smallAt(7), Lit(value = 28269964941861492))), litRun(b, p, smallAt(14), Lit(value = 3809913)))
 
 verify litImplicit
     litImplicit(Bytes.fromList([105, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34, 58]), offAt(0)) => true
     litImplicit(Bytes.fromList([105, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34]), offAt(0)) => false
 
 fn litStrict(b: Bytes, p: Off) -> Bool
-    ? "Whether the 23 bytes of strictImplicit\",\"body\": stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 115), byteAt(b, p, 1, 116)), Bool.and(byteAt(b, p, 2, 114), Bool.and(byteAt(b, p, 3, 105), byteAt(b, p, 4, 99)))), Bool.and(Bool.and(byteAt(b, p, 5, 116), Bool.and(byteAt(b, p, 6, 73), byteAt(b, p, 7, 109))), Bool.and(byteAt(b, p, 8, 112), Bool.and(byteAt(b, p, 9, 108), byteAt(b, p, 10, 105))))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 11, 99), Bool.and(byteAt(b, p, 12, 105), byteAt(b, p, 13, 116))), Bool.and(byteAt(b, p, 14, 34), Bool.and(byteAt(b, p, 15, 44), byteAt(b, p, 16, 34)))), Bool.and(Bool.and(byteAt(b, p, 17, 98), Bool.and(byteAt(b, p, 18, 111), byteAt(b, p, 19, 100))), Bool.and(byteAt(b, p, 20, 121), Bool.and(byteAt(b, p, 21, 34), byteAt(b, p, 22, 58))))))
+    ? "Whether the 23 bytes of strictImplicit\",\"body\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 20675643619570803)), litRun(b, p, smallAt(7), Lit(value = 32766972989829229))), litRun(b, p, smallAt(14), Lit(value = 34168901732543522))), litRun(b, p, smallAt(21), Lit(value = 14882)))
 
 verify litStrict
     litStrict(Bytes.fromList([115, 116, 114, 105, 99, 116, 73, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34, 58]), offAt(0)) => true
     litStrict(Bytes.fromList([115, 116, 114, 105, 99, 116, 73, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34]), offAt(0)) => false
 
 fn litInst(b: Bytes, p: Off) -> Bool
-    ? "Whether the 21 bytes of instImplicit\",\"body\": stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 105), byteAt(b, p, 1, 110)), Bool.and(byteAt(b, p, 2, 115), Bool.and(byteAt(b, p, 3, 116), byteAt(b, p, 4, 73)))), Bool.and(Bool.and(byteAt(b, p, 5, 109), byteAt(b, p, 6, 112)), Bool.and(byteAt(b, p, 7, 108), Bool.and(byteAt(b, p, 8, 105), byteAt(b, p, 9, 99))))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 10, 105), byteAt(b, p, 11, 116)), Bool.and(byteAt(b, p, 12, 34), Bool.and(byteAt(b, p, 13, 44), byteAt(b, p, 14, 34)))), Bool.and(Bool.and(byteAt(b, p, 15, 98), Bool.and(byteAt(b, p, 16, 111), byteAt(b, p, 17, 100))), Bool.and(byteAt(b, p, 18, 121), Bool.and(byteAt(b, p, 19, 34), byteAt(b, p, 20, 58))))))
+    ? "Whether the 21 bytes of instImplicit\",\"body\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 31645359645355625)), litRun(b, p, smallAt(7), Lit(value = 12422782354942316))), litRun(b, p, smallAt(14), Lit(value = 16363453420626466)))
 
 verify litInst
     litInst(Bytes.fromList([105, 110, 115, 116, 73, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34, 58]), offAt(0)) => true
     litInst(Bytes.fromList([105, 110, 115, 116, 73, 109, 112, 108, 105, 99, 105, 116, 34, 44, 34, 98, 111, 100, 121, 34]), offAt(0)) => false
 
 fn litName(b: Bytes, p: Off) -> Bool
-    ? "Whether the 8 bytes of ,\"name\": stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), byteAt(b, p, 1, 34)), Bool.and(byteAt(b, p, 2, 110), byteAt(b, p, 3, 97))), Bool.and(Bool.and(byteAt(b, p, 4, 109), byteAt(b, p, 5, 101)), Bool.and(byteAt(b, p, 6, 34), byteAt(b, p, 7, 58))))
+    ? "Whether the 8 bytes of ,\"name\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(litRun(b, p, smallAt(0), Lit(value = 9681669668610604)), litRun(b, p, smallAt(7), Lit(value = 58)))
 
 verify litName
     litName(Bytes.fromList([44, 34, 110, 97, 109, 101, 34, 58]), offAt(0)) => true
     litName(Bytes.fromList([44, 34, 110, 97, 109, 101, 34]), offAt(0)) => false
 
 fn litType(b: Bytes, p: Off) -> Bool
-    ? "Whether the 8 bytes of ,\"type\": stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), byteAt(b, p, 1, 34)), Bool.and(byteAt(b, p, 2, 116), byteAt(b, p, 3, 121))), Bool.and(Bool.and(byteAt(b, p, 4, 112), byteAt(b, p, 5, 101)), Bool.and(byteAt(b, p, 6, 34), byteAt(b, p, 7, 58))))
+    ? "Whether the 8 bytes of ,\"type\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(litRun(b, p, smallAt(0), Lit(value = 9681682956558892)), litRun(b, p, smallAt(7), Lit(value = 58)))
 
 verify litType
     litType(Bytes.fromList([44, 34, 116, 121, 112, 101, 34, 58]), offAt(0)) => true
     litType(Bytes.fromList([44, 34, 116, 121, 112, 101, 34]), offAt(0)) => false
 
 fn litIeComma(b: Bytes, p: Off) -> Bool
-    ? "Whether the 6 bytes of ,\"ie\": stand at p, each read where it lies."
-    Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 105))), Bool.and(byteAt(b, p, 3, 101), Bool.and(byteAt(b, p, 4, 34), byteAt(b, p, 5, 58))))
+    ? "Whether the 6 bytes of ,\"ie\": stand at p, compared by litRun (LiteralWords)."
+    litRun(b, p, smallAt(0), Lit(value = 63919404687916))
 
 verify litIeComma
     litIeComma(Bytes.fromList([44, 34, 105, 101, 34, 58]), offAt(0)) => true
     litIeComma(Bytes.fromList([44, 34, 105, 101, 34]), offAt(0)) => false
 
 fn litIn(b: Bytes, p: Off) -> Bool
-    ? "Whether the 6 bytes of {{\"in\": stand at p, each read where it lies."
-    Bool.and(Bool.and(byteAt(b, p, 0, 123), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 105))), Bool.and(byteAt(b, p, 3, 110), Bool.and(byteAt(b, p, 4, 34), byteAt(b, p, 5, 58))))
+    ? "Whether the 6 bytes of {{\"in\": stand at p, compared by litRun (LiteralWords)."
+    litRun(b, p, smallAt(0), Lit(value = 63919555682939))
 
 verify litIn
     litIn(Bytes.fromList([123, 34, 105, 110, 34, 58]), offAt(0)) => true
     litIn(Bytes.fromList([123, 34, 105, 110, 34]), offAt(0)) => false
 
 fn litStr(b: Bytes, p: Off) -> Bool
-    ? "Whether the 14 bytes of ,\"str\":{{\"pre\": stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 115))), Bool.and(Bool.and(byteAt(b, p, 3, 116), byteAt(b, p, 4, 114)), Bool.and(byteAt(b, p, 5, 34), byteAt(b, p, 6, 58)))), Bool.and(Bool.and(byteAt(b, p, 7, 123), Bool.and(byteAt(b, p, 8, 34), byteAt(b, p, 9, 112))), Bool.and(Bool.and(byteAt(b, p, 10, 114), byteAt(b, p, 11, 101)), Bool.and(byteAt(b, p, 12, 34), byteAt(b, p, 13, 58)))))
+    ? "Whether the 14 bytes of ,\"str\":{{\"pre\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(litRun(b, p, smallAt(0), Lit(value = 16363423624536620)), litRun(b, p, smallAt(7), Lit(value = 16363367756210811)))
 
 verify litStr
     litStr(Bytes.fromList([44, 34, 115, 116, 114, 34, 58, 123, 34, 112, 114, 101, 34, 58]), offAt(0)) => true
     litStr(Bytes.fromList([44, 34, 115, 116, 114, 34, 58, 123, 34, 112, 114, 101, 34]), offAt(0)) => false
 
 fn litStrText(b: Bytes, p: Off) -> Bool
-    ? "Whether the 8 bytes of ,\"str\":\" stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), byteAt(b, p, 1, 34)), Bool.and(byteAt(b, p, 2, 115), byteAt(b, p, 3, 116))), Bool.and(Bool.and(byteAt(b, p, 4, 114), byteAt(b, p, 5, 34)), Bool.and(byteAt(b, p, 6, 58), byteAt(b, p, 7, 34))))
+    ? "Whether the 8 bytes of ,\"str\":\" stand at p, compared by litRun (LiteralWords)."
+    Bool.and(litRun(b, p, smallAt(0), Lit(value = 16363423624536620)), litRun(b, p, smallAt(7), Lit(value = 34)))
 
 verify litStrText
     litStrText(Bytes.fromList([44, 34, 115, 116, 114, 34, 58, 34]), offAt(0)) => true
     litStrText(Bytes.fromList([44, 34, 115, 116, 114, 34, 58]), offAt(0)) => false
 
 fn litNum(b: Bytes, p: Off) -> Bool
-    ? "Whether the 12 bytes of ,\"num\":{{\"i\": stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 110))), Bool.and(byteAt(b, p, 3, 117), Bool.and(byteAt(b, p, 4, 109), byteAt(b, p, 5, 34)))), Bool.and(Bool.and(byteAt(b, p, 6, 58), Bool.and(byteAt(b, p, 7, 123), byteAt(b, p, 8, 34))), Bool.and(byteAt(b, p, 9, 105), Bool.and(byteAt(b, p, 10, 34), byteAt(b, p, 11, 58)))))
+    ? "Whether the 12 bytes of ,\"num\":{{\"i\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(litRun(b, p, smallAt(0), Lit(value = 16363402166149676)), litRun(b, p, smallAt(7), Lit(value = 249685418619)))
 
 verify litNum
     litNum(Bytes.fromList([44, 34, 110, 117, 109, 34, 58, 123, 34, 105, 34, 58]), offAt(0)) => true
     litNum(Bytes.fromList([44, 34, 110, 117, 109, 34, 58, 123, 34, 105, 34]), offAt(0)) => false
 
 fn litPre(b: Bytes, p: Off) -> Bool
-    ? "Whether the 7 bytes of ,\"pre\": stand at p, each read where it lies."
-    Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 112))), Bool.and(Bool.and(byteAt(b, p, 3, 114), byteAt(b, p, 4, 101)), Bool.and(byteAt(b, p, 5, 34), byteAt(b, p, 6, 58))))
+    ? "Whether the 7 bytes of ,\"pre\": stand at p, compared by litRun (LiteralWords)."
+    litRun(b, p, smallAt(0), Lit(value = 16363367756210732))
 
 verify litPre
     litPre(Bytes.fromList([44, 34, 112, 114, 101, 34, 58]), offAt(0)) => true
     litPre(Bytes.fromList([44, 34, 112, 114, 101, 34]), offAt(0)) => false
 
 fn litConst(b: Bytes, p: Off) -> Bool
-    ? "Whether the 17 bytes of {{\"const\":{{\"name\": stand at p, each read where it lies."
-    Bool.and(Bool.and(Bool.and(Bool.and(byteAt(b, p, 0, 123), byteAt(b, p, 1, 34)), Bool.and(byteAt(b, p, 2, 99), byteAt(b, p, 3, 111))), Bool.and(Bool.and(byteAt(b, p, 4, 110), byteAt(b, p, 5, 115)), Bool.and(byteAt(b, p, 6, 116), byteAt(b, p, 7, 34)))), Bool.and(Bool.and(Bool.and(byteAt(b, p, 8, 58), byteAt(b, p, 9, 123)), Bool.and(byteAt(b, p, 10, 34), byteAt(b, p, 11, 110))), Bool.and(Bool.and(byteAt(b, p, 12, 97), byteAt(b, p, 13, 109)), Bool.and(byteAt(b, p, 14, 101), Bool.and(byteAt(b, p, 15, 34), byteAt(b, p, 16, 58))))))
+    ? "Whether the 17 bytes of {{\"const\":{{\"name\": stand at p, compared by litRun (LiteralWords)."
+    Bool.and(Bool.and(litRun(b, p, smallAt(0), Lit(value = 32778015450800763)), litRun(b, p, smallAt(7), Lit(value = 30787898114259490))), litRun(b, p, smallAt(14), Lit(value = 3809893)))
 
 verify litConst
     litConst(Bytes.fromList([123, 34, 99, 111, 110, 115, 116, 34, 58, 123, 34, 110, 97, 109, 101, 34, 58]), offAt(0)) => true
     litConst(Bytes.fromList([123, 34, 99, 111, 110, 115, 116, 34, 58, 123, 34, 110, 97, 109, 101, 34]), offAt(0)) => false
 
 fn litUs(b: Bytes, p: Off) -> Bool
-    ? "Whether the 7 bytes of ,\"us\":[ stand at p, each read where it lies."
-    Bool.and(Bool.and(byteAt(b, p, 0, 44), Bool.and(byteAt(b, p, 1, 34), byteAt(b, p, 2, 117))), Bool.and(Bool.and(byteAt(b, p, 3, 115), byteAt(b, p, 4, 34)), Bool.and(byteAt(b, p, 5, 58), byteAt(b, p, 6, 91))))
+    ? "Whether the 7 bytes of ,\"us\":[ stand at p, compared by litRun (LiteralWords)."
+    litRun(b, p, smallAt(0), Lit(value = 25678142521025068))
 
 verify litUs
     litUs(Bytes.fromList([44, 34, 117, 115, 34, 58, 91]), offAt(0)) => true

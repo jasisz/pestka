@@ -206,7 +206,7 @@ record St
     line: Int
 
 record Run
-    lines: List<Line>
+    lines: List<LineAt>
     err: String
     bad: Bool
 
@@ -336,17 +336,19 @@ fn parsedHalves(b: Bytes, left: List<Int>, right: List<Int>) -> List<Run>
 verify parsedHalves
     parsedHalves(Bytes.fromList([]), [0], [0]) => []
 
-fn parsedRange(b: Bytes, s: Off, end: Int, acc: List<Line>) -> Run
+fn parsedRange(b: Bytes, s: Off, end: Int, acc: List<LineAt>) -> Run
     ? "The lines from s to end, which ends just after a newline or is the end of the file: each read from the bytes when it is in a common form, else as text (LinesFromBytes). A line that is not text stops the range."
     match Export.Lines.offValue(s) >= end
         true -> Run(lines = List.reverse(acc), err = "", bad = false)
         false -> match Export.Lines.lineAt(b, s)
-            Option.Some(la) -> parsedRange(b, la.next, end, List.prepend(la.line, acc))
-            Option.None -> parsedText(b, s, end, acc, textEnd(Export.Lines.newlineFrom(b, s), end))
+            Option.Some(la) -> parsedRange(b, la.next, end, List.prepend(la, acc))
+            Option.None -> match Export.Lines.nameAt(b, s)
+                Option.Some(la) -> parsedRange(b, la.next, end, List.prepend(la, acc))
+                Option.None -> parsedText(b, s, end, acc, textEnd(Export.Lines.newlineFrom(b, s), end))
 
 verify parsedRange
     parsedRange(Bytes.fromList([]), Export.Lines.offAt(0), 0, []) => Run(lines = [], err = "", bad = false)
-    parsedRange(Bytes.fromList([10]), Export.Lines.offAt(0), 1, []) => Run(lines = [Line.Blank], err = "", bad = false)
+    parsedRange(Bytes.fromList([10]), Export.Lines.offAt(0), 1, []) => Run(lines = [Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0))], err = "", bad = false)
 
 fn textEnd(nl: Off, end: Int) -> Int
     ? "Where a line read as text ends: its newline, or the end of the file for a last line with none."
@@ -358,14 +360,14 @@ verify textEnd
     textEnd(Export.Lines.offAt(-1), 5) => 5
     textEnd(Export.Lines.offAt(3), 5) => 3
 
-fn parsedText(b: Bytes, s: Off, end: Int, acc: List<Line>, t: Int) -> Run
+fn parsedText(b: Bytes, s: Off, end: Int, acc: List<LineAt>, t: Int) -> Run
     ? "A line from s to t read as text."
     match String.fromUtf8(Bytes.take(Bytes.drop(b, Export.Lines.offValue(s)), t - Export.Lines.offValue(s)))
         Result.Err(e) -> Run(lines = List.reverse(acc), err = e, bad = true)
-        Result.Ok(tx) -> parsedRange(b, Export.Lines.offAt(t + 1), end, List.prepend(Export.Reader.parseLine(tx), acc))
+        Result.Ok(tx) -> parsedRange(b, Export.Lines.offAt(t + 1), end, List.prepend(Export.Lines.lineOf(Export.Reader.parseLine(tx), Export.Lines.offAt(0)), acc))
 
 verify parsedText
-    parsedText(Bytes.fromList([10]), Export.Lines.offAt(0), 1, [], 0) => Run(lines = [Line.Blank], err = "", bad = false)
+    parsedText(Bytes.fromList([10]), Export.Lines.offAt(0), 1, [], 0) => Run(lines = [Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0))], err = "", bad = false)
 
 fn applied(src: String, st: St, runs: List<Run>) -> Result<St, String>
     ? "The runs' lines packed in order; a run stopped by a line that is not text reports it after its lines."
@@ -387,20 +389,16 @@ fn appliedRun(src: String, r: Result<St, String>, run: Run, rest: List<Run>) -> 
 verify appliedRun
     appliedRun("f", Result.Err("x"), Run(lines = [], err = "", bad = false), []) => Result.Err("x")
 
-fn appliedLines(q: P, x: X, ls: List<Line>, line: Int) -> Result<St, String>
-    ? "Lines packed and noted in order; line is the number of the first."
+fn appliedLines(q: P, x: X, ls: List<LineAt>, line: Int) -> Result<St, String>
+    ? "Lines packed and noted in order, one function calling itself (RunOfLines); line is the number of the first."
     match ls
         [] -> Result.Ok(St(q = q, x = x, line = line))
-        [l, ..rest] -> appliedLine(q, x, l, rest, line)
+        [l, ..rest] -> match took(q, x, l)
+            Result.Err(e) -> Result.Err("line {line}: {e}")
+            Result.Ok(r) -> appliedLines(r.q, r.x, rest, line + 1)
 
 verify appliedLines
-    appliedLines(started("", "{{}}"), x00(), [Line.Bad("x")], 3) => Result.Err("line 3: x")
-
-fn appliedLine(q: P, x: X, l: Line, rest: List<Line>, line: Int) -> Result<St, String>
-    ? "One line packed and noted."
-    match packed(q, x, l)
-        Result.Err(e) -> Result.Err("line {line}: {e}")
-        Result.Ok(r) -> appliedLines(r.q, r.x, rest, line + 1)
+    appliedLines(started("", "{{}}"), x00(), [Export.Lines.lineOf(Line.Bad("x"), Export.Lines.offAt(0))], 3) => Result.Err("line 3: x")
 
 record QX
     q: P
@@ -522,9 +520,6 @@ fn uSet(c: Vector<U32>, j: Int, v: Int) -> Vector<U32>
 verify uSet
     Vector.len(uSet(Vector.fromList([Export.Split.nat32(0)]), 0, 2)) => 1
 
-verify appliedLine
-    appliedLine(started("", "{{}}"), x00(), Line.Bad("x"), [], 3) => Result.Err("line 3: x")
-
 record One
     q: P
     x: X
@@ -576,21 +571,72 @@ fn bLines(src: String, offset: Int, b: Bytes, eof: Bool, s: Off, p: Option<P>, x
     ? "The line starting at s: read from the bytes when it is in a common form, else cut out and read as text. Past the last newline of a chunk the next chunk is read from where its line starts; at the end of the file what is left is the last line, as for the text reader."
     ! [Disk.readBytesAt]
     match Export.Lines.offValue(s) >= Bytes.len(b)
-        true -> match eof
-            true -> oneFinished(oneLines(p, x, [""], line))
-            false -> bChunked(src, offset + Bytes.len(b), chunkBytes(), p, x, line)
+        true -> bEnd(src, offset, b, eof, p, x, line)
         false -> match p
             Option.None -> bText(src, offset, b, eof, s, Option.None, x, line, Export.Lines.newlineFrom(b, s))
-            Option.Some(q) -> match Export.Lines.lineAt(b, s)
-                Option.Some(la) -> bLine(src, offset, b, eof, la.next, q, x, la.line, line)
-                Option.None -> bText(src, offset, b, eof, s, Option.Some(q), x, line, Export.Lines.newlineFrom(b, s))
+            Option.Some(q) -> bStopped(src, offset, b, eof, bRun(b, Bytes.len(b), s, q, x, line))
 
-fn bLine(src: String, offset: Int, b: Bytes, eof: Bool, next: Off, q: P, x: X, l: Line, line: Int) -> Result<One, String>
-    ? "A line read from the bytes, packed and noted."
+fn bEnd(src: String, offset: Int, b: Bytes, eof: Bool, p: Option<P>, x: X, line: Int) -> Result<One, String>
+    ? "Past the last newline of a chunk: the next chunk read from where its line starts, or at the end of the file what is left is the last line, as for the text reader."
     ! [Disk.readBytesAt]
-    match packed(q, x, l)
-        Result.Err(e) -> Result.Err("line {line}: {e}")
-        Result.Ok(r) -> bLines(src, offset, b, eof, next, Option.Some(r.q), r.x, line + 1)
+    match eof
+        true -> oneFinished(oneLines(p, x, [""], line))
+        false -> bChunked(src, offset + Bytes.len(b), chunkBytes(), p, x, line)
+
+decision RunOfLines
+    date = "2026-11-12"
+    reason =
+        "A line read from the bytes went from bLines to bLine and back, two"
+        "steps of the loop the functions reading a file form, each moving"
+        "all they carry: the file's name, the chunk, the packer and its"
+        "notes; and the chunk's length was taken again at every line. The"
+        "lines read from the bytes are now packed by bRun, one function"
+        "calling itself with the length at hand, which stops only at a line"
+        "it does not read, at the end of the chunk or at an error."
+    chosen = "RunOfLines"
+    rejected = ["StepPerLine"]
+    impacts = [bLines, bRun, bStopped]
+
+type Ran
+    Stopped(P, X, Off, Int)
+    Failed(String)
+
+fn bRun(b: Bytes, n: Int, s: Off, q: P, x: X, line: Int) -> Ran
+    ? "The lines from s read from the bytes and packed, line their number, up to n, the chunk's length, or to the first line read neither by lineAt nor by nameAt (RunOfLines)."
+    match Export.Lines.offValue(s) >= n
+        true -> Ran.Stopped(q, x, s, line)
+        false -> match Export.Lines.lineAt(b, s)
+            Option.Some(la) -> match took(q, x, la)
+                Result.Err(e) -> Ran.Failed("line {line}: {e}")
+                Result.Ok(r) -> bRun(b, n, la.next, r.q, r.x, line + 1)
+            Option.None -> match Export.Lines.nameAt(b, s)
+                Option.Some(la) -> match took(q, x, la)
+                    Result.Err(e) -> Ran.Failed("line {line}: {e}")
+                    Result.Ok(r) -> bRun(b, n, la.next, r.q, r.x, line + 1)
+                Option.None -> Ran.Stopped(q, x, s, line)
+
+verify bRun
+    bRun(Bytes.fromList([]), 0, Export.Lines.offAt(0), started("", ""), x00(), 3) => Ran.Stopped(started("", ""), x00(), Export.Lines.offAt(0), 3)
+    bRun(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58, 51, 44, 34, 102, 110, 34, 58, 52, 125, 44, 34, 105, 101, 34, 58, 49, 50, 125, 10]), 33, Export.Lines.offAt(0), started("", ""), x00(), 3) => Ran.Failed("line 3: unknown expression index 4")
+
+fn took(q: P, x: X, la: LineAt) -> Result<QX, String>
+    ? "A line read from the bytes packed: an application, a lambda or a pi from its numbers as they are (AppsUnboxed in Export.Lines), any other line from its Line."
+    match Export.Lines.numOf(la.kind)
+        1 -> colApp(q, x, Export.Lines.numOf(la.n1), Export.Lines.numOf(la.n2), Export.Lines.numOf(la.n3))
+        2 -> colBind(q, x, BinderIds(ie = Export.Lines.numOf(la.n1), nameIdx = Export.Lines.numOf(la.n2), typeIdx = Export.Lines.numOf(la.n3), bodyIdx = Export.Lines.numOf(la.n4), bi = la.bi, isLam = la.lam))
+        _ -> packed(q, x, la.line)
+
+verify took
+    capOf(packedX(took(started("", "{{}}"), x00(), Export.Lines.lineOf(Line.App(0, 0, 0), Export.Lines.offAt(0))))) => Result.Err("unknown expression index 0")
+
+fn bStopped(src: String, offset: Int, b: Bytes, eof: Bool, r: Ran) -> Result<One, String>
+    ? "Where a run of lines stopped: the end of the chunk, or a line read as text (RunOfLines)."
+    ! [Disk.readBytesAt]
+    match r
+        Ran.Failed(e) -> Result.Err(e)
+        Ran.Stopped(q, x, s, line) -> match Export.Lines.offValue(s) >= Bytes.len(b)
+            true -> bEnd(src, offset, b, eof, Option.Some(q), x, line)
+            false -> bText(src, offset, b, eof, s, Option.Some(q), x, line, Export.Lines.newlineFrom(b, s))
 
 fn bText(src: String, offset: Int, b: Bytes, eof: Bool, s: Off, p: Option<P>, x: X, line: Int, nl: Off) -> Result<One, String>
     ? "A line read as text, up to its newline nl. A line the chunk ends inside is read again from its start with the next chunk, or with twice the bytes when it is the chunk's first; at the end of the file it is the last line."
