@@ -831,7 +831,7 @@ record W
     main: List<Int>
     mainChunks: List<Bytes>
     mainBytes: Int
-    proofs: List<Int>
+    proofs: Bytes
     proofChunks: List<Bytes>
     proofBytes: Int
     fN: Int
@@ -876,7 +876,7 @@ verify zeroed
 
 fn fresh() -> W
     ? "Nothing written yet; names and levels start at 1, after the implicit 0."
-    W(main = [], mainChunks = [], mainBytes = 0, proofs = [], proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = 0, di = 0, mainNext = 0, lazy = 0, open = Vector.fromList([]))
+    W(main = [], mainChunks = [], mainBytes = 0, proofs = Bytes.fromList([]), proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = 0, di = 0, mainNext = 0, lazy = 0, open = Vector.fromList([]))
 
 verify fresh
     fresh().nameId => 1
@@ -1032,13 +1032,13 @@ verify mainChunked
 
 fn flushProofs(w: W) -> Result<W, String>
     ? "The proof section's bytes so far, as a chunk."
-    match List.len(w.proofs) == 0
+    match Bytes.len(w.proofs) == 0
         true -> Result.Ok(w)
-        false -> proofsChunked(w, Bytes.fromList(List.reverse(w.proofs))?)
+        false -> proofsChunked(w, w.proofs)
 
 fn proofsChunked(w: W, c: Bytes) -> Result<W, String>
     ? "c, the proof section's bytes so far, kept as a chunk."
-    Result.Ok(W.update(w, proofs = [], proofChunks = List.prepend(c, w.proofChunks), proofBytes = w.proofBytes + Bytes.len(c)))
+    Result.Ok(W.update(w, proofs = Bytes.fromList([]), proofChunks = List.prepend(c, w.proofChunks), proofBytes = w.proofBytes + Bytes.len(c)))
 
 verify proofsChunked
     Result.withDefault(proofsChunked(fresh(), Bytes.fromList([1, 2])), fresh()).proofBytes => 2
@@ -1058,7 +1058,7 @@ fn flushedIf(w: W) -> Result<W, String>
 
 fn proofsFlushedIf(w: W) -> Result<W, String>
     ? "The proof section's chunk made once its list is long."
-    match List.len(w.proofs) >= chunkLimit()
+    match Bytes.len(w.proofs) >= chunkLimit()
         true -> flushProofs(w)
         false -> Result.Ok(w)
 
@@ -1375,8 +1375,23 @@ fn lazyOut(b: Bytes, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vec
     ? "The theorem and its block written."
     blen = uvLen(n) + List.len(x.out)
     m = declPieces(b, d.pieces, w.ei, w.mainNext, ids, d.value, blen, x.fine, List.prepend(6, List.prepend(18, w.main)))
-    w2 = W.update(w, main = m, proofs = List.concat(x.out, uv(w.proofs, n)), open = Option.withDefault(Vector.set(w.open, w.di, acc0()), w.open), di = w.di + 1, lazy = w.lazy + 1)
+    blk = Bytes.fromList(List.reverse(x.out))?
+    cnt = Bytes.fromList(List.reverse(uv([], n)))?
+    w1 = W.update(w, proofs = Bytes.concat(Bytes.concat(w.proofs, cnt), blk))
+    w2 = W.update(w1, main = m, open = Option.withDefault(Vector.set(w1.open, w1.di, acc0()), w1.open), di = w1.di + 1, lazy = w1.lazy + 1)
     written(b, d.end, end, w2, owner, ids, nameF, levelF, count, codes, cs)
+
+decision BlocksAsBytes
+    date = "2026-11-12"
+    reason =
+        "A finished block was put onto the proof section's list of octets"
+        "with List.concat, every octet of it read and pushed once more. It is"
+        "now made bytes at once (its octets reversed where they lie) and"
+        "appended, with its count, to the bytes of the proof section's"
+        "current chunk, which has one owner and grows in place."
+    chosen = "BlocksAsBytes"
+    rejected = ["BlocksConcatenated"]
+    impacts = [lazyOut, W, flushProofs]
 
 fn declPieces(b: Bytes, ps: List<Piece>, e: Int, next: Int, ids: Vector<Vector<U32>>, value: Int, blen: Int, fine: Bool, acc: List<Int>) -> List<Int>
     ? "A declaration's pieces: raw bytes copied, references by main numbers; the value of a theorem with a block (value, else -1) is its block's length and the placed byte."
@@ -1514,7 +1529,7 @@ verify flushMain
     Result.withDefault(flushMain(W.update(fresh(), main = [1])), fresh()).mainBytes => 1
 
 verify flushProofs
-    Result.withDefault(flushProofs(W.update(fresh(), proofs = [1])), fresh()).proofBytes => 1
+    Result.withDefault(flushProofs(W.update(fresh(), proofs = Bytes.fromList([1]))), fresh()).proofBytes => 1
 
 verify flushedIf
     flushedIf(fresh()) => Result.Ok(fresh())
@@ -1579,7 +1594,7 @@ verify lazyWritten
     lazyWritten(Bytes.fromList([]), at(0), fresh(), cnew(0, 0), cnew32(0), Vector.fromList([]), Vector.fromList([]), Vector.fromList([1]), codes0(), cols0(), DeclP(kind = 2, pieces = [], names = [], skip = false, value = 0, end = at(0)), Option.None) => Result.Err("declaration 0: its block is missing")
 
 verify lazyOut
-    Result.withDefault(lazyOut(Bytes.fromList([]), at(0), fresh(), cnew(0, 0), cnew32(1), Vector.fromList([]), Vector.fromList([]), Vector.fromList([1]), codes0(), cols0(), DeclP(kind = 2, pieces = [Piece.Val(0)], names = [], skip = false, value = 0, end = at(0)), Acc(out = [3, 7], k = 1, mark = 0, fine = true), 1), fresh()).proofs => [3, 7, 1]
+    Result.withDefault(lazyOut(Bytes.fromList([]), at(0), fresh(), cnew(0, 0), cnew32(1), Vector.fromList([]), Vector.fromList([]), Vector.fromList([1]), codes0(), cols0(), DeclP(kind = 2, pieces = [Piece.Val(0)], names = [], skip = false, value = 0, end = at(0)), Acc(out = [3, 7], k = 1, mark = 0, fine = true), 1), fresh()).proofs => Bytes.fromList([1, 7, 3])
     Result.withDefault(lazyOut(Bytes.fromList([]), at(0), fresh(), cnew(0, 0), cnew32(1), Vector.fromList([]), Vector.fromList([]), Vector.fromList([1]), codes0(), cols0(), DeclP(kind = 2, pieces = [Piece.Val(0)], names = [], skip = false, value = 0, end = at(0)), Acc(out = [3, 7], k = 1, mark = 0, fine = true), 1), fresh()).main => [1, 3, 6, 18]
 
 verify declPieces
