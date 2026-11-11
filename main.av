@@ -16,9 +16,10 @@ fn main() -> Int
     ! [Args.get, Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     args = Args.get()
     match args
-        ["pack", src, dst] -> packed(Export.Pack.pack(src, dst, 2))
-        ["pack", src, dst, "0"] -> packed(Export.Pack.pack(src, dst, 0))
-        ["pack", src, dst, "2"] -> packed(Export.Pack.pack(src, dst, 2))
+        ["pack", src, dst] -> packed(Export.Pack.pack(src, dst, 2, 4))
+        ["pack", src, dst, "0"] -> packed(Export.Pack.pack(src, dst, 0, 1))
+        ["pack", src, dst, "2"] -> packed(Export.Pack.pack(src, dst, 2, 4))
+        ["pack", src, dst, "2", n] -> packed(Export.Pack.pack(src, dst, 2, workersOf(n)))
         _ -> checked(args)
 
 fn checked(args: List<String>) -> Int
@@ -73,14 +74,14 @@ fn input(args: List<String>) -> Outcome
     match args
         [path] -> fileOf(path, 4)
         [path, n] -> fileOf(path, workersOf(n))
-        _ -> Outcome.Declined("usage: pestka [--low-memory] [--reorder-always] [--show-placed] FILE [WORKERS] | pestka pack FILE.ndjson FILE.susz [0|2]")
+        _ -> Outcome.Declined("usage: pestka [--low-memory] [--reorder-always] [--show-placed] FILE [WORKERS] | pestka pack FILE.ndjson FILE.susz [0|2 [WORKERS]]")
 
 fn fileOf(path: String, workers: Int) -> Outcome
     ? "A Susz file by its signature, otherwise lean4export's ndjson, packed into Susz of version 2 in memory and read as Susz (NdjsonThroughSusz)."
     ! [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     match Export.Susz.isSusz(path)
         true -> Export.Susz.readFile(path)
-        false -> packedOf(path, workers, Export.Pack.image(path))
+        false -> packedOf(path, workers, Export.Pack.image(path, workers))
 
 decision NdjsonThroughSusz
     date = "2026-11-11"

@@ -46,8 +46,8 @@ record Ren
 fn define(r: Ren, src: Int, dense: Int) -> Ren
     ? "The table's id src becomes Susz id dense: while every id has been its own, nothing is kept (IdsRenumbered)."
     match Bool.and(Map.len(r.m) == 0, src == dense)
-        true -> Ren(below = dense + 1, m = r.m)
-        false -> Ren(below = r.below, m = Map.set(r.m, src, dense))
+        true -> Ren.update(r, below = dense + 1)
+        false -> Ren.update(r, m = Map.set(r.m, src, dense))
 
 verify define
     define(Ren(below = 1, m = {}), 1, 1) => Ren(below = 2, m = {})
@@ -102,13 +102,13 @@ fn lvs(q: P, xs: List<Int>, acc: List<Int>) -> Result<List<Int>, String>
 verify lvs
     lvs(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), [3], []) => Result.Err("unknown level index 3")
 
-fn pack(src: String, dst: String, version: Int) -> Result<String, String>
-    ? "Packs src into dst in Susz of version 0 or 2; the counts written, or why not. Version 2 is packed in one step (OneStepPack)."
+fn pack(src: String, dst: String, version: Int, workers: Int) -> Result<String, String>
+    ? "Packs src into dst in Susz of version 0 or 2; the counts written, or why not. Version 2 is packed in one step (OneStepPack), its lines parsed on workers (ParsedInRounds)."
     ! [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     match Disk.writeBytes(dst, Bytes.fromList([]))
         Result.Err(e) -> Result.Err("cannot write {dst}: {e}")
         Result.Ok(_) -> match version == 2
-            true -> Export.Split.written2(dst, onePacked(src)?)
+            true -> Export.Split.written2(dst, onePacked(src, workers)?)
             false -> versioned(trailedTo(chunked(src, dst, 0, "", Option.None, 1)), dst, version)
 
 decision OneStepPack
@@ -157,12 +157,242 @@ fn slotsFor(size: Int) -> Int
 verify slotsFor
     slotsFor(0) => 2
 
-fn onePacked(src: String) -> Result<Laid, String>
-    ? "The ndjson export at src packed into version 2 in one step (OneStepPack)."
+fn onePacked(src: String, workers: Int) -> Result<Laid, String>
+    ? "The ndjson export at src packed into version 2 in one step (OneStepPack): on one worker line by line, on several in rounds (ParsedInRounds)."
     ! [Disk.readBytesAt, Disk.size]
     size = Disk.size(src)?
-    o = bChunked(src, 0, chunkBytes(), Option.None, x0(slotsFor(size))?, 1)?
+    x = x0(slotsFor(size))?
+    o = match workers <= 1
+        true -> bChunked(src, 0, chunkBytes(), Option.None, x, 1)?
+        false -> cStart(src, workers, x)?
     oneLaid(o)
+
+decision ParsedInRounds
+    date = "2026-11-11"
+    reason =
+        "Parsing a line needs nothing but its bytes, while packing it needs"
+        "every line before it. On several workers a chunk is cut at"
+        "newlines into one range per worker, the ranges are parsed at once,"
+        "and the lines they give are packed in file order while the next"
+        "chunk is parsed, as the ndjson reader reads in rounds"
+        "(RangesInPlace in Export.Reader). The records and the bytes written"
+        "are those of one worker; a line that cannot be decoded as text"
+        "stops its range, and is reported once the lines before it are"
+        "packed."
+    chosen = "ParsedInRounds"
+    rejected = ["ParsedInOrder"]
+    impacts = [cStart, cLoop, parsedRanges, applied]
+
+record St
+    q: P
+    x: X
+    line: Int
+
+record Run
+    lines: List<Line>
+    err: String
+    bad: Bool
+
+fn cStart(src: String, workers: Int, x: X) -> Result<One, String>
+    ? "The header line read as text from the first chunk, then the rest in rounds; a first chunk with no newline is read line by line."
+    ! [Disk.readBytesAt]
+    match Disk.readBytesAt(src, 0, chunkBytes())
+        Result.Err(e) -> Result.Err("cannot read {src}: {e}")
+        Result.Ok(b) -> cHeader(src, workers, x, b, Export.Lines.newlineFrom(b, Export.Lines.offAt(0)))
+
+fn cHeader(src: String, workers: Int, x: X, b: Bytes, nl: Off) -> Result<One, String>
+    ? "The header line up to nl, then the lines after it in rounds."
+    ! [Disk.readBytesAt]
+    match Export.Lines.offValue(nl) < 0
+        true -> bChunked(src, 0, chunkBytes(), Option.None, x, 1)
+        false -> match String.fromUtf8(Bytes.take(b, Export.Lines.offValue(nl)))
+            Result.Err(e) -> Result.Err("cannot read {src}: {e}")
+            Result.Ok(t) -> cAfterHeader(src, workers, Export.Lines.offValue(nl) + 1, oneLines(Option.None, x, [t], 1))
+
+fn cAfterHeader(src: String, workers: Int, offset: Int, l: OneLined) -> Result<One, String>
+    ? "The rounds after the header line, or why the header stops the file."
+    ! [Disk.readBytesAt]
+    match l
+        OneLined.Bad(e) -> Result.Err(e)
+        OneLined.Done(Option.None, _, _) -> Result.Err("empty file")
+        OneLined.Done(Option.Some(q), x, line) -> cLoop(src, workers, offset, St(q = q, x = x, line = line), [])
+
+fn cLoop(src: String, workers: Int, offset: Int, st: St, pending: List<Run>) -> Result<One, String>
+    ? "Reads the chunk at offset, where a line starts; its complete lines are parsed while the lines parsed before are packed (ParsedInRounds). At the end of the file the chunk's last line needs no newline; a chunk with no newline at all is read on line by line."
+    ! [Disk.readBytesAt]
+    match Disk.readBytesAt(src, offset, chunkBytes())
+        Result.Err(e) -> Result.Err("cannot read {src}: {e}")
+        Result.Ok(b) -> cRound(src, workers, offset, st, pending, b, Bytes.len(b) < chunkBytes(), lastNewline(b, Bytes.len(b) - 1))
+
+fn cRound(src: String, workers: Int, offset: Int, st: St, pending: List<Run>, b: Bytes, eof: Bool, nl: Int) -> Result<One, String>
+    ? "One round: the lines parsed before packed while this chunk's are parsed."
+    ! [Disk.readBytesAt]
+    end = match eof
+        true -> Bytes.len(b)
+        false -> nl + 1
+    match Bool.and(end == 0, eof == false)
+        true -> cLong(src, offset, applied(src, st, pending))
+        false -> match (applied(src, st, pending), parsedRanges(b, cuts(b, 0, end, workers)))!
+            (r, runs) -> cNext(src, workers, offset + end, eof, r, runs)
+
+fn cLong(src: String, offset: Int, r: Result<St, String>) -> Result<One, String>
+    ? "A line longer than a chunk: the rest of the file read line by line, from that line."
+    ! [Disk.readBytesAt]
+    match r
+        Result.Err(e) -> Result.Err(e)
+        Result.Ok(st) -> bChunked(src, offset, 2 * chunkBytes(), Option.Some(st.q), st.x, st.line)
+
+fn cNext(src: String, workers: Int, next: Int, eof: Bool, r: Result<St, String>, runs: List<Run>) -> Result<One, String>
+    ? "The next round, or at the end of the file the last lines packed."
+    ! [Disk.readBytesAt]
+    match r
+        Result.Err(e) -> Result.Err(e)
+        Result.Ok(st) -> match eof
+            true -> cDone(applied(src, st, runs))
+            false -> cLoop(src, workers, next, st, runs)
+
+fn cDone(r: Result<St, String>) -> Result<One, String>
+    ? "The packer and its notes after the last line."
+    match r
+        Result.Err(e) -> Result.Err(e)
+        Result.Ok(st) -> Result.Ok(One(q = st.q, x = st.x))
+
+verify cDone
+    cDone(Result.Err("x")) => Result.Err("x")
+
+fn lastNewline(b: Bytes, i: Int) -> Int
+    ? "The last newline at i or before it, -1 when there is none."
+    match i < 0
+        true -> -1
+        false -> match Bytes.get(b, i)
+            Option.Some(10) -> i
+            _ -> lastNewline(b, i - 1)
+
+verify lastNewline
+    lastNewline(Bytes.fromList([10, 1, 10, 2]), 3) => 2
+    lastNewline(Bytes.fromList([1]), 0) => -1
+
+fn cuts(b: Bytes, from: Int, end: Int, workers: Int) -> List<Int>
+    ? "Where the ranges of the bytes from to end start, one range per worker, each cut just after a newline, then end."
+    List.reverse(List.prepend(end, cutsFrom(b, from, end, workers, 1, [from])))
+
+verify cuts
+    cuts(Bytes.fromList([1, 10, 2, 10, 3, 10]), 0, 6, 2) => [0, 4, 6]
+    cuts(Bytes.fromList([]), 0, 0, 2) => [0, 0, 0]
+
+fn cutsFrom(b: Bytes, from: Int, end: Int, workers: Int, k: Int, acc: List<Int>) -> List<Int>
+    ? "Cut k of workers - 1, reversed onto acc."
+    match k >= workers
+        true -> acc
+        false -> cutsFrom(b, from, end, workers, k + 1, List.prepend(cutAfter(b, from + Result.withDefault(Int.div((end - from) * k, workers), 0), end), acc))
+
+verify cutsFrom
+    cutsFrom(Bytes.fromList([]), 0, 0, 1, 1, [0]) => [0]
+
+fn cutAfter(b: Bytes, at: Int, end: Int) -> Int
+    ? "Just after the first newline at at or past it, but not past end."
+    nl = Export.Lines.offValue(Export.Lines.newlineFrom(b, Export.Lines.offAt(at)))
+    match nl < 0
+        true -> end
+        false -> Int.min(end, nl + 1)
+
+verify cutAfter
+    cutAfter(Bytes.fromList([1, 10, 2]), 0, 3) => 2
+    cutAfter(Bytes.fromList([1, 2]), 0, 2) => 2
+
+fn parsedRanges(b: Bytes, cs: List<Int>) -> List<Run>
+    ? "The ranges between neighbouring cuts parsed, each on a worker of its own: the cuts are halved and the halves run as an independent product (ParsedInRounds)."
+    match cs
+        [] -> []
+        [_] -> []
+        [from, to] -> [parsedRange(b, Export.Lines.offAt(from), to, [])]
+        _ -> parsedHalves(b, List.take(cs, Int.div(List.len(cs), 2) + 1), List.drop(cs, Int.div(List.len(cs), 2)))
+
+verify parsedRanges
+    parsedRanges(Bytes.fromList([]), [0]) => []
+
+fn parsedHalves(b: Bytes, left: List<Int>, right: List<Int>) -> List<Run>
+    ? "The two halves at once."
+    match (parsedRanges(b, left), parsedRanges(b, right))!
+        (l, r) -> List.concat(l, r)
+
+verify parsedHalves
+    parsedHalves(Bytes.fromList([]), [0], [0]) => []
+
+fn parsedRange(b: Bytes, s: Off, end: Int, acc: List<Line>) -> Run
+    ? "The lines from s to end, which ends just after a newline or is the end of the file: each read from the bytes when it is in a common form, else as text (LinesFromBytes). A line that is not text stops the range."
+    match Export.Lines.offValue(s) >= end
+        true -> Run(lines = List.reverse(acc), err = "", bad = false)
+        false -> match Export.Lines.lineAt(b, s)
+            Option.Some(la) -> parsedRange(b, la.next, end, List.prepend(la.line, acc))
+            Option.None -> parsedText(b, s, end, acc, textEnd(Export.Lines.newlineFrom(b, s), end))
+
+verify parsedRange
+    parsedRange(Bytes.fromList([]), Export.Lines.offAt(0), 0, []) => Run(lines = [], err = "", bad = false)
+    parsedRange(Bytes.fromList([10]), Export.Lines.offAt(0), 1, []) => Run(lines = [Line.Blank], err = "", bad = false)
+
+fn textEnd(nl: Off, end: Int) -> Int
+    ? "Where a line read as text ends: its newline, or the end of the file for a last line with none."
+    match Export.Lines.offValue(nl) < 0
+        true -> end
+        false -> Int.min(Export.Lines.offValue(nl), end)
+
+verify textEnd
+    textEnd(Export.Lines.offAt(-1), 5) => 5
+    textEnd(Export.Lines.offAt(3), 5) => 3
+
+fn parsedText(b: Bytes, s: Off, end: Int, acc: List<Line>, t: Int) -> Run
+    ? "A line from s to t read as text."
+    match String.fromUtf8(Bytes.take(Bytes.drop(b, Export.Lines.offValue(s)), t - Export.Lines.offValue(s)))
+        Result.Err(e) -> Run(lines = List.reverse(acc), err = e, bad = true)
+        Result.Ok(tx) -> parsedRange(b, Export.Lines.offAt(t + 1), end, List.prepend(Export.Reader.parseLine(tx), acc))
+
+verify parsedText
+    parsedText(Bytes.fromList([10]), Export.Lines.offAt(0), 1, [], 0) => Run(lines = [Line.Blank], err = "", bad = false)
+
+fn applied(src: String, st: St, runs: List<Run>) -> Result<St, String>
+    ? "The runs' lines packed in order; a run stopped by a line that is not text reports it after its lines."
+    match runs
+        [] -> Result.Ok(st)
+        [r, ..rest] -> appliedRun(src, appliedLines(st.q, st.x, r.lines, st.line), r, rest)
+
+verify applied
+    applied("f", St(q = started("", "{{}}"), x = x00(), line = 2), [Run(lines = [], err = "e", bad = true)]) => Result.Err("cannot read f: e")
+
+fn appliedRun(src: String, r: Result<St, String>, run: Run, rest: List<Run>) -> Result<St, String>
+    ? "On to the next run, or the run's own stop."
+    match r
+        Result.Err(e) -> Result.Err(e)
+        Result.Ok(st) -> match run.bad
+            true -> Result.Err("cannot read {src}: {run.err}")
+            false -> applied(src, st, rest)
+
+verify appliedRun
+    appliedRun("f", Result.Err("x"), Run(lines = [], err = "", bad = false), []) => Result.Err("x")
+
+fn appliedLines(q: P, x: X, ls: List<Line>, line: Int) -> Result<St, String>
+    ? "Lines packed and noted in order; line is the number of the first."
+    match ls
+        [] -> Result.Ok(St(q = q, x = x, line = line))
+        [l, ..rest] -> appliedLine(q, x, l, rest, line)
+
+verify appliedLines
+    appliedLines(started("", "{{}}"), x00(), [Line.Bad("x")], 3) => Result.Err("line 3: x")
+
+fn appliedLine(q: P, x: X, l: Line, rest: List<Line>, line: Int) -> Result<St, String>
+    ? "One line packed and noted."
+    e0 = q.exprs
+    n0 = q.names
+    d0 = q.decls
+    before = List.len(q.out)
+    match lineOf(q, l)
+        Result.Err(e) -> Result.Err("line {line}: {e}")
+        Result.Ok(r) -> match noted(x, r, e0, n0, d0, before)
+            Result.Err(e) -> Result.Err("line {line}: {e}")
+            Result.Ok(y) -> appliedLines(r, y, rest, line + 1)
+
+verify appliedLine
+    appliedLine(started("", "{{}}"), x00(), Line.Bad("x"), [], 3) => Result.Err("line 3: x")
 
 record One
     q: P
@@ -383,10 +613,10 @@ decision PackedInMemory
     rejected = ["TemporaryFile"]
     impacts = [image, written, onePacked]
 
-fn image(src: String) -> Result<Image, String>
-    ? "The ndjson export at src packed into Susz of version 2 in memory (PackedInMemory), in one step (OneStepPack)."
+fn image(src: String, workers: Int) -> Result<Image, String>
+    ? "The ndjson export at src packed into Susz of version 2 in memory (PackedInMemory), in one step (OneStepPack), its lines parsed on workers (ParsedInRounds)."
     ! [Disk.readBytesAt, Disk.size]
-    Export.Split.imageOf(onePacked(src)?)
+    Export.Split.imageOf(onePacked(src, workers)?)
 
 fn trailedTo(r: Result<P, String>) -> Result<String, String>
     ? "The last bytes and the trailer appended to the file."
@@ -605,19 +835,19 @@ fn trailed(q: P) -> Result<String, String>
 
 fn withName(q: P, i: Int, out: List<Int>) -> P
     ? "q with a name record appended: the file's name i is the next Susz name."
-    P(path = q.path, out = out, written = q.written, start = q.start, names = q.names + 1, levels = q.levels, exprs = q.exprs, decls = q.decls, nr = define(q.nr, i, q.names), lr = q.lr, er = q.er)
+    P.update(q, out = out, names = q.names + 1, nr = define(q.nr, i, q.names))
 
 fn withLevel(q: P, i: Int, out: List<Int>) -> P
     ? "q with a level record appended."
-    P(path = q.path, out = out, written = q.written, start = q.start, names = q.names, levels = q.levels + 1, exprs = q.exprs, decls = q.decls, nr = q.nr, lr = define(q.lr, i, q.levels), er = q.er)
+    P.update(q, out = out, levels = q.levels + 1, lr = define(q.lr, i, q.levels))
 
 fn withExpr(q: P, i: Int, out: List<Int>) -> P
     ? "q with an expression record appended."
-    P(path = q.path, out = out, written = q.written, start = q.start, names = q.names, levels = q.levels, exprs = q.exprs + 1, decls = q.decls, nr = q.nr, lr = q.lr, er = define(q.er, i, q.exprs))
+    P.update(q, out = out, exprs = q.exprs + 1, er = define(q.er, i, q.exprs))
 
 fn withDecl(q: P, out: List<Int>) -> P
     ? "q with a declaration record appended."
-    P(path = q.path, out = out, written = q.written, start = q.start, names = q.names, levels = q.levels, exprs = q.exprs, decls = q.decls + 1, nr = q.nr, lr = q.lr, er = q.er)
+    P.update(q, out = out, decls = q.decls + 1)
 
 verify withName
     withName(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, [7]).names => 2
