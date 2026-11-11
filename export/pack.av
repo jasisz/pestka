@@ -9,7 +9,7 @@ module Pack
         "structure only; the reader trusts none of it and computes every hash"
         "and range itself."
     exposes [pack, image]
-    depends [Bytes, Json.Line, Json.Access, Core.Names, Core.Lazy, Core.Exprs, Core.Decls, Export.Reader, Export.Lines, Export.Split, Export.Susz]
+    depends [Bytes, Json.Line, Json.Access, Core.Names, Core.Lazy, Core.Exprs, Core.Decls, Export.Reader, Export.Items, Export.Lines, Export.Split, Export.Susz]
     effects [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
 
 record P
@@ -1246,7 +1246,7 @@ fn exprRarer(q: P, ie: Int, fs: List<Tuple<String, J>>) -> Result<P, String>
     match Json.Access.has(fs, "letE")
         true -> letObj(q, ie, Json.Access.obj(fs, "letE")?)
         false -> match Json.Access.has(fs, "natVal")
-            true -> Result.Ok(withExpr(q, ie, text(List.prepend(14, q.out), Json.Access.text(fs, "natVal")?)))
+            true -> natLine(q, ie, Json.Access.text(fs, "natVal")?)
             false -> match Json.Access.has(fs, "strVal")
                 true -> Result.Ok(withExpr(q, ie, text(List.prepend(15, q.out), Json.Access.text(fs, "strVal")?)))
                 false -> match Json.Access.has(fs, "proj")
@@ -1257,6 +1257,14 @@ fn exprRarer(q: P, ie: Int, fs: List<Tuple<String, J>>) -> Result<P, String>
 
 verify exprRarer
     exprRarer(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 0, []) => Result.Err("unknown expression kind")
+
+fn natLine(q: P, ie: Int, digits: String) -> Result<P, String>
+    ? "14: a Nat literal's digits, once the reader's tables would take them (Export.Items.natOf): a sign or anything but digits is refused here, by its line, as the ndjson reader refuses it."
+    _ = Export.Items.natOf(digits)?
+    Result.Ok(withExpr(q, ie, text(List.prepend(14, q.out), digits)))
+
+verify natLine
+    natLine(started("", "{{}}"), 0, "-3") => Result.Err("negative Nat literal")
 
 fn letObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Name, type, value and body."
