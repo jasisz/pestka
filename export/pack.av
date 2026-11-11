@@ -574,7 +574,7 @@ fn bLines(src: String, offset: Int, b: Bytes, eof: Bool, s: Off, p: Option<P>, x
         true -> bEnd(src, offset, b, eof, p, x, line)
         false -> match p
             Option.None -> bText(src, offset, b, eof, s, Option.None, x, line, Export.Lines.newlineFrom(b, s))
-            Option.Some(q) -> bStopped(src, offset, b, eof, bRun(b, Bytes.len(b), s, q, x, line))
+            Option.Some(q) -> bStopped(src, offset, b, eof, bRun(b, Export.Lines.offAt(Bytes.len(b)), s, q, x, line))
 
 fn bEnd(src: String, offset: Int, b: Bytes, eof: Bool, p: Option<P>, x: X, line: Int) -> Result<One, String>
     ? "Past the last newline of a chunk: the next chunk read from where its line starts, or at the end of the file what is left is the last line, as for the text reader."
@@ -601,9 +601,9 @@ type Ran
     Stopped(P, X, Off, Int)
     Failed(String)
 
-fn bRun(b: Bytes, n: Int, s: Off, q: P, x: X, line: Int) -> Ran
+fn bRun(b: Bytes, n: Off, s: Off, q: P, x: X, line: Int) -> Ran
     ? "The lines from s read from the bytes and packed, line their number, up to n, the chunk's length, or to the first line read neither by lineAt nor by nameAt (RunOfLines)."
-    match Export.Lines.offValue(s) >= n
+    match Export.Lines.offValue(s) >= Export.Lines.offValue(n)
         true -> Ran.Stopped(q, x, s, line)
         false -> match Export.Lines.lineAt(b, s)
             Option.Some(la) -> match took(q, x, la)
@@ -616,8 +616,8 @@ fn bRun(b: Bytes, n: Int, s: Off, q: P, x: X, line: Int) -> Ran
                 Option.None -> Ran.Stopped(q, x, s, line)
 
 verify bRun
-    bRun(Bytes.fromList([]), 0, Export.Lines.offAt(0), started("", ""), x00(), 3) => Ran.Stopped(started("", ""), x00(), Export.Lines.offAt(0), 3)
-    bRun(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58, 51, 44, 34, 102, 110, 34, 58, 52, 125, 44, 34, 105, 101, 34, 58, 49, 50, 125, 10]), 33, Export.Lines.offAt(0), started("", ""), x00(), 3) => Ran.Failed("line 3: unknown expression index 4")
+    bRun(Bytes.fromList([]), Export.Lines.offAt(0), Export.Lines.offAt(0), started("", ""), x00(), 3) => Ran.Stopped(started("", ""), x00(), Export.Lines.offAt(0), 3)
+    bRun(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58, 51, 44, 34, 102, 110, 34, 58, 52, 125, 44, 34, 105, 101, 34, 58, 49, 50, 125, 10]), Export.Lines.offAt(33), Export.Lines.offAt(0), started("", ""), x00(), 3) => Ran.Failed("line 3: unknown expression index 4")
 
 fn took(q: P, x: X, la: LineAt) -> Result<QX, String>
     ? "A line read from the bytes packed: an application, a lambda or a pi from its numbers as they are (AppsUnboxed in Export.Lines), any other line from its Line."
