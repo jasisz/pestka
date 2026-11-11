@@ -8,8 +8,8 @@ module Pack
         "theorem's own proof in a block of its own. The packer copies"
         "structure only; the reader trusts none of it and computes every hash"
         "and range itself."
-    exposes [pack]
-    depends [Bytes, Json.Line, Json.Access, Core.Exprs, Core.Decls, Export.Reader, Export.Split]
+    exposes [pack, image]
+    depends [Bytes, Json.Line, Json.Access, Core.Exprs, Core.Decls, Export.Reader, Export.Split, Export.Susz]
     effects [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
 
 record P
@@ -107,7 +107,40 @@ fn pack(src: String, dst: String, version: Int) -> Result<String, String>
     ! [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     match Disk.writeBytes(dst, Bytes.fromList([]))
         Result.Err(e) -> Result.Err("cannot write {dst}: {e}")
-        Result.Ok(_) -> versioned(chunked(src, dst, 0, "", Option.None, 1), dst, version)
+        Result.Ok(_) -> versioned(trailedTo(chunked(src, dst, 0, "", Option.None, 1)), dst, version)
+
+decision PackedInMemory
+    date = "2026-11-11"
+    reason =
+        "pestka FILE.ndjson packs the export into Susz of version 2 in"
+        "memory and reads that, with no file between: the lines are packed"
+        "as for a file, but a packer with no path keeps its output instead"
+        "of appending it, version 0 is the bytes it kept and the trailer,"
+        "and Export.Split.image lays them out as version 2. Each stage"
+        "returns only bytes, so what it built is freed before the next one"
+        "runs and before checking."
+    chosen = "PackedInMemory"
+    rejected = ["TemporaryFile"]
+    impacts = [image, written, imageOf]
+
+fn image(src: String) -> Result<Image, String>
+    ? "The ndjson export at src packed into Susz of version 2 in memory (PackedInMemory); the packer's writes are never made, as it has no path."
+    ! [Disk.readBytesAt, Disk.writeBytes, Disk.appendBytes]
+    q = chunked(src, "", 0, "", Option.None, 1)?
+    Export.Split.image(imageOf(q)?)
+
+fn imageOf(q: P) -> Result<Bytes, String>
+    ? "Version 0 from what the packer kept: its records, then the trailer (PackedInMemory)."
+    all = P.update(q, written = List.len(q.out))
+    Bytes.fromList(List.reverse(List.concat(trailer(all), q.out)))
+
+verify imageOf
+    Result.withDefault(imageOf(P(path = "", out = [7], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {}))), Bytes.fromList([])) == Bytes.fromList([]) => false
+
+fn trailedTo(r: Result<P, String>) -> Result<String, String>
+    ? "The last bytes and the trailer appended to the file."
+    ! [Disk.appendBytes]
+    trailed(written(r?)?)
 
 fn versioned(r: Result<String, String>, dst: String, version: Int) -> Result<String, String>
     ? "Version 0 as written, or rewritten as version 2."
@@ -125,7 +158,7 @@ fn chunkBytes() -> Int
 verify chunkBytes
     chunkBytes() > 0 => true
 
-fn chunked(src: String, dst: String, offset: Int, carry: String, p: Option<P>, line: Int) -> Result<String, String>
+fn chunked(src: String, dst: String, offset: Int, carry: String, p: Option<P>, line: Int) -> Result<P, String>
     ? "Reads the chunk at offset; carry is the unfinished last line of the chunk before; p is the packer once the header line is read."
     ! [Disk.readBytesAt, Disk.writeBytes, Disk.appendBytes]
     match Disk.readBytesAt(src, offset, chunkBytes())
@@ -134,7 +167,7 @@ fn chunked(src: String, dst: String, offset: Int, carry: String, p: Option<P>, l
             true -> finished(lines(dst, p, [carry], line))
             false -> decoded(src, dst, offset, carry, p, line, b, 0)
 
-fn decoded(src: String, dst: String, offset: Int, carry: String, p: Option<P>, line: Int, b: Bytes, cut: Int) -> Result<String, String>
+fn decoded(src: String, dst: String, offset: Int, carry: String, p: Option<P>, line: Int, b: Bytes, cut: Int) -> Result<P, String>
     ? "The chunk as text, leaving out the bytes of a character its end cuts in two."
     ! [Disk.readBytesAt, Disk.writeBytes, Disk.appendBytes]
     match String.fromUtf8(Bytes.take(b, Bytes.len(b) - cut))
@@ -152,7 +185,7 @@ fn joined(carry: String, parts: List<String>) -> List<String>
 verify joined
     joined("ab", ["c", "d"]) => ["abc", "d"]
 
-fn split(src: String, dst: String, next: Int, parts: List<String>, p: Option<P>, line: Int) -> Result<String, String>
+fn split(src: String, dst: String, next: Int, parts: List<String>, p: Option<P>, line: Int) -> Result<P, String>
     ? "Packs the complete lines of a chunk and writes what they gave; the last part waits for the next chunk."
     ! [Disk.readBytesAt, Disk.writeBytes, Disk.appendBytes]
     match lines(dst, p, List.take(parts, List.len(parts) - 1), line)
@@ -278,20 +311,29 @@ fn flushed(p: Option<P>) -> Result<Option<P>, String>
         Option.Some(q) -> Result.Ok(Option.Some(written(q)?))
 
 fn written(q: P) -> Result<P, String>
-    ? "The bytes of q's output appended to the file."
+    ? "The bytes of q's output appended to the file; a packer with no path keeps them (PackedInMemory)."
     ! [Disk.appendBytes]
-    bs = Bytes.fromList(List.reverse(q.out))?
+    match q.path == ""
+        true -> Result.Ok(q)
+        false -> appended(q, Bytes.fromList(List.reverse(q.out))?)
+
+fn appended(q: P, bs: Bytes) -> Result<P, String>
+    ? "bs appended to the file."
+    ! [Disk.appendBytes]
     match Disk.appendBytes(q.path, bs)
         Result.Err(e) -> Result.Err("cannot write: {e}")
         Result.Ok(_) -> Result.Ok(P(path = q.path, out = [], written = q.written + Bytes.len(bs), start = q.start, names = q.names, levels = q.levels, exprs = q.exprs, decls = q.decls, nr = q.nr, lr = q.lr, er = q.er))
 
-fn finished(l: Lined) -> Result<String, String>
-    ? "The trailer after the last record."
-    ! [Disk.appendBytes]
+fn finished(l: Lined) -> Result<P, String>
+    ? "The packer after the last record."
     match l
         Lined.Bad(e) -> Result.Err(e)
         Lined.Done(Option.None, _) -> Result.Err("empty file")
-        Lined.Done(Option.Some(q), _) -> trailed(written(q)?)
+        Lined.Done(Option.Some(q), _) -> Result.Ok(q)
+
+verify finished
+    finished(Lined.Bad("x")) => Result.Err("x")
+    finished(Lined.Done(Option.None, 1)) => Result.Err("empty file")
 
 fn trailer(q: P) -> List<Int>
     ? "The trailer, reversed: the four counts, the number of blocks, then for the one block its offset and length (u64) and the first name, level, expression and declaration it defines (u32); last the trailer's own length and the closing signature ZSUS (docs/susz.md)."

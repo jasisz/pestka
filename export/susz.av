@@ -11,7 +11,7 @@ module Susz
         "which this reader hands to checking undecoded (Core.Lazy): the main"
         "block, the frontier it lists and how the blocks fill the section are"
         "checked here, each block when its declaration is checked."
-    exposes [isSusz, readFile, At, vAt, posAt, place, ahead, ahead1, ahead2, octetAt]
+    exposes [isSusz, readFile, readImage, Image, At, vAt, posAt, place, ahead, ahead1, ahead2, octetAt]
     exposes opaque [Pos]
     depends [Bytes, Core.Names, Core.Exprs, Core.Decls, Core.Lazy, Export.Tables, Export.Items, Export.Declarations, Export.Reader, Export.Stream]
     effects [Disk.readBytesAt, Disk.size]
@@ -52,7 +52,7 @@ verify marginBytes
     marginBytes() > 0 => true
 
 record Rd
-    path: String
+    src: Src
     b: Bytes
     base: Int
     stop: Int
@@ -171,33 +171,109 @@ record Trailer
     proofs: Int
     proofsLength: Int
 
-fn readFile(path: String) -> Outcome
-    ? "Reads the whole file: the trailer first, for the block, then the header and the block's records."
-    ! [Disk.readBytesAt, Disk.size]
-    match Disk.size(path)
-        Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
-        Result.Ok(size) -> match Disk.readBytesAt(path, Int.max(size - 8, 0), 8)
-            Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
-            Result.Ok(tail) -> withTail(path, size, tail)
+decision BytesFromFileOrMemory
+    date = "2026-11-11"
+    reason =
+        "A Susz file and a Susz image packed in memory from an ndjson file"
+        "(Export.Pack.image) are the same bytes, read by the same functions:"
+        "the reader asks its source for a range of bytes, and a file reads it"
+        "from the disk while an image takes it from the bytes it holds. An"
+        "image is two runs of bytes, the header and the main block first and"
+        "the proof section and the trailer after, read as one file: the"
+        "proof section a reader keeps is the second run alone, so the main"
+        "block's bytes are freed once it is read, as a file's chunks are."
+    chosen = "BytesFromFileOrMemory"
+    rejected = ["ReaderPerSource", "ImageAsOneRun"]
+    impacts = [Src, Image, bytesAt, sizeOf, readFile, readImage]
 
-fn withTail(path: String, size: Int, tail: Bytes) -> Outcome
+record Image
+    front: Bytes
+    back: Bytes
+
+type Src
+    File(String)
+    Memory(Image)
+
+fn sizeOf(src: Src) -> Result<Int, String>
+    ? "How many bytes the source holds (BytesFromFileOrMemory)."
+    ! [Disk.size]
+    match src
+        Src.File(path) -> Disk.size(path)
+        Src.Memory(m) -> Result.Ok(Bytes.len(m.front) + Bytes.len(m.back))
+
+verify sizeOf
+    sizeOf(Src.Memory(Image(front = Bytes.fromList([1]), back = Bytes.fromList([2, 3])))) => Result.Ok(3)
+
+fn bytesAt(src: Src, offset: Int, n: Int) -> Result<Bytes, String>
+    ? "At most n bytes at offset, fewer at the end (BytesFromFileOrMemory)."
+    ! [Disk.readBytesAt]
+    match src
+        Src.File(path) -> Disk.readBytesAt(path, offset, n)
+        Src.Memory(m) -> Result.Ok(imageAt(m, offset, n))
+
+verify bytesAt
+    bytesAt(Src.Memory(Image(front = Bytes.fromList([1, 2]), back = Bytes.fromList([3]))), 1, 2) => Result.Ok(Bytes.fromList([2, 3]))
+
+fn imageAt(m: Image, offset: Int, n: Int) -> Bytes
+    ? "n bytes at offset of the image: from one run, or both when they cross."
+    f = Bytes.len(m.front)
+    match offset >= f
+        true -> Bytes.take(Bytes.drop(m.back, offset - f), n)
+        false -> match offset + n <= f
+            true -> Bytes.take(Bytes.drop(m.front, offset), n)
+            false -> Bytes.concat(Bytes.drop(m.front, offset), Bytes.take(m.back, offset + n - f))
+
+verify imageAt
+    imageAt(Image(front = Bytes.fromList([1, 2]), back = Bytes.fromList([3, 4])), 0, 2) => Bytes.fromList([1, 2])
+    imageAt(Image(front = Bytes.fromList([1, 2]), back = Bytes.fromList([3, 4])), 3, 5) => Bytes.fromList([4])
+    imageAt(Image(front = Bytes.fromList([1, 2]), back = Bytes.fromList([3, 4])), 1, 2) => Bytes.fromList([2, 3])
+
+fn nameOf(src: Src) -> String
+    ? "The source as messages name it."
+    match src
+        Src.File(path) -> path
+        Src.Memory(_) -> "the export packed in memory"
+
+verify nameOf
+    nameOf(Src.File("f")) => "f"
+
+fn readFile(path: String) -> Outcome
+    ? "Reads the whole file (BytesFromFileOrMemory)."
+    ! [Disk.readBytesAt, Disk.size]
+    readSource(Src.File(path))
+
+fn readImage(m: Image) -> Outcome
+    ? "Reads an image packed in memory as a file is read (BytesFromFileOrMemory)."
+    ! [Disk.readBytesAt, Disk.size]
+    readSource(Src.Memory(m))
+
+fn readSource(src: Src) -> Outcome
+    ? "Reads the whole source: the trailer first, for the block, then the header and the block's records."
+    ! [Disk.readBytesAt, Disk.size]
+    match sizeOf(src)
+        Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
+        Result.Ok(size) -> match bytesAt(src, Int.max(size - 8, 0), 8)
+            Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
+            Result.Ok(tail) -> withTail(src, size, tail)
+
+fn withTail(src: Src, size: Int, tail: Bytes) -> Outcome
     ? "The last eight bytes: the trailer's length and the closing signature ZSUS."
     ! [Disk.readBytesAt]
     n = u32At(tail, 0)
     match Bool.and(Bytes.drop(tail, 4) == Bytes.fromList([90, 83, 85, 83]), Bool.and(n >= 8, n <= size))
         false -> Outcome.Rejected("not a complete Susz file")
-        true -> match Disk.readBytesAt(path, size - n, n)
-            Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
-            Result.Ok(tr) -> withVersion(path, size - n, tr)
+        true -> match bytesAt(src, size - n, n)
+            Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
+            Result.Ok(tr) -> withVersion(src, size - n, tr)
 
-fn withVersion(path: String, end: Int, tr: Bytes) -> Outcome
+fn withVersion(src: Src, end: Int, tr: Bytes) -> Outcome
     ? "The version byte of the header picks the trailer's layout: 0, or 2 with proofs in blocks of their own; any other version is rejected (rule 6)."
     ! [Disk.readBytesAt]
-    match Disk.readBytesAt(path, 4, 1)
-        Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
+    match bytesAt(src, 4, 1)
+        Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
         Result.Ok(v) -> match octet(v, 0)
-            0 -> withTrailer(path, end, trailerOf(tr))
-            2 -> withTrailer(path, end, trailer2Of(tr))
+            0 -> withTrailer(src, end, trailerOf(tr))
+            2 -> withTrailer(src, end, trailer2Of(tr))
             k -> Outcome.Rejected("Susz version {k} is not known")
 
 fn trailer2Of(b: Bytes) -> Option<Trailer>
@@ -220,7 +296,7 @@ fn trailerOf(b: Bytes) -> Option<Trailer>
 verify trailerOf
     trailerOf(Bytes.fromList([])) => Option.None
 
-fn withTrailer(path: String, end: Int, tr: Option<Trailer>) -> Outcome
+fn withTrailer(src: Src, end: Int, tr: Option<Trailer>) -> Outcome
     ? "Reads the header, then the block."
     ! [Disk.readBytesAt]
     match tr
@@ -229,9 +305,9 @@ fn withTrailer(path: String, end: Int, tr: Option<Trailer>) -> Outcome
             false -> Outcome.Rejected("the block lies outside the file")
             true -> match sectionsFit(t, end)
                 false -> Outcome.Rejected("the proof section does not lie between the main block and the trailer")
-                true -> match Disk.readBytesAt(path, 0, t.offset)
-                    Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
-                    Result.Ok(h) -> header(path, t, h)
+                true -> match bytesAt(src, 0, t.offset)
+                    Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
+                    Result.Ok(h) -> header(src, t, h)
 
 fn sectionsFit(t: Trailer, end: Int) -> Bool
     ? "Version 2: the proof section starts where the main block ends and ends where the trailer starts, so no byte of the file is outside both."
@@ -243,7 +319,7 @@ verify sectionsFit
     sectionsFit(Trailer(names = 1, levels = 1, exprs = 0, decls = 0, offset = 10, length = 5, version = 2, proofs = 15, proofsLength = 3), 18) => true
     sectionsFit(Trailer(names = 1, levels = 1, exprs = 0, decls = 0, offset = 10, length = 5, version = 2, proofs = 15, proofsLength = 3), 19) => false
 
-fn header(path: String, tr: Trailer, h: Bytes) -> Outcome
+fn header(src: Src, tr: Trailer, h: Bytes) -> Outcome
     ? "Signature, the version, three zero bytes, and the meta text, checked as the ndjson header line is; then the main block's records."
     ! [Disk.readBytesAt]
     m = vAt(h, posOf(8))
@@ -255,20 +331,20 @@ fn header(path: String, tr: Trailer, h: Bytes) -> Outcome
                 Result.Err(e) -> Outcome.Rejected("meta: {e}")
                 Result.Ok(v) -> match Export.Reader.supported(v)
                     false -> Outcome.Declined("format version {v} is not supported")
-                    true -> refill(Rd(path = path, b = Bytes.fromList([]), base = 0, stop = tr.offset + tr.length, n = 0), Tables.update(Export.Tables.empty(), version = tr.version), tr.offset, tr)
+                    true -> refill(Rd(src = src, b = Bytes.fromList([]), base = 0, stop = tr.offset + tr.length, n = 0), Tables.update(Export.Tables.empty(), version = tr.version), tr.offset, tr)
 
 fn refill(r: Rd, t: Tables, offset: Int, tr: Trailer) -> Outcome
     ? "The chunk that starts at offset, cut at the end of the block."
     ! [Disk.readBytesAt]
-    match Disk.readBytesAt(r.path, offset, Int.min(chunkBytes(), r.stop - offset))
-        Result.Err(e) -> Outcome.Declined("cannot read {r.path}: {e}")
-        Result.Ok(b) -> records(Rd(path = r.path, b = b, base = offset, stop = r.stop, n = r.n), t, posOf(0), tr)
+    match bytesAt(r.src, offset, Int.min(chunkBytes(), r.stop - offset))
+        Result.Err(e) -> Outcome.Declined("cannot read {nameOf(r.src)}: {e}")
+        Result.Ok(b) -> records(Rd(src = r.src, b = b, base = offset, stop = r.stop, n = r.n), t, posOf(0), tr)
 
 fn records(r: Rd, t: Tables, i: Pos, tr: Trailer) -> Outcome
     ? "The record at i; the tables are passed apart from the reading state so that they have one owner and grow in place. At the end of the block the counts are checked; a chunk with less than the margin left is first replaced (ChunkWithMargin)."
     ! [Disk.readBytesAt]
     match r.base + i.value == r.stop
-        true -> ended(r.path, t, tr)
+        true -> ended(r.src, t, tr)
         false -> match Bool.and(r.base + Bytes.len(r.b) < r.stop, Bytes.len(r.b) - i.value < marginBytes())
             true -> refill(r, t, r.base + i.value, tr)
             false -> step(r, t, i, tr)
@@ -284,7 +360,7 @@ fn stepped(r: Rd, tr: Trailer, d: Done) -> Outcome
     ? "Goes on after a record, or stops at a bad one. A bad record is named by its number in the block, which does not depend on how the file is read."
     ! [Disk.readBytesAt]
     match d
-        Done.Next(t, at) -> records(Rd(path = r.path, b = r.b, base = r.base, stop = r.stop, n = r.n + 1), t, at, tr)
+        Done.Next(t, at) -> records(Rd(src = r.src, b = r.b, base = r.base, stop = r.stop, n = r.n + 1), t, at, tr)
         Done.Short -> short(r)
         Done.Bad(e) -> Outcome.Rejected("record {r.n + 1}: {e}")
 
@@ -295,16 +371,16 @@ fn short(r: Rd) -> Outcome
         false -> Outcome.Declined("record {r.n + 1} is longer than {marginBytes()} bytes")
 
 verify short
-    short(Rd(path = "f", b = Bytes.fromList([]), base = 4, stop = 4, n = 2)) => Outcome.Rejected("record 3: the block ends inside it")
+    short(Rd(src = Src.File("f"), b = Bytes.fromList([]), base = 4, stop = 4, n = 2)) => Outcome.Rejected("record 3: the block ends inside it")
 
-fn ended(path: String, t: Tables, tr: Trailer) -> Outcome
+fn ended(src: Src, t: Tables, tr: Trailer) -> Outcome
     ? "The trailer's counts must be the main block's; in version 2 its blocks must fill the proof section, which is read then."
     ! [Disk.readBytesAt]
     match Bool.and(Bool.and(tr.names == t.nextName, tr.levels == t.nextLevel), Bool.and(tr.exprs == t.nextExpr, tr.decls == t.declCount))
         true -> match tr.version == 2
             false -> Outcome.Read(Export.Tables.finish(t))
             true -> match t.proofAt == tr.proofsLength
-                true -> withProofs(path, t, tr)
+                true -> withProofs(src, t, tr)
                 false -> Outcome.Rejected("the proof blocks take {t.proofAt} bytes, the proof section {tr.proofsLength}")
         false -> Outcome.Rejected("the trailer's counts disagree with the records")
 
@@ -332,12 +408,12 @@ decision FrontierAndPlaces
     rejected = ["FrontierAtTheEnd", "NamesListedPerBlock", "OptimisticOrder"]
     impacts = [exportRec, lazyThm, withProofs, storeOf]
 
-fn withProofs(path: String, t: Tables, tr: Trailer) -> Outcome
+fn withProofs(src: Src, t: Tables, tr: Trailer) -> Outcome
     ? "Version 2: the frontier the main block listed with the place codes of its names, and the proof section read whole; every lazy theorem gets its block's bytes (FrontierAndPlaces)."
     ! [Disk.readBytesAt]
     s = storeOf(t)
-    match Disk.readBytesAt(path, tr.proofs, tr.proofsLength)
-        Result.Err(e) -> Outcome.Declined("cannot read {path}: {e}")
+    match bytesAt(src, tr.proofs, tr.proofsLength)
+        Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
         Result.Ok(pb) -> Outcome.Read(packedAll(Export.Tables.finish(t), s, pb))
 
 fn storeOf(t: Tables) -> Store

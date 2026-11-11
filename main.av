@@ -23,7 +23,7 @@ fn main() -> Int
 
 fn checked(args: List<String>) -> Int
     ? "Reads and checks the file the arguments name; the exit status."
-    ! [Console.print, Disk.readBytesAt, Disk.size]
+    ! [Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     plain = withoutFlag(args, [])
     o = input(plain)
     v = report(o, workersIn(plain), memoryIn(args), List.contains(args, "--reorder-always"), List.contains(args, "--show-placed"))
@@ -69,18 +69,50 @@ verify withoutFlag
 
 fn input(args: List<String>) -> Outcome
     ? "The file read on as many workers as asked for, or the usage as a decline."
-    ! [Disk.readBytesAt, Disk.size]
+    ! [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     match args
         [path] -> fileOf(path, 4)
         [path, n] -> fileOf(path, workersOf(n))
         _ -> Outcome.Declined("usage: pestka [--low-memory] [--reorder-always] [--show-placed] FILE [WORKERS] | pestka pack FILE.ndjson FILE.susz [0|2]")
 
 fn fileOf(path: String, workers: Int) -> Outcome
-    ? "A Susz file by its signature, otherwise lean4export's ndjson."
-    ! [Disk.readBytesAt, Disk.size]
+    ? "A Susz file by its signature, otherwise lean4export's ndjson, packed into Susz of version 2 in memory and read as Susz (NdjsonThroughSusz)."
+    ! [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     match Export.Susz.isSusz(path)
         true -> Export.Susz.readFile(path)
-        false -> Export.Stream.readFile(path, workers)
+        false -> packedOf(path, workers, Export.Pack.image(path))
+
+decision NdjsonThroughSusz
+    date = "2026-11-11"
+    reason =
+        "An ndjson export is read one way: packed into Susz of version 2 in"
+        "memory (PackedInMemory in Export.Pack) and read by the Susz reader,"
+        "which leaves theorems' proofs as bytes until they are checked."
+        "Packing and the Susz reader stop at the first bad record they"
+        "meet, and a Susz reader names a record by its number in a block"
+        "that packing laid out, not by its line. So when packing fails, or"
+        "the reader rejects or declines the image, the ndjson reader reads"
+        "the file as it always has, and its verdict, the first bad line"
+        "named by its number, is the one given: a file that is not read is"
+        "reported as the ndjson reader reports it, and only a file that is"
+        "read whole goes on to be checked from the image."
+    chosen = "NdjsonThroughSusz"
+    rejected = ["NdjsonReaderOnly", "PackErrorsAsLines"]
+    impacts = [fileOf, packedOf, readPacked]
+
+fn packedOf(path: String, workers: Int, r: Result<Image, String>) -> Outcome
+    ? "The image read, or the file read by the ndjson reader when it could not be packed (NdjsonThroughSusz)."
+    ! [Disk.readBytesAt, Disk.size]
+    match r
+        Result.Ok(m) -> readPacked(path, workers, Export.Susz.readImage(m))
+        Result.Err(_) -> Export.Stream.readFile(path, workers)
+
+fn readPacked(path: String, workers: Int, o: Outcome) -> Outcome
+    ? "The image as read, or the file read by the ndjson reader when the image was not (NdjsonThroughSusz)."
+    ! [Disk.readBytesAt, Disk.size]
+    match o
+        Outcome.Read(_) -> o
+        _ -> Export.Stream.readFile(path, workers)
 
 fn workersIn(args: List<String>) -> Int
     ? "The workers the arguments ask for; four by default."

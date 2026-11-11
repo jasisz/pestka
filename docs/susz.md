@@ -5,7 +5,11 @@ pressed out) is Pestka's binary export format. It carries the same records
 as a lean4export 3.1.0 ndjson file, in the same order, without text to parse.
 `pestka pack FILE.ndjson FILE.susz [0|2]` writes one, of version 2 unless
 asked for 0; `pestka FILE.susz [WORKERS]` checks one, recognised by its first
-four bytes.
+four bytes. `pestka FILE.ndjson [WORKERS]` packs the export into version 2 in
+memory, with no file between, and checks that, read by the same reader
+(`NdjsonThroughSusz` in `main.av`); a file that cannot be packed, or whose
+image the reader rejects, is read by the ndjson reader instead, so a bad
+line is reported by its number as it always was.
 
 This page describes version 0 and version 2, which Pestka writes and reads
 today, and the rules every version keeps. Version 1, a tree of blocks for
