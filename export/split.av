@@ -14,6 +14,7 @@ module Split
         "block and in their blocks and finds the frontier; the last writes."
         "The writer is deterministic: the same file gives the same bytes."
     exposes [split, image]
+    exposes opaque [Ix]
     depends [Bytes, Core.Names, Core.Lazy, Export.Susz]
     effects [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
 
@@ -185,10 +186,45 @@ decision ChunkedNumbers
         "number. Each of these is a vector of chunks of 65536 numbers. A"
         "number is set in place by taking its chunk out of the outer vector"
         "first, so that the chunk has one owner while it is set, and putting"
-        "it back after."
+        "it back after. What stands in its place meanwhile is noChunk, one"
+        "vector made once for the module, so taking a chunk out allocates"
+        "nothing."
     chosen = "ChunkedNumbers"
     rejected = ["OneVector", "MapsOfNumbers"]
-    impacts = [cnew, cget, cset]
+    impacts = [cnew, cget, cset, Ix, ixAt]
+
+decision IdsInRange
+    date = "2026-11-11"
+    reason =
+        "An expression or declaration id is below 2^40, or none (-1), as a"
+        "file's counts are u32. It is an Ix, made only by ixAt, so compiled"
+        "Aver holds it as a machine word and finds its chunk and its place"
+        "in the chunk by division and remainder on that word."
+    chosen = "IdsInRange"
+    rejected = ["IdsAsInts"]
+    impacts = [Ix, ixOf, ixAt, cget, cset]
+
+record Ix
+    value: Int
+
+fn ixOf(n: Int) -> Result<Ix, String>
+    ? "An id: -1 for none, otherwise below 2^40 (IdsInRange)."
+    match Bool.and(n >= -1, n <= 1099511627776)
+        true -> Result.Ok(Ix(value = n))
+        false -> Result.Err("id out of range")
+
+verify ixOf
+    ixOf(-2) => Result.Err("id out of range")
+
+fn ixAt(n: Int) -> Ix
+    ? "The id n, none when it is out of range (IdsInRange)."
+    match ixOf(n)
+        Result.Ok(x) -> x
+        Result.Err(_) -> Ix(value = -1)
+
+verify ixAt
+    ixAt(5).value => 5
+    ixAt(-9).value => -1
 
 fn cnew(n: Int, x: Int) -> Vector<Vector<Int>>
     ? "n numbers x, in chunks of 65536 (ChunkedNumbers)."
@@ -207,20 +243,27 @@ verify chunksOf
     List.len(chunksOf(2, 0, [])) => 2
 
 fn cget(v: Vector<Vector<Int>>, i: Int) -> Int
-    ? "Number i, -1 when there is none (ChunkedNumbers)."
-    match Vector.get(v, Int.div(i, 65536))
-        Option.Some(c) -> Option.withDefault(Vector.get(c, Int.mod(i, 65536)), -1)
-        Option.None -> -1
+    ? "Number i, -1 when there is none (ChunkedNumbers, IdsInRange)."
+    x = ixAt(i)
+    match x.value < 0
+        true -> -1
+        false -> match Vector.get(v, Int.div(x.value, 65536))
+            Option.Some(c) -> Option.withDefault(Vector.get(c, Int.mod(x.value, 65536)), -1)
+            Option.None -> -1
 
 verify cget
     cget(cnew(1, 5), 0) => 5
+    cget(cnew(1, 5), -1) => -1
 
 fn cset(v: Vector<Vector<Int>>, i: Int, x: Int) -> Vector<Vector<Int>>
-    ? "v with x as number i: its chunk taken out, set and put back (ChunkedNumbers)."
-    ci = Int.div(i, 65536)
-    match Vector.get(v, ci)
-        Option.None -> v
-        Option.Some(c) -> cput(Option.withDefault(Vector.set(v, ci, noChunk()), v), ci, chunkSet(c, Int.mod(i, 65536), x))
+    ? "v with x as number i: its chunk taken out, set and put back (ChunkedNumbers, IdsInRange)."
+    k = ixAt(i)
+    ci = Int.div(Int.max(k.value, 0), 65536)
+    match Bool.and(k.value >= 0, ci < Vector.len(v))
+        false -> v
+        true -> match Vector.get(v, ci)
+            Option.None -> v
+            Option.Some(c) -> cput(Option.withDefault(Vector.set(v, ci, noChunk), v), ci, chunkSet(c, Int.mod(k.value, 65536), x))
 
 verify cset
     cget(cset(cset(cnew(70000, 0), 65537, 9), 2, 4), 65537) => 9
@@ -237,14 +280,9 @@ fn cput(v: Vector<Vector<Int>>, ci: Int, c: Vector<Int>) -> Vector<Vector<Int>>
     Option.withDefault(Vector.set(v, ci, c), v)
 
 verify cput
-    Vector.len(cput(Vector.fromList([noChunk()]), 0, Vector.fromList([1]))) => 1
+    Vector.len(cput(Vector.fromList([noChunk]), 0, Vector.fromList([1]))) => 1
 
-fn noChunk() -> Vector<Int>
-    ? "What stands for a chunk while it is out."
-    Vector.fromList([])
-
-verify noChunk
-    Vector.len(noChunk()) => 0
+noChunk: Vector<Int> = Vector.fromList([0])
 
 fn skipList(b: Bytes, p: Pos) -> Pos
     ? "Past a list of varints at p."
@@ -457,19 +495,12 @@ fn scanned(b: Bytes, p: Pos, end: Pos, ei: Int, di: Int, nameId: Int, eoff: Vect
     match Bool.or(off(p) >= off(end), off(p) < 0)
         true -> A(eoff = eoff, owner = owner, names = names, known = known, exprs = ei, decls = di)
         false -> match tagAt(b, p)
-            1 -> scannedName(b, p, end, ei, di, nameId, nameStrAt(b, p, names), eoff, owner, names, known)
-            2 -> scannedName(b, p, end, ei, di, nameId, nameNumAt(b, p, names), eoff, owner, names, known)
+            1 -> scanned(b, skipRecord(b, p), end, ei, di, nameId + 1, eoff, owner, Option.withDefault(Vector.set(names, nameId, nameStrAt(b, p, names)), names), known)
+            2 -> scanned(b, skipRecord(b, p), end, ei, di, nameId + 1, eoff, owner, Option.withDefault(Vector.set(names, nameId, nameNumAt(b, p, names)), names), known)
             18 -> declScanned(b, end, ei, di, nameId, eoff, owner, names, known, declOf(b, next1(p), ei))
             t -> match Bool.and(t >= 7, t <= 17)
                 true -> scanned(b, skipRecord(b, p), end, ei + 1, di, nameId, cset(eoff, ei, off(p)), owner, names, known)
                 false -> scanned(b, skipRecord(b, p), end, ei, di, nameId, eoff, owner, names, known)
-
-fn scannedName(b: Bytes, p: Pos, end: Pos, ei: Int, di: Int, nameId: Int, n: Name, eoff: Vector<Vector<Int>>, owner: Vector<Vector<Int>>, names: Vector<Name>, known: Map<Name, Int>) -> A
-    ? "After a name record: the name n is name nameId. It is made before the names are handed on, so that the vector has one owner when it is set."
-    scanned(b, skipRecord(b, p), end, ei, di, nameId + 1, eoff, owner, Option.withDefault(Vector.set(names, nameId, n), names), known)
-
-verify scannedName
-    scannedName(Bytes.fromList([2, 0, 3]), at(0), at(3), 0, 0, 1, Core.Names.num(Core.Names.anon(), 3), cnew(0, 0), cnew(0, 0), Vector.fromList([Core.Names.anon(), Core.Names.anon()]), {}).names => Vector.fromList([Core.Names.anon(), Core.Names.num(Core.Names.anon(), 3)])
 
 fn nameStrAt(b: Bytes, p: Pos, names: Vector<Name>) -> Name
     ? "A name record 1: its prefix and its text."
@@ -681,7 +712,7 @@ record W
     di: Int
     mainNext: Int
     lazy: Int
-    open: Map<Int, Acc>
+    open: Vector<Acc>
 
 fn zeroes(w: W, name: Bool, level: Bool) -> W
     ? "The anonymous name and the level zero have no records: when a block names them, their frontier entries open the main block, 1 back from names 1 and levels 1."
@@ -714,7 +745,7 @@ verify zeroed
 
 fn fresh() -> W
     ? "Nothing written yet; names and levels start at 1, after the implicit 0."
-    W(main = [], mainChunks = [], mainBytes = 0, proofs = [], proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = 0, di = 0, mainNext = 0, lazy = 0, open = {})
+    W(main = [], mainChunks = [], mainBytes = 0, proofs = [], proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = 0, di = 0, mainNext = 0, lazy = 0, open = Vector.fromList([]))
 
 verify fresh
     fresh().nameId => 1
@@ -801,7 +832,7 @@ fn withV0(b: Bytes, tr: Bytes) -> Result<Laid, String>
     owner = walkBack(b, a.exprs - 1, a.eoff, a.owner)
     nm = numbered(b, 0, a.exprs, a.eoff, owner, Vector.new(decls, 0)?, Vector.new(names, -2)?, Vector.new(u32At(tr, 4), -2)?, 0)
     codes = Codes(names = Vector.fromList(codesOf(a.known, List.fromVector(a.names), [])), nat = codeIn(a.known, Core.Names.str(Core.Names.anon(), "Nat")), str = codesOf(a.known, litNames, []))
-    w = written(b, at(base), at(base + len), zeroes(fresh(), geti(nm.nameF, 0) == -1, geti(nm.levelF, 0) == -1), nm.owner, nm.ids, zeroed(nm.nameF), zeroed(nm.levelF), nm.count, codes)?
+    w = written(b, at(base), at(base + len), zeroes(W.update(fresh(), open = Vector.new(decls, acc0())?), geti(nm.nameF, 0) == -1, geti(nm.levelF, 0) == -1), nm.owner, nm.ids, zeroed(nm.nameF), zeroed(nm.levelF), nm.count, codes)?
     laid(Bytes.take(Bytes.drop(b, 8), base - 8), u32At(tr, 0), u32At(tr, 4), decls, exprs, w)
 
 litNames: List<Name> = [Core.Names.str(Core.Names.anon(), "Nat"), Core.Names.str(Core.Names.anon(), "String"), Core.Names.str(Core.Names.str(Core.Names.anon(), "String"), "ofList"), Core.Names.str(Core.Names.anon(), "List"), Core.Names.str(Core.Names.anon(), "Char"), Core.Names.str(Core.Names.str(Core.Names.anon(), "Char"), "ofNat")]
@@ -964,9 +995,16 @@ fn mainRefAt(b: Bytes, x: At, n: Int, e: Int, next: Int, ids: Vector<Vector<Int>
 
 fn blockWritten(b: Bytes, p: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vector<Int>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes, o: Int) -> W
     ? "An expression of o's block, after a mark when it stood before a later declaration than the block's last record."
-    a1 = markedAt(Option.withDefault(Map.get(w.open, o), Acc(out = [], k = 0, mark = 0, fine = true)), w.di)
+    a1 = markedAt(Option.withDefault(Vector.get(w.open, o), acc0()), w.di)
     r = blockExpr(b, p, w.ei, o, cget(ids, w.ei), owner, ids, nameF, levelF, codes, a1.mark, a1.out)
-    W.update(w, open = Map.set(w.open, o, Acc(out = r.out, k = a1.k + 1, mark = a1.mark, fine = Bool.and(a1.fine, r.fine))))
+    W.update(w, open = Option.withDefault(Vector.set(w.open, o, Acc(out = r.out, k = a1.k + 1, mark = a1.mark, fine = Bool.and(a1.fine, r.fine))), w.open))
+
+fn acc0() -> Acc
+    ? "A block not yet begun."
+    Acc(out = [], k = 0, mark = 0, fine = true)
+
+verify acc0
+    acc0().k => 0
 
 fn markedAt(a: Acc, di: Int) -> Acc
     ? "A mark record first when the block's last mark is not di."
@@ -1052,7 +1090,7 @@ fn projBlock(b: Bytes, p: Pos, e: Int, o: Int, k: Int, owner: Vector<Vector<Int>
 fn declWritten(b: Bytes, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vector<Int>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes, d: DeclP) -> Result<W, String>
     ? "A declaration, its references by main numbers; a theorem whose value has a block becomes kind 6, its block taken into the proof section."
     match geti(count, w.di) > 0
-        true -> lazyWritten(b, end, w, owner, ids, nameF, levelF, count, codes, d, Map.get(w.open, w.di))
+        true -> lazyWritten(b, end, w, owner, ids, nameF, levelF, count, codes, d, Vector.get(w.open, w.di))
         false -> written(b, d.end, end, W.update(mainOut(w, declPieces(b, d.pieces, w.ei, w.mainNext, ids, -1, 0, false, List.prepend(d.kind, List.prepend(18, w.main)))), di = w.di + 1), owner, ids, nameF, levelF, count, codes)
 
 fn lazyWritten(b: Bytes, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vector<Int>>, nameF: Vector<Int>, levelF: Vector<Int>, count: Vector<Int>, codes: Codes, d: DeclP, a: Option<Acc>) -> Result<W, String>
@@ -1065,7 +1103,7 @@ fn lazyOut(b: Bytes, end: Pos, w: W, owner: Vector<Vector<Int>>, ids: Vector<Vec
     ? "The theorem and its block written."
     blen = uvLen(n) + List.len(x.out)
     m = declPieces(b, d.pieces, w.ei, w.mainNext, ids, d.value, blen, x.fine, List.prepend(6, List.prepend(18, w.main)))
-    w2 = W.update(mainOut(w, m), proofs = List.concat(x.out, uv(w.proofs, n)), open = Map.remove(w.open, w.di), di = w.di + 1, lazy = w.lazy + 1)
+    w2 = W.update(w, main = m, proofs = List.concat(x.out, uv(w.proofs, n)), open = Option.withDefault(Vector.set(w.open, w.di, acc0()), w.open), di = w.di + 1, lazy = w.lazy + 1)
     written(b, d.end, end, w2, owner, ids, nameF, levelF, count, codes)
 
 fn declPieces(b: Bytes, ps: List<Piece>, e: Int, next: Int, ids: Vector<Vector<Int>>, value: Int, blen: Int, fine: Bool, acc: List<Int>) -> List<Int>
@@ -1241,7 +1279,7 @@ verify mainRefs
     mainRefs(Bytes.fromList([]), at(0), 0, 0, 0, cnew(0, 0), [3]) => [3]
 
 verify blockWritten
-    Option.withDefault(Map.get(blockWritten(Bytes.fromList([7, 3]), at(0), W.update(fresh(), di = 2), cnew(1, 0), cnew(1, 0), Vector.fromList([]), Vector.fromList([]), Vector.fromList([1]), codes0(), 0).open, 0), Acc(out = [], k = 0, mark = 0, fine = true)).out => [3, 7, 2, 19]
+    Option.withDefault(Vector.get(blockWritten(Bytes.fromList([7, 3]), at(0), W.update(fresh(), di = 2, open = Vector.fromList([acc0()])), cnew(1, 0), cnew(1, 0), Vector.fromList([]), Vector.fromList([]), Vector.fromList([1]), codes0(), 0).open, 0), Acc(out = [], k = 0, mark = 0, fine = true)).out => [3, 7, 2, 19]
 
 verify blockRef
     blockRef([], 1, 1, 0, 1, cnew(1, 0), cnew(1, 0)) => [1]
