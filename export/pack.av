@@ -54,12 +54,23 @@ verify define
     define(Ren(below = 1, m = {}), 5, 1) => Ren(below = 1, m = {5 => 1})
 
 fn lookup(r: Ren, i: Int) -> Int
-    ? "The Susz id of the table's id i, or -1 when i is not defined (IdsRenumbered)."
+    ? "The Susz id of the table's id i, or -1 when i is not defined (IdsRenumbered); while nothing is mapped, i itself when it is below, with no hash computed."
+    match Map.len(r.m) == 0
+        true -> match Bool.and(i >= 0, i < r.below)
+            true -> i
+            false -> -1
+        false -> lookupMapped(r, i)
+
+fn lookupMapped(r: Ren, i: Int) -> Int
+    ? "The Susz id of i once ids are mapped."
     match Map.get(r.m, i)
         Option.Some(x) -> x
         Option.None -> match Bool.and(i >= 0, i < r.below)
             true -> i
             false -> -1
+
+verify lookupMapped
+    lookupMapped(Ren(below = 2, m = {7 => 2}), 1) => 1
 
 verify lookup
     lookup(Ren(below = 2, m = {}), 1) => 1
@@ -740,7 +751,9 @@ fn uv(acc: List<Int>, n: Int) -> List<Int>
     ? "n as a varint, little-endian base 128, onto the reversed output."
     match n < 128
         true -> List.prepend(n, acc)
-        false -> uv(List.prepend(Int.mod(n, 128) + 128, acc), Int.div(n, 128))
+        false -> match n < 4611686018427387904
+            true -> uv(List.prepend(Bits.and(n, 127) + 128, acc), Bits.shiftRight(n, 7))
+            false -> uv(List.prepend(Int.mod(n, 128) + 128, acc), Int.div(n, 128))
 
 verify uv
     uv([], 5) => [5]
