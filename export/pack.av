@@ -143,11 +143,9 @@ decision OneStepPack
 
 record X
     eoff: Vector<Vector<Num>>
-    c1: Vector<Vector<U32>>
-    c2: Vector<Vector<U32>>
+    parts: Vector<Vector<Num>>
     kc: Vector<Num>
-    ac: Vector<U32>
-    bc: Vector<U32>
+    pc: Vector<Num>
     run: Int
     owner: Vector<Vector<Num>>
     cap: Int
@@ -156,14 +154,14 @@ record X
 
 fn x0(slots: Int) -> Result<X, String>
     ? "Nothing noted yet: room for slots chunks of 65536 expressions, none made but the columns' first, and for 4096 names."
-    Result.Ok(X(eoff = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, c1 = Vector.new(Int.max(slots, 1), Export.Split.noChunk32)?, c2 = Vector.new(Int.max(slots, 1), Export.Split.noChunk32)?, kc = Vector.new(65536, Export.Split.num(0)), ac = Vector.new(65536, Export.Split.nat32(0)), bc = Vector.new(65536, Export.Split.nat32(0)), run = 0, owner = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, cap = 0, names = Vector.new(4096, Core.Names.anon()), known = {}))
+    Result.Ok(X(eoff = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, parts = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, kc = Vector.new(65536, Export.Split.num(0)), pc = Vector.new(65536, Export.Split.num(0)), run = 0, owner = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, cap = 0, names = Vector.new(4096, Core.Names.anon()), known = {}))
 
 verify x0
     capOf(x0(2)) => Result.Ok(0)
 
 fn x00() -> X
     ? "Nothing noted, for examples."
-    X(eoff = Vector.fromList([Export.Split.noChunk]), c1 = Vector.fromList([Export.Split.noChunk32]), c2 = Vector.fromList([Export.Split.noChunk32]), kc = Vector.new(65536, Export.Split.num(0)), ac = Vector.new(65536, Export.Split.nat32(0)), bc = Vector.new(65536, Export.Split.nat32(0)), run = 0, owner = Vector.fromList([Export.Split.noChunk]), cap = 0, names = Vector.fromList([Core.Names.anon()]), known = {})
+    X(eoff = Vector.fromList([Export.Split.noChunk]), parts = Vector.fromList([Export.Split.noChunk]), kc = Vector.new(65536, Export.Split.num(0)), pc = Vector.new(65536, Export.Split.num(0)), run = 0, owner = Vector.fromList([Export.Split.noChunk]), cap = 0, names = Vector.fromList([Core.Names.anon()]), known = {})
 
 verify x00
     x00().cap => 0
@@ -533,8 +531,8 @@ verify bindCode
     bindCode(false) => 6
 
 fn colDone(q: P, ie: Int, x: X) -> Result<QX, String>
-    ? "The expression counted; refused past what a u32 count holds."
-    match q.exprs >= 4294967295
+    ? "The expression counted; refused past what the columns hold (PartsInOneWord in Export.Split)."
+    match q.exprs >= Export.Split.partsLimit()
         true -> Result.Err("too many expressions")
         false -> Result.Ok(QX(q = P.update(q, exprs = q.exprs + 1, er = define(q.er, ie, q.exprs)), x = x))
 
@@ -545,8 +543,7 @@ fn colSet(x: X, e: Int, k: Int, c1: Int, c2: Int) -> X
     ? "Expression e's kind word and parts set in the current chunks, each field on its own, and counted in the run."
     j = Bits.and(e, 65535)
     x1 = X.update(x, kc = kSet(x.kc, j, k))
-    x2 = X.update(x1, ac = uSet(x1.ac, j, c1))
-    X.update(x2, bc = uSet(x2.bc, j, c2), run = x2.run + 1)
+    X.update(x1, pc = kPut(x1.pc, j, Export.Split.partsOf(c1, c2)), run = x1.run + 1)
 
 verify colSet
     colSet(x00(), 0, 1, 0, 0).run => 1
@@ -558,13 +555,6 @@ fn kSet(c: Vector<Num>, j: Int, v: Int) -> Vector<Num>
 verify kSet
     Vector.len(kSet(Vector.fromList([Export.Split.num(0)]), 0, 2)) => 1
 
-fn uSet(c: Vector<U32>, j: Int, v: Int) -> Vector<U32>
-    ? "c with v at j, in place."
-    Option.withDefault(Vector.set(c, j, Export.Split.nat32(v)), c)
-
-verify uSet
-    Vector.len(uSet(Vector.fromList([Export.Split.nat32(0)]), 0, 2)) => 1
-
 record One
     q: P
     x: X
@@ -574,7 +564,7 @@ fn oneLaid(o: One) -> Result<Laid, String>
     q = flushRun(o.q, o.x.run)
     x = lastStashed(o.x, q.exprs)
     b = Bytes.fromList(List.reverse(q.out))?
-    a = A(eoff = x.eoff, c1 = x.c1, c2 = x.c2, owner = x.owner, names = Vector.fromList(List.take(List.fromVector(x.names), q.names)), known = x.known, exprs = q.exprs, decls = q.decls)
+    a = A(eoff = x.eoff, parts = x.parts, owner = x.owner, names = Vector.fromList(List.take(List.fromVector(x.names), q.names)), known = x.known, exprs = q.exprs, decls = q.decls)
     Export.Split.laidAfter(b, q.start, Bytes.len(b), q.names, q.levels, q.decls, q.exprs, a)
 
 fn lastStashed(x: X, exprs: Int) -> X
@@ -590,17 +580,15 @@ verify lastStashed
 fn stashed(x: X, ci: Int) -> X
     ? "The current chunks put in place as chunk ci, each field on its own (ExprColumns)."
     x1 = X.update(x, eoff = Option.withDefault(Vector.set(x.eoff, ci, x.kc), x.eoff))
-    x2 = X.update(x1, c1 = Option.withDefault(Vector.set(x1.c1, ci, x1.ac), x1.c1))
-    X.update(x2, c2 = Option.withDefault(Vector.set(x2.c2, ci, x2.bc), x2.c2))
+    X.update(x1, parts = Option.withDefault(Vector.set(x1.parts, ci, x1.pc), x1.parts))
 
 verify stashed
-    Vector.len(Option.withDefault(Vector.get(stashed(x00(), 0).c2, 0), Export.Split.noChunk32)) => 65536
+    Vector.len(Option.withDefault(Vector.get(stashed(x00(), 0).parts, 0), Export.Split.noChunk)) => 65536
 
 fn freshChunks(x: X) -> X
     ? "New current chunks, each field on its own."
     x1 = X.update(x, kc = Vector.new(65536, Export.Split.num(0)))
-    x2 = X.update(x1, ac = Vector.new(65536, Export.Split.nat32(0)))
-    X.update(x2, bc = Vector.new(65536, Export.Split.nat32(0)))
+    X.update(x1, pc = Vector.new(65536, Export.Split.num(0)))
 
 verify freshChunks
     freshChunks(x00()).run => 0
@@ -794,8 +782,8 @@ verify colRun
     colRun(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58, 48, 44, 34, 102, 110, 34, 58, 48, 125, 44, 34, 105, 101, 34, 58, 49, 125, 10]), Export.Lines.offAt(32), Export.Lines.offAt(0), x00(), cntAt(2), cntAt(1), cntAt(65536), cntAt(0)).taken => cntAt(0)
 
 fn appFits(ie: Int, f: Int, a: Int, e: Cnt) -> Bool
-    ? "Whether an application with id ie and parts f and a is the next expression e with both parts defined, while ids are their own, and the count stays below what a u32 holds (the checks of colApp and colDone)."
-    Bool.and(Bool.and(ie == e.value, e.value < 4294967295), Bool.and(Bool.and(f >= 0, f < e.value), Bool.and(a >= 0, a < e.value)))
+    ? "Whether an application with id ie and parts f and a is the next expression e with both parts defined, while ids are their own, and the count stays below what the columns hold (the checks of colApp and colDone)."
+    Bool.and(Bool.and(ie == e.value, e.value < Export.Split.partsLimit()), Bool.and(Bool.and(f >= 0, f < e.value), Bool.and(a >= 0, a < e.value)))
 
 verify appFits
     appFits(2, 0, 1, cntAt(2)) => true
@@ -807,23 +795,18 @@ fn bindFits(la: LineAt, e: Cnt, names: Cnt) -> Bool
     ty = Export.Lines.numOf(la.n3)
     body = Export.Lines.numOf(la.n4)
     nmi = Export.Lines.numOf(la.n2)
-    Bool.and(Bool.and(Bool.and(Export.Lines.numOf(la.n1) == e.value, e.value < 4294967295), Bool.and(nmi >= 0, nmi < names.value)), Bool.and(Bool.and(ty >= 0, ty < e.value), Bool.and(body >= 0, body < e.value)))
+    Bool.and(Bool.and(Bool.and(Export.Lines.numOf(la.n1) == e.value, e.value < Export.Split.partsLimit()), Bool.and(nmi >= 0, nmi < names.value)), Bool.and(Bool.and(ty >= 0, ty < e.value), Bool.and(body >= 0, body < e.value)))
 
 fn colPut(x: X, e: Cnt, k: Int, c1: Int, c2: Int) -> X
     ? "Expression e's kind word and parts set in the current chunks, as colSet sets them; the run is counted by the caller (ColumnRuns)."
     j = Bits.and(e.value, 65535)
     x1 = X.update(x, kc = kPut(x.kc, j, Export.Split.numStep(k)))
-    x2 = X.update(x1, ac = uPut(x1.ac, j, Export.Split.u32Step(c1)))
-    X.update(x2, bc = uPut(x2.bc, j, Export.Split.u32Step(c2)))
+    X.update(x1, pc = kPut(x1.pc, j, Export.Split.partsOf(c1, c2)))
 
 verify colPut
     Vector.get(colPut(x00(), cntAt(1), 1, 0, 0).kc, 1) => Option.Some(Export.Split.num(1))
 
 fn kPut(c: Vector<Num>, j: Int, v: Num) -> Vector<Num>
-    ? "c with v at j, in place."
-    Option.withDefault(Vector.set(c, j, v), c)
-
-fn uPut(c: Vector<U32>, j: Int, v: U32) -> Vector<U32>
     ? "c with v at j, in place."
     Option.withDefault(Vector.set(c, j, v), c)
 

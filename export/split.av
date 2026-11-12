@@ -1125,6 +1125,8 @@ record W
     mainNext: Ix
     lazy: Int
     open: Vector<Acc>
+    hold: Acc
+    held: Ix
     ids: IdsW
 
 fn zeroes(w: W, name: Bool, level: Bool) -> W
@@ -1158,7 +1160,7 @@ verify zeroed
 
 fn fresh() -> W
     ? "Nothing written yet; names and levels start at 1, after the implicit 0."
-    W(main = [], mainChunks = [], mainBytes = 0, proofs = Bytes.fromList([]), proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = Ix(value = 0), di = Ix(value = 0), mainNext = Ix(value = 0), lazy = 0, open = Vector.fromList([]), ids = ids0(0))
+    W(main = [], mainChunks = [], mainBytes = 0, proofs = Bytes.fromList([]), proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = Ix(value = 0), di = Ix(value = 0), mainNext = Ix(value = 0), lazy = 0, open = Vector.fromList([]), hold = acc0(), held = Ix(value = -1), ids = ids0(0))
 
 verify fresh
     fresh().nameId => 1
@@ -1474,11 +1476,14 @@ fn mainRefAt(b: Bytes, x: At, n: Int, e: Ix, next: Ix, ids: IdsW, acc: List<Int>
     mainRefs(b, x.at, n - 1, e, next, ids, mainRef(acc, e, x.value, next, ids))
 
 fn blockWritten(b: Bytes, p: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Num) -> BW
-    ? "An expression of o's block, after a mark when it stood before a later declaration than the block's last record."
-    a1 = markedAt(Option.withDefault(Vector.get(w.open, o.value), acc0()), w.di)
-    r = blockExpr(b, p, w.ei, o, a1.k, owner, w.ids, nameF, levelF, codes, a1.mark.value, a1.out)
-    w1 = W.update(w, open = Option.withDefault(Vector.set(w.open, o.value, Acc(out = r.out, k = ixStep(a1.k.value + 1), mark = a1.mark, fine = Bool.and(a1.fine, r.fine))), w.open))
-    BW(w = W.update(w1, ids = idSet(w1.ids, w1.ei, a1.k)), at = r.at)
+    ? "An expression of o's block, after a mark when it stood before a later declaration than the block's last record; the block held out (BlockHeldOut)."
+    w0 = heldFor(w, o)
+    h = w0.hold
+    w1 = W.update(w0, hold = acc0())
+    a1 = markedAt(h, w1.di)
+    r = blockExpr(b, p, w1.ei, o, a1.k, owner, w1.ids, nameF, levelF, codes, a1.mark.value, a1.out)
+    w2 = W.update(w1, hold = Acc(out = r.out, k = ixStep(a1.k.value + 1), mark = a1.mark, fine = Bool.and(a1.fine, r.fine)))
+    BW(w = W.update(w2, ids = idSet(w2.ids, w2.ei, a1.k)), at = r.at)
 
 fn colsRun(b: Bytes, n: At, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols) -> Result<W, String>
     ? "A run record: the next n.value expressions are in the columns (ExprColumns); the records go on after it."
@@ -1515,29 +1520,18 @@ verify colFrontier
 
 fn colMainW(w: W, k: Num, c1: Ix, c2: Ix) -> W
     ? "An expression of the columns written into the main block, as colMain writes it and mainExprOut counts it; the main block's list moved out of w and onto, never read as a copy (BlocksTakenOut)."
-    code = Bits.and(k.value, 15)
     d1 = numStep(w.mainNext.value - idOf(w.ids, c1))
     d2 = numStep(w.mainNext.value - idOf(w.ids, c2))
-    w1 = W.update(w, main = List.prepend(colTag(code), w.main))
-    w2 = match code == 1
+    w1 = W.update(w, main = colHead(w.main, k))
+    w2 = match Bits.and(k.value, 15) == 1
         true -> w1
-        false -> W.update(w1, main = uwn(List.prepend(code - headBase(code), w1.main), numStep(Bits.shiftRight(k.value, 4))))
+        false -> W.update(w1, main = uwn(w1.main, numStep(Bits.shiftRight(k.value, 4))))
     w3 = W.update(w2, main = uwn(uwn(w2.main, d1), d2))
     W.update(w3, ids = idSet(w3.ids, w3.ei, w3.mainNext))
 
 verify colMainW
     colMainW(W.update(fresh(), ids = ids0(1), mainNext = ixAt(1)), num(34), ixAt(0), ixAt(0)).main => colMain([], num(34), ixAt(0), ixAt(0), ixAt(1), ids0(1))
     colMainW(W.update(fresh(), ids = ids0(1), mainNext = ixAt(1)), num(1), ixAt(0), ixAt(0)).main => colMain([], num(1), ixAt(0), ixAt(0), ixAt(1), ids0(1))
-
-fn colTag(code: Int) -> Int
-    ? "The tag of kind code code: 10 for an application (1), 11 for a lambda, 12 for a pi."
-    match code == 1
-        true -> 10
-        false -> headTag(code)
-
-verify colTag
-    colTag(1) => 10
-    colTag(7) => 12
 
 fn colHead(acc: List<Int>, k: Num) -> List<Int>
     ? "The tag of kind word k, and a binder's annotation byte."
@@ -1566,10 +1560,71 @@ verify colMain
 
 fn colBlock(w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, o: Num, k: Num, c1: Ix, c2: Ix) -> W
     ? "An expression of the columns into o's block, after a mark when it stood before a later declaration than the block's last record, as blockWritten; numbered the block's next (NumberedAsWritten)."
-    n = openCount(w.open, o)
-    w1 = W.update(w, open = colOpened(w.open, w.di, k, c1, c2, o, owner, w.ids, nameF))
-    w2 = W.update(w1, ids = idSet(w1.ids, w1.ei, n))
-    W.update(w2, ei = ixStep(w2.ei.value + 1))
+    w0 = heldFor(w, o)
+    match w0.held.value == o.value
+        true -> colHeld(w0, owner, nameF, o, k, c1, c2)
+        false -> colNumbered(w0, Ix(value = 0))
+
+fn colHeld(w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, o: Num, k: Num, c1: Ix, c2: Ix) -> W
+    ? "An expression of the columns written into the block held, o."
+    n = w.hold.k
+    w1 = W.update(w, hold = colAcc(markedAt(w.hold, w.di), k, c1, c2, o, owner, w.ids, nameF))
+    colNumbered(w1, n)
+
+fn colNumbered(w: W, n: Ix) -> W
+    ? "The expression numbered n, and the next one's turn."
+    w1 = W.update(w, ids = idSet(w.ids, w.ei, n))
+    W.update(w1, ei = ixStep(w1.ei.value + 1))
+
+verify colNumbered
+    colNumbered(W.update(fresh(), ids = ids0(1)), ixAt(0)).ei.value => 1
+
+verify colHeld
+    colHeld(W.update(fresh(), ids = ids0(1), held = ixAt(0)), cnew(1, 0), Vector.fromList([]), num(0), num(1), ixAt(0), ixAt(0)).hold.k.value => 1
+
+decision BlockHeldOut
+    date = "2026-11-12"
+    reason =
+        "Most expressions of a block follow one another, and each was"
+        "written by taking the block's open record out of the vector of"
+        "open blocks and putting it back. The block written to last is"
+        "now held out of the vector, in the writer's own field, and stays"
+        "there while the expressions written are its: it is put back only"
+        "when an expression of another block comes, and before its"
+        "theorem's declaration reads it. Its place in the vector meanwhile"
+        "holds a block not yet begun."
+    chosen = "BlockHeldOut"
+    rejected = ["BlocksTakenOutEachTime"]
+    impacts = [W, heldFor, settled, colBlock, blockWritten, declWritten]
+
+fn heldFor(w: W, o: Num) -> W
+    ? "w with block o held out (BlockHeldOut): as it is when it holds o, else the block held put back and o taken out; held stays none when there is no block o."
+    match w.held.value == o.value
+        true -> w
+        false -> heldTaken(settled(w), o)
+
+verify heldFor
+    heldFor(W.update(fresh(), open = Vector.fromList([acc0(), Acc(out = [3], k = ixAt(1), mark = ixAt(0), fine = true)])), num(1)).hold.out => [3]
+    Vector.get(heldFor(heldFor(W.update(fresh(), open = Vector.fromList([acc0(), Acc(out = [3], k = ixAt(1), mark = ixAt(0), fine = true)])), num(1)), num(0)).open, 1) => Option.Some(Acc(out = [3], k = ixAt(1), mark = ixAt(0), fine = true))
+
+fn heldTaken(w: W, o: Num) -> W
+    ? "Block o taken out of the vector and held, w holding none."
+    match Vector.get(w.open, o.value)
+        Option.None -> w
+        Option.Some(a) -> W.update(w, open = openPut(w.open, o.value, acc0()), hold = a, held = ixStep(o.value))
+
+verify heldTaken
+    heldTaken(fresh(), num(0)).held.value => -1
+
+fn settled(w: W) -> W
+    ? "The block held put back in its place; none held."
+    h = w.hold
+    i = w.held.value
+    w1 = W.update(w, hold = acc0(), held = Ix(value = -1))
+    W.update(w1, open = openPut(w1.open, i, h))
+
+verify settled
+    settled(fresh()) => fresh()
 
 decision BlocksTakenOut
     date = "2026-11-12"
@@ -1583,58 +1638,20 @@ decision BlocksTakenOut
         "put back."
     chosen = "BlocksTakenOut"
     rejected = ["BlocksReadAsCopies"]
-    impacts = [colBlock, colOpened, openCount]
-
-fn openCount(v: Vector<Acc>, o: Num) -> Ix
-    ? "How many expressions block o holds so far, 0 when there is no such block."
-    match Vector.get(v, o.value)
-        Option.Some(a) -> a.k
-        Option.None -> Ix(value = 0)
-
-verify openCount
-    openCount(Vector.fromList([acc0()]), num(3)) => Ix(value = 0)
-
-fn colOpened(v: Vector<Acc>, di: Ix, k: Num, c1: Ix, c2: Ix, o: Num, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>) -> Vector<Acc>
-    ? "The open blocks with an expression of the columns written into block o, taken out while it is written (BlocksTakenOut); unchanged when there is no such block."
-    i = o.value
-    z = acc0()
-    match Vector.get(v, i)
-        Option.None -> v
-        Option.Some(a) -> openPut(Option.withDefault(Vector.set(v, i, z), v), i, colAcc(markedAt(a, di), k, c1, c2, o, owner, ids, nameF))
-
-verify colOpened
-    Option.withDefault(Vector.get(colOpened(Vector.fromList([acc0()]), ixAt(0), num(1), ixAt(0), ixAt(0), num(0), cnew(1, 0), ids0(1), Vector.fromList([])), 0), acc0()).k => ixAt(1)
+    impacts = [heldTaken, settled]
 
 fn colAcc(a: Acc, k: Num, c1: Ix, c2: Ix, o: Num, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>) -> Acc
     ? "Block a with the expression written and counted, as colBlockOut writes it."
-    code = Bits.and(k.value, 15)
-    h = match code == 1
-        true -> List.prepend(10, a.out)
-        false -> uv(List.prepend(code - headBase(code), List.prepend(headTag(code), a.out)), geti(nameF, Bits.shiftRight(k.value, 4)))
+    h0 = colHead(a.out, k)
+    h = match Bits.and(k.value, 15) == 1
+        true -> h0
+        false -> uv(h0, geti(nameF, Bits.shiftRight(k.value, 4)))
     Acc(out = uwn(uwn(h, refBack(c1, o, a.k, owner, ids)), refBack(c2, o, a.k, owner, ids)), k = ixStep(a.k.value + 1), mark = a.mark, fine = a.fine)
 
 verify colAcc
     colAcc(acc0(), num(1), ixAt(0), ixAt(0), num(0), cnew(1, -4), ids0(1), Vector.fromList([])).out => colBlockOut([], num(1), ixAt(0), ixAt(0), num(0), ixAt(0), cnew(1, -4), ids0(1), Vector.fromList([]))
     colAcc(acc0(), num(98), ixAt(0), ixAt(1), num(0), cnew(2, 0), ids0(2), Vector.fromList([5, 5, 5, 5, 5, 5, 7])).out => colBlockOut([], num(98), ixAt(0), ixAt(1), num(0), ixAt(0), cnew(2, 0), ids0(2), Vector.fromList([5, 5, 5, 5, 5, 5, 7]))
     colAcc(acc0(), num(35), ixAt(0), ixAt(1), num(0), cnew(2, 0), ids0(2), Vector.fromList([5, 5, 5])).out => colBlockOut([], num(35), ixAt(0), ixAt(1), num(0), ixAt(0), cnew(2, 0), ids0(2), Vector.fromList([5, 5, 5]))
-
-fn headTag(code: Int) -> Int
-    ? "The tag of a binder's kind code: 11 for a lambda (2 to 5), 12 for a pi."
-    match code <= 5
-        true -> 11
-        false -> 12
-
-verify headTag
-    headTag(3) => 11
-
-fn headBase(code: Int) -> Int
-    ? "What a binder's kind code less its annotation is: 2 for a lambda, 6 for a pi."
-    match code <= 5
-        true -> 2
-        false -> 6
-
-verify headBase
-    headBase(9) => 6
 
 fn refBack(c: Ix, o: Num, k: Ix, owner: Vector<Vector<Num>>, ids: IdsW) -> Num
     ? "How far back a reference to expression c from number k of o's block is, as blockRefC writes it."
@@ -1768,7 +1785,13 @@ fn projBlock(b: Bytes, p: Pos, e: Ix, o: Num, k: Ix, owner: Vector<Vector<Num>>,
     fineRA(blockRefs(b, i.at, 1, e, o, k, owner, ids, uv(uv(List.prepend(16, acc), geti(nameF, n.value)), i.value)), Core.Lazy.placedFor(geti(codes.names, n.value), mark))
 
 fn declWritten(b: Bytes, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, d: DeclP) -> Result<W, String>
-    ? "A declaration, its references by main numbers; a theorem whose value has a block becomes kind 6, its block taken into the proof section."
+    ? "A declaration, its references by main numbers; a theorem whose value has a block becomes kind 6, its block, put back first when it is held (BlockHeldOut), taken into the proof section."
+    match w.held.value == w.di.value
+        true -> declWritten(b, end, settled(w), owner, nameF, levelF, codes, cs, d)
+        false -> declOpen(b, end, w, owner, nameF, levelF, codes, cs, d)
+
+fn declOpen(b: Bytes, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, d: DeclP) -> Result<W, String>
+    ? "A declaration whose block, if any, is in the vector of open blocks."
     match blockLength(w.open, w.di.value) > 0
         true -> lazyWritten(b, end, w, owner, nameF, levelF, codes, cs, d, Vector.get(w.open, w.di.value))
         false -> written(b, d.end, end, W.update(mainOut(w, declPieces(b, d.pieces, w.ei, w.mainNext, w.ids, -1, 0, false, List.prepend(d.kind, List.prepend(18, w.main)))), di = nextIx(w.di)), owner, nameF, levelF, codes, cs)
@@ -1965,7 +1988,7 @@ verify mainRefs
     mainRefs(Bytes.fromList([]), at(0), 0, ixAt(0), ixAt(0), ids0(0), [3]).out => [3]
 
 verify blockWritten
-    Option.withDefault(Vector.get(blockWritten(Bytes.fromList([7, 3]), at(0), W.update(fresh(), di = ixAt(2), open = Vector.fromList([acc0()])), cnew(1, 0), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), num(0)).w.open, 0), Acc(out = [], k = Ix(value = 0), mark = Ix(value = 0), fine = true)).out => [3, 7, 2, 19]
+    blockWritten(Bytes.fromList([7, 3]), at(0), W.update(fresh(), di = ixAt(2), open = Vector.fromList([acc0()])), cnew(1, 0), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), num(0)).w.hold.out => [3, 7, 2, 19]
 
 verify blockRef
     blockRef([], ixAt(1), 1, num(0), ixAt(1), cnew(1, 0), ids0(1)) => [1]
@@ -2085,7 +2108,7 @@ verify colMainDone
     Result.withDefault(colMainDone(Bytes.fromList([]), at(0), num(1), at(0), fresh(), cnew(1, -2), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), num(-2)), fresh()).mainNext.value => 1
 
 verify colBlock
-    Option.withDefault(Vector.get(colBlock(W.update(fresh(), ei = ixAt(2), open = Vector.fromList([acc0()]), ids = ids0(3)), cset(cnew(3, 0), 1, -4), Vector.fromList([]), num(0), num(1), ixAt(0), ixAt(1)).open, 0), acc0()).out => [1, 0, 10]
+    colBlock(W.update(fresh(), ei = ixAt(2), open = Vector.fromList([acc0()]), ids = ids0(3)), cset(cnew(3, 0), 1, -4), Vector.fromList([]), num(0), num(1), ixAt(0), ixAt(1)).hold.out => [1, 0, 10]
 
 verify colBlockOut
     colBlockOut([], num(1), ixAt(0), ixAt(1), num(0), ixAt(1), cset(cnew(2, 0), 1, -4), ids0(2), Vector.fromList([])) => [2, 1, 10]
