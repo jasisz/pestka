@@ -431,7 +431,7 @@ fn recorded(q: P, x: X, l: Line) -> Result<QX, String>
     d0 = q.decls
     before = List.len(q.out)
     r = lineOf(q, l)?
-    y = noted(x, r, e0, n0, d0, before)?
+    y = noted(x, r, l, e0, n0, d0, before)?
     Result.Ok(QX(q = r, x = y))
 
 verify recorded
@@ -706,12 +706,12 @@ fn oneFinished(l: OneLined) -> Result<One, String>
         OneLined.Done(Option.None, _, _) -> Result.Err("empty file")
         OneLined.Done(Option.Some(q), x, _) -> Result.Ok(One(q = q, x = x))
 
-fn noted(x: X, q: P, e0: Int, n0: Int, d0: Int, before: Int) -> Result<X, String>
-    ? "What the record just packed at before tells the split: an expression where it starts, a name its value, a declaration its references, its names and whether it is skipped (OneStepPack)."
+fn noted(x: X, q: P, l: Line, e0: Int, n0: Int, d0: Int, before: Int) -> Result<X, String>
+    ? "What the record just packed at before, from line l, tells the split: an expression where it starts, a name its value, a declaration its references, its names and whether it is skipped (OneStepPack)."
     match q.exprs > e0
         true -> Result.Ok(exprNoted(roomFor(x, e0), e0, before))
         false -> match q.names > n0
-            true -> nameNoted(x, n0, newBytes(q.out, List.len(q.out) - before))
+            true -> nameLined(x, n0, q, l, before)
             false -> match q.decls > d0
                 true -> Result.Ok(declNoted(x, d0, Export.Split.declOf(newBytes(q.out, List.len(q.out) - before), Export.Split.at(1), e0)))
                 false -> Result.Ok(x)
@@ -745,6 +745,30 @@ fn chunkMade(v: Vector<Vector<Num>>, ci: Int, init: Int) -> Vector<Vector<Num>>
 fn exprNoted(x: X, e: Int, before: Int) -> X
     ? "Where expression e starts, as its kind word (ExprColumns)."
     X.update(x, kc = kSet(x.kc, Bits.and(e, 65535), before * 16))
+
+fn nameLined(x: X, n: Int, q: P, l: Line, before: Int) -> Result<X, String>
+    ? "Name n, built from its line when the line says it as the record does (NamesFromLines), else from its record."
+    match l
+        Line.NameStr(_, pre, s) -> nameSet(x, n, Core.Names.str(Option.withDefault(Vector.get(x.names, lookup(q.nr, pre)), Core.Names.anon()), s))
+        Line.NameNum(_, pre, k) -> nameSet(x, n, Core.Names.num(Option.withDefault(Vector.get(x.names, lookup(q.nr, pre)), Core.Names.anon()), k))
+        _ -> nameNoted(x, n, newBytes(q.out, List.len(q.out) - before))
+
+verify nameLined
+    capOf(nameLined(x00(), 1, started("", "{{}}"), Line.NameNum(1, 0, 3), 0)) => Result.Ok(0)
+    Vector.get(Result.withDefault(nameLined(x00(), 0, started("", "{{}}"), Line.NameStr(1, 0, "a"), 0), x00()).names, 0) => Option.Some(Core.Names.str(Core.Names.anon(), "a"))
+
+decision NamesFromLines
+    date = "2026-11-12"
+    reason =
+        "A name was built from the record just packed: its bytes taken off"
+        "the output, reversed, made Bytes and decoded, the text made a"
+        "String again. The line it came from holds the prefix and the text"
+        "or number the record was written from, so the name is built from"
+        "them; a name line the reader parses as JSON is still read back"
+        "from its record."
+    chosen = "NamesFromLines"
+    rejected = ["NamesReadBack"]
+    impacts = [nameLined, noted]
 
 fn nameNoted(x: X, n: Int, b: Bytes) -> Result<X, String>
     ? "Name n, built from its record b."
@@ -1671,7 +1695,7 @@ verify oneFinished
     oneFinished(OneLined.Done(Option.None, x00(), 1)) => Result.Err("empty file")
 
 verify noted
-    capOf(noted(x00(), started("", "{{}}"), 0, 1, 0, 0)) => Result.Ok(0)
+    capOf(noted(x00(), started("", "{{}}"), Line.Blank, 0, 1, 0, 0)) => Result.Ok(0)
 
 verify roomFor
     roomFor(x00(), 0).cap => 65536
