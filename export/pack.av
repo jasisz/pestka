@@ -991,7 +991,31 @@ verify u64
 fn text(acc: List<Int>, s: String) -> List<Int>
     ? "A string: its length in bytes, then its UTF-8 bytes."
     b = String.toUtf8(s)
-    octetsOnto(Bytes.octets(b), uv(acc, Bytes.len(b)))
+    bytesOnto(b, 0, Bytes.len(b), uv(acc, Bytes.len(b)))
+
+decision BytesOntoOutput
+    date = "2026-11-12"
+    reason =
+        "A string was written by making a list of its bytes and copying the"
+        "list onto the output, and a name's record went through text and"
+        "withName, which take the output as a list read out of the packer:"
+        "every byte of it went onto a list held twice. The bytes are now"
+        "read where they lie, one Bytes.get at a time by a function calling"
+        "itself, and a name's record is written onto the packer's own list."
+    chosen = "BytesOntoOutput"
+    rejected = ["OctetsListed"]
+    impacts = [text, bytesOnto, nameStr]
+
+fn bytesOnto(b: Bytes, i: Int, n: Int, acc: List<Int>) -> List<Int>
+    ? "The bytes of b from i up to n, in order, onto the reversed output."
+    match i < n
+        true -> match Bytes.get(b, i)
+            Option.Some(x) -> bytesOnto(b, i + 1, n, List.prepend(x, acc))
+            Option.None -> acc
+        false -> acc
+
+verify bytesOnto
+    bytesOnto(Bytes.fromList([1, 2]), 0, 2, [0]) => [2, 1, 0]
 
 verify text
     text([], "hi") => [105, 104, 2]
@@ -1251,7 +1275,9 @@ verify letE
 fn nameStr(q: P, i: Int, pre: Int, s: String) -> Result<P, String>
     ? "1: the prefix and the text."
     k = nm(q, pre)?
-    Result.Ok(withName(q, i, text(uv(List.prepend(1, q.out), k), s)))
+    b = String.toUtf8(s)
+    q1 = P.update(q, out = bytesOnto(b, 0, Bytes.len(b), uv(uv(List.prepend(1, q.out), k), Bytes.len(b))))
+    Result.Ok(P.update(q1, names = q1.names + 1, nr = define(q1.nr, i, q1.names)))
 
 verify nameStr
     Result.withDefault(nameStr(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, 0, "a"), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {}))).names => 2
