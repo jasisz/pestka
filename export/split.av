@@ -134,6 +134,15 @@ fn uv(acc: List<Int>, n: Int) -> List<Int>
 verify uv
     uv([], 300) => [2, 172]
 
+fn uwn(acc: List<Int>, n: Num) -> List<Int>
+    ? "n as a varint onto the reversed output, n and each step of it a machine word: uv for the ids and distances the writer works out (IdsInRange)."
+    match n.value < 128
+        true -> List.prepend(n.value, acc)
+        false -> uwn(List.prepend(Bits.and(n.value, 127) + 128, acc), numStep(Bits.shiftRight(n.value, 7)))
+
+verify uwn
+    uwn([], num(300)) => [2, 172]
+
 fn uvLen(n: Int) -> Int
     ? "How many bytes n takes as a varint."
     match n < 128
@@ -1383,7 +1392,7 @@ fn mainExprWritten(b: Bytes, q: Pos, end: Pos, w: W, owner: Vector<Vector<Num>>,
 
 fn mainRef(acc: List<Int>, e: Ix, d: Int, next: Ix, ids: IdsW) -> List<Int>
     ? "A reference d back from expression e, as how far back its main number is from next."
-    uv(acc, next.value - idOf(ids, back(e, d)))
+    uwn(acc, numStep(next.value - idOf(ids, back(e, d))))
 
 fn mainExpr(b: Bytes, p: Pos, e: Ix, next: Ix, ids: IdsW, acc: List<Int>) -> RA
     ? "The expression record at p in the main block: only references change."
@@ -1475,8 +1484,8 @@ fn colMain(acc: List<Int>, k: Num, c1: Ix, c2: Ix, next: Ix, ids: IdsW) -> List<
     ? "An expression of the columns in the main block: its name as it is, its parts by how far back their main numbers are from next."
     h = match Bits.and(k.value, 15) == 1
         true -> colHead(acc, k)
-        false -> uv(colHead(acc, k), Bits.shiftRight(k.value, 4))
-    uv(uv(h, next.value - idOf(ids, c1)), next.value - idOf(ids, c2))
+        false -> uwn(colHead(acc, k), numStep(Bits.shiftRight(k.value, 4)))
+    uwn(uwn(h, numStep(next.value - idOf(ids, c1))), numStep(next.value - idOf(ids, c2)))
 
 verify colMain
     colMain([], num(1), ixAt(0), ixAt(0), ixAt(1), ids0(1)) => [1, 1, 10]
@@ -1501,8 +1510,8 @@ fn blockRefC(acc: List<Int>, c: Ix, o: Num, k: Ix, owner: Vector<Vector<Num>>, i
     ? "A reference to expression c from number k of o's block: back among the block's own, else past them into the frontier."
     oc = nget(owner, c)
     match oc.value == o.value
-        true -> uv(acc, k.value - idOf(ids, c))
-        false -> uv(acc, k.value + 1 + (0 - oc.value - 4))
+        true -> uwn(acc, numStep(k.value - idOf(ids, c)))
+        false -> uwn(acc, numStep(k.value + 1 + (0 - oc.value - 4)))
 
 verify blockRefC
     blockRefC([], ixAt(0), num(0), ixAt(1), cnew(1, 0), ids0(1)) => [1]
@@ -1646,10 +1655,10 @@ fn declPieces(b: Bytes, ps: List<Piece>, e: Ix, next: Ix, ids: IdsW, value: Int,
     match ps
         [] -> acc
         [Piece.Raw(s, t), ..rest] -> declPieces(b, rest, e, next, ids, value, blen, fine, copied(acc, b, s, t))
-        [Piece.Ref(x), ..rest] -> declPieces(b, rest, e, next, ids, value, blen, fine, uv(acc, next.value - idOf(ids, ixAt(x))))
+        [Piece.Ref(x), ..rest] -> declPieces(b, rest, e, next, ids, value, blen, fine, uwn(acc, numStep(next.value - idOf(ids, ixAt(x)))))
         [Piece.Val(x), ..rest] -> match value >= 0
             true -> declPieces(b, rest, e, next, ids, value, blen, fine, List.prepend(placedByte(fine), uv(acc, blen)))
-            false -> declPieces(b, rest, e, next, ids, value, blen, fine, uv(acc, next.value - idOf(ids, ixAt(x))))
+            false -> declPieces(b, rest, e, next, ids, value, blen, fine, uwn(acc, numStep(next.value - idOf(ids, ixAt(x)))))
 
 fn placedByte(fine: Bool) -> Int
     ? "1 when every name is placed."
