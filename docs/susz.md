@@ -40,7 +40,9 @@ Pestka declines a file, rather than rejecting it, when it hits one of its own
 limits:
 
 - A proof block with more than 2^24 expressions. The theorem is declined when
-  it is checked, so an earlier real error in the file still wins.
+  it is checked, so an earlier real error in the file still wins. A count
+  above 2^32 - 1 is not a limit but a format error: the file is rejected at
+  the theorem's record in MAIN, as the spec says.
 - Frontier entries of one kind that are not listed in increasing order.
   Canonical packers always list them in order.
 - A number above 2^62 in an offset or length. Ids and counts are already at

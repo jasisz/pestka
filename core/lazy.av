@@ -262,12 +262,13 @@ decision BlockCountBounded
     date = "2026-11-11"
     reason =
         "Decoding makes a vector of as many places as the block holds"
-        "expressions before reading any. The count is the theorem record's"
-        "(OWNER-4), which the reader held to the block's length when it read"
-        "MAIN: every expression record takes at least two bytes, a tag and"
-        "a field. A count past Aver's largest vector, 2^24, declines the"
-        "declaration: an implementation limit, decided by the file's bytes"
-        "alone, ordered with the declaration's other failures."
+        "expressions before reading any. The count comes from the theorem's"
+        "record. The reader already held it to the format's rules when it"
+        "read MAIN: at most half the block's length, and at most 2^32 - 1"
+        "(Susz 1 spec, section 5.2). A file that breaks them is rejected"
+        "there. A count past Aver's largest vector, 2^24, then declines the"
+        "declaration. That is an implementation limit, decided by the file's"
+        "bytes alone, and ordered with the declaration's other failures."
     chosen = "BlockCountBounded"
     rejected = ["CountTrusted", "CountAtTheBlockHead"]
     impacts = [decoded]

@@ -349,6 +349,7 @@ record Dir
     pads: List<Tuple<Int, Int>>
     ids: List<Int>
     must: Int
+    mustEntry: Int
 
 fn withTrailer(src: Src, end: Int, tr: Bytes) -> Outcome
     ? "The counts and the directory, whose section count must give the trailer's length; then the entries, the PAD sections and MAIN (HeaderAndDirectory)."
@@ -356,7 +357,7 @@ fn withTrailer(src: Src, end: Int, tr: Bytes) -> Outcome
     n = u32At(tr, 16)
     match Bytes.len(tr) == 28 + 24 * n
         false -> Outcome.Rejected("trailer @ {end + Bytes.len(tr) - 8}: a trailer length of {Bytes.len(tr)} bytes does not hold {n} directory entries")
-        true -> match entries(tr, 0, n, 16, end, Dir(names = u32At(tr, 0), levels = u32At(tr, 4), exprs = u32At(tr, 8), decls = u32At(tr, 12), countsAt = end, dirAt = end + 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1))
+        true -> match entries(tr, 0, n, 16, end, Dir(names = u32At(tr, 0), levels = u32At(tr, 4), exprs = u32At(tr, 8), decls = u32At(tr, 12), countsAt = end, dirAt = end + 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1, mustEntry = 0))
             Result.Err(o) -> o
             Result.Ok(d) -> padded(src, d, List.reverse(d.pads))
 
@@ -364,12 +365,12 @@ fn entries(tr: Bytes, k: Int, n: Int, expected: Int, end: Int, d: Dir) -> Result
     ? "Entry k of n, starting where the section before ended; at the end the sections must reach the trailer and MAIN be among them; only then does an unknown section that must be understood decline the file (HeaderAndDirectory)."
     match k >= n
         true -> match expected == end
-            false -> Result.Err(Outcome.Rejected("directory @ {tiledAt(d, n)}: the sections end at {expected}, the trailer starts at {end}"))
+            false -> Result.Err(Outcome.Rejected("directory @ {tiledAt(d, n)}: {lastEntry(n)}the sections end at {expected}, the trailer starts at {end}"))
             true -> match d.main < 0
                 true -> Result.Err(Outcome.Rejected("directory @ {d.dirAt}: there is no MAIN section"))
                 false -> match d.must < 0
                     true -> Result.Ok(d)
-                    false -> Result.Err(Outcome.Declined("directory @ {d.must}: the file needs a section Pestka does not know"))
+                    false -> Result.Err(Outcome.Declined("directory @ {d.must}: entry {d.mustEntry}: the file needs a section Pestka does not know"))
         false -> entry(tr, k, n, expected, end, d, 20 + 24 * k)
 
 fn tiledAt(d: Dir, n: Int) -> Int
@@ -381,6 +382,16 @@ fn tiledAt(d: Dir, n: Int) -> Int
 verify tiledAt
     tiledAt(dir0(), 0) => 16
     tiledAt(dir0(), 1) => 36
+
+fn lastEntry(n: Int) -> String
+    ? "The last entry's number, for an error at its length (Susz 1 spec, section 8: the entry's number from 1), or nothing when there is no entry."
+    match n == 0
+        true -> ""
+        false -> "entry {n}: "
+
+verify lastEntry
+    lastEntry(0) => ""
+    lastEntry(3) => "entry 3: "
 
 fn entry(tr: Bytes, k: Int, n: Int, expected: Int, end: Int, d: Dir, e: Int) -> Result<Dir, Outcome>
     ? "Entry k, at byte e of the trailer: its reserved bytes, its flags, its id once only, where it starts and ends (HeaderAndDirectory)."
@@ -402,19 +413,20 @@ fn entry(tr: Bytes, k: Int, n: Int, expected: Int, end: Int, d: Dir, e: Int) -> 
                         false -> Result.Err(Outcome.Rejected("directory @ {at + 8}: entry {k + 1}: section {id} starts at {off}, not at {expected} where the one before ends"))
                         true -> match off + len <= end
                             false -> Result.Err(Outcome.Rejected("directory @ {at + 16}: entry {k + 1}: section {id} runs past the trailer"))
-                            true -> entries(tr, k + 1, n, off + len, end, entryKept(Dir.update(d, ids = List.prepend(id, d.ids)), id, f, flags, off, len, at))
+                            true -> entries(tr, k + 1, n, off + len, end, entryKept(Dir.update(d, ids = List.prepend(id, d.ids)), id, f, flags, off, len, at, k + 1))
 
-fn entryKept(d: Dir, id: Int, f: Int, flags: Int, off: Int, len: Int, at: Int) -> Dir
+fn entryKept(d: Dir, id: Int, f: Int, flags: Int, off: Int, len: Int, at: Int, k1: Int) -> Dir
     ? "A known section kept by where it lies; the first unknown one that must be understood noted, to decline the file once the directory is checked; an unknown informational one skipped (HeaderAndDirectory)."
     match f < 0
         true -> match Bool.and(flags == 1, d.must < 0)
-            true -> Dir.update(d, must = at)
+            true -> Dir.update(d, must = at, mustEntry = k1)
             false -> d
         false -> sectionKept(d, id, off, len)
 
 verify entryKept
-    entryKept(dir0(), 9, -1, 1, 16, 4, 40).must => 40
-    entryKept(dir0(), 9, -1, 0, 16, 4, 40) => dir0()
+    entryKept(dir0(), 9, -1, 1, 16, 4, 40, 1).must => 40
+    entryKept(dir0(), 9, -1, 1, 16, 4, 40, 1).mustEntry => 1
+    entryKept(dir0(), 9, -1, 0, 16, 4, 40, 1) => dir0()
 
 
 fn flagsOf(id: Int) -> Int
@@ -445,7 +457,7 @@ verify sectionKept
 
 fn dir0() -> Dir
     ? "A directory of nothing, for examples."
-    Dir(names = 1, levels = 1, exprs = 0, decls = 0, countsAt = 0, dirAt = 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1)
+    Dir(names = 1, levels = 1, exprs = 0, decls = 0, countsAt = 0, dirAt = 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1, mustEntry = 0)
 
 verify dir0
     dir0().main => -1
@@ -453,13 +465,13 @@ verify dir0
 verify entries
     entries(Bytes.fromList([]), 0, 0, 16, 16, dir0()) => Result.Err(Outcome.Rejected("directory @ 16: there is no MAIN section"))
     entries(Bytes.fromList([]), 0, 0, 16, 20, dir0()) => Result.Err(Outcome.Rejected("directory @ 16: the sections end at 16, the trailer starts at 20"))
-    entries(Bytes.fromList([]), 0, 0, 16, 16, Dir.update(dir0(), main = 16, must = 40)) => Result.Err(Outcome.Declined("directory @ 40: the file needs a section Pestka does not know"))
+    entries(Bytes.fromList([]), 0, 0, 16, 16, Dir.update(dir0(), main = 16, must = 40, mustEntry = 1)) => Result.Err(Outcome.Declined("directory @ 40: entry 1: the file needs a section Pestka does not know"))
 
 verify entry
     entry(Bytes.fromList([1, 0, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, dir0(), 0) => Result.Ok(Dir.update(dir0(), main = 16, mainLength = 4, ids = [1]))
     entry(Bytes.fromList([1, 0, 3, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, dir0(), 0) => Result.Err(Outcome.Rejected("directory @ 2: entry 1: flag bits 1 to 15 are not zero"))
     entry(Bytes.fromList([1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, dir0(), 0) => Result.Err(Outcome.Rejected("directory @ 2: entry 1: section 1 has flags 0, not 1"))
-    entry(Bytes.fromList([9, 0, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, Dir.update(dir0(), main = 16), 0) => Result.Err(Outcome.Declined("directory @ 0: the file needs a section Pestka does not know"))
+    entry(Bytes.fromList([9, 0, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, Dir.update(dir0(), main = 16), 0) => Result.Err(Outcome.Declined("directory @ 0: entry 1: the file needs a section Pestka does not know"))
     entry(Bytes.fromList([1, 0, 1, 0, 0, 0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, dir0(), 0) => Result.Err(Outcome.Rejected("directory @ 8: entry 1: section 1 starts at 17, not at 16 where the one before ends"))
     entry(Bytes.fromList([1, 0, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, dir0(), 0) => Result.Err(Outcome.Rejected("directory @ 16: entry 1: section 1 runs past the trailer"))
     entry(Bytes.fromList([1, 0, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, Dir.update(dir0(), ids = [1]), 0) => Result.Err(Outcome.Rejected("directory @ 0: entry 1: section 1 is listed twice"))
@@ -715,25 +727,30 @@ decision CountInTheRecord
     date = "2026-11-12"
     reason =
         "A theorem with a proof block (declaration kind 6) states its block's"
-        "length and how many expression records it holds (OWNER-4), so the"
-        "reader holds the count to the length while it reads MAIN: at least"
-        "one record, and at most half the bytes, since an expression record"
-        "takes at least two. The block's bytes are the next of PROOFS,"
-        "which the blocks must fill exactly."
+        "length and how many expression records it holds (Susz 1 spec,"
+        "section 5.2). The reader checks the count while it reads MAIN. It"
+        "must be at least 1 and at most half the length, since an expression"
+        "record takes at least two bytes. It must also be at most 2^32 - 1."
+        "Both are format rules, so breaking them rejects the file at this"
+        "record. Pestka's own limit, 2^24, comes later: it declines the"
+        "theorem when its block is decoded. The block's bytes are the next"
+        "of PROOFS, which the blocks must fill exactly."
     chosen = "CountInTheRecord"
     rejected = ["CountAtTheBlockHead"]
     impacts = [lazyThm, lazyAdded]
 
 fn lazyThm(t: Tables, b: Bytes, head: Head, l: At) -> Done
-    ? "6: a theorem whose proof is the next block of PROOFS, by its length and its count, which must fit what is left of PROOFS, then its group (CountInTheRecord)."
+    ? "6: a theorem whose proof is the next block of PROOFS, by its length and its count (at most 2^32 - 1), which must fit what is left of PROOFS, then its group (CountInTheRecord)."
     x = vAt(b, l.at)
     match Bool.or(l.at.value < 0, x.at.value < 0)
         true -> cut(t, [l, x])
         false -> match Bool.and(x.value >= 1, 2 * x.value <= l.value)
             false -> Done.Bad("a proof block of {l.value} bytes cannot hold {x.value} expressions")
-            true -> match t.proofAt + l.value <= t.proofLength
-                false -> Done.Bad("a proof block of {l.value} bytes runs past PROOFS ({t.proofLength - t.proofAt} bytes left)")
-                true -> lazyGroup(t, head, l.value, x.value, idsAt(b, x.at))
+            true -> match x.value <= 4294967295
+                false -> Done.Bad("a proof block of {x.value} expressions: at most 2^32 - 1")
+                true -> match t.proofAt + l.value <= t.proofLength
+                    false -> Done.Bad("a proof block of {l.value} bytes runs past PROOFS ({t.proofLength - t.proofAt} bytes left)")
+                    true -> lazyGroup(t, head, l.value, x.value, idsAt(b, x.at))
 
 fn lazyGroup(t: Tables, head: Head, l: Int, count: Int, all: Ids) -> Done
     ? "The theorem's group, then the theorem."
@@ -748,6 +765,8 @@ verify lazyThm
     lazyThm(Export.Tables.empty(), Bytes.fromList([3, 2, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 3, at = Pos(value = 1))) => Done.Bad("a proof block of 3 bytes cannot hold 2 expressions")
     lazyThm(Export.Tables.empty(), Bytes.fromList([3, 0, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 3, at = Pos(value = 1))) => Done.Bad("a proof block of 3 bytes cannot hold 0 expressions")
     lazyThm(Export.Tables.empty(), Bytes.fromList([3, 1, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 3, at = Pos(value = 1))) => Done.Bad("a proof block of 3 bytes runs past PROOFS (0 bytes left)")
+    lazyThm(Export.Tables.empty(), Bytes.fromList([128, 128, 128, 128, 16, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 8589934592, at = Pos(value = 0))) => Done.Bad("a proof block of 4294967296 expressions: at most 2^32 - 1")
+    lazyThm(Export.Tables.empty(), Bytes.fromList([255, 255, 255, 255, 15, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 8589934590, at = Pos(value = 0))) => Done.Bad("a proof block of 8589934590 bytes runs past PROOFS (0 bytes left)")
 
 fn lazyAdded(t: Tables, head: Head, l: Int, count: Int, all: Ids) -> Done
     ? "The lazy theorem built and added, its block placed after the blocks before it, bounded by the frontier listed so far (CountInTheRecord)."
