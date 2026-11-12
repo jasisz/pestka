@@ -122,17 +122,22 @@ decision NdjsonThroughSusz
         "the file as it always has, and its verdict, the first bad line"
         "named by its number, is the one given: a file that is not read is"
         "reported as the ndjson reader reports it, and only a file that is"
-        "read whole goes on to be checked from the image."
+        "read whole goes on to be checked from the image. A line packing"
+        "does not support, an unknown key among them (KeysAsKnown in"
+        "Export.Pack), declines the file: the ndjson reader would drop"
+        "what that key says."
     chosen = "NdjsonThroughSusz"
     rejected = ["NdjsonReaderOnly", "PackErrorsAsLines"]
     impacts = [fileOf, packedOf, readPacked]
 
 fn packedOf(path: String, workers: Int, r: Result<Image, String>) -> Outcome
-    ? "The image read, or the file read by the ndjson reader when it could not be packed (NdjsonThroughSusz)."
+    ? "The image read; a decline when packing met something it does not support; otherwise the file read by the ndjson reader when it could not be packed (NdjsonThroughSusz)."
     ! [Disk.readBytesAt, Disk.size]
     match r
         Result.Ok(m) -> readPacked(path, workers, Export.Susz.readImage(m))
-        Result.Err(_) -> Export.Stream.readFile(path, workers)
+        Result.Err(e) -> match String.contains(e, "is not supported")
+            true -> Outcome.Declined(e)
+            false -> Export.Stream.readFile(path, workers)
 
 fn readPacked(path: String, workers: Int, o: Outcome) -> Outcome
     ? "The image as read, or the file read by the ndjson reader when the image was not (NdjsonThroughSusz)."

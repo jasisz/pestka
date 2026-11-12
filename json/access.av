@@ -3,7 +3,7 @@ module Access
         "Reading fields out of a parsed JSON object, with an error that names"
         "the missing or mistyped key. Objects in the export have at most a"
         "dozen members, so a linear search is the right lookup."
-    exposes [field, need, int, text, bool, obj, ints, arr, has]
+    exposes [field, need, int, text, bool, obj, ints, arr, has, only]
     depends [Json.Line]
     effects []
 
@@ -106,3 +106,16 @@ fn allInts(xs: List<J>, key: String, acc: List<Int>) -> Result<List<Int>, String
 verify allInts
     allInts([], "k", []) => Result.Ok([])
     allInts([J.JInt(3)], "k", []) => Result.Ok([3])
+
+fn only(fs: List<Tuple<String, J>>, keys: List<String>) -> Result<Unit, String>
+    ? "Unit when every key of the object is one of keys; otherwise the first other key, as one this reader does not support: a key a newer exporter added may carry meaning, so it is not dropped."
+    match fs
+        [] -> Result.Ok(Unit)
+        [(k, _), ..rest] -> match List.contains(keys, k)
+            true -> only(rest, keys)
+            false -> Result.Err("unknown key '{k}' is not supported")
+
+verify only
+    only([("a", J.JInt(1))], ["a", "b"]) => Result.Ok(Unit)
+    only([("a", J.JInt(1)), ("c", J.JNull)], ["a"]) => Result.Err("unknown key 'c' is not supported")
+    only([], []) => Result.Ok(Unit)

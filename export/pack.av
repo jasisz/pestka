@@ -892,7 +892,19 @@ fn oneHeader(l: String, x: X, rest: List<String>, line: Int) -> OneLined
         Result.Err(e) -> OneLined.Bad("line 1: {e}")
         Result.Ok(v) -> match Export.Reader.supported(v)
             false -> OneLined.Bad("format version {v} is not supported")
-            true -> oneLines(Option.Some(started("", metaText(l))), x, rest, line + 1)
+            true -> match headerKeys(l)
+                Result.Err(e) -> OneLined.Bad("line 1: {e}")
+                Result.Ok(_) -> oneLines(Option.Some(started("", metaText(l))), x, rest, line + 1)
+
+fn headerKeys(l: String) -> Result<Unit, String>
+    ? "The header has the meta key alone (KeysAsKnown)."
+    match Json.Line.parse(l)?
+        J.JObj(fs) -> Json.Access.only(fs, ["meta"])
+        _ -> Result.Err("the header is not an object")
+
+verify headerKeys
+    headerKeys("{{\"meta\":{{}},\"x\":1}}") => Result.Err("unknown key 'x' is not supported")
+    headerKeys("{{\"meta\":{{}}}}") => Result.Ok(Unit)
 
 fn oneFinished(l: OneLined) -> Result<One, String>
     ? "The packer and its notes after the last record."
@@ -1482,31 +1494,67 @@ fn obj(q: P, fs: List<Tuple<String, J>>) -> Result<P, String>
     match fs
         [(k, J.JObj(o))] -> declObj(q, k, o)
         _ -> match Json.Access.has(fs, "ie")
-            true -> exprObj(q, fresh(q.er, "expression", Json.Access.int(fs, "ie")?)?, fs)
+            true -> exprObj(q, fresh(q.er, "expression", Json.Access.int(fs, "ie")?)?, oneKind(fs, ["ie", "app", "lam", "forallE", "bvar", "sort", "const", "letE", "natVal", "strVal", "proj", "mdata"])?)
             false -> match Json.Access.has(fs, "in")
                 true -> nameObj(q, fresh(q.nr, "name", Json.Access.int(fs, "in")?)?, fs)
                 false -> match Json.Access.has(fs, "il")
-                    true -> levelObj(q, fresh(q.lr, "level", Json.Access.int(fs, "il")?)?, fs)
-                    false -> Result.Err("unrecognised line")
+                    true -> levelObj(q, fresh(q.lr, "level", Json.Access.int(fs, "il")?)?, oneKind(fs, ["il", "succ", "param", "max", "imax"])?)
+                    false -> unrecognised(fs)
 
 verify obj
     obj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), []) => Result.Err("unrecognised line")
 
+decision KeysAsKnown
+    date = "2026-11-12"
+    reason =
+        "A line the reader parses as JSON names every key it has: a key"
+        "outside its kind's keys, or a second kind on an expression or level"
+        "line, may carry meaning a newer lean4export added, so packing stops"
+        "with it as not supported, the class of the Rust packer's refusal"
+        "(exit 2), and is not dropped silently (spec 9.1). The lines the"
+        "fast path reads have their keys by their bytes."
+    chosen = "KeysAsKnown"
+    rejected = ["UnknownKeysIgnored"]
+    impacts = [obj, oneKind, unrecognised]
+
+fn oneKind(fs: List<Tuple<String, J>>, keys: List<String>) -> Result<List<Tuple<String, J>>, String>
+    ? "fs when its keys are its index key and one kind, all among keys (KeysAsKnown)."
+    _ = Json.Access.only(fs, keys)?
+    match List.len(fs) == 2
+        true -> Result.Ok(fs)
+        false -> Result.Err("a line with {List.len(fs)} keys where it takes an index and one kind is not supported")
+
+verify oneKind
+    oneKind([("ie", J.JInt(1)), ("x", J.JInt(0))], ["ie", "bvar"]) => Result.Err("unknown key 'x' is not supported")
+    oneKind([("ie", J.JInt(1)), ("bvar", J.JInt(0)), ("sort", J.JInt(0))], ["ie", "bvar", "sort"]) => Result.Err("a line with 3 keys where it takes an index and one kind is not supported")
+    oneKind([("ie", J.JInt(1)), ("bvar", J.JInt(0))], ["ie", "bvar"]) => Result.Ok([("ie", J.JInt(1)), ("bvar", J.JInt(0))])
+
+fn unrecognised(fs: List<Tuple<String, J>>) -> Result<P, String>
+    ? "A line with none of the index keys: its first key as not supported (KeysAsKnown)."
+    _ = Json.Access.only(fs, [])?
+    Result.Err("unrecognised line")
+
+verify unrecognised
+    unrecognised([("x", J.JInt(1))]) => Result.Err("unknown key 'x' is not supported")
+    unrecognised([]) => Result.Err("unrecognised line")
+
 fn nameObj(q: P, i: Int, fs: List<Tuple<String, J>>) -> Result<P, String>
     ? "A name line in a form the reader parses as JSON."
     match Json.Access.has(fs, "str")
-        true -> nameStrObj(q, i, Json.Access.obj(fs, "str")?)
-        false -> nameNumObj(q, i, Json.Access.obj(fs, "num")?)
+        true -> nameStrObj(q, i, Json.Access.obj(onlyKeys(fs, ["in", "str"])?, "str")?)
+        false -> nameNumObj(q, i, Json.Access.obj(onlyKeys(fs, ["in", "num"])?, "num")?)
 
 verify nameObj
     Result.withDefault(nameObj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, [("num", J.JObj([("i", J.JInt(4)), ("pre", J.JInt(0))]))]), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {}))).names => 2
 
 fn nameStrObj(q: P, i: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Its prefix and text."
+    _ = Json.Access.only(o, ["pre", "str"])?
     nameStr(q, i, Json.Access.int(o, "pre")?, Json.Access.text(o, "str")?)
 
 fn nameNumObj(q: P, i: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Its prefix and number."
+    _ = Json.Access.only(o, ["i", "pre"])?
     nameNum(q, i, Json.Access.int(o, "pre")?, Json.Access.int(o, "i")?)
 
 fn levelObj(q: P, i: Int, fs: List<Tuple<String, J>>) -> Result<P, String>
@@ -1546,10 +1594,12 @@ verify exprObj
 
 fn appObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Function and argument."
+    _ = Json.Access.only(o, ["arg", "fn"])?
     app(q, ie, Json.Access.int(o, "fn")?, Json.Access.int(o, "arg")?)
 
 fn binderObj(q: P, ie: Int, o: List<Tuple<String, J>>, isLam: Bool) -> Result<P, String>
     ? "Name, type, body and annotation."
+    _ = Json.Access.only(o, ["binderInfo", "body", "name", "type"])?
     bi = binderOf(Json.Access.text(o, "binderInfo")?)?
     binder(q, ie, Json.Access.int(o, "name")?, Json.Access.int(o, "type")?, Json.Access.int(o, "body")?, bi, isLam)
 
@@ -1583,6 +1633,7 @@ verify exprRest
 
 fn constObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Name and levels."
+    _ = Json.Access.only(o, ["name", "us"])?
     cnst(q, ie, Json.Access.int(o, "name")?, Json.Access.ints(o, "us")?)
 
 fn exprRarer(q: P, ie: Int, fs: List<Tuple<String, J>>) -> Result<P, String>
@@ -1642,10 +1693,12 @@ verify natLine
 
 fn letObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Name, type, value and body."
+    _ = Json.Access.only(o, ["body", "name", "nondep", "type", "value"])?
     letE(q, ie, Json.Access.int(o, "name")?, Json.Access.int(o, "type")?, Json.Access.int(o, "value")?, Json.Access.int(o, "body")?)
 
 fn projObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Structure name, field index and how far back the structure is."
+    _ = Json.Access.only(o, ["idx", "struct", "typeName"])?
     ds = back(q, Json.Access.int(o, "struct")?)?
     n = nm(q, Json.Access.int(o, "typeName")?)?
     Result.Ok(withExpr(q, ie, uv(uv(uv(List.prepend(16, q.out), n), n64(o, "idx")?), ds)))
@@ -1667,6 +1720,7 @@ decision MdataNotWritten
 
 fn mdataObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "No record: the line's id names the wrapped expression (MdataNotWritten)."
+    _ = Json.Access.only(o, ["data", "expr"])?
     k = ref(q, Json.Access.int(o, "expr")?)?
     Result.Ok(P.update(q, er = Ren.update(q.er, m = Map.set(q.er.m, ie, k))))
 
@@ -1676,16 +1730,20 @@ verify mdataObj
 fn declObj(q: P, k: String, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "A declaration line by its kind."
     match k
-        "axiom" -> axiomObj(q, o)
-        "def" -> defObj(q, o)
-        "thm" -> thm(q, Json.Access.int(o, "name")?, Json.Access.ints(o, "levelParams")?, Json.Access.int(o, "type")?, Json.Access.int(o, "value")?, Json.Access.ints(o, "all")?)
-        "opaque" -> opaqueObj(q, o)
-        "quot" -> quotObj(q, o)
-        "inductive" -> inductiveObj(q, o)
-        _ -> Result.Err("unknown declaration kind '{k}'")
+        "axiom" -> axiomObj(q, onlyKeys(o, ["isUnsafe", "levelParams", "name", "type"])?)
+        "def" -> defObj(q, onlyKeys(o, ["all", "hints", "levelParams", "name", "safety", "type", "value"])?)
+        "thm" -> thmObj(q, onlyKeys(o, ["all", "levelParams", "name", "type", "value"])?)
+        "opaque" -> opaqueObj(q, onlyKeys(o, ["all", "isUnsafe", "levelParams", "name", "type", "value"])?)
+        "quot" -> quotObj(q, onlyKeys(o, ["kind", "levelParams", "name", "type"])?)
+        "inductive" -> inductiveObj(q, onlyKeys(o, ["ctors", "recs", "types"])?)
+        _ -> Result.Err("unknown declaration kind '{k}' is not supported")
+
+fn thmObj(q: P, o: List<Tuple<String, J>>) -> Result<P, String>
+    ? "A theorem the reader parses as JSON."
+    thm(q, Json.Access.int(o, "name")?, Json.Access.ints(o, "levelParams")?, Json.Access.int(o, "type")?, Json.Access.int(o, "value")?, Json.Access.ints(o, "all")?)
 
 verify declObj
-    declObj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), "lemma", []) => Result.Err("unknown declaration kind 'lemma'")
+    declObj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), "lemma", []) => Result.Err("unknown declaration kind 'lemma' is not supported")
 
 fn headObj(q: P, acc: List<Int>, o: List<Tuple<String, J>>) -> Result<List<Int>, String>
     ? "name, levelParams and type."
@@ -1713,7 +1771,7 @@ fn hintsObj(j: J) -> Result<Hints, String>
     match j
         J.JStr("opaque") -> Result.Ok(Hints.Opaque)
         J.JStr("abbrev") -> Result.Ok(Hints.Abbrev)
-        J.JObj(fs) -> Result.Ok(Hints.Regular(n64(fs, "regular")?))
+        J.JObj(fs) -> Result.Ok(Hints.Regular(n64(onlyKeys(fs, ["regular"])?, "regular")?))
         _ -> Result.Err("malformed hints")
 
 verify hintsObj
@@ -1788,9 +1846,9 @@ fn partOnto(q: P, acc: List<Int>, o: List<Tuple<String, J>>, kind: Int) -> Resul
     ? "One part of an inductive block, its head first."
     h = headObj(q, acc, o)?
     match kind
-        0 -> typeOnto(q, h, o)
-        1 -> ctorOnto(q, h, o)
-        _ -> recOnto(q, h, o)
+        0 -> typeOnto(q, h, onlyKeys(o, ["all", "ctors", "isRec", "isReflexive", "isUnsafe", "levelParams", "name", "numIndices", "numNested", "numParams", "type"])?)
+        1 -> ctorOnto(q, h, onlyKeys(o, ["cidx", "induct", "isUnsafe", "levelParams", "name", "numFields", "numParams", "type"])?)
+        _ -> recOnto(q, h, onlyKeys(o, ["all", "isUnsafe", "k", "levelParams", "name", "numIndices", "numMinors", "numMotives", "numParams", "rules", "type"])?)
 
 verify partOnto
     partOnto(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), [], [], 0) => Result.Err("missing key 'name'")
@@ -1823,12 +1881,24 @@ fn recOnto(q: P, h: List<Int>, o: List<Tuple<String, J>>) -> Result<List<Int>, S
 verify recOnto
     recOnto(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), [], []) => Result.Err("missing key 'isUnsafe'")
 
+fn onlyKeys(o: List<Tuple<String, J>>, keys: List<String>) -> Result<List<Tuple<String, J>>, String>
+    ? "o when all its keys are among keys (KeysAsKnown)."
+    _ = Json.Access.only(o, keys)?
+    Result.Ok(o)
+
+verify onlyKeys
+    onlyKeys([("a", J.JInt(1))], ["b"]) => Result.Err("unknown key 'a' is not supported")
+
 fn rulesOnto(q: P, acc: List<Int>, xs: List<J>) -> Result<List<Int>, String>
     ? "Each rule: ctor, nfields and how far back its right-hand side is."
     match xs
         [] -> Result.Ok(acc)
-        [J.JObj(o), ..rest] -> rulesOnto(q, uv(uv(uv(acc, nm(q, Json.Access.int(o, "ctor")?)?), n64(o, "nfields")?), back(q, Json.Access.int(o, "rhs")?)?), rest)
+        [J.JObj(r), ..rest] -> ruleOnto(q, acc, onlyKeys(r, ["ctor", "nfields", "rhs"])?, rest)
         _ -> Result.Err("expected an object")
+
+fn ruleOnto(q: P, acc: List<Int>, o: List<Tuple<String, J>>, rest: List<J>) -> Result<List<Int>, String>
+    ? "One rule onto acc, then the rest."
+    rulesOnto(q, uv(uv(uv(acc, nm(q, Json.Access.int(o, "ctor")?)?), n64(o, "nfields")?), back(q, Json.Access.int(o, "rhs")?)?), rest)
 
 verify rulesOnto
     rulesOnto(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), [], [J.JNull]) => Result.Err("expected an object")
