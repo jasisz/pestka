@@ -391,12 +391,56 @@ verify appliedRun
     appliedRun("f", Result.Err("x"), Run(lines = [], err = "", bad = false), []) => Result.Err("x")
 
 fn appliedLines(q: P, x: X, ls: List<LineAt>, line: Int) -> Result<St, String>
-    ? "Lines packed and noted in order, one function calling itself (RunOfLines); line is the number of the first."
+    ? "Lines packed and noted in order (RunOfLines); line is the number of the first. While the file's expressions keep their own ids, a run of applications, lambdas and pis by colList first (ColumnRuns)."
+    match Map.len(q.er.m) == 0
+        false -> appliedStep(q, x, ls, line)
+        true -> appliedRunCols(q, x, ls, line)
+
+fn appliedRunCols(q: P, x: X, ls: List<LineAt>, line: Int) -> Result<St, String>
+    ? "A run of column lines by colList, then the line it stopped at by appliedStep (ColumnRuns)."
+    e = cntAt(q.exprs)
+    names = namesFast(q.nr)
+    cap = cntAt(x.cap)
+    appliedCols(q, line, colList(ls, x, e, names, cap, cntAt(0)))
+
+fn appliedCols(q: P, line: Int, r: CL) -> Result<St, String>
+    ? "After a run of column lines: the expressions counted and defined and the run record's count grown, as bCols does; then the line the run stopped at."
+    match r.taken.value > 0
+        false -> appliedStep(q, r.x, r.rest, line)
+        true -> appliedStep(P.update(q, exprs = r.e.value, er = Ren.update(q.er, below = r.e.value)), X.update(r.x, run = r.x.run + r.taken.value), r.rest, line + r.taken.value)
+
+fn appliedStep(q: P, x: X, ls: List<LineAt>, line: Int) -> Result<St, String>
+    ? "The first line packed and noted, then the lines after it."
     match ls
         [] -> Result.Ok(St(q = q, x = x, line = line))
         [l, ..rest] -> match took(q, x, l)
             Result.Err(e) -> Result.Err("line {line}: {e}")
             Result.Ok(r) -> appliedLines(r.q, r.x, rest, line + 1)
+
+record CL
+    x: X
+    rest: List<LineAt>
+    e: Cnt
+    taken: Cnt
+
+fn colList(ls: List<LineAt>, x: X, e: Cnt, names: Cnt, cap: Cnt, taken: Cnt) -> CL
+    ? "The applications, lambdas and pis first in ls packed into the current chunks, as colRun packs them from the bytes; the lines from the first it does not take are left (ColumnRuns)."
+    match e.value >= cap.value
+        true -> CL(x = x, rest = ls, e = e, taken = taken)
+        false -> match ls
+            [] -> CL(x = x, rest = [], e = e, taken = taken)
+            [la, ..rest] -> match Export.Lines.numOf(la.kind)
+                1 -> match appFits(Export.Lines.numOf(la.n1), Export.Lines.numOf(la.n2), Export.Lines.numOf(la.n3), e)
+                    true -> colList(rest, colPut(x, e, 1, Export.Lines.numOf(la.n2), Export.Lines.numOf(la.n3)), nextCnt(e), names, cap, nextCnt(taken))
+                    false -> CL(x = x, rest = List.prepend(la, rest), e = e, taken = taken)
+                2 -> match bindFits(la, e, names)
+                    true -> colList(rest, colPut(x, e, Export.Lines.numOf(la.n2) * 16 + bindCode(la.lam) + binderByte(la.bi), Export.Lines.numOf(la.n3), Export.Lines.numOf(la.n4)), nextCnt(e), names, cap, nextCnt(taken))
+                    false -> CL(x = x, rest = List.prepend(la, rest), e = e, taken = taken)
+                _ -> CL(x = x, rest = List.prepend(la, rest), e = e, taken = taken)
+
+verify colList
+    colList([], x00(), cntAt(0), cntAt(1), cntAt(65536), cntAt(0)).taken => cntAt(0)
+    colList([Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0))], x00(), cntAt(0), cntAt(1), cntAt(65536), cntAt(0)).rest => [Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0))]
 
 verify appliedLines
     appliedLines(started("", "{{}}"), x00(), [Export.Lines.lineOf(Line.Bad("x"), Export.Lines.offAt(0))], 3) => Result.Err("line 3: x")
