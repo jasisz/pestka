@@ -13,7 +13,7 @@ module Split
         "expression's owner to its parts; one numbers expressions in the main"
         "block and in their blocks and finds the frontier; the last writes."
         "The writer is deterministic: the same file gives the same bytes."
-    exposes [split, image, imageOf, laidMessage2, written2, laidAfter, Laid, A, Cols, DeclP, Placed, placedOne, declOf, seeded, placedUnlessSkipped, nameStrAt, nameNumAt, at, cset, cget, noChunk, nat32, noChunk32, cget32, cnew32, num]
+    exposes [split, image, imageOf, laidMessage2, written2, laidAfter, Laid, A, Cols, DeclP, Placed, placedOne, declOf, seeded, placedUnlessSkipped, nameStrAt, nameNumAt, at, cset, cget, noChunk, nat32, noChunk32, cget32, cnew32, num, numStep, u32Step]
     exposes opaque [Ix, U32, Num]
     depends [Bytes, Core.Names, Core.Lazy, Export.Susz]
     effects [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]

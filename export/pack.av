@@ -9,6 +9,7 @@ module Pack
         "structure only; the reader trusts none of it and computes every hash"
         "and range itself."
     exposes [pack, image]
+    exposes opaque [Cnt]
     depends [Bytes, Json.Line, Json.Access, Core.Names, Core.Lazy, Core.Exprs, Core.Decls, Export.Reader, Export.Items, Export.Lines, Export.Split, Export.Susz]
     effects [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
 
@@ -602,7 +603,34 @@ type Ran
     Failed(String)
 
 fn bRun(b: Bytes, n: Off, s: Off, q: P, x: X, line: Int) -> Ran
-    ? "The lines from s read from the bytes and packed, line their number, up to n, the chunk's length, or to the first line read neither by lineAt nor by nameAt (RunOfLines)."
+    ? "The lines from s read from the bytes and packed, line their number, up to n, the chunk's length, or to the first line read neither by lineAt nor by nameAt (RunOfLines): while the file's expressions keep their own ids, a run of applications, lambdas and pis by colRun first (ColumnRuns)."
+    match Map.len(q.er.m) == 0
+        false -> bStep(b, n, s, q, x, line)
+        true -> bRunCols(b, n, s, q, x, line)
+
+fn bRunCols(b: Bytes, n: Off, s: Off, q: P, x: X, line: Int) -> Ran
+    ? "A run of column lines from s by colRun, then the line it stopped at by bStep (ColumnRuns)."
+    e = cntAt(q.exprs)
+    names = namesFast(q.nr)
+    cap = cntAt(x.cap)
+    bCols(b, n, q, line, colRun(b, n, s, x, e, names, cap, cntAt(0)))
+
+fn bCols(b: Bytes, n: Off, q: P, line: Int, r: CR) -> Ran
+    ? "After a run of column lines: the expressions counted and defined as their own ids, as colDone counts and defines each, and the run record's count grown, as colSet grows it; then the line the run stopped at."
+    match r.taken.value > 0
+        false -> bAfterCols(b, n, r.s, q, r.x, line, r.la)
+        true -> bAfterCols(b, n, r.s, P.update(q, exprs = r.e.value, er = Ren.update(q.er, below = r.e.value)), X.update(r.x, run = r.x.run + r.taken.value), line + r.taken.value, r.la)
+
+fn bAfterCols(b: Bytes, n: Off, s: Off, q: P, x: X, line: Int, la: Option<LineAt>) -> Ran
+    ? "The line a run of column lines stopped at: packed from what lineAt read of it when it read it, else read by bStep."
+    match la
+        Option.Some(l) -> match took(q, x, l)
+            Result.Err(e) -> Ran.Failed("line {line}: {e}")
+            Result.Ok(r) -> bRun(b, n, l.next, r.q, r.x, line + 1)
+        Option.None -> bStep(b, n, s, q, x, line)
+
+fn bStep(b: Bytes, n: Off, s: Off, q: P, x: X, line: Int) -> Ran
+    ? "The line at s read from the bytes and packed, then the lines after it (RunOfLines)."
     match Export.Lines.offValue(s) >= Export.Lines.offValue(n)
         true -> Ran.Stopped(q, x, s, line)
         false -> match Export.Lines.lineAt(b, s)
@@ -614,6 +642,146 @@ fn bRun(b: Bytes, n: Off, s: Off, q: P, x: X, line: Int) -> Ran
                     Result.Err(e) -> Ran.Failed("line {line}: {e}")
                     Result.Ok(r) -> bRun(b, n, la.next, r.q, r.x, line + 1)
                 Option.None -> Ran.Stopped(q, x, s, line)
+
+decision ColumnRuns
+    date = "2026-11-12"
+    reason =
+        "Nine lines in ten are applications, lambdas and pis, and each went"
+        "through took, colApp or colBind, colSet and colDone, every step"
+        "taking and handing back the whole packer and its notes (two records"
+        "of 20 fields) and reckoning ids, counts and the chunk's place as"
+        "Ints of any size: about 500 instructions a line before writing a"
+        "word. While the file's expressions keep their own ids (no id"
+        "mapped, so each line's id is the next one and a part's id is"
+        "itself), such a line needs only that its id is the next, that its"
+        "parts and name are below the counts, and its three words set in"
+        "the current chunk. colRun packs a run of them with the counts as"
+        "machine words and only the chunks' record in hand, and stops at"
+        "the first line it cannot take so (any other line, a line one of"
+        "these checks refuses, a full chunk), which then goes the general"
+        "way, errors included. The words set, the counts and the run"
+        "record's count are those the general way gives."
+    chosen = "ColumnRuns"
+    rejected = ["PacketPerLine"]
+    impacts = [bRun, colRun, bCols]
+
+record Cnt
+    value: Int
+
+fn cntOf(n: Int) -> Result<Cnt, Bool>
+    ? "A count or an id of the columns: -1 for none, otherwise at most 2^40 (ColumnRuns)."
+    match Bool.and(n >= -1, n <= 1099511627776)
+        true -> Result.Ok(Cnt(value = n))
+        false -> Result.Err(false)
+
+verify cntOf
+    cntOf(-2) => Result.Err(false)
+
+fn cntAt(n: Int) -> Cnt
+    ? "n as a count, none when it is out of range."
+    match cntOf(n)
+        Result.Ok(c) -> c
+        Result.Err(_) -> Cnt(value = -1)
+
+verify cntAt
+    cntAt(3).value => 3
+    cntAt(-3).value => -1
+
+fn cntWord(n: Int) -> Result<Cnt, Bool>
+    ? "A count reckoned on a machine word: the bound of cntOf, a constructor of its own so that its argument stays a word (ColumnRuns)."
+    match Bool.and(n >= -1, n <= 1099511627776)
+        true -> Result.Ok(Cnt(value = n))
+        false -> Result.Err(false)
+
+verify cntWord
+    cntWord(-2) => Result.Err(false)
+
+fn cntStep(n: Int) -> Cnt
+    ? "n reckoned on a word as a count, none when it is out of range."
+    match cntWord(n)
+        Result.Ok(c) -> c
+        Result.Err(_) -> Cnt(value = -1)
+
+verify cntStep
+    cntStep(4).value => 4
+
+fn nextCnt(c: Cnt) -> Cnt
+    ? "The count after c."
+    cntStep(c.value + 1)
+
+verify nextCnt
+    nextCnt(cntAt(4)).value => 5
+
+fn namesFast(r: Ren) -> Cnt
+    ? "How many names there are while every name keeps its own id, so that a name's Susz id is itself; none once ids are mapped."
+    match Map.len(r.m) == 0
+        true -> cntAt(r.below)
+        false -> Cnt(value = -1)
+
+verify namesFast
+    namesFast(Ren(below = 3, m = {})).value => 3
+    namesFast(Ren(below = 3, m = {5 => 1})).value => -1
+
+record CR
+    x: X
+    s: Off
+    e: Cnt
+    taken: Cnt
+    la: Option<LineAt>
+
+fn colRun(b: Bytes, n: Off, s: Off, x: X, e: Cnt, names: Cnt, cap: Cnt, taken: Cnt) -> CR
+    ? "The applications, lambdas and pis from s packed into the current chunks as colApp and colBind pack them, e the next expression, names the names when each keeps its own id (or none), cap the end of the current chunk; up to n, the chunk's length, or the first line it does not take (ColumnRuns)."
+    match Bool.or(Export.Lines.offValue(s) >= Export.Lines.offValue(n), e.value >= cap.value)
+        true -> CR(x = x, s = s, e = e, taken = taken, la = Option.None)
+        false -> match Export.Lines.lineAt(b, s)
+            Option.None -> CR(x = x, s = s, e = e, taken = taken, la = Option.None)
+            Option.Some(la) -> match Export.Lines.numOf(la.kind)
+                1 -> match appFits(Export.Lines.numOf(la.n1), Export.Lines.numOf(la.n2), Export.Lines.numOf(la.n3), e)
+                    true -> colRun(b, n, la.next, colPut(x, e, 1, Export.Lines.numOf(la.n2), Export.Lines.numOf(la.n3)), nextCnt(e), names, cap, nextCnt(taken))
+                    false -> CR(x = x, s = s, e = e, taken = taken, la = Option.Some(la))
+                2 -> match bindFits(la, e, names)
+                    true -> colRun(b, n, la.next, colPut(x, e, Export.Lines.numOf(la.n2) * 16 + bindCode(la.lam) + binderByte(la.bi), Export.Lines.numOf(la.n3), Export.Lines.numOf(la.n4)), nextCnt(e), names, cap, nextCnt(taken))
+                    false -> CR(x = x, s = s, e = e, taken = taken, la = Option.Some(la))
+                _ -> CR(x = x, s = s, e = e, taken = taken, la = Option.Some(la))
+
+verify colRun
+    colRun(Bytes.fromList([]), Export.Lines.offAt(0), Export.Lines.offAt(0), x00(), cntAt(0), cntAt(1), cntAt(65536), cntAt(0)).taken => cntAt(0)
+    colRun(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58, 48, 44, 34, 102, 110, 34, 58, 48, 125, 44, 34, 105, 101, 34, 58, 49, 125, 10]), Export.Lines.offAt(32), Export.Lines.offAt(0), x00(), cntAt(1), cntAt(1), cntAt(65536), cntAt(0)).taken => cntAt(1)
+    colRun(Bytes.fromList([123, 34, 97, 112, 112, 34, 58, 123, 34, 97, 114, 103, 34, 58, 48, 44, 34, 102, 110, 34, 58, 48, 125, 44, 34, 105, 101, 34, 58, 49, 125, 10]), Export.Lines.offAt(32), Export.Lines.offAt(0), x00(), cntAt(2), cntAt(1), cntAt(65536), cntAt(0)).taken => cntAt(0)
+
+fn appFits(ie: Int, f: Int, a: Int, e: Cnt) -> Bool
+    ? "Whether an application with id ie and parts f and a is the next expression e with both parts defined, while ids are their own, and the count stays below what a u32 holds (the checks of colApp and colDone)."
+    Bool.and(Bool.and(ie == e.value, e.value < 4294967295), Bool.and(Bool.and(f >= 0, f < e.value), Bool.and(a >= 0, a < e.value)))
+
+verify appFits
+    appFits(2, 0, 1, cntAt(2)) => true
+    appFits(2, 0, 2, cntAt(2)) => false
+    appFits(3, 0, 1, cntAt(2)) => false
+
+fn bindFits(la: LineAt, e: Cnt, names: Cnt) -> Bool
+    ? "Whether a lambda or a pi is the next expression e with its name, type and body defined, while ids are their own (the checks of colBind and colDone)."
+    ty = Export.Lines.numOf(la.n3)
+    body = Export.Lines.numOf(la.n4)
+    nmi = Export.Lines.numOf(la.n2)
+    Bool.and(Bool.and(Bool.and(Export.Lines.numOf(la.n1) == e.value, e.value < 4294967295), Bool.and(nmi >= 0, nmi < names.value)), Bool.and(Bool.and(ty >= 0, ty < e.value), Bool.and(body >= 0, body < e.value)))
+
+fn colPut(x: X, e: Cnt, k: Int, c1: Int, c2: Int) -> X
+    ? "Expression e's kind word and parts set in the current chunks, as colSet sets them; the run is counted by the caller (ColumnRuns)."
+    j = Bits.and(e.value, 65535)
+    x1 = X.update(x, kc = kPut(x.kc, j, Export.Split.numStep(k)))
+    x2 = X.update(x1, ac = uPut(x1.ac, j, Export.Split.u32Step(c1)))
+    X.update(x2, bc = uPut(x2.bc, j, Export.Split.u32Step(c2)))
+
+verify colPut
+    Vector.get(colPut(x00(), cntAt(1), 1, 0, 0).kc, 1) => Option.Some(Export.Split.num(1))
+
+fn kPut(c: Vector<Num>, j: Int, v: Num) -> Vector<Num>
+    ? "c with v at j, in place."
+    Option.withDefault(Vector.set(c, j, v), c)
+
+fn uPut(c: Vector<U32>, j: Int, v: U32) -> Vector<U32>
+    ? "c with v at j, in place."
+    Option.withDefault(Vector.set(c, j, v), c)
 
 verify bRun
     bRun(Bytes.fromList([]), Export.Lines.offAt(0), Export.Lines.offAt(0), started("", ""), x00(), 3) => Ran.Stopped(started("", ""), x00(), Export.Lines.offAt(0), 3)
