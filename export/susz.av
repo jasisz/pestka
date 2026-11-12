@@ -617,9 +617,59 @@ fn withProofs(src: Src, t: Tables, d: Dir) -> Outcome
     ? "The frontier MAIN listed, with the declaration index of each of its names, and PROOFS read whole; every lazy theorem gets its block's bytes (FrontierAndRuleP)."
     ! [Disk.readBytesAt]
     s = storeOf(t)
-    match bytesAt(src, d.proofs, d.proofsLength)
+    match piecesAt(src, d.proofs, d.proofsLength, [])
         Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
-        Result.Ok(pb) -> Outcome.Read(packedAll(Export.Tables.finish(t), s, pb))
+        Result.Ok(ps) -> Outcome.Read(packedAll(Export.Tables.finish(t), s, joined(ps)))
+
+decision ProofsReadInPieces
+    date = "2026-11-12"
+    reason =
+        "PROOFS was read with one Disk.readBytesAt. Under wasm-gc the host"
+        "hands the bytes over through the module's own memory, which may grow"
+        "to 128 MB, so mathlib's PROOFS could not be read and the file was"
+        "declined. It is now read 64 MB at a time and the pieces joined, two"
+        "by two in rounds: one read on a section that small, three rounds of"
+        "copying on mathlib's."
+    chosen = "ProofsReadInPieces"
+    rejected = ["ProofsReadWhole"]
+    impacts = [withProofs, piecesAt, joined]
+
+fn pieceBytes() -> Int
+    ? "How much of PROOFS one read takes: half of what the wasm-gc host can hand over at once (ProofsReadInPieces)."
+    67108864
+
+verify pieceBytes
+    pieceBytes() => 67108864
+
+fn piecesAt(src: Src, offset: Int, n: Int, acc: List<Bytes>) -> Result<List<Bytes>, String>
+    ? "The n bytes at offset, in pieces of at most pieceBytes, in order."
+    ! [Disk.readBytesAt]
+    match n <= pieceBytes()
+        true -> Result.Ok(List.reverse(List.prepend(bytesAt(src, offset, n)?, acc)))
+        false -> piecesAt(src, offset + pieceBytes(), n - pieceBytes(), List.prepend(bytesAt(src, offset, pieceBytes())?, acc))
+
+verify piecesAt
+    piecesAt(Src.Memory(Image(front = Bytes.fromList([1, 2]), back = Bytes.fromList([3]))), 1, 2, []) => Result.Ok([Bytes.fromList([2, 3])])
+
+fn joined(bs: List<Bytes>) -> Bytes
+    ? "The bytes one after another, joined two by two in rounds."
+    match bs
+        [] -> Bytes.fromList([])
+        [b] -> b
+        _ -> joined(joinedPairs(bs, []))
+
+verify joined
+    joined([Bytes.fromList([1]), Bytes.fromList([2, 3]), Bytes.fromList([4])]) => Bytes.fromList([1, 2, 3, 4])
+
+fn joinedPairs(bs: List<Bytes>, acc: List<Bytes>) -> List<Bytes>
+    ? "Each two neighbours joined; one left over kept."
+    match bs
+        [] -> List.reverse(acc)
+        [a] -> List.reverse(List.prepend(a, acc))
+        [a, b, ..rest] -> joinedPairs(rest, List.prepend(Bytes.concat(a, b), acc))
+
+verify joinedPairs
+    joinedPairs([Bytes.fromList([1]), Bytes.fromList([2]), Bytes.fromList([3])], []) => [Bytes.fromList([1, 2]), Bytes.fromList([3])]
 
 fn storeOf(t: Tables) -> Store
     ? "The frontier, and the declaration index of each of its names (FrontierAndRuleP)."
