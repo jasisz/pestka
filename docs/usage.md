@@ -36,11 +36,11 @@ cd lean4export && echo leanprover/lean4:v4.34.1 > lean-toolchain && lake build
 
 ### Susz
 
-An export can be packed once into Susz, Pestka's binary form of it
+An export can be packed once into Susz 1, a binary form of it
 ([format](susz.md)), and checked from that as often as needed:
 
 ```bash
-.build/target/release/main pack mathlib.ndjson mathlib.susz   # 5.90 GB to 661 MB, about a minute
+.build/target/release/main pack mathlib.ndjson mathlib.susz   # 5.90 GB to 653 MB (638 MB with --no-index)
 .build/target/release/main mathlib.susz [WORKERS]
 ```
 
