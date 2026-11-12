@@ -1,18 +1,20 @@
 module Lazy
     intent =
-        "A theorem's proof that is built only when it is asked for (Susz"
-        "version 2, docs/susz.md): the bytes of its block in the file's proof"
-        "section, the frontier tables of names, levels and expressions that"
-        "the reader built from the main block, and what the declaration"
-        "record says of the block. Decoding builds a fresh term, nothing of"
-        "it kept in any table, so the term lives only while checking holds"
-        "it. Nothing in the block is trusted: every record is checked as the"
-        "reader checks one of the main block, every reference against what"
-        "was listed before the declaration, and the declaration's word on"
-        "which names the block names before they are placed against the"
-        "block's own records; a block that disagrees is an error of its"
-        "declaration, the same whenever and however often it is decoded."
-    exposes [Proof, Source, Store, Bounds, Decoded, force, forced, valued, emptyStore, never, codeOf, countOf, placedFor]
+        "A theorem's proof that is built only when it is asked for (a proof"
+        "block of a Susz 1 file, susz-v-next.md section 6): the bytes of its"
+        "block in the file's PROOFS section, the frontier tables of names,"
+        "levels and expressions that the reader built from MAIN, and what"
+        "the theorem's record says of the block: how many expressions it"
+        "holds, how much of the frontier was listed before it, and where it"
+        "lies in the file. Decoding builds a fresh term, nothing of it kept"
+        "in any table, so the term lives only while checking holds it."
+        "Nothing in the block is trusted: every record is checked as the"
+        "reader checks one of MAIN, every reference against what was listed"
+        "before the declaration, and every constant and projection against"
+        "rule P, declared before the theorem; a block that disagrees is an"
+        "error of its declaration, the same whenever and however often it is"
+        "decoded."
+    exposes [Proof, Source, Store, Bounds, Decoded, force, forced, valued, emptyStore, never]
     exposes opaque [LPos]
     depends [Bytes, Core.Names, Core.Levels, Core.Exprs]
     effects []
@@ -21,16 +23,15 @@ record Store
     names: Vector<Name>
     levels: Vector<Level>
     exprs: Vector<Expr>
-    codes: Vector<Int>
-    natCode: Int
-    strCodes: List<Int>
+    decls: Vector<Int>
 
 record Bounds
     decl: Int
     names: Int
     levels: Int
     exprs: Int
-    placed: Bool
+    count: Int
+    at: Int
 
 decision OneDeferredProof
     date = "2026-11-11"
@@ -65,7 +66,7 @@ type Decoded
 
 fn emptyStore() -> Store
     ? "No frontier."
-    Store(names = Vector.fromList([]), levels = Vector.fromList([]), exprs = Vector.fromList([]), codes = Vector.fromList([]), natCode = never(), strCodes = [])
+    Store(names = Vector.fromList([]), levels = Vector.fromList([]), exprs = Vector.fromList([]), decls = Vector.fromList([]))
 
 verify emptyStore
     Vector.len(emptyStore().names) => 0
@@ -79,65 +80,55 @@ fn valued(p: Proof) -> Bool
 verify valued
     valued(Proof.Built(Core.Exprs.bvar(0))) => true
 
-decision PlaceCodes
-    date = "2026-11-11"
+decision DeclaredBefore
+    date = "2026-11-12"
     reason =
-        "Whether a name is placed before a declaration, or by it as an"
-        "inductive block (NamesPlacedWhereRead), is asked of every constant"
-        "a proof block names, with the mark of its record. The reader keeps"
-        "for every name it placed one number, its place code: twice the"
-        "number of the first declaration placing it, plus one when that"
-        "declaration is an inductive block; a name never placed has a code"
-        "past every declaration. A name passes for mark m when its code is"
-        "below 2m, placed before declaration m, or is 2m + 1, placed by m"
-        "as an inductive block. The first placement counts: a name placed"
-        "again is placed from the first on, as the ndjson reader keeps it."
-        "Codes are looked up by the frontier index a block names a name by,"
-        "in a vector the reader fills once, so a block pays one vector read"
-        "and a comparison per constant."
-    chosen = "PlaceCodes"
-    rejected = ["NamesLookedUpByValue"]
-    impacts = [never, codeOf, placedFor]
+        "Susz 1 drops the marks and the placed byte of version 2 (spec"
+        "section 10.6): a block of theorem T may name in a constant or a"
+        "projection only a name whose declaration index is below T's (rule"
+        "P), and every declared name is declared once (OWNER-8), so a name"
+        "has one index, which the reader looks up once per frontier name"
+        "when MAIN is read. A block pays one vector read and a comparison"
+        "per constant, and keeps no state between records. A name declared"
+        "by a declaration Pestka skips passes rule P but is never in the"
+        "environment, in any order of checking, so it fails the theorem"
+        "the same way wherever the theorem is checked. The constants a"
+        "literal stands for are not asked of a block: checking keeps the"
+        "declarations up to the last of them in file order (LiteralPrefix in"
+        "Check.Decl)."
+    chosen = "DeclaredBefore"
+    rejected = ["PlaceCodes", "MarksPerRecord"]
+    impacts = [never, constOf, projOf, declaredBefore]
 
 fn never() -> Int
-    ? "The place code of a name no declaration places: past every declaration (PlaceCodes)."
+    ? "The declaration index of a name no declaration declares: past every declaration (DeclaredBefore)."
     2305843009213693952
 
 verify never
     never() > 0 => true
 
-fn codeOf(decl: Int, isBlock: Bool) -> Int
-    ? "The place code of a name first placed by declaration decl, an inductive block or not (PlaceCodes)."
-    match isBlock
-        true -> 2 * decl + 1
-        false -> 2 * decl
+fn declaredBefore(s: Store, n: Int, decl: Int) -> Bool
+    ? "Whether frontier name n is declared by a declaration before decl (DeclaredBefore)."
+    match Vector.get(s.decls, n)
+        Option.Some(d) -> d < decl
+        Option.None -> false
 
-verify codeOf
-    codeOf(3, true) => 7
-    codeOf(3, false) => 6
-
-fn placedFor(code: Int, mark: Int) -> Bool
-    ? "Whether a name of this code is placed before declaration mark, or by it as an inductive block (PlaceCodes)."
-    Bool.or(code < 2 * mark, code == 2 * mark + 1)
-
-verify placedFor
-    placedFor(codeOf(2, false), 3) => true
-    placedFor(codeOf(3, false), 3) => false
-    placedFor(codeOf(3, true), 3) => true
-    placedFor(codeOf(4, true), 3) => false
-    placedFor(never(), 3) => false
+verify declaredBefore
+    declaredBefore(Store.update(emptyStore(), decls = Vector.fromList([2])), 0, 3) => true
+    declaredBefore(Store.update(emptyStore(), decls = Vector.fromList([3])), 0, 3) => false
+    declaredBefore(emptyStore(), 0, 3) => false
 
 fn force(p: Proof) -> Expr
-    ? "The proof's term, decoded from its block when packed; a block that does not decode stands for a constant no environment has. Only a declaration's own check reports what is wrong with its block (forced); a theorem unfolded elsewhere is placed before the declaration unfolding it, so its own failure comes first."
+    ? "The proof's term, decoded from its block when packed; a block that does not decode stands for a constant no environment has. Only a declaration's own check reports what is wrong with its block (forced); a theorem unfolded elsewhere is declared before the declaration unfolding it, so its own failure comes first."
     match forced(p)
         Decoded.Term(e) -> e
         _ -> broken()
 
 verify force
     force(Proof.Built(Core.Exprs.natLit(1))) => Core.Exprs.natLit(1)
-    force(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([1, 7, 3]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, placed = true)))) => Core.Exprs.bvar(3)
-    force(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([2, 7, 3, 10, 1, 1]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, placed = true)))) => Core.Exprs.app(Core.Exprs.bvar(3), Core.Exprs.bvar(3))
-    force(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([1, 99]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, placed = true)))) => broken()
+    force(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([7, 3]), bounds1(1)))) => Core.Exprs.bvar(3)
+    force(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([7, 3, 10, 1, 1]), bounds1(2)))) => Core.Exprs.app(Core.Exprs.bvar(3), Core.Exprs.bvar(3))
+    force(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([99, 0]), bounds1(1)))) => broken()
 
 fn forced(p: Proof) -> Decoded
     ? "The proof's term, or what is wrong with where it comes from: Broken rejects, Long declines (OneDeferredProof)."
@@ -152,12 +143,12 @@ fn sourced(src: Source) -> Decoded
         Source.SuszBlock(s, b, bd) -> decoded(s, b, bd)
 
 verify sourced
-    sourced(Source.SuszSpot(0, 0, bounds0())) => Decoded.Broken("proof block: never read")
+    sourced(Source.SuszSpot(0, 0, bounds1(1))) => Decoded.Broken("proof block: never read")
 
 verify forced
-    forced(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([1, 99]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, placed = true)))) => Decoded.Broken("proof record 1: unknown record tag 99")
-    forced(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([1, 7, 3, 0]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, placed = true)))) => Decoded.Broken("proof block: 1 bytes after the last record")
-    forced(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([1, 7, 3]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, placed = false)))) => Decoded.Broken("proof block: the declaration says a name is named before it is placed, but none is")
+    forced(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([99, 0]), Bounds.update(bounds1(1), at = 100)))) => Decoded.Broken("PROOFS @ 100: record 1: unknown record tag 99")
+    forced(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([7, 3, 0]), bounds1(1)))) => Decoded.Broken("PROOFS @ 2: record 2: 1 bytes after the last record")
+    forced(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([7, 3, 7]), bounds1(2)))) => Decoded.Broken("PROOFS @ 2: record 2: the block ends inside it")
 
 fn broken() -> Expr
     ? "What a block that does not decode stands for: a constant that no environment has."
@@ -203,16 +194,27 @@ record Lvls
 
 type Step
     Got(Expr, LPos)
-    Unplaced(Expr, LPos, Name)
     Bad(String)
-    TooLong
 
 fn short() -> Step
     ? "A record that runs past the block."
     Step.Bad("the block ends inside it")
 
+decision MinimalVarints
+    date = "2026-11-12"
+    reason =
+        "Susz 1 varints are minimal and below 2^64 (spec section 3): a"
+        "varint of more than one byte does not end in 0x00, and the tenth"
+        "byte, of weight 2^63, is exactly 1. One comparison on the last"
+        "byte. A varint that breaks it is malformed, value -1 at none,"
+        "which a record tells apart from one that runs past the block"
+        "(value 0 at none) by cut."
+    chosen = "MinimalVarints"
+    rejected = ["AnyEncoding"]
+    impacts = [vAt, vMore, cut]
+
 fn vAt(b: Bytes, i: LPos) -> LAt
-    ? "The varint at i (at most nine bytes) and where the next field starts; at is -1 when there is none."
+    ? "The varint at i and where the next field starts; at is -1 when there is none, value -1 when it is malformed (MinimalVarints)."
     match Bytes.get(b, i.value)
         Option.None -> LAt(value = 0, at = LPos(value = -1))
         Option.Some(x) -> match x < 128
@@ -222,101 +224,82 @@ fn vAt(b: Bytes, i: LPos) -> LAt
 verify vAt
     vAt(Bytes.fromList([172, 2]), LPos(value = 0)) => LAt(value = 300, at = LPos(value = 2))
     vAt(Bytes.fromList([172]), LPos(value = 0)).at.value => -1
+    vAt(Bytes.fromList([128, 0]), LPos(value = 0)) => LAt(value = -1, at = LPos(value = -1))
+    vAt(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 1]), LPos(value = 0)) => LAt(value = 9223372036854775808, at = LPos(value = 10))
+    vAt(Bytes.fromList([255, 255, 255, 255, 255, 255, 255, 255, 255, 1]), LPos(value = 0)) => LAt(value = 18446744073709551615, at = LPos(value = 10))
+    vAt(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 2]), LPos(value = 0)).value => -1
 
 fn vMore(b: Bytes, i: LPos, acc: Int, k: Int, w: Int) -> LAt
-    ? "Byte k of the varint at i, of weight w; a tenth byte makes no varint here, where every number counts records, bytes or declarations."
-    match k >= 9
-        true -> LAt(value = 0, at = LPos(value = -1))
-        false -> match Bytes.get(b, i.value + k)
-            Option.None -> LAt(value = 0, at = LPos(value = -1))
-            Option.Some(x) -> match x < 128
-                true -> LAt(value = acc + x * w, at = lorNone(lposOf(i.value + k + 1)))
+    ? "Byte k of the varint at i, of weight w: it may not end the varint as 0x00, and the tenth must be 1 (MinimalVarints)."
+    match Bytes.get(b, i.value + k)
+        Option.None -> LAt(value = 0, at = LPos(value = -1))
+        Option.Some(x) -> match k >= 9
+            true -> match x == 1
+                true -> LAt(value = acc + w, at = lorNone(lposOf(i.value + 10)))
+                false -> LAt(value = -1, at = LPos(value = -1))
+            false -> match x < 128
+                true -> match x == 0
+                    true -> LAt(value = -1, at = LPos(value = -1))
+                    false -> LAt(value = acc + x * w, at = lorNone(lposOf(i.value + k + 1)))
                 false -> vMore(b, i, acc + Bits.and(x, 127) * w, k + 1, w * 128)
 
 verify vMore
     vMore(Bytes.fromList([128, 1]), LPos(value = 0), 0, 1, 128) => LAt(value = 128, at = LPos(value = 2))
 
+fn cut(xs: List<LAt>) -> Step
+    ? "A record whose fields ran out: a malformed varint among them, else the block ends inside it (MinimalVarints)."
+    match xs
+        [] -> short()
+        [x, ..rest] -> match x.value < 0
+            true -> Step.Bad("a varint is not minimal or not below 2^64")
+            false -> cut(rest)
+
+verify cut
+    cut([LAt(value = 0, at = LPos(value = -1))]) => Step.Bad("the block ends inside it")
+    cut([LAt(value = -1, at = LPos(value = -1))]) => Step.Bad("a varint is not minimal or not below 2^64")
+
 decision BlockCountBounded
     date = "2026-11-11"
     reason =
-        "A block starts with how many expressions it holds, and decoding"
-        "makes a vector of that many places before reading any. A count is"
-        "read from the file, so it is first held to what the block's bytes"
-        "can hold: every expression record takes at least two bytes, a tag"
-        "and a field. A larger count rejects the block rather than allocate"
-        "for it. A literal in a block longer than marginBytes declines it,"
-        "as a record that long declines the main block."
+        "Decoding makes a vector of as many places as the block holds"
+        "expressions before reading any. The count is the theorem record's"
+        "(OWNER-4), which the reader held to the block's length when it read"
+        "MAIN: every expression record takes at least two bytes, a tag and"
+        "a field. A count past Aver's largest vector, 2^24, declines the"
+        "declaration: an implementation limit, decided by the file's bytes"
+        "alone, ordered with the declaration's other failures."
     chosen = "BlockCountBounded"
-    rejected = ["CountTrusted"]
-    impacts = [decoded, litOf]
-
-fn countOf(b: Bytes) -> Int
-    ? "The count a block starts with, or 0 when it has none; what the reader adds to the expressions it reports."
-    n = vAt(b, LPos(value = 0))
-    match n.at.value < 0
-        true -> 0
-        false -> n.value
-
-verify countOf
-    countOf(Bytes.fromList([2, 7, 3, 10, 1, 1])) => 2
-    countOf(Bytes.fromList([])) => 0
+    rejected = ["CountTrusted", "CountAtTheBlockHead"]
+    impacts = [decoded]
 
 fn decoded(s: Store, b: Bytes, bd: Bounds) -> Decoded
-    ? "The block: its count, then its records; the last expression is the proof (BlockCountBounded)."
-    n = vAt(b, LPos(value = 0))
-    match n.at.value < 0
-        true -> Decoded.Broken("proof block: no count")
-        false -> match Bool.or(n.value < 1, 2 * n.value > Bytes.len(b))
-            true -> Decoded.Broken("proof block: a count of {n.value} expressions in {Bytes.len(b)} bytes")
-            false -> match Vector.new(n.value, Core.Exprs.bvar(0))
-                Result.Ok(xs) -> built(s, b, bd, n.at, 0, n.value, xs, 0, true, 0)
-                Result.Err(e) -> Decoded.Long("proof block: {e}")
+    ? "The block: its count from the theorem's record, then its records; the last expression is the proof (BlockCountBounded)."
+    match Vector.new(bd.count, Core.Exprs.bvar(0))
+        Result.Ok(xs) -> built(s, b, bd, LPos(value = 0), 0, bd.count, xs)
+        Result.Err(e) -> Decoded.Long("PROOFS @ {bd.at}: a block of {bd.count} expressions: {e}")
 
 verify decoded
-    decoded(emptyStore(), Bytes.fromList([9, 7, 3]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, placed = true)) => Decoded.Broken("proof block: a count of 9 expressions in 3 bytes")
-    decoded(emptyStore(), Bytes.fromList([0]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, placed = true)) => Decoded.Broken("proof block: a count of 0 expressions in 1 bytes")
+    decoded(emptyStore(), Bytes.fromList([7, 3]), bounds1(1)) => Decoded.Term(Core.Exprs.bvar(3))
 
-fn built(s: Store, b: Bytes, bd: Bounds, i: LPos, k: Int, n: Int, xs: Vector<Expr>, mark: Int, fine: Bool, rec: Int) -> Decoded
-    ? "The record at i, the block's record rec + 1, after k of its n expressions; xs holds those k, mark is the mark so far and fine whether every name so far was placed before its mark."
+fn built(s: Store, b: Bytes, bd: Bounds, i: LPos, k: Int, n: Int, xs: Vector<Expr>) -> Decoded
+    ? "The record at i, the block's record k + 1, after k of its n expressions; xs holds those k."
     match k >= n
-        true -> ended(b, bd, i, n, xs, fine)
+        true -> ended(b, bd, i, n, xs)
         false -> match Bytes.get(b, i.value)
-            Option.None -> Decoded.Broken("proof record {rec + 1}: the block ends inside it")
-            Option.Some(19) -> marked(s, b, bd, vAt(b, lorNone(lposOf(i.value + 1))), k, n, xs, mark, fine, rec)
-            Option.Some(tag) -> withOne(s, b, bd, i, k, n, xs, mark, fine, rec, recordOf(s, b, xs, k, bd, mark, tag, lorNone(lposOf(i.value + 1))))
+            Option.None -> Decoded.Broken("PROOFS @ {bd.at + i.value}: record {k + 1}: the block ends inside it")
+            Option.Some(tag) -> withOne(s, b, bd, i, k, n, xs, recordOf(s, b, xs, k, bd, tag, lorNone(lposOf(i.value + 1))))
 
-fn marked(s: Store, b: Bytes, bd: Bounds, m: LAt, k: Int, n: Int, xs: Vector<Expr>, mark: Int, fine: Bool, rec: Int) -> Decoded
-    ? "19, a mark: the expression records after it stood before declaration m in the export. Marks never go down nor past the block's own declaration."
-    match m.at.value < 0
-        true -> Decoded.Broken("proof record {rec + 1}: the block ends inside it")
-        false -> match Bool.and(m.value >= mark, m.value <= bd.decl)
-            true -> built(s, b, bd, m.at, k, n, xs, m.value, fine, rec + 1)
-            false -> Decoded.Broken("proof record {rec + 1}: mark {m.value} is below the mark before it, {mark}, or past the block's declaration, {bd.decl}")
-
-fn withOne(s: Store, b: Bytes, bd: Bounds, i: LPos, k: Int, n: Int, xs: Vector<Expr>, mark: Int, fine: Bool, rec: Int, r: Step) -> Decoded
-    ? "Goes on after expression k, or stops at a bad one. A name the record names before its mark's declaration places it is an error at once when the declaration said every name is placed."
+fn withOne(s: Store, b: Bytes, bd: Bounds, i: LPos, k: Int, n: Int, xs: Vector<Expr>, r: Step) -> Decoded
+    ? "Goes on after expression k, or stops at a bad one, named by where its record starts and its number in the block (spec section 8)."
     match r
-        Step.Got(e, at) -> built(s, b, bd, at, k + 1, n, placed(xs, k, e), mark, fine, rec + 1)
-        Step.Unplaced(e, at, nm) -> match bd.placed
-            true -> Decoded.Broken("proof record {rec + 1}: {Core.Names.render(nm)} is not placed before declaration {mark}, but the declaration says every name is")
-            false -> built(s, b, bd, at, k + 1, n, placed(xs, k, e), mark, false, rec + 1)
-        Step.Bad(e) -> Decoded.Broken("proof record {rec + 1}: {e}")
-        Step.TooLong -> Decoded.Long("proof record {rec + 1} is longer than {limitBytes()} bytes")
+        Step.Got(e, at) -> built(s, b, bd, at, k + 1, n, placed(xs, k, e))
+        Step.Bad(e) -> Decoded.Broken("PROOFS @ {bd.at + i.value}: record {k + 1}: {e}")
 
-fn limitBytes() -> Int
-    ? "The longest literal a block may hold, as marginBytes in Export.Susz (BlockCountBounded)."
-    1048576
-
-verify limitBytes
-    limitBytes() > 0 => true
-
-fn ended(b: Bytes, bd: Bounds, i: LPos, n: Int, xs: Vector<Expr>, fine: Bool) -> Decoded
-    ? "All n expressions read: the block must end there, and the declaration's word on names placed must be what the records said."
+fn ended(b: Bytes, bd: Bounds, i: LPos, n: Int, xs: Vector<Expr>) -> Decoded
+    ? "All n expressions read: the block must end there."
     match i.value == Bytes.len(b)
-        false -> Decoded.Broken("proof block: {Bytes.len(b) - i.value} bytes after the last record")
-        true -> match Bool.and(Bool.not(bd.placed), fine)
-            true -> Decoded.Broken("proof block: the declaration says a name is named before it is placed, but none is")
-            false -> lastOf(xs, n)
+        false -> Decoded.Broken("PROOFS @ {bd.at + i.value}: record {n + 1}: {Bytes.len(b) - i.value} bytes after the last record")
+        true -> lastOf(xs, n)
 
 fn placed(v: Vector<Expr>, j: Int, e: Expr) -> Vector<Expr>
     ? "v with e at j; j is always in range."
@@ -350,27 +333,26 @@ fn levelAt(s: Store, bd: Bounds, i: Int) -> Option<Level>
         true -> Vector.get(s.levels, i)
         false -> Option.None
 
-fn recordOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, bd: Bounds, mark: Int, tag: Int, i: LPos) -> Step
-    ? "The record with tag, its fields at i; applications first, the most common."
+fn recordOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, bd: Bounds, tag: Int, i: LPos) -> Step
+    ? "The record with tag, its fields at i; applications first, the most common. A block holds expression records only, tags 7 to 16 (spec 10.5)."
     match tag
         10 -> appOf(s, xs, k, bd, b, vAt(b, i))
         11 -> binderOf(s, b, xs, k, bd, i, true)
         12 -> binderOf(s, b, xs, k, bd, i, false)
         7 -> bvarOf(vAt(b, i))
-        9 -> constOf(s, b, bd, mark, vAt(b, i))
+        9 -> constOf(s, b, bd, vAt(b, i))
         8 -> sortOf(s, bd, vAt(b, i))
         13 -> letOf(s, b, xs, k, bd, vAt(b, i))
-        14 -> litOf(s, b, mark, vAt(b, i), true)
-        15 -> litOf(s, b, mark, vAt(b, i), false)
-        16 -> projOf(s, b, xs, k, bd, mark, vAt(b, i))
-        17 -> mdataOf(s, xs, k, bd, vAt(b, i))
+        14 -> natOf(b, vAt(b, i))
+        15 -> strOf(b, vAt(b, i))
+        16 -> projOf(s, b, xs, k, bd, vAt(b, i))
         _ -> Step.Bad("unknown record tag {tag}")
 
 fn appOf(s: Store, xs: Vector<Expr>, k: Int, bd: Bounds, b: Bytes, f: LAt) -> Step
     ? "10: the function and the argument."
     a = vAt(b, f.at)
     match a.at.value < 0
-        true -> short()
+        true -> cut([f, a])
         false -> match ref(s, xs, k, bd, f.value)
             Option.None -> Step.Bad("unknown expression reference {f.value}")
             Option.Some(fe) -> match ref(s, xs, k, bd, a.value)
@@ -383,7 +365,7 @@ fn binderOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, bd: Bounds, i: LPos, i
     ty = vAt(b, n.at)
     body = vAt(b, ty.at)
     match Bool.or(i.value >= Bytes.len(b), body.at.value < 0)
-        true -> short()
+        true -> cut([n, ty, body])
         false -> match binderInfo(Option.withDefault(Bytes.get(b, i.value), 9))
             Option.None -> Step.Bad("unknown binder annotation {Option.withDefault(Bytes.get(b, i.value), 9)}")
             Option.Some(bi) -> binderBuilt(nameAt(s, bd, n.value), n.value, ref(s, xs, k, bd, ty.value), ty.value, ref(s, xs, k, bd, body.value), body.value, bi, isLam, body.at)
@@ -412,37 +394,33 @@ fn binderInfo(k: Int) -> Option<Binder>
 fn bvarOf(x: LAt) -> Step
     ? "7: a bound variable."
     match x.at.value < 0
-        true -> short()
+        true -> cut([x])
         false -> Step.Got(Core.Exprs.bvar(x.value), x.at)
 
 fn sortOf(s: Store, bd: Bounds, l: LAt) -> Step
     ? "8: the sort of a frontier level."
     match l.at.value < 0
-        true -> short()
+        true -> cut([l])
         false -> match levelAt(s, bd, l.value)
             Option.None -> Step.Bad("unknown level reference {l.value}")
             Option.Some(lv) -> Step.Got(Core.Exprs.sort(lv), l.at)
 
-fn constOf(s: Store, b: Bytes, bd: Bounds, mark: Int, n: LAt) -> Step
-    ? "9: a frontier name and its frontier levels; the name is held against the record's mark (PlaceCodes)."
+fn constOf(s: Store, b: Bytes, bd: Bounds, n: LAt) -> Step
+    ? "9: a frontier name and its frontier levels; the name must be declared before the theorem (DeclaredBefore)."
     c = vAt(b, n.at)
     match Bool.or(n.at.value < 0, c.at.value < 0)
-        true -> short()
+        true -> cut([n, c])
         false -> match nameAt(s, bd, n.value)
             Option.None -> Step.Bad("unknown name reference {n.value}")
-            Option.Some(nm) -> constBuilt(nm, placedFor(Option.withDefault(Vector.get(s.codes, n.value), never()), mark), levelsFrom(s, bd, b, c.at, c.value))
+            Option.Some(nm) -> match declaredBefore(s, n.value, bd.decl)
+                false -> Step.Bad("{Core.Names.render(nm)} is not declared before the theorem")
+                true -> constBuilt(nm, levelsFrom(s, bd, b, c.at, c.value))
 
-fn constBuilt(nm: Name, ok: Bool, ls: Lvls) -> Step
+fn constBuilt(nm: Name, ls: Lvls) -> Step
     ? "The constant, when its levels are there."
     match ls.at.value < 0
-        true -> Step.Bad("a level reference is unknown or runs past the block")
-        false -> named(Core.Exprs.cnst(nm, ls.ls), ls.at, nm, ok)
-
-fn named(e: Expr, at: LPos, nm: Name, ok: Bool) -> Step
-    ? "A record naming nm, placed before its mark or not."
-    match ok
-        true -> Step.Got(e, at)
-        false -> Step.Unplaced(e, at, nm)
+        true -> Step.Bad("a level reference is unknown, malformed or runs past the block")
+        false -> Step.Got(Core.Exprs.cnst(nm, ls.ls), ls.at)
 
 fn levelsFrom(s: Store, bd: Bounds, b: Bytes, i: LPos, n: Int) -> Lvls
     ? "n frontier levels at i, in order."
@@ -468,7 +446,7 @@ fn letOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, bd: Bounds, n: LAt) -> St
     v = vAt(b, ty.at)
     body = vAt(b, v.at)
     match body.at.value < 0
-        true -> short()
+        true -> cut([n, ty, v, body])
         false -> letBuilt(nameAt(s, bd, n.value), n.value, ref(s, xs, k, bd, ty.value), ty.value, ref(s, xs, k, bd, v.value), v.value, ref(s, xs, k, bd, body.value), body.value, body.at)
 
 fn letBuilt(n: Option<Name>, ni: Int, ty: Option<Expr>, ti: Int, v: Option<Expr>, vi: Int, body: Option<Expr>, bo: Int, at: LPos) -> Step
@@ -483,108 +461,108 @@ fn letBuilt(n: Option<Name>, ni: Int, ty: Option<Expr>, ti: Int, v: Option<Expr>
                     Option.None -> Step.Bad("unknown expression reference {bo}")
                     Option.Some(y) -> Step.Got(Core.Exprs.letE(nm, t, x, y), at)
 
-fn litOf(s: Store, b: Bytes, mark: Int, n: LAt, isNat: Bool) -> Step
-    ? "14 a Nat by its decimal digits, 15 a string, checked as the reader checks one; a literal names the constants checking unfolds it to (BlockCountBounded, PlaceCodes)."
-    match n.value > limitBytes()
-        true -> Step.TooLong
-        false -> match Bool.and(n.at.value >= 0, n.at.value + n.value <= Bytes.len(b))
+fn natOf(b: Bytes, n: LAt) -> Step
+    ? "14: a Nat by its minimal little-endian bytes, as Export.Susz reads one in MAIN."
+    match n.at.value < 0
+        true -> cut([n])
+        false -> match n.at.value + n.value <= Bytes.len(b)
+            false -> short()
+            true -> natRead(b, n.at.value, n.value)
+
+fn natRead(b: Bytes, i: Int, n: Int) -> Step
+    ? "The n bytes at i, the last not 0x00, as a number."
+    match Bool.and(n > 0, Option.withDefault(Bytes.get(b, i + n - 1), 0) == 0)
+        true -> Step.Bad("a Nat literal ends in a zero byte")
+        false -> Step.Got(Core.Exprs.natLit(leValue(b, i, i + n - 1, 0)), lorNone(lposOf(i + n)))
+
+fn leValue(b: Bytes, i: Int, j: Int, acc: Int) -> Int
+    ? "The bytes from i to j as a little-endian number, read from the last; acc is the value of those after j."
+    match j < i
+        true -> acc
+        false -> leValue(b, i, j - 1, acc * 256 + Option.withDefault(Bytes.get(b, j), 0))
+
+verify leValue
+    leValue(Bytes.fromList([1, 2]), 0, 1, 0) => 513
+
+verify natRead
+    natRead(Bytes.fromList([0, 1]), 0, 2) => Step.Got(Core.Exprs.natLit(256), LPos(value = 2))
+
+verify natOf
+    natOf(Bytes.fromList([14, 2, 0, 1]), LAt(value = 2, at = LPos(value = 2))) => Step.Got(Core.Exprs.natLit(256), LPos(value = 4))
+    natOf(Bytes.fromList([14, 1, 0]), LAt(value = 1, at = LPos(value = 2))) => Step.Bad("a Nat literal ends in a zero byte")
+    natOf(Bytes.fromList([14, 0]), LAt(value = 0, at = LPos(value = 2))) => Step.Got(Core.Exprs.natLit(0), LPos(value = 2))
+
+fn strOf(b: Bytes, n: LAt) -> Step
+    ? "15: a string, well-formed UTF-8."
+    match n.at.value < 0
+        true -> cut([n])
+        false -> match n.at.value + n.value <= Bytes.len(b)
             false -> short()
             true -> match String.fromUtf8(Bytes.take(Bytes.drop(b, n.at.value), n.value))
                 Result.Err(e) -> Step.Bad("a string is not UTF-8: {e}")
-                Result.Ok(text) -> litBuilt(s, text, isNat, mark, lorNone(lposOf(n.at.value + n.value)))
+                Result.Ok(text) -> Step.Got(Core.Exprs.strLit(text), lorNone(lposOf(n.at.value + n.value)))
 
-fn litBuilt(s: Store, text: String, isNat: Bool, mark: Int, at: LPos) -> Step
-    ? "The literal; a Nat must be digits, as Export.Items.natOf has it."
-    match isNat
-        false -> litNamed(Core.Exprs.strLit(text), at, allPlaced(s.strCodes, mark), "String")
-        true -> match String.startsWith(text, "-")
-            true -> Step.Bad("negative Nat literal")
-            false -> match Int.fromString(text)
-                Result.Ok(v) -> litNamed(Core.Exprs.natLit(v), at, placedFor(s.natCode, mark), "Nat")
-                Result.Err(_) -> Step.Bad("malformed Nat literal")
+verify strOf
+    strOf(Bytes.fromList([15, 1, 255]), LAt(value = 1, at = LPos(value = 2))) => Step.Bad("a string is not UTF-8: invalid UTF-8")
 
-fn litNamed(e: Expr, at: LPos, ok: Bool, what: String) -> Step
-    ? "A literal, whose constants are placed before its mark or not."
-    match ok
-        true -> Step.Got(e, at)
-        false -> Step.Unplaced(e, at, Core.Names.str(Core.Names.anon(), what))
-
-fn allPlaced(codes: List<Int>, mark: Int) -> Bool
-    ? "Every code placed before mark (PlaceCodes)."
-    match codes
-        [] -> true
-        [c, ..rest] -> Bool.and(placedFor(c, mark), allPlaced(rest, mark))
-
-verify allPlaced
-    allPlaced([0, 2], 2) => true
-    allPlaced([0, 4], 2) => false
-
-fn projOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, bd: Bounds, mark: Int, n: LAt) -> Step
-    ? "16: a projection, the structure's frontier name, the field and the structure; the name is held against the record's mark (PlaceCodes)."
+fn projOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, bd: Bounds, n: LAt) -> Step
+    ? "16: a projection, the structure's frontier name, the field and the structure; the name must be declared before the theorem (DeclaredBefore)."
     f = vAt(b, n.at)
     x = vAt(b, f.at)
     match x.at.value < 0
-        true -> short()
+        true -> cut([n, f, x])
         false -> match nameAt(s, bd, n.value)
             Option.None -> Step.Bad("unknown name reference {n.value}")
-            Option.Some(nm) -> match ref(s, xs, k, bd, x.value)
-                Option.None -> Step.Bad("unknown expression reference {x.value}")
-                Option.Some(e) -> named(Core.Exprs.proj(nm, f.value, e), x.at, nm, placedFor(Option.withDefault(Vector.get(s.codes, n.value), never()), mark))
+            Option.Some(nm) -> match declaredBefore(s, n.value, bd.decl)
+                false -> Step.Bad("{Core.Names.render(nm)} is not declared before the theorem")
+                true -> match ref(s, xs, k, bd, x.value)
+                    Option.None -> Step.Bad("unknown expression reference {x.value}")
+                    Option.Some(e) -> Step.Got(Core.Exprs.proj(nm, f.value, e), x.at)
 
-fn mdataOf(s: Store, xs: Vector<Expr>, k: Int, bd: Bounds, d: LAt) -> Step
-    ? "17: metadata stands for the expression it wraps."
-    match d.at.value < 0
-        true -> short()
-        false -> match ref(s, xs, k, bd, d.value)
-            Option.None -> Step.Bad("unknown expression reference {d.value}")
-            Option.Some(e) -> Step.Got(e, d.at)
+fn bounds1(n: Int) -> Bounds
+    ? "Bounds of declaration 0 with an empty frontier and n expressions, for examples."
+    Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = n, at = 0)
 
-fn bounds0() -> Bounds
-    ? "Bounds of declaration 0 with an empty frontier, for examples."
-    Bounds(decl = 0, names = 0, levels = 0, exprs = 0, placed = true)
-
-verify bounds0
-    bounds0().decl => 0
+verify bounds1
+    bounds1(2).count => 2
 
 verify built
-    built(emptyStore(), Bytes.fromList([1, 7, 3]), bounds0(), LPos(value = 1), 0, 1, Vector.fromList([Core.Exprs.bvar(0)]), 0, true, 0) => Decoded.Term(Core.Exprs.bvar(3))
-    built(emptyStore(), Bytes.fromList([1]), bounds0(), LPos(value = 1), 0, 1, Vector.fromList([Core.Exprs.bvar(0)]), 0, true, 0) => Decoded.Broken("proof record 1: the block ends inside it")
-
-verify marked
-    marked(emptyStore(), Bytes.fromList([1, 19, 5]), Bounds(decl = 3, names = 0, levels = 0, exprs = 0, placed = true), LAt(value = 5, at = LPos(value = 3)), 0, 1, Vector.fromList([Core.Exprs.bvar(0)]), 0, true, 0) => Decoded.Broken("proof record 1: mark 5 is below the mark before it, 0, or past the block's declaration, 3")
+    built(emptyStore(), Bytes.fromList([7, 3]), bounds1(1), LPos(value = 0), 0, 1, Vector.fromList([Core.Exprs.bvar(0)])) => Decoded.Term(Core.Exprs.bvar(3))
+    built(emptyStore(), Bytes.fromList([]), bounds1(1), LPos(value = 0), 0, 1, Vector.fromList([Core.Exprs.bvar(0)])) => Decoded.Broken("PROOFS @ 0: record 1: the block ends inside it")
 
 verify withOne
-    withOne(emptyStore(), Bytes.fromList([]), bounds0(), LPos(value = 0), 0, 1, Vector.fromList([Core.Exprs.bvar(0)]), 0, true, 2, Step.Bad("x")) => Decoded.Broken("proof record 3: x")
-    withOne(emptyStore(), Bytes.fromList([]), bounds0(), LPos(value = 0), 0, 1, Vector.fromList([Core.Exprs.bvar(0)]), 0, true, 0, Step.TooLong) => Decoded.Long("proof record 1 is longer than 1048576 bytes")
-    withOne(emptyStore(), Bytes.fromList([]), bounds0(), LPos(value = 0), 0, 1, Vector.fromList([Core.Exprs.bvar(0)]), 4, true, 0, Step.Unplaced(Core.Exprs.bvar(0), LPos(value = 0), Core.Names.str(Core.Names.anon(), "C"))) => Decoded.Broken("proof record 1: C is not placed before declaration 4, but the declaration says every name is")
+    withOne(emptyStore(), Bytes.fromList([]), Bounds.update(bounds1(1), at = 10), LPos(value = 4), 2, 3, Vector.fromList([Core.Exprs.bvar(0)]), Step.Bad("x")) => Decoded.Broken("PROOFS @ 14: record 3: x")
 
 verify ended
-    ended(Bytes.fromList([1, 7, 3]), bounds0(), LPos(value = 3), 1, Vector.fromList([Core.Exprs.bvar(3)]), true) => Decoded.Term(Core.Exprs.bvar(3))
+    ended(Bytes.fromList([7, 3]), bounds1(1), LPos(value = 2), 1, Vector.fromList([Core.Exprs.bvar(3)])) => Decoded.Term(Core.Exprs.bvar(3))
 
 verify lastOf
     lastOf(Vector.fromList([]), 1) => Decoded.Broken("proof block: empty")
 
 verify ref
-    ref(emptyStore(), Vector.fromList([Core.Exprs.bvar(1)]), 1, bounds0(), 1) => Option.Some(Core.Exprs.bvar(1))
-    ref(emptyStore(), Vector.fromList([Core.Exprs.bvar(1)]), 1, bounds0(), 0) => Option.None
-    ref(Store.update(emptyStore(), exprs = Vector.fromList([Core.Exprs.bvar(7)])), Vector.fromList([]), 0, bounds0(), 1) => Option.None
-    ref(Store.update(emptyStore(), exprs = Vector.fromList([Core.Exprs.bvar(7)])), Vector.fromList([]), 0, Bounds.update(bounds0(), exprs = 1), 1) => Option.Some(Core.Exprs.bvar(7))
+    ref(emptyStore(), Vector.fromList([Core.Exprs.bvar(1)]), 1, bounds1(1), 1) => Option.Some(Core.Exprs.bvar(1))
+    ref(emptyStore(), Vector.fromList([Core.Exprs.bvar(1)]), 1, bounds1(1), 0) => Option.None
+    ref(Store.update(emptyStore(), exprs = Vector.fromList([Core.Exprs.bvar(7)])), Vector.fromList([]), 0, bounds1(1), 1) => Option.None
+    ref(Store.update(emptyStore(), exprs = Vector.fromList([Core.Exprs.bvar(7)])), Vector.fromList([]), 0, Bounds.update(bounds1(1), exprs = 1), 1) => Option.Some(Core.Exprs.bvar(7))
 
 verify nameAt
-    nameAt(Store.update(emptyStore(), names = Vector.fromList([Core.Names.anon()])), bounds0(), 0) => Option.None
-    nameAt(Store.update(emptyStore(), names = Vector.fromList([Core.Names.anon()])), Bounds.update(bounds0(), names = 1), 0) => Option.Some(Core.Names.anon())
+    nameAt(Store.update(emptyStore(), names = Vector.fromList([Core.Names.anon()])), bounds1(1), 0) => Option.None
+    nameAt(Store.update(emptyStore(), names = Vector.fromList([Core.Names.anon()])), Bounds.update(bounds1(1), names = 1), 0) => Option.Some(Core.Names.anon())
 
 verify levelAt
-    levelAt(Store.update(emptyStore(), levels = Vector.fromList([Level.Zero])), bounds0(), 0) => Option.None
+    levelAt(Store.update(emptyStore(), levels = Vector.fromList([Level.Zero])), bounds1(1), 0) => Option.None
 
 verify recordOf
-    recordOf(emptyStore(), Bytes.fromList([99]), Vector.fromList([]), 0, bounds0(), 0, 99, LPos(value = 1)) => Step.Bad("unknown record tag 99")
+    recordOf(emptyStore(), Bytes.fromList([99]), Vector.fromList([]), 0, bounds1(1), 99, LPos(value = 1)) => Step.Bad("unknown record tag 99")
+    recordOf(emptyStore(), Bytes.fromList([17, 1]), Vector.fromList([]), 0, bounds1(1), 17, LPos(value = 1)) => Step.Bad("unknown record tag 17")
+    recordOf(emptyStore(), Bytes.fromList([19, 0, 1]), Vector.fromList([]), 0, bounds1(1), 19, LPos(value = 1)) => Step.Bad("unknown record tag 19")
 
 verify appOf
-    appOf(emptyStore(), Vector.fromList([]), 0, bounds0(), Bytes.fromList([1, 1]), LAt(value = 1, at = LPos(value = 1))) => Step.Bad("unknown expression reference 1")
+    appOf(emptyStore(), Vector.fromList([]), 0, bounds1(1), Bytes.fromList([1, 1]), LAt(value = 1, at = LPos(value = 1))) => Step.Bad("unknown expression reference 1")
+    appOf(emptyStore(), Vector.fromList([]), 0, bounds1(1), Bytes.fromList([10, 1, 129, 0]), LAt(value = 1, at = LPos(value = 2))) => Step.Bad("a varint is not minimal or not below 2^64")
 
 verify binderOf
-    binderOf(emptyStore(), Bytes.fromList([9, 0, 1, 1]), Vector.fromList([]), 0, bounds0(), LPos(value = 0), true) => Step.Bad("unknown binder annotation 9")
+    binderOf(emptyStore(), Bytes.fromList([9, 0, 1, 1]), Vector.fromList([]), 0, bounds1(1), LPos(value = 0), true) => Step.Bad("unknown binder annotation 9")
 
 verify binderBuilt
     binderBuilt(Option.None, 4, Option.None, 1, Option.None, 1, Binder.Default, true, LPos(value = 0)) => Step.Bad("unknown name reference 4")
@@ -597,43 +575,28 @@ verify bvarOf
     bvarOf(LAt(value = 2, at = LPos(value = 1))) => Step.Got(Core.Exprs.bvar(2), LPos(value = 1))
 
 verify sortOf
-    sortOf(emptyStore(), bounds0(), LAt(value = 0, at = LPos(value = 1))) => Step.Bad("unknown level reference 0")
+    sortOf(emptyStore(), bounds1(1), LAt(value = 0, at = LPos(value = 1))) => Step.Bad("unknown level reference 0")
 
 verify constOf
-    constOf(emptyStore(), Bytes.fromList([0, 0]), bounds0(), 0, LAt(value = 0, at = LPos(value = 1))) => Step.Bad("unknown name reference 0")
+    constOf(emptyStore(), Bytes.fromList([0, 0]), bounds1(1), LAt(value = 0, at = LPos(value = 1))) => Step.Bad("unknown name reference 0")
+    constOf(Store(names = Vector.fromList([Core.Names.str(Core.Names.anon(), "C")]), levels = Vector.fromList([]), exprs = Vector.fromList([]), decls = Vector.fromList([4])), Bytes.fromList([0, 0]), Bounds.update(bounds1(1), decl = 4, names = 1), LAt(value = 0, at = LPos(value = 1))) => Step.Bad("C is not declared before the theorem")
+    constOf(Store(names = Vector.fromList([Core.Names.str(Core.Names.anon(), "C")]), levels = Vector.fromList([]), exprs = Vector.fromList([]), decls = Vector.fromList([3])), Bytes.fromList([0, 0]), Bounds.update(bounds1(1), decl = 4, names = 1), LAt(value = 0, at = LPos(value = 1))) => Step.Got(Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "C"), []), LPos(value = 2))
 
 verify constBuilt
-    constBuilt(Core.Names.anon(), true, Lvls(ls = [], at = LPos(value = 2))) => Step.Got(Core.Exprs.cnst(Core.Names.anon(), []), LPos(value = 2))
-
-verify named
-    named(Core.Exprs.bvar(0), LPos(value = 1), Core.Names.anon(), false) => Step.Unplaced(Core.Exprs.bvar(0), LPos(value = 1), Core.Names.anon())
+    constBuilt(Core.Names.anon(), Lvls(ls = [], at = LPos(value = 2))) => Step.Got(Core.Exprs.cnst(Core.Names.anon(), []), LPos(value = 2))
 
 verify levelsFrom
-    levelsFrom(emptyStore(), bounds0(), Bytes.fromList([]), LPos(value = 0), 0) => Lvls(ls = [], at = LPos(value = 0))
+    levelsFrom(emptyStore(), bounds1(1), Bytes.fromList([]), LPos(value = 0), 0) => Lvls(ls = [], at = LPos(value = 0))
 
 verify levelThen
-    levelThen(emptyStore(), bounds0(), Bytes.fromList([]), LAt(value = 0, at = LPos(value = -1)), 1).at.value => -1
+    levelThen(emptyStore(), bounds1(1), Bytes.fromList([]), LAt(value = 0, at = LPos(value = -1)), 1).at.value => -1
 
 verify letOf
-    letOf(emptyStore(), Bytes.fromList([0, 1, 1, 1]), Vector.fromList([]), 0, bounds0(), LAt(value = 0, at = LPos(value = 1))) => Step.Bad("unknown name reference 0")
+    letOf(emptyStore(), Bytes.fromList([0, 1, 1, 1]), Vector.fromList([]), 0, bounds1(1), LAt(value = 0, at = LPos(value = 1))) => Step.Bad("unknown name reference 0")
 
 verify letBuilt
     letBuilt(Option.None, 3, Option.None, 1, Option.None, 1, Option.None, 1, LPos(value = 0)) => Step.Bad("unknown name reference 3")
 
-verify litOf
-    litOf(Store.update(emptyStore(), natCode = 0), Bytes.fromList([1, 55]), 1, LAt(value = 1, at = LPos(value = 1)), true) => Step.Got(Core.Exprs.natLit(7), LPos(value = 2))
-    litOf(emptyStore(), Bytes.fromList([1, 55]), 1, LAt(value = 1, at = LPos(value = 1)), true) => Step.Unplaced(Core.Exprs.natLit(7), LPos(value = 2), Core.Names.str(Core.Names.anon(), "Nat"))
-    litOf(emptyStore(), Bytes.fromList([1]), 1, LAt(value = 2000000, at = LPos(value = 1)), true) => Step.TooLong
-
-verify litBuilt
-    litBuilt(emptyStore(), "-1", true, 0, LPos(value = 0)) => Step.Bad("negative Nat literal")
-    litBuilt(emptyStore(), "x", true, 0, LPos(value = 0)) => Step.Bad("malformed Nat literal")
-
-verify litNamed
-    litNamed(Core.Exprs.natLit(1), LPos(value = 0), true, "Nat") => Step.Got(Core.Exprs.natLit(1), LPos(value = 0))
-
 verify projOf
-    projOf(emptyStore(), Bytes.fromList([0, 0, 1]), Vector.fromList([]), 0, bounds0(), 0, LAt(value = 0, at = LPos(value = 1))) => Step.Bad("unknown name reference 0")
-
-verify mdataOf
-    mdataOf(emptyStore(), Vector.fromList([Core.Exprs.bvar(4)]), 1, bounds0(), LAt(value = 1, at = LPos(value = 1))) => Step.Got(Core.Exprs.bvar(4), LPos(value = 1))
+    projOf(emptyStore(), Bytes.fromList([0, 0, 1]), Vector.fromList([]), 0, bounds1(1), LAt(value = 0, at = LPos(value = 1))) => Step.Bad("unknown name reference 0")
+    projOf(Store(names = Vector.fromList([Core.Names.str(Core.Names.anon(), "S")]), levels = Vector.fromList([]), exprs = Vector.fromList([]), decls = Vector.fromList([never()])), Bytes.fromList([0, 0, 1]), Vector.fromList([]), 0, Bounds.update(bounds1(1), names = 1), LAt(value = 0, at = LPos(value = 1))) => Step.Bad("S is not declared before the theorem")

@@ -10,7 +10,7 @@ module Declarations
 fn declLine(t: Tables, kind: String, o: List<Tuple<String, J>>) -> Result<Tables, String>
     ? "One declaration line, already split into its kind and its object."
     d = declOf(t, kind, o)?
-    Result.Ok(Export.Tables.addDecl(t, d))
+    Export.Tables.addDecl(t, d)
 
 verify declLine
     declLine(Export.Tables.empty(), "lemma", []) => Result.Err("unknown declaration kind 'lemma'")
@@ -53,21 +53,21 @@ fn thmAt(t: Tables, name: Int, params: List<Int>, ty: Int, val: Int, group: List
     ? "A theorem from the indices of a thm line read by position, looked up in the order declOf looks them up."
     h = headOf(t, name, params, ty)?
     v = Export.Tables.expr(t, val)?
-    Result.Ok(Export.Tables.addDecl(t, Decl.Thm(h, Proof.Built(v), Export.Tables.names(t, group)?)))
+    Export.Tables.addDecl(t, Decl.Thm(h, Proof.Built(v), Export.Tables.names(t, group)?))
 
 verify thmAt
     thmAt(Export.Tables.empty(), 0, [], 0, 0, [0]) => Result.Err("unknown expression index 0")
-    List.len(Result.withDefault(thmAt(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.bvar(0)), Export.Tables.empty()), 0, [], 0, 0, [0]), Export.Tables.empty()).decls) => 1
+    List.len(Result.withDefault(thmAt(Result.withDefault(Export.Tables.addExpr(Result.withDefault(Export.Tables.addName(Export.Tables.empty(), 1, Core.Names.str(Core.Names.anon(), "x")), Export.Tables.empty()), 0, Core.Exprs.bvar(0)), Export.Tables.empty()), 1, [], 0, 0, [0]), Export.Tables.empty()).decls) => 1
 
 fn defAt(t: Tables, name: Int, params: List<Int>, ty: Int, val: Int, group: List<Int>, hints: Hints, safety: Safety) -> Result<Tables, String>
     ? "A definition from the indices of a def line read by position, looked up in the order defOf looks them up."
     h = headOf(t, name, params, ty)?
     v = Export.Tables.expr(t, val)?
-    Result.Ok(Export.Tables.addDecl(t, Decl.Defn(h, v, hints, safety, Export.Tables.names(t, group)?)))
+    Export.Tables.addDecl(t, Decl.Defn(h, v, hints, safety, Export.Tables.names(t, group)?))
 
 verify defAt
     defAt(Export.Tables.empty(), 0, [], 0, 0, [0], Hints.Abbrev, Safety.Safe) => Result.Err("unknown expression index 0")
-    List.len(Result.withDefault(defAt(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.bvar(0)), Export.Tables.empty()), 0, [], 0, 0, [0], Hints.Abbrev, Safety.Safe), Export.Tables.empty()).decls) => 1
+    List.len(Result.withDefault(defAt(Result.withDefault(Export.Tables.addExpr(Result.withDefault(Export.Tables.addName(Export.Tables.empty(), 1, Core.Names.str(Core.Names.anon(), "x")), Export.Tables.empty()), 0, Core.Exprs.bvar(0)), Export.Tables.empty()), 1, [], 0, 0, [0], Hints.Abbrev, Safety.Safe), Export.Tables.empty()).decls) => 1
 
 fn value(t: Tables, o: List<Tuple<String, J>>) -> Result<Expr, String>
     ? "The value of a definition, theorem or opaque constant."

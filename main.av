@@ -16,11 +16,27 @@ fn main() -> Int
     ! [Args.get, Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     args = Args.get()
     match args
-        ["pack", src, dst] -> packed(Export.Pack.pack(src, dst, 2, 4))
-        ["pack", src, dst, "0"] -> packed(Export.Pack.pack(src, dst, 0, 1))
-        ["pack", src, dst, "2"] -> packed(Export.Pack.pack(src, dst, 2, 4))
-        ["pack", src, dst, "2", n] -> packed(Export.Pack.pack(src, dst, 2, workersOf(n)))
+        ["pack", ..rest] -> packArgs(withoutIndexFlag(rest, []), List.contains(rest, "--no-index") == false)
         _ -> checked(args)
+
+fn packArgs(args: List<String>, indexOn: Bool) -> Int
+    ? "pestka pack [--no-index] FILE.ndjson FILE.susz [WORKERS]: four workers by default."
+    ! [Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
+    match args
+        [src, dst] -> packed(Export.Pack.pack(src, dst, 4, indexOn))
+        [src, dst, n] -> packed(Export.Pack.pack(src, dst, workersOf(n), indexOn))
+        _ -> printed("usage: pestka pack [--no-index] FILE.ndjson FILE.susz [WORKERS]", 2)
+
+fn withoutIndexFlag(args: List<String>, acc: List<String>) -> List<String>
+    ? "The arguments without --no-index, in their order."
+    match args
+        [] -> List.reverse(acc)
+        [a, ..rest] -> match a == "--no-index"
+            true -> withoutIndexFlag(rest, acc)
+            false -> withoutIndexFlag(rest, List.prepend(a, acc))
+
+verify withoutIndexFlag
+    withoutIndexFlag(["--no-index", "a", "b"], []) => ["a", "b"]
 
 fn checked(args: List<String>) -> Int
     ? "Reads and checks the file the arguments name; the exit status."
@@ -31,11 +47,21 @@ fn checked(args: List<String>) -> Int
     v.code
 
 fn packed(r: Result<String, String>) -> Int
-    ? "pestka pack FILE.ndjson FILE.susz [VERSION] writes the export in Susz (docs/susz.md), of version 2 or, asked for, 0: 0 when written, 1 when not."
+    ? "pestka pack writes the export in Susz 1 (docs/susz.md), with INDEX unless --no-index: 0 when written, 1 when the export is not valid, 2 when it cannot be packed."
     ! [Console.print]
     match r
         Result.Ok(m) -> printed(m, 0)
-        Result.Err(e) -> printed("cannot pack: {e}", 1)
+        Result.Err(e) -> printed("cannot pack: {e}", packFailure(e))
+
+fn packFailure(e: String) -> Int
+    ? "1 when the export is not a valid one, 2 when it cannot be packed: past a limit of the format or of Pestka, or of a format version Pestka does not read (spec OPEN 11)."
+    match Bool.or(String.contains(e, "limit: "), String.contains(e, "is not supported"))
+        true -> 2
+        false -> 1
+
+verify packFailure
+    packFailure("line 4: limit: x") => 2
+    packFailure("line 3: unknown name index 4") => 1
 
 fn printed(m: String, code: Int) -> Int
     ? "Prints m and gives code."
@@ -74,10 +100,10 @@ fn input(args: List<String>) -> Outcome
     match args
         [path] -> fileOf(path, 4)
         [path, n] -> fileOf(path, workersOf(n))
-        _ -> Outcome.Declined("usage: pestka [--low-memory] [--reorder-always] [--show-placed] FILE [WORKERS] | pestka pack FILE.ndjson FILE.susz [0|2 [WORKERS]]")
+        _ -> Outcome.Declined("usage: pestka [--low-memory] [--reorder-always] [--show-placed] FILE [WORKERS] | pestka pack [--no-index] FILE.ndjson FILE.susz [WORKERS]")
 
 fn fileOf(path: String, workers: Int) -> Outcome
-    ? "A Susz file by its signature, otherwise lean4export's ndjson, packed into Susz of version 2 in memory and read as Susz (NdjsonThroughSusz)."
+    ? "A Susz file by its signature, otherwise lean4export's ndjson, packed into Susz 1 in memory and read as Susz (NdjsonThroughSusz)."
     ! [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     match Export.Susz.isSusz(path)
         true -> Export.Susz.readFile(path)
@@ -86,8 +112,8 @@ fn fileOf(path: String, workers: Int) -> Outcome
 decision NdjsonThroughSusz
     date = "2026-11-11"
     reason =
-        "An ndjson export is read one way: packed into Susz of version 2 in"
-        "memory (PackedInMemory in Export.Pack) and read by the Susz reader,"
+        "An ndjson export is read one way: packed into Susz 1 in memory"
+        "(PackedInMemory in Export.Pack) and read by the Susz reader,"
         "which leaves theorems' proofs as bytes until they are checked."
         "Packing and the Susz reader stop at the first bad record they"
         "meet, and a Susz reader names a record by its number in a block"

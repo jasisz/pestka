@@ -23,13 +23,13 @@ rm -rf "$prof"
 mkdir -p "$prof"
 RUSTFLAGS="$FLAGS -Cprofile-generate=$prof" cargo build --release --target-dir "$root/.build/target-pgo"
 "$root/.build/target-pgo/release/main" "$train" 1 >/dev/null
-# The same export packed into Susz, of version 2 and of version 0, is
-# checked too, so reading Susz and decoding proof blocks are not left cold.
+# An ndjson export is also packed into a Susz 1 file, with INDEX, and that
+# file checked, so packing, writing INDEX and reading a file are not left
+# cold. A Susz 1 file as the training export trains reading alone.
 if [ "$(head -c 4 "$train")" != SUSZ ]; then
     "$root/.build/target-pgo/release/main" pack "$train" "$root/.build/train.susz" >/dev/null
     "$root/.build/target-pgo/release/main" "$root/.build/train.susz" 1 >/dev/null
-    "$root/.build/target-pgo/release/main" pack "$train" "$root/.build/train0.susz" 0 >/dev/null
-    "$root/.build/target-pgo/release/main" "$root/.build/train0.susz" 1 >/dev/null
+    rm -f "$root/.build/train.susz"
 fi
 profdata=$(command -v llvm-profdata || ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-profdata | head -1)
 "$profdata" merge -o "$prof/merged.profdata" "$prof"

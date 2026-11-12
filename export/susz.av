@@ -1,44 +1,50 @@
 module Susz
     intent =
-        "Reads an export in Susz, Pestka's binary export format (docs/susz.md):"
-        "the records of a lean4export file without the text, ids implicit"
-        "and dense, an expression naming earlier ones by how far back they"
-        "are. It builds the same tables as the ndjson reader, through the"
-        "same functions, so every check and every message after reading is"
-        "the same. Nothing in the file is trusted: every id is looked up as"
-        "a line's would be, and every hash and range is computed here."
-        "Version 2 keeps theorems' own proofs in blocks of a proof section,"
-        "which this reader hands to checking undecoded (Core.Lazy): the main"
-        "block, the frontier it lists and how the blocks fill the section are"
-        "checked here, each block when its declaration is checked."
+        "Reads an export in Susz 1 (susz-v-next.md, the spec; docs/susz.md"
+        "lists Pestka's own limits): the records of a lean4export file"
+        "without the text, ids implicit and dense, an expression naming"
+        "earlier ones by how far back they are, in sections a directory at"
+        "the end of the file lays out. It builds the same tables as the"
+        "ndjson reader, through the same functions, so every check and every"
+        "message after reading is the same. Nothing in the file is trusted:"
+        "every id is looked up as a line's would be, every hash and range is"
+        "computed here, and every size, offset and count the file gives is"
+        "held to the records it describes. Theorems' own proofs, in blocks"
+        "of the PROOFS section, go to checking undecoded (Core.Lazy): MAIN,"
+        "the frontier it lists and how the blocks fill PROOFS are checked"
+        "here, each block when its declaration is checked. The INDEX and"
+        "SOURCE sections are never read: a full check's verdict does not"
+        "depend on them."
     exposes [isSusz, readFile, readImage, Image, At, vAt, posAt, place, ahead, ahead1, ahead2, octetAt]
     exposes opaque [Pos]
-    depends [Bytes, Core.Names, Core.Exprs, Core.Decls, Core.Lazy, Export.Tables, Export.Items, Export.Declarations, Export.Reader, Export.Stream]
+    depends [Bytes, Core.Names, Core.Exprs, Core.Decls, Core.Lazy, Export.Tables, Export.Items, Export.Declarations, Export.Stream]
     effects [Disk.readBytesAt, Disk.size]
 
 fn isSusz(path: String) -> Bool
-    ? "Whether the file starts with Susz's signature, SUSZ."
+    ? "Whether the file starts with Susz's signature, SUSZ: such a file is read as Susz, and one of an internal version is rejected by its header."
     ! [Disk.readBytesAt]
     match Disk.readBytesAt(path, 0, 4)
         Result.Ok(b) -> b == Bytes.fromList([83, 85, 83, 90])
         Result.Err(_) -> false
 
 decision ChunkWithMargin
-    date = "2026-11-10"
+    date = "2026-11-12"
     reason =
-        "Records have no fixed length, so a chunk can end inside one. The"
-        "file is read 16 MB at a time, and a chunk is replaced by the next,"
-        "read from the record it has reached, once fewer than 1 MB of it are"
+        "Records have no fixed length, so a chunk can end inside one. MAIN"
+        "is read 16 MB at a time, and a chunk is replaced by the next, read"
+        "from the record it has reached, once fewer than 1 MB of it are"
         "left: a record crosses the end of a chunk only when it is longer"
-        "than 1 MB; the longest in mathlib is a few kilobytes. A record that"
-        "runs past the end of the chunk is a truncated block at the block's"
-        "end and a declined file elsewhere."
+        "than 1 MB; the longest in mathlib is a few kilobytes. Such a record"
+        "is read again from its start with a chunk twice as long, as often"
+        "as it takes, so no record is declined for its length (spec 7.2:"
+        "a limit that depends on buffering is lifted). A record that runs"
+        "past the end of MAIN is truncated."
     chosen = "ChunkWithMargin"
-    rejected = ["RecordsAcrossChunks"]
-    impacts = [chunkBytes, marginBytes, records]
+    rejected = ["RecordsAcrossChunks", "LongRecordsDeclined"]
+    impacts = [chunkBytes, marginBytes, records, short]
 
 fn chunkBytes() -> Int
-    ? "How much of the file one chunk reads (ChunkWithMargin)."
+    ? "How much of MAIN one chunk reads (ChunkWithMargin)."
     16777216
 
 verify chunkBytes
@@ -98,12 +104,12 @@ verify orNone
 decision OneDecoder
     date = "2026-11-11"
     reason =
-        "Export.Split, which rewrites a file of version 0 as version 2, reads"
-        "the same records with the same encoding as this reader. It reads"
-        "them with this module's positions and varints, through posAt,"
-        "place, ahead, octetAt and vAt, so that one decoder reads Susz while"
-        "reading and while packing, and the packer's positions are machine"
-        "words as the reader's are (PositionsInRange, VarintsByValue)."
+        "Export.Split, which lays the records the packer wrote out as Susz"
+        "1, reads them with this module's positions and varints, through"
+        "posAt, place, ahead, octetAt and vAt, so that one decoder reads"
+        "Susz while reading and while packing, and the packer's positions"
+        "are machine words as the reader's are (PositionsInRange,"
+        "VarintsByValue)."
     chosen = "OneDecoder"
     rejected = ["DecoderPerModule"]
     impacts = [posAt, place, ahead, ahead1, ahead2, octetAt, vAt]
@@ -160,17 +166,6 @@ record Ids
     ids: List<Int>
     at: Pos
 
-record Trailer
-    names: Int
-    levels: Int
-    exprs: Int
-    decls: Int
-    offset: Int
-    length: Int
-    version: Int
-    proofs: Int
-    proofsLength: Int
-
 decision BytesFromFileOrMemory
     date = "2026-11-11"
     reason =
@@ -178,10 +173,10 @@ decision BytesFromFileOrMemory
         "(Export.Pack.image) are the same bytes, read by the same functions:"
         "the reader asks its source for a range of bytes, and a file reads it"
         "from the disk while an image takes it from the bytes it holds. An"
-        "image is two runs of bytes, the header and the main block first and"
-        "the proof section and the trailer after, read as one file: the"
-        "proof section a reader keeps is the second run alone, so the main"
-        "block's bytes are freed once it is read, as a file's chunks are."
+        "image is two runs of bytes, the header and MAIN first and the other"
+        "sections and the trailer after, read as one file: the PROOFS"
+        "section a reader keeps is in the second run, so MAIN's bytes are"
+        "freed once it is read, as a file's chunks are."
     chosen = "BytesFromFileOrMemory"
     rejected = ["ReaderPerSource", "ImageAsOneRun"]
     impacts = [Src, Image, bytesAt, sizeOf, readFile, readImage]
@@ -247,203 +242,388 @@ fn readImage(m: Image) -> Outcome
     ! [Disk.readBytesAt, Disk.size]
     readSource(Src.Memory(m))
 
+decision ErrorsInFileOrder
+    date = "2026-11-12"
+    reason =
+        "The spec (section 8) orders structural errors: the header, then the"
+        "trailer and the directory, then MAIN's records in file order, each"
+        "named by its section, the absolute offset of the record (of the"
+        "field for the header, trailer and directory) and the record's"
+        "number in its section, from 1. The reader checks in that order and"
+        "stops at the first, so the message is a function of the bytes. A"
+        "proof block's errors are its theorem's (Core.Lazy), in the order"
+        "of declarations."
+    chosen = "ErrorsInFileOrder"
+    rejected = ["ErrorsAsMet"]
+    impacts = [readSource, withHeader, withTail, withTrailer, entries, padded, stepped, ended]
+
 fn readSource(src: Src) -> Outcome
-    ? "Reads the whole source: the trailer first, for the block, then the header and the block's records."
+    ? "Reads the whole source: the header, the trailer and its directory, the PAD sections, then MAIN's records (ErrorsInFileOrder)."
     ! [Disk.readBytesAt, Disk.size]
     match sizeOf(src)
         Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
-        Result.Ok(size) -> match bytesAt(src, Int.max(size - 8, 0), 8)
+        Result.Ok(size) -> match bytesAt(src, 0, 16)
+            Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
+            Result.Ok(h) -> withHeader(src, size, h)
+
+decision HeaderAndDirectory
+    date = "2026-11-12"
+    reason =
+        "A Susz 1 file is a 16-byte header (the signature SUSZ\\r\\n\\x1a\\n, a"
+        "u16 major version 1 and six zero bytes), its sections, and a"
+        "trailer at the end: the four counts, the directory (one entry of"
+        "24 bytes per section: id, flags, four zero bytes, offset and"
+        "length) and the trailer's own length and the closing signature"
+        "ZSUS. The sections tile the body exactly. MAIN (1) and PROOFS (2)"
+        "must be understood; SOURCE (3), PAD (4, all zero bytes) and INDEX"
+        "(5) are informational, and a full check never reads SOURCE or"
+        "INDEX. An unknown section that must be understood declines the"
+        "file; an unknown informational one is skipped. Another major"
+        "version declines; the internal versions 0 and 2 are rejected by"
+        "their signature."
+    chosen = "HeaderAndDirectory"
+    rejected = ["VersionByteAndFixedTrailer"]
+    impacts = [withHeader, withTail, withTrailer, entries, entry, flagsOf]
+
+fn withHeader(src: Src, size: Int, h: Bytes) -> Outcome
+    ? "The signature, the major version and the reserved bytes (HeaderAndDirectory)."
+    ! [Disk.readBytesAt]
+    match Bytes.take(h, 8) == Bytes.fromList([83, 85, 83, 90, 13, 10, 26, 10])
+        false -> Outcome.Rejected("header @ 0: not a Susz 1 file")
+        true -> match Bytes.len(h) == 16
+            false -> Outcome.Rejected("header @ 8: the header is cut short")
+            true -> match u16At(h, 8) == 1
+                false -> Outcome.Declined("header @ 8: Susz major version {u16At(h, 8)} is not known")
+                true -> match u16At(h, 10) == 0
+                    false -> Outcome.Rejected("header @ 10: the reserved bytes are not zero")
+                    true -> match u32At(h, 12) == 0
+                        false -> Outcome.Rejected("header @ 12: the reserved bytes are not zero")
+                        true -> withEnd(src, size)
+
+fn withEnd(src: Src, size: Int) -> Outcome
+    ? "A file long enough for the smallest trailer, then its last eight bytes (HeaderAndDirectory)."
+    ! [Disk.readBytesAt]
+    match size < 44
+        true -> Outcome.Rejected("trailer @ 16: the file is too short for a trailer")
+        false -> match bytesAt(src, size - 8, 8)
             Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
             Result.Ok(tail) -> withTail(src, size, tail)
 
+verify withEnd
+    withEnd(Src.File("f"), 40) => Outcome.Rejected("trailer @ 16: the file is too short for a trailer")
+
+verify withHeader
+    withHeader(Src.File("f"), 16, Bytes.fromList([83, 85, 83, 90, 2, 0, 0, 0])) => Outcome.Rejected("header @ 0: not a Susz 1 file")
+    withHeader(Src.File("f"), 16, Bytes.fromList([83, 85, 83, 90, 13, 10, 26, 10, 2, 0, 0, 0, 0, 0, 0, 0])) => Outcome.Declined("header @ 8: Susz major version 2 is not known")
+    withHeader(Src.File("f"), 16, Bytes.fromList([83, 85, 83, 90, 13, 10, 26, 10, 1, 0, 0, 0, 0, 1, 0, 0])) => Outcome.Rejected("header @ 12: the reserved bytes are not zero")
+    withHeader(Src.File("f"), 16, Bytes.fromList([83, 85, 83, 90, 13, 10, 26, 10, 1, 0])) => Outcome.Rejected("header @ 8: the header is cut short")
+
 fn withTail(src: Src, size: Int, tail: Bytes) -> Outcome
-    ? "The last eight bytes: the trailer's length and the closing signature ZSUS."
+    ? "The last eight bytes: ZSUS, and the trailer's length, which must be possible in this file (HeaderAndDirectory)."
     ! [Disk.readBytesAt]
     n = u32At(tail, 0)
-    match Bool.and(Bytes.drop(tail, 4) == Bytes.fromList([90, 83, 85, 83]), Bool.and(n >= 8, n <= size))
-        false -> Outcome.Rejected("not a complete Susz file")
-        true -> match bytesAt(src, size - n, n)
+    match Bytes.drop(tail, 4) == Bytes.fromList([90, 83, 85, 83])
+        false -> Outcome.Rejected("trailer @ {size - 4}: no closing signature ZSUS")
+        true -> match Bool.and(n >= 28, n <= size - 16)
+            false -> Outcome.Rejected("trailer @ {size - 8}: a trailer length of {n} bytes")
+            true -> match bytesAt(src, size - n, n)
+                Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
+                Result.Ok(tr) -> withTrailer(src, size - n, tr)
+
+verify withTail
+    withTail(Src.File("f"), 60, Bytes.fromList([28, 0, 0, 0, 90, 83, 85, 80])) => Outcome.Rejected("trailer @ 56: no closing signature ZSUS")
+    withTail(Src.File("f"), 60, Bytes.fromList([27, 0, 0, 0, 90, 83, 85, 83])) => Outcome.Rejected("trailer @ 52: a trailer length of 27 bytes")
+    withTail(Src.File("f"), 60, Bytes.fromList([45, 0, 0, 0, 90, 83, 85, 83])) => Outcome.Rejected("trailer @ 52: a trailer length of 45 bytes")
+
+record Dir
+    names: Int
+    levels: Int
+    exprs: Int
+    decls: Int
+    countsAt: Int
+    dirAt: Int
+    main: Int
+    mainLength: Int
+    proofs: Int
+    proofsLength: Int
+    pads: List<Tuple<Int, Int>>
+    ids: List<Int>
+    must: Int
+
+fn withTrailer(src: Src, end: Int, tr: Bytes) -> Outcome
+    ? "The counts and the directory, whose section count must give the trailer's length; then the entries, the PAD sections and MAIN (HeaderAndDirectory)."
+    ! [Disk.readBytesAt]
+    n = u32At(tr, 16)
+    match Bytes.len(tr) == 28 + 24 * n
+        false -> Outcome.Rejected("trailer @ {end + Bytes.len(tr) - 8}: a trailer length of {Bytes.len(tr)} bytes does not hold {n} directory entries")
+        true -> match entries(tr, 0, n, 16, end, Dir(names = u32At(tr, 0), levels = u32At(tr, 4), exprs = u32At(tr, 8), decls = u32At(tr, 12), countsAt = end, dirAt = end + 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1))
+            Result.Err(o) -> o
+            Result.Ok(d) -> padded(src, d, List.reverse(d.pads))
+
+fn entries(tr: Bytes, k: Int, n: Int, expected: Int, end: Int, d: Dir) -> Result<Dir, Outcome>
+    ? "Entry k of n, starting where the section before ended; at the end the sections must reach the trailer and MAIN be among them; only then does an unknown section that must be understood decline the file (HeaderAndDirectory)."
+    match k >= n
+        true -> match expected == end
+            false -> Result.Err(Outcome.Rejected("directory @ {tiledAt(d, n)}: the sections end at {expected}, the trailer starts at {end}"))
+            true -> match d.main < 0
+                true -> Result.Err(Outcome.Rejected("directory @ {d.dirAt}: there is no MAIN section"))
+                false -> match d.must < 0
+                    true -> Result.Ok(d)
+                    false -> Result.Err(Outcome.Declined("directory @ {d.must}: the file needs a section Pestka does not know"))
+        false -> entry(tr, k, n, expected, end, d, 20 + 24 * k)
+
+fn tiledAt(d: Dir, n: Int) -> Int
+    ? "Where a directory that does not reach the trailer is reported: the last entry's length, or the section count when there is none."
+    match n == 0
+        true -> d.dirAt
+        false -> d.dirAt + 4 + 24 * (n - 1) + 16
+
+verify tiledAt
+    tiledAt(dir0(), 0) => 16
+    tiledAt(dir0(), 1) => 36
+
+fn entry(tr: Bytes, k: Int, n: Int, expected: Int, end: Int, d: Dir, e: Int) -> Result<Dir, Outcome>
+    ? "Entry k, at byte e of the trailer: its reserved bytes, its flags, its id once only, where it starts and ends (HeaderAndDirectory)."
+    id = u16At(tr, e)
+    flags = u16At(tr, e + 2)
+    off = u64At(tr, e + 8)
+    len = u64At(tr, e + 16)
+    at = d.countsAt + e
+    f = flagsOf(id)
+    match u32At(tr, e + 4) == 0
+        false -> Result.Err(Outcome.Rejected("directory @ {at + 4}: entry {k + 1}: the reserved bytes are not zero"))
+        true -> match flags > 1
+            true -> Result.Err(Outcome.Rejected("directory @ {at + 2}: entry {k + 1}: flag bits 1 to 15 are not zero"))
+            false -> match Bool.and(f >= 0, f != flags)
+                true -> Result.Err(Outcome.Rejected("directory @ {at + 2}: entry {k + 1}: section {id} has flags {flags}, not {f}"))
+                false -> match List.contains(d.ids, id)
+                    true -> Result.Err(Outcome.Rejected("directory @ {at}: entry {k + 1}: section {id} is listed twice"))
+                    false -> match off == expected
+                        false -> Result.Err(Outcome.Rejected("directory @ {at + 8}: entry {k + 1}: section {id} starts at {off}, not at {expected} where the one before ends"))
+                        true -> match off + len <= end
+                            false -> Result.Err(Outcome.Rejected("directory @ {at + 16}: entry {k + 1}: section {id} runs past the trailer"))
+                            true -> entries(tr, k + 1, n, off + len, end, entryKept(Dir.update(d, ids = List.prepend(id, d.ids)), id, f, flags, off, len, at))
+
+fn entryKept(d: Dir, id: Int, f: Int, flags: Int, off: Int, len: Int, at: Int) -> Dir
+    ? "A known section kept by where it lies; the first unknown one that must be understood noted, to decline the file once the directory is checked; an unknown informational one skipped (HeaderAndDirectory)."
+    match f < 0
+        true -> match Bool.and(flags == 1, d.must < 0)
+            true -> Dir.update(d, must = at)
+            false -> d
+        false -> sectionKept(d, id, off, len)
+
+verify entryKept
+    entryKept(dir0(), 9, -1, 1, 16, 4, 40).must => 40
+    entryKept(dir0(), 9, -1, 0, 16, 4, 40) => dir0()
+
+
+fn flagsOf(id: Int) -> Int
+    ? "The flags of a known section: 1, must be understood, for MAIN and PROOFS, 0 for SOURCE, PAD and INDEX; -1 for an unknown id (HeaderAndDirectory)."
+    match id
+        1 -> 1
+        2 -> 1
+        3 -> 0
+        4 -> 0
+        5 -> 0
+        _ -> -1
+
+verify flagsOf
+    flagsOf(2) => 1
+    flagsOf(5) => 0
+    flagsOf(6) => -1
+
+fn sectionKept(d: Dir, id: Int, off: Int, len: Int) -> Dir
+    ? "Where MAIN, PROOFS and each PAD lie; SOURCE and INDEX are not read."
+    match id
+        1 -> Dir.update(d, main = off, mainLength = len)
+        2 -> Dir.update(d, proofs = off, proofsLength = len)
+        4 -> Dir.update(d, pads = List.prepend((off, len), d.pads))
+        _ -> d
+
+verify sectionKept
+    sectionKept(dir0(), 3, 16, 4) => dir0()
+
+fn dir0() -> Dir
+    ? "A directory of nothing, for examples."
+    Dir(names = 1, levels = 1, exprs = 0, decls = 0, countsAt = 0, dirAt = 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1)
+
+verify dir0
+    dir0().main => -1
+
+verify entries
+    entries(Bytes.fromList([]), 0, 0, 16, 16, dir0()) => Result.Err(Outcome.Rejected("directory @ 16: there is no MAIN section"))
+    entries(Bytes.fromList([]), 0, 0, 16, 20, dir0()) => Result.Err(Outcome.Rejected("directory @ 16: the sections end at 16, the trailer starts at 20"))
+    entries(Bytes.fromList([]), 0, 0, 16, 16, Dir.update(dir0(), main = 16, must = 40)) => Result.Err(Outcome.Declined("directory @ 40: the file needs a section Pestka does not know"))
+
+verify entry
+    entry(Bytes.fromList([1, 0, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, dir0(), 0) => Result.Ok(Dir.update(dir0(), main = 16, mainLength = 4, ids = [1]))
+    entry(Bytes.fromList([1, 0, 3, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, dir0(), 0) => Result.Err(Outcome.Rejected("directory @ 2: entry 1: flag bits 1 to 15 are not zero"))
+    entry(Bytes.fromList([1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, dir0(), 0) => Result.Err(Outcome.Rejected("directory @ 2: entry 1: section 1 has flags 0, not 1"))
+    entry(Bytes.fromList([9, 0, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, Dir.update(dir0(), main = 16), 0) => Result.Err(Outcome.Declined("directory @ 0: the file needs a section Pestka does not know"))
+    entry(Bytes.fromList([1, 0, 1, 0, 0, 0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, dir0(), 0) => Result.Err(Outcome.Rejected("directory @ 8: entry 1: section 1 starts at 17, not at 16 where the one before ends"))
+    entry(Bytes.fromList([1, 0, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, dir0(), 0) => Result.Err(Outcome.Rejected("directory @ 16: entry 1: section 1 runs past the trailer"))
+    entry(Bytes.fromList([1, 0, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, Dir.update(dir0(), ids = [1]), 0) => Result.Err(Outcome.Rejected("directory @ 0: entry 1: section 1 is listed twice"))
+    entry(Bytes.fromList([1, 0, 1, 0, 1, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]), 0, 1, 16, 20, dir0(), 0) => Result.Err(Outcome.Rejected("directory @ 4: entry 1: the reserved bytes are not zero"))
+
+fn padded(src: Src, d: Dir, pads: List<Tuple<Int, Int>>) -> Outcome
+    ? "Every PAD section all zero bytes, so that no byte of a file is free; then MAIN (HeaderAndDirectory)."
+    ! [Disk.readBytesAt]
+    match pads
+        [] -> refill(Rd(src = src, b = Bytes.fromList([]), base = 0, stop = d.main + d.mainLength, n = 0), Tables.update(Export.Tables.empty(), proofBase = Int.max(d.proofs, 0), proofLength = d.proofsLength), d.main, chunkBytes(), d)
+        [(off, len), ..rest] -> match bytesAt(src, off, len)
             Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
-            Result.Ok(tr) -> withVersion(src, size - n, tr)
+            Result.Ok(b) -> padChecked(src, d, rest, off, firstNonZero(b, 0))
 
-fn withVersion(src: Src, end: Int, tr: Bytes) -> Outcome
-    ? "The version byte of the header picks the trailer's layout: 0, or 2 with proofs in blocks of their own; any other version is rejected (rule 6)."
+fn padChecked(src: Src, d: Dir, rest: List<Tuple<Int, Int>>, off: Int, i: Int) -> Outcome
+    ? "The next PAD section, or the first byte of this one that is not zero."
     ! [Disk.readBytesAt]
-    match bytesAt(src, 4, 1)
-        Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
-        Result.Ok(v) -> match octet(v, 0)
-            0 -> withTrailer(src, end, trailerOf(tr))
-            2 -> withTrailer(src, end, trailer2Of(tr))
-            k -> Outcome.Rejected("Susz version {k} is not known")
+    match i < 0
+        true -> padded(src, d, rest)
+        false -> Outcome.Rejected("PAD @ {off + i}: a byte is not zero")
 
-fn trailer2Of(b: Bytes) -> Option<Trailer>
-    ? "Version 2: the counts after the main block, the main block and the proof section, each by offset and length, and the trailer's own length, 56."
-    match Bool.and(Bytes.len(b) == 56, u32At(b, 48) == 56)
-        false -> Option.None
-        true -> Option.Some(Trailer(names = u32At(b, 0), levels = u32At(b, 4), exprs = u32At(b, 8), decls = u32At(b, 12), offset = u64At(b, 16), length = u64At(b, 24), version = 2, proofs = u64At(b, 32), proofsLength = u64At(b, 40)))
+fn firstNonZero(b: Bytes, i: Int) -> Int
+    ? "Where the first byte of b from i on that is not zero is, -1 when there is none."
+    match Bytes.get(b, i)
+        Option.None -> -1
+        Option.Some(0) -> firstNonZero(b, i + 1)
+        Option.Some(_) -> i
 
-verify trailer2Of
-    trailer2Of(Bytes.fromList([])) => Option.None
+verify firstNonZero
+    firstNonZero(Bytes.fromList([0, 0, 3]), 0) => 2
+    firstNonZero(Bytes.fromList([0]), 0) => -1
 
-fn trailerOf(b: Bytes) -> Option<Trailer>
-    ? "Counts, then one block: version 0 files have exactly one, starting with the first name, level, expression and declaration."
-    match Bool.and(Bytes.len(b) == 60, u32At(b, 16) == 1)
-        false -> Option.None
-        true -> match Bool.and(Bool.and(u32At(b, 36) == 1, u32At(b, 40) == 1), Bool.and(u32At(b, 44) == 0, u32At(b, 48) == 0))
-            false -> Option.None
-            true -> Option.Some(Trailer(names = u32At(b, 0), levels = u32At(b, 4), exprs = u32At(b, 8), decls = u32At(b, 12), offset = u64At(b, 20), length = u64At(b, 28), version = 0, proofs = 0, proofsLength = 0))
-
-verify trailerOf
-    trailerOf(Bytes.fromList([])) => Option.None
-
-fn withTrailer(src: Src, end: Int, tr: Option<Trailer>) -> Outcome
-    ? "Reads the header, then the block."
+fn refill(r: Rd, t: Tables, offset: Int, size: Int, d: Dir) -> Outcome
+    ? "The chunk of size bytes that starts at offset, cut at the end of MAIN."
     ! [Disk.readBytesAt]
-    match tr
-        Option.None -> Outcome.Rejected("the trailer is not one of its version")
-        Option.Some(t) -> match Bool.and(t.offset >= 8, t.offset + t.length <= end)
-            false -> Outcome.Rejected("the block lies outside the file")
-            true -> match sectionsFit(t, end)
-                false -> Outcome.Rejected("the proof section does not lie between the main block and the trailer")
-                true -> match bytesAt(src, 0, t.offset)
-                    Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
-                    Result.Ok(h) -> header(src, t, h)
-
-fn sectionsFit(t: Trailer, end: Int) -> Bool
-    ? "Version 2: the proof section starts where the main block ends and ends where the trailer starts, so no byte of the file is outside both."
-    match t.version == 2
-        false -> true
-        true -> Bool.and(t.proofs == t.offset + t.length, t.proofs + t.proofsLength == end)
-
-verify sectionsFit
-    sectionsFit(Trailer(names = 1, levels = 1, exprs = 0, decls = 0, offset = 10, length = 5, version = 2, proofs = 15, proofsLength = 3), 18) => true
-    sectionsFit(Trailer(names = 1, levels = 1, exprs = 0, decls = 0, offset = 10, length = 5, version = 2, proofs = 15, proofsLength = 3), 19) => false
-
-fn header(src: Src, tr: Trailer, h: Bytes) -> Outcome
-    ? "Signature, the version, three zero bytes, and the meta text, checked as the ndjson header line is; then the main block's records."
-    ! [Disk.readBytesAt]
-    m = vAt(h, posOf(8))
-    match Bool.and(Bool.and(Bytes.take(h, 4) == Bytes.fromList([83, 85, 83, 90]), Bool.and(octet(h, 4) == tr.version, Bytes.take(Bytes.drop(h, 5), 3) == Bytes.fromList([0, 0, 0]))), m.at.value + m.value == Bytes.len(h))
-        false -> Outcome.Rejected("not a Susz file of version {tr.version}")
-        true -> match textAt(h, m)
-            Result.Err(e) -> Outcome.Rejected("meta: {e}")
-            Result.Ok(s) -> match Export.Reader.header("{{\"meta\":{s}}}")
-                Result.Err(e) -> Outcome.Rejected("meta: {e}")
-                Result.Ok(v) -> match Export.Reader.supported(v)
-                    false -> Outcome.Declined("format version {v} is not supported")
-                    true -> refill(Rd(src = src, b = Bytes.fromList([]), base = 0, stop = tr.offset + tr.length, n = 0), Tables.update(Export.Tables.empty(), version = tr.version), tr.offset, tr)
-
-fn refill(r: Rd, t: Tables, offset: Int, tr: Trailer) -> Outcome
-    ? "The chunk that starts at offset, cut at the end of the block."
-    ! [Disk.readBytesAt]
-    match bytesAt(r.src, offset, Int.min(chunkBytes(), r.stop - offset))
+    match bytesAt(r.src, offset, Int.min(size, r.stop - offset))
         Result.Err(e) -> Outcome.Declined("cannot read {nameOf(r.src)}: {e}")
-        Result.Ok(b) -> records(Rd(src = r.src, b = b, base = offset, stop = r.stop, n = r.n), t, posOf(0), tr)
+        Result.Ok(b) -> records(Rd(src = r.src, b = b, base = offset, stop = r.stop, n = r.n), t, posOf(0), d)
 
-fn records(r: Rd, t: Tables, i: Pos, tr: Trailer) -> Outcome
-    ? "The record at i; the tables are passed apart from the reading state so that they have one owner and grow in place. At the end of the block the counts are checked; a chunk with less than the margin left is first replaced (ChunkWithMargin)."
+fn records(r: Rd, t: Tables, i: Pos, d: Dir) -> Outcome
+    ? "The record at i; the tables are passed apart from the reading state so that they have one owner and grow in place. At the end of MAIN the counts are checked; a chunk with less than the margin left is first replaced (ChunkWithMargin)."
     ! [Disk.readBytesAt]
     match r.base + i.value == r.stop
-        true -> ended(r.src, t, tr)
+        true -> ended(r.src, t, d)
         false -> match Bool.and(r.base + Bytes.len(r.b) < r.stop, Bytes.len(r.b) - i.value < marginBytes())
-            true -> refill(r, t, r.base + i.value, tr)
-            false -> step(r, t, i, tr)
+            true -> refill(r, t, r.base + i.value, chunkBytes(), d)
+            false -> step(r, t, i, d)
 
-fn step(r: Rd, t: Tables, i: Pos, tr: Trailer) -> Outcome
+fn step(r: Rd, t: Tables, i: Pos, d: Dir) -> Outcome
     ? "One record."
     ! [Disk.readBytesAt]
     match Bytes.get(r.b, i.value)
-        Option.None -> short(r)
-        Option.Some(tag) -> stepped(r, tr, recordAt(t, r.b, tag, orNone(posOf(i.value + 1))))
+        Option.None -> short(r, t, i, d)
+        Option.Some(tag) -> stepped(r, i, d, recordAt(t, r.b, tag, orNone(posOf(i.value + 1))))
 
-fn stepped(r: Rd, tr: Trailer, d: Done) -> Outcome
-    ? "Goes on after a record, or stops at a bad one. A bad record is named by its number in the block, which does not depend on how the file is read."
+fn stepped(r: Rd, i: Pos, d: Dir, x: Done) -> Outcome
+    ? "Goes on after a record, or stops at a bad one, named by its offset in the file and its number in MAIN, which do not depend on how the file is read (ErrorsInFileOrder). A record past the chunk is read again (short)."
     ! [Disk.readBytesAt]
-    match d
-        Done.Next(t, at) -> records(Rd(src = r.src, b = r.b, base = r.base, stop = r.stop, n = r.n + 1), t, at, tr)
-        Done.Short -> short(r)
-        Done.Bad(e) -> Outcome.Rejected("record {r.n + 1}: {e}")
+    match x
+        Done.Next(t, at) -> records(Rd(src = r.src, b = r.b, base = r.base, stop = r.stop, n = r.n + 1), t, at, d)
+        Done.Short(t) -> short(r, t, i, d)
+        Done.Bad(e) -> Outcome.Rejected("MAIN @ {r.base + i.value}: record {r.n + 1}: {e}")
+        Done.Out(e) -> Outcome.Declined("MAIN @ {r.base + i.value}: record {r.n + 1}: {e}")
 
-fn short(r: Rd) -> Outcome
-    ? "A record that runs past the end of the chunk (ChunkWithMargin)."
+fn short(r: Rd, t: Tables, i: Pos, d: Dir) -> Outcome
+    ? "A record that runs past the end of the chunk: past the end of MAIN it is truncated, else it is read again from its start with a chunk twice as long (ChunkWithMargin)."
+    ! [Disk.readBytesAt]
     match r.base + Bytes.len(r.b) >= r.stop
-        true -> Outcome.Rejected("record {r.n + 1}: the block ends inside it")
-        false -> Outcome.Declined("record {r.n + 1} is longer than {marginBytes()} bytes")
+        true -> Outcome.Rejected("MAIN @ {r.base + i.value}: record {r.n + 1}: the section ends inside it")
+        false -> refill(r, t, r.base + i.value, 2 * Int.max(Bytes.len(r.b), chunkBytes()), d)
 
 verify short
-    short(Rd(src = Src.File("f"), b = Bytes.fromList([]), base = 4, stop = 4, n = 2)) => Outcome.Rejected("record 3: the block ends inside it")
+    short(Rd(src = Src.File("f"), b = Bytes.fromList([]), base = 4, stop = 4, n = 2), Export.Tables.empty(), Pos(value = 0), dir0()) => Outcome.Rejected("MAIN @ 4: record 3: the section ends inside it")
 
-fn ended(src: Src, t: Tables, tr: Trailer) -> Outcome
-    ? "The trailer's counts must be the main block's; in version 2 its blocks must fill the proof section, which is read then."
+fn ended(src: Src, t: Tables, d: Dir) -> Outcome
+    ? "The trailer's counts must be MAIN's, the first that is not reported where it is; PROOFS is there exactly when a theorem has a block, and the blocks fill it; it is read then (ErrorsInFileOrder)."
     ! [Disk.readBytesAt]
-    match Bool.and(Bool.and(tr.names == t.nextName, tr.levels == t.nextLevel), Bool.and(tr.exprs == t.nextExpr, tr.decls == t.declCount))
-        true -> match tr.version == 2
+    k = countsWrong([d.names, d.levels, d.exprs, d.decls], [t.nextName, t.nextLevel, t.nextExpr, t.declCount], 0)
+    match k < 0
+        false -> Outcome.Rejected("trailer @ {d.countsAt + 4 * k}: the counts {d.names}, {d.levels}, {d.exprs}, {d.decls} are not MAIN's {t.nextName}, {t.nextLevel}, {t.nextExpr}, {t.declCount}")
+        true -> match Bool.or(t.proofAt > 0, d.proofs >= 0)
             false -> Outcome.Read(Export.Tables.finish(t))
-            true -> match t.proofAt == tr.proofsLength
-                true -> withProofs(src, t, tr)
-                false -> Outcome.Rejected("the proof blocks take {t.proofAt} bytes, the proof section {tr.proofsLength}")
-        false -> Outcome.Rejected("the trailer's counts disagree with the records")
+            true -> withSections(src, t, d)
 
-decision FrontierAndPlaces
-    date = "2026-11-11"
+fn countsWrong(said: List<Int>, read: List<Int>, k: Int) -> Int
+    ? "The first count, from k, that the trailer says and MAIN does not read; -1 when all agree."
+    match said
+        [] -> -1
+        [a, ..rest] -> match read
+            [] -> -1
+            [b, ..more] -> match a == b
+                true -> countsWrong(rest, more, k + 1)
+                false -> k
+
+verify countsWrong
+    countsWrong([1, 2, 3], [1, 2, 4], 0) => 2
+    countsWrong([1], [1], 0) => -1
+
+fn withSections(src: Src, t: Tables, d: Dir) -> Outcome
+    ? "PROOFS with blocks that fill it; a block past its end was refused at its theorem's record (lazyThm)."
+    ! [Disk.readBytesAt]
+    match t.proofAt == 0
+        true -> Outcome.Rejected("PROOFS @ {d.proofs}: a PROOFS section, but no theorem has a proof block")
+        false -> match t.proofAt == d.proofsLength
+            false -> Outcome.Rejected("PROOFS @ {d.proofs + t.proofAt}: the proof blocks fill {t.proofAt} of {d.proofsLength} bytes")
+            true -> withProofs(src, t, d)
+
+decision FrontierAndRuleP
+    date = "2026-11-12"
     reason =
-        "A proof block names names, levels and main-block expressions only"
-        "through the frontier: records 19 of the main block, each naming one"
-        "item already read, numbered in record order per kind. A block may"
-        "name only entries listed before its declaration record, so a proof"
-        "holds only expressions read before its theorem, as in the export,"
-        "and those were held to NamesPlacedWhereRead as they were read. The"
-        "names a block's own records name are held against their marks"
-        "when the block is decoded, by place codes the reader fills once the"
-        "main block is read (PlaceCodes): the code of a name only grows with"
-        "later placements past the theorem, which fail any mark the block"
-        "may have either way. The declaration record says whether every"
-        "such name is placed, and that word joins the reader's decision"
-        "whether checking may leave file order; decoding holds the word to"
-        "the records. So the decision is the ndjson file's: the main block"
-        "decides it as the ndjson reader does, every block's records are"
-        "held to what the export's lines would have been held to, and a"
-        "block whose word is false is its declaration's error."
-    chosen = "FrontierAndPlaces"
-    rejected = ["FrontierAtTheEnd", "NamesListedPerBlock", "OptimisticOrder"]
-    impacts = [exportRec, lazyThm, withProofs, storeOf]
+        "A proof block names names, levels and MAIN expressions only through"
+        "the frontier: records 19 of MAIN, each naming one item already"
+        "read, numbered in record order per kind, no item twice. A block"
+        "may name only entries listed before its declaration record, so a"
+        "proof holds only expressions read before its theorem. Its"
+        "constants and projections must be declared before its theorem"
+        "(rule P, DeclaredBefore in Core.Lazy): the reader gives each"
+        "frontier name the index of the declaration declaring it, once MAIN"
+        "is read. Duplicates are found by ids growing: Pestka's packer lists"
+        "every item right after its record, so the ids of each kind only"
+        "grow, an id listed again is the last one or below it, and one"
+        "below the last is declined rather than looked up (an"
+        "implementation limit, spec 7.2), since keeping every id listed"
+        "would cost a set as large as the frontier."
+    chosen = "FrontierAndRuleP"
+    rejected = ["FrontierAtTheEnd", "NamesListedPerBlock", "FrontierIdSet"]
+    impacts = [exportRec, exportedKind, lazyThm, withProofs, storeOf]
 
-fn withProofs(src: Src, t: Tables, tr: Trailer) -> Outcome
-    ? "Version 2: the frontier the main block listed with the place codes of its names, and the proof section read whole; every lazy theorem gets its block's bytes (FrontierAndPlaces)."
+fn withProofs(src: Src, t: Tables, d: Dir) -> Outcome
+    ? "The frontier MAIN listed, with the declaration index of each of its names, and PROOFS read whole; every lazy theorem gets its block's bytes (FrontierAndRuleP)."
     ! [Disk.readBytesAt]
     s = storeOf(t)
-    match bytesAt(src, tr.proofs, tr.proofsLength)
+    match bytesAt(src, d.proofs, d.proofsLength)
         Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
         Result.Ok(pb) -> Outcome.Read(packedAll(Export.Tables.finish(t), s, pb))
 
 fn storeOf(t: Tables) -> Store
-    ? "The frontier, and the place codes of its names and of the constants literals name (FrontierAndPlaces)."
+    ? "The frontier, and the declaration index of each of its names (FrontierAndRuleP)."
     names = List.reverse(t.outNames)
-    Store(names = Vector.fromList(names), levels = Vector.fromList(List.reverse(t.outLevels)), exprs = Vector.fromList(List.reverse(t.outExprs)), codes = Vector.fromList(codesOf(t.known, names, [])), natCode = codeIn(t.known, Core.Names.str(Core.Names.anon(), "Nat")), strCodes = codesOf(t.known, litNames, []))
+    Store(names = Vector.fromList(names), levels = Vector.fromList(List.reverse(t.outLevels)), exprs = Vector.fromList(List.reverse(t.outExprs)), decls = Vector.fromList(declsOf(t.known, names, [])))
 
 verify storeOf
-    storeOf(Export.Tables.empty()).natCode => Core.Lazy.never()
+    Vector.len(storeOf(Export.Tables.empty()).decls) => 0
 
-litNames: List<Name> = [Core.Names.str(Core.Names.anon(), "Nat"), Core.Names.str(Core.Names.anon(), "String"), Core.Names.str(Core.Names.str(Core.Names.anon(), "String"), "ofList"), Core.Names.str(Core.Names.anon(), "List"), Core.Names.str(Core.Names.anon(), "Char"), Core.Names.str(Core.Names.str(Core.Names.anon(), "Char"), "ofNat")]
-
-fn codesOf(known: Map<Name, Int>, ns: List<Name>, acc: List<Int>) -> List<Int>
-    ? "The place code of each name, in order."
+fn declsOf(known: Map<Name, Int>, ns: List<Name>, acc: List<Int>) -> List<Int>
+    ? "The declaration index of each name, in order, never for a name no declaration declares (UniqueDeclaredNames in Export.Tables)."
     match ns
         [] -> List.reverse(acc)
-        [n, ..rest] -> codesOf(known, rest, List.prepend(codeIn(known, n), acc))
+        [n, ..rest] -> declsOf(known, rest, List.prepend(declIn(known, n), acc))
 
-verify codesOf
-    codesOf({Core.Names.anon() => 4}, [Core.Names.anon()], []) => [4]
+verify declsOf
+    declsOf({Core.Names.anon() => 9}, [Core.Names.anon()], []) => [4]
 
-fn codeIn(known: Map<Name, Int>, n: Name) -> Int
-    ? "n's place code, or never (PlaceCodes)."
-    Option.withDefault(Map.get(known, n), Core.Lazy.never())
+fn declIn(known: Map<Name, Int>, n: Name) -> Int
+    ? "n's declaration index, or never: its code without the bit saying whether Pestka skips it."
+    match Map.get(known, n)
+        Option.Some(c) -> Bits.shiftRight(c, 1)
+        Option.None -> Core.Lazy.never()
 
-verify codeIn
-    codeIn({}, Core.Names.anon()) => Core.Lazy.never()
+verify declIn
+    declIn({}, Core.Names.anon()) => Core.Lazy.never()
 
 fn packedAll(p: Parsed, s: Store, pb: Bytes) -> Parsed
-    ? "The declarations with their proofs packed, and the expressions counted as the file holds them: the main block's and those each block says it holds, which decoding holds it to."
+    ? "The declarations with their proofs packed, and the expressions counted as the file holds them: MAIN's and those each theorem's record says its block holds, which decoding holds it to."
     ds = packedDecls(p.decls, s, pb, [], 0)
     Parsed.update(p, decls = ds.decls, exprs = p.exprs + ds.count)
 
@@ -462,15 +642,15 @@ fn packedNext(ds: List<Decl>, s: Store, pb: Bytes, acc: List<Decl>, count: Int, 
     packedDecls(ds, s, pb, List.prepend(d, acc), count + blockCount(d))
 
 fn blockCount(d: Decl) -> Int
-    ? "How many expressions a lazy theorem's block says it holds."
+    ? "How many expressions a lazy theorem's block holds, as its record says."
     match d
         Decl.Thm(_, p, _) -> match p
-            Proof.Deferred(Source.SuszBlock(_, b, _)) -> Core.Lazy.countOf(b)
+            Proof.Deferred(Source.SuszBlock(_, _, bd)) -> bd.count
             _ -> 0
         _ -> 0
 
 fn packedDecl(d: Decl, s: Store, pb: Bytes) -> Decl
-    ? "A theorem whose proof is a spot in the proof section gets that block's bytes."
+    ? "A theorem whose proof is a spot in PROOFS gets that block's bytes."
     match d
         Decl.Thm(h, p, all) -> match p
             Proof.Deferred(Source.SuszSpot(o, l, bd)) -> Decl.Thm(h, Proof.Deferred(Source.SuszBlock(s, Bytes.take(Bytes.drop(pb, o), l), bd)), all)
@@ -478,16 +658,14 @@ fn packedDecl(d: Decl, s: Store, pb: Bytes) -> Decl
         _ -> d
 
 fn exportRec(t: Tables, b: Bytes, i: Pos) -> Done
-    ? "19 (version 2): a frontier entry, a name (kind 0), level (1) or expression (2) by how far back it is from the next of its kind; it is the next of the frontier of its kind (FrontierAndPlaces)."
+    ? "19: a frontier entry, a name (kind 0), level (1) or expression (2) by how far back it is from the next of its kind; it is the next of the frontier of its kind (FrontierAndRuleP)."
     x = vAt(b, orNone(posOf(i.value + 1)))
-    match t.version == 2
-        false -> Done.Bad("unknown record tag 19")
-        true -> match Bool.or(i.value >= Bytes.len(b), x.at.value < 0)
-            true -> Done.Short
-            false -> exported(t, octet(b, i.value), x.value, x.at)
+    match Bool.or(i.value >= Bytes.len(b), x.at.value < 0)
+        true -> cut(t, [x])
+        false -> exported(t, octet(b, i.value), x.value, x.at)
 
 verify exportRec
-    exportRec(Export.Tables.empty(), Bytes.fromList([0, 1]), Pos(value = 0)) => Done.Bad("unknown record tag 19")
+    exportRec(Export.Tables.empty(), Bytes.fromList([0, 128, 0]), Pos(value = 0)) => Done.Bad("a varint is not minimal or not below 2^64")
 
 fn exported(t: Tables, kind: Int, d: Int, at: Pos) -> Done
     ? "The frontier entry d back added; 0 back names nothing."
@@ -496,83 +674,129 @@ fn exported(t: Tables, kind: Int, d: Int, at: Pos) -> Done
         false -> exportedKind(t, kind, d, at)
 
 verify exported
-    exported(Tables.update(Export.Tables.empty(), version = 2), 0, 0, Pos(value = 2)) => Done.Bad("a frontier entry names nothing")
-    exported(Tables.update(Export.Tables.empty(), version = 2), 0, 2, Pos(value = 2)) => Done.Bad("unknown name index -1")
-    exported(Tables.update(Export.Tables.empty(), version = 2), 0, 1, Pos(value = 2)) => Done.Next(Tables.update(Export.Tables.empty(), version = 2, outNames = [Core.Names.anon()], nOutNames = 1), Pos(value = 2))
-    exported(Tables.update(Export.Tables.empty(), version = 2), 7, 1, Pos(value = 2)) => Done.Bad("unknown frontier kind 7")
+    exported(Export.Tables.empty(), 0, 0, Pos(value = 2)) => Done.Bad("a frontier entry names nothing")
+    exported(Export.Tables.empty(), 0, 2, Pos(value = 2)) => Done.Bad("unknown name index -1")
+    exported(Export.Tables.empty(), 0, 1, Pos(value = 2)) => Done.Next(Tables.update(Export.Tables.empty(), outNames = [Core.Names.anon()], nOutNames = 1, lastName = 0), Pos(value = 2))
+    exported(Export.Tables.empty(), 7, 1, Pos(value = 2)) => Done.Bad("unknown frontier kind 7")
 
 fn exportedKind(t: Tables, kind: Int, d: Int, at: Pos) -> Done
-    ? "By kind."
+    ? "By kind; the id must be past the last listed of its kind (FrontierAndRuleP)."
     match kind
         0 -> match Export.Tables.name(t, t.nextName - d)
-            Result.Ok(n) -> Done.Next(Tables.update(t, outNames = List.prepend(n, t.outNames), nOutNames = t.nOutNames + 1), at)
+            Result.Ok(n) -> listed(t.nextName - d, t.lastName, "name", Done.Next(Tables.update(t, outNames = List.prepend(n, t.outNames), nOutNames = t.nOutNames + 1, lastName = t.nextName - d), at))
             Result.Err(e) -> Done.Bad(e)
         1 -> match Export.Tables.level(t, t.nextLevel - d)
-            Result.Ok(l) -> Done.Next(Tables.update(t, outLevels = List.prepend(l, t.outLevels), nOutLevels = t.nOutLevels + 1), at)
+            Result.Ok(l) -> listed(t.nextLevel - d, t.lastLevel, "level", Done.Next(Tables.update(t, outLevels = List.prepend(l, t.outLevels), nOutLevels = t.nOutLevels + 1, lastLevel = t.nextLevel - d), at))
             Result.Err(e) -> Done.Bad(e)
         2 -> match Export.Tables.expr(t, t.nextExpr - d)
-            Result.Ok(e) -> Done.Next(Tables.update(t, outExprs = List.prepend(e, t.outExprs), nOutExprs = t.nOutExprs + 1), at)
+            Result.Ok(e) -> listed(t.nextExpr - d, t.lastExpr, "expression", Done.Next(Tables.update(t, outExprs = List.prepend(e, t.outExprs), nOutExprs = t.nOutExprs + 1, lastExpr = t.nextExpr - d), at))
             Result.Err(e) -> Done.Bad(e)
         _ -> Done.Bad("unknown frontier kind {kind}")
 
+fn listed(id: Int, last: Int, what: String, next: Done) -> Done
+    ? "next, when id is past the last of its kind listed; the last again is listed twice, one below it declined (FrontierAndRuleP)."
+    match id > last
+        true -> next
+        false -> match id == last
+            true -> Done.Bad("frontier {what} {id} is listed twice")
+            false -> Done.Out("frontier {what} {id} is listed after {what} {last}: Pestka reads only growing frontier ids")
+
+verify listed
+    listed(3, 3, "name", Done.Short(Export.Tables.empty())) => Done.Bad("frontier name 3 is listed twice")
+    listed(2, 3, "name", Done.Short(Export.Tables.empty())) => Done.Out("frontier name 2 is listed after name 3: Pestka reads only growing frontier ids")
+    listed(4, 3, "name", Done.Short(Export.Tables.empty())) => Done.Short(Export.Tables.empty())
+
+verify exportedKind
+    exportedKind(Export.Tables.empty(), 0, 1, Pos(value = 0)) => Done.Next(Tables.update(Export.Tables.empty(), outNames = [Core.Names.anon()], nOutNames = 1, lastName = 0), Pos(value = 0))
+    exportedKind(Tables.update(Export.Tables.empty(), lastName = 0), 0, 1, Pos(value = 0)) => Done.Bad("frontier name 0 is listed twice")
+    exportedKind(Export.Tables.empty(), 7, 1, Pos(value = 0)) => Done.Bad("unknown frontier kind 7")
+
+decision CountInTheRecord
+    date = "2026-11-12"
+    reason =
+        "A theorem with a proof block (declaration kind 6) states its block's"
+        "length and how many expression records it holds (OWNER-4), so the"
+        "reader holds the count to the length while it reads MAIN: at least"
+        "one record, and at most half the bytes, since an expression record"
+        "takes at least two. The block's bytes are the next of PROOFS,"
+        "which the blocks must fill exactly."
+    chosen = "CountInTheRecord"
+    rejected = ["CountAtTheBlockHead"]
+    impacts = [lazyThm, lazyAdded]
+
 fn lazyThm(t: Tables, b: Bytes, head: Head, l: At) -> Done
-    ? "6 (version 2): a theorem whose proof is the next block of the proof section, by its length, then whether every name the block names is placed before its mark (a bool byte), then its group."
-    p = boolAt(b, l.at.value)
-    all = idsAt(b, orNone(posOf(l.at.value + 1)))
-    match t.version == 2
-        false -> Done.Bad("unknown declaration kind 6")
-        true -> match Bool.or(Bool.or(l.at.value < 0, p < 0), all.at.value < 0)
-            true -> Done.Short
-            false -> match p > 1
-                true -> Done.Bad("a bool byte is neither 0 nor 1")
-                false -> lazyAdded(t, head, l.value, p == 1, all)
+    ? "6: a theorem whose proof is the next block of PROOFS, by its length and its count, which must fit what is left of PROOFS, then its group (CountInTheRecord)."
+    x = vAt(b, l.at)
+    match Bool.or(l.at.value < 0, x.at.value < 0)
+        true -> cut(t, [l, x])
+        false -> match Bool.and(x.value >= 1, 2 * x.value <= l.value)
+            false -> Done.Bad("a proof block of {l.value} bytes cannot hold {x.value} expressions")
+            true -> match t.proofAt + l.value <= t.proofLength
+                false -> Done.Bad("a proof block of {l.value} bytes runs past PROOFS ({t.proofLength - t.proofAt} bytes left)")
+                true -> lazyGroup(t, head, l.value, x.value, idsAt(b, x.at))
+
+fn lazyGroup(t: Tables, head: Head, l: Int, count: Int, all: Ids) -> Done
+    ? "The theorem's group, then the theorem."
+    match all.at.value < 0
+        true -> cut(t, [asAt(all)])
+        false -> lazyAdded(t, head, l, count, all)
+
+verify lazyGroup
+    lazyGroup(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 2, 1, Ids(ids = [], at = Pos(value = -1))) => Done.Short(Export.Tables.empty())
 
 verify lazyThm
-    lazyThm(Export.Tables.empty(), Bytes.fromList([3, 1, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 3, at = Pos(value = 1))) => Done.Bad("unknown declaration kind 6")
-    lazyThm(Tables.update(Export.Tables.empty(), version = 2), Bytes.fromList([3, 2, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 3, at = Pos(value = 1))) => Done.Bad("a bool byte is neither 0 nor 1")
+    lazyThm(Export.Tables.empty(), Bytes.fromList([3, 2, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 3, at = Pos(value = 1))) => Done.Bad("a proof block of 3 bytes cannot hold 2 expressions")
+    lazyThm(Export.Tables.empty(), Bytes.fromList([3, 0, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 3, at = Pos(value = 1))) => Done.Bad("a proof block of 3 bytes cannot hold 0 expressions")
+    lazyThm(Export.Tables.empty(), Bytes.fromList([3, 1, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), At(value = 3, at = Pos(value = 1))) => Done.Bad("a proof block of 3 bytes runs past PROOFS (0 bytes left)")
 
-fn lazyAdded(t: Tables, head: Head, l: Int, placed: Bool, all: Ids) -> Done
-    ? "The lazy theorem built and added, its block placed after the blocks before it, bounded by the frontier listed so far; the block's word on names placed joins the reader's (FrontierAndPlaces)."
-    bd = Bounds(decl = t.declCount, names = t.nOutNames, levels = t.nOutLevels, exprs = t.nOutExprs, placed = placed)
+fn lazyAdded(t: Tables, head: Head, l: Int, count: Int, all: Ids) -> Done
+    ? "The lazy theorem built and added, its block placed after the blocks before it, bounded by the frontier listed so far (CountInTheRecord)."
+    bd = Bounds(decl = t.declCount, names = t.nOutNames, levels = t.nOutLevels, exprs = t.nOutExprs, count = count, at = t.proofBase + t.proofAt)
     d = lazyOf(t, head, Proof.Deferred(Source.SuszSpot(t.proofAt, l, bd)), all.ids)
     at = t.proofAt + l
-    lazyDone(declAdded(t, d, all.at), placed, at)
+    lazyDone(declAdded(t, d, all.at), at)
 
-fn lazyDone(d: Done, placed: Bool, at: Int) -> Done
-    ? "After the theorem: the proof section taken up to at, and the reader's decision kept only when the block's names are placed."
+fn lazyDone(d: Done, at: Int) -> Done
+    ? "After the theorem: PROOFS taken up to at."
     match d
-        Done.Next(t, i) -> Done.Next(Tables.update(t, proofAt = at, allPlaced = Bool.and(t.allPlaced, placed)), i)
+        Done.Next(t, i) -> Done.Next(Tables.update(t, proofAt = at), i)
         _ -> d
 
 verify packedAll
     packedAll(Export.Tables.finish(Export.Tables.empty()), Core.Lazy.emptyStore(), Bytes.fromList([])).exprs => 0
 
 verify packedDecls
-    packedDecls([Decl.Thm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Deferred(Source.SuszSpot(0, 3, Bounds(decl = 0, names = 0, levels = 0, exprs = 0, placed = true))), [])], Core.Lazy.emptyStore(), Bytes.fromList([2, 7, 3]), [], 0).count => 2
+    packedDecls([Decl.Thm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Deferred(Source.SuszSpot(0, 2, Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 1, at = 16))), [])], Core.Lazy.emptyStore(), Bytes.fromList([7, 3]), [], 0).count => 1
 
 verify packedNext
     packedNext([], Core.Lazy.emptyStore(), Bytes.fromList([]), [], 3, Decl.Induct([], [], [])).count => 3
 
 verify blockCount
     blockCount(Decl.Induct([], [], [])) => 0
-    blockCount(Decl.Thm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Deferred(Source.SuszBlock(Core.Lazy.emptyStore(), Bytes.fromList([5]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, placed = true))), [])) => 5
+    blockCount(Decl.Thm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Deferred(Source.SuszBlock(Core.Lazy.emptyStore(), Bytes.fromList([7, 3]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 5, at = 0))), [])) => 5
 
 verify packedDecl
     packedDecl(Decl.Induct([], [], []), Core.Lazy.emptyStore(), Bytes.fromList([])) => Decl.Induct([], [], [])
 
-verify exportedKind
-    exportedKind(Tables.update(Export.Tables.empty(), version = 2), 0, 1, Pos(value = 0)) => Done.Next(Tables.update(Export.Tables.empty(), version = 2, outNames = [Core.Names.anon()], nOutNames = 1), Pos(value = 0))
-    exportedKind(Tables.update(Export.Tables.empty(), version = 2), 7, 1, Pos(value = 0)) => Done.Bad("unknown frontier kind 7")
-
 verify lazyAdded
-    lazyAdded(Tables.update(Export.Tables.empty(), version = 2), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 4, true, Ids(ids = [], at = Pos(value = 0))) == Done.Short => false
+    lazyAdded(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 4, 1, Ids(ids = [], at = Pos(value = 0))) == Done.Short(Export.Tables.empty()) => false
 
 verify lazyDone
-    lazyDone(Done.Short, true, 3) => Done.Short
+    lazyDone(Done.Short(Export.Tables.empty()), 3) => Done.Short(Export.Tables.empty())
 
 fn lazyOf(t: Tables, head: Head, p: Proof, all: List<Int>) -> Result<Decl, String>
     ? "The theorem with its proof's spot."
     Result.Ok(Decl.Thm(head, p, Export.Tables.names(t, all)?))
+
+fn u16At(b: Bytes, i: Int) -> Int
+    ? "A little-endian u16 at i, or -1 past the end."
+    match Bytes.get(b, i + 1)
+        Option.None -> -1
+        Option.Some(d) -> d * 256 + octet(b, i)
+
+verify u16At
+    u16At(Bytes.fromList([1, 2]), 0) => 513
+    u16At(Bytes.fromList([1]), 0) => -1
 
 fn u32At(b: Bytes, i: Int) -> Int
     ? "A little-endian u32 at i, or -1 past the end."
@@ -605,11 +829,42 @@ verify octet
 
 type Done
     Next(Tables, Pos)
-    Short
+    Short(Tables)
     Bad(String)
+    Out(String)
+
+fn cut(t: Tables, xs: List<At>) -> Done
+    ? "A record whose fields ran out: a malformed varint among them is an error, else the record runs past the chunk, and the tables go back as they were, with one owner (MinimalVarints, ChunkWithMargin)."
+    match xs
+        [] -> Done.Short(t)
+        [x, ..rest] -> match x.value < 0
+            true -> Done.Bad("a varint is not minimal or not below 2^64")
+            false -> cut(t, rest)
+
+verify cut
+    cut(Export.Tables.empty(), [At(value = 0, at = Pos(value = -1))]) => Done.Short(Export.Tables.empty())
+    cut(Export.Tables.empty(), [At(value = 3, at = Pos(value = 1)), At(value = -1, at = Pos(value = -1))]) => Done.Bad("a varint is not minimal or not below 2^64")
+
+fn asAt(x: Ids) -> At
+    ? "A list as the field cut looks at: malformed when an element was."
+    match x.ids == [-1]
+        true -> At(value = -1, at = x.at)
+        false -> At(value = 0, at = x.at)
+
+verify asAt
+    asAt(Ids(ids = [-1], at = Pos(value = -1))).value => -1
+
+fn gcut(xs: List<At>) -> Got
+    ? "cut for the parts of a declaration."
+    match cut(Export.Tables.empty(), xs)
+        Done.Bad(e) -> Got.GotBad(e)
+        _ -> Got.GotShort
+
+verify gcut
+    gcut([]) => Got.GotShort
 
 decision VarintsByValue
-    date = "2026-11-10"
+    date = "2026-11-12"
     reason =
         "A varint is little-endian base 128, the high bit of each byte saying"
         "another follows, at most 10 bytes. Decoding 10 M of them in Aver"
@@ -617,16 +872,28 @@ decision VarintsByValue
         "numbers, each byte read costing about 25, and with expressions"
         "named by how far back they are the file is half as big. Each byte's"
         "low seven bits are multiplied by the weight of their place, 128 to"
-        "the power of the byte's number, so any value is read exactly. The"
-        "first nine bytes hold 63 bits, a value below 2^63 that every partial"
-        "sum stays below; only the tenth, of weight 2^63, takes a value past"
-        "it, and it is read in a function of its own."
+        "the power of the byte's number, so any value is read exactly. Susz"
+        "1 asks for minimal varints below 2^64 (MinimalVarints): the last"
+        "byte of a varint of more than one is not zero, and the tenth, of"
+        "weight 2^63, read in a function of its own, is exactly 1."
     chosen = "VarintsByValue"
     rejected = ["FixedWidth", "VarintsByShifts"]
-    impacts = [vAt, v1, v2, v3, v4, v5, v6, v7, v8, v9]
+    impacts = [vAt, v1, v2, v3, v4, v5, v6, v7, v8, v9, ended1]
+
+decision MinimalVarints
+    date = "2026-11-12"
+    reason =
+        "Every value has one encoding (spec section 3), which canonical"
+        "packing needs: a malformed varint, one not minimal or not below"
+        "2^64, reads as value -1 at none, told apart from one that runs past"
+        "the chunk (value 0 at none) by cut, so that it is an error of its"
+        "record and not a reason to read the record again."
+    chosen = "MinimalVarints"
+    rejected = ["AnyEncoding"]
+    impacts = [ended1, v9, cut, asAt, gcut, idsNext]
 
 fn vAt(b: Bytes, i: Pos) -> At
-    ? "The varint at i and where the next field starts; at is -1 when there is none (VarintsByValue)."
+    ? "The varint at i and where the next field starts; at is -1 when there is none, and value -1 too when it is malformed (VarintsByValue, MinimalVarints)."
     match Bytes.get(b, i.value)
         Option.None -> At(value = 0, at = Pos(value = -1))
         Option.Some(x) -> match x < 128
@@ -638,17 +905,29 @@ verify vAt
     vAt(Bytes.fromList([172, 2]), Pos(value = 0)) => At(value = 300, at = Pos(value = 2))
     vAt(Bytes.fromList([128]), Pos(value = 0)).at.value => -1
     vAt(Bytes.fromList([5]), Pos(value = -1)).at.value => -1
+    vAt(Bytes.fromList([128, 0]), Pos(value = 0)) => At(value = -1, at = Pos(value = -1))
     vAt(Bytes.fromList([255, 255, 255, 255, 255, 255, 255, 255, 127]), Pos(value = 0)) => At(value = 9223372036854775807, at = Pos(value = 9))
     vAt(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 1]), Pos(value = 0)) => At(value = 9223372036854775808, at = Pos(value = 10))
-    vAt(Bytes.fromList([255, 255, 255, 255, 255, 255, 255, 255, 255, 127]), Pos(value = 0)) => At(value = 1180591620717411303423, at = Pos(value = 10))
-    vAt(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 1]), Pos(value = 0)).at.value => -1
+    vAt(Bytes.fromList([255, 255, 255, 255, 255, 255, 255, 255, 255, 1]), Pos(value = 0)) => At(value = 18446744073709551615, at = Pos(value = 10))
+    vAt(Bytes.fromList([255, 255, 255, 255, 255, 255, 255, 255, 255, 2]), Pos(value = 0)) => At(value = -1, at = Pos(value = -1))
+    vAt(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 1]), Pos(value = 0)) => At(value = -1, at = Pos(value = -1))
+
+fn ended1(x: Int, value: Int, at: Int) -> At
+    ? "A varint's last byte x, after the first: 0 there is not minimal (MinimalVarints)."
+    match x == 0
+        true -> At(value = -1, at = Pos(value = -1))
+        false -> At(value = value, at = orNone(posOf(at)))
+
+verify ended1
+    ended1(0, 0, 2) => At(value = -1, at = Pos(value = -1))
+    ended1(1, 128, 2) => At(value = 128, at = Pos(value = 2))
 
 fn v1(b: Bytes, i: Pos, acc: Int) -> At
     ? "The second byte of the varint at i, of weight 128^1; acc is the value of the bytes before it (VarintsByValue)."
     match Bytes.get(b, i.value + 1)
         Option.None -> At(value = 0, at = Pos(value = -1))
         Option.Some(x) -> match x < 128
-            true -> At(value = acc + Bits.and(x, 127) * 128, at = orNone(posOf(i.value + 2)))
+            true -> ended1(x, acc + x * 128, i.value + 2)
             false -> v2(b, i, acc + Bits.and(x, 127) * 128)
 
 verify v1
@@ -660,7 +939,7 @@ fn v2(b: Bytes, i: Pos, acc: Int) -> At
     match Bytes.get(b, i.value + 2)
         Option.None -> At(value = 0, at = Pos(value = -1))
         Option.Some(x) -> match x < 128
-            true -> At(value = acc + Bits.and(x, 127) * 16384, at = orNone(posOf(i.value + 3)))
+            true -> ended1(x, acc + x * 16384, i.value + 3)
             false -> v3(b, i, acc + Bits.and(x, 127) * 16384)
 
 verify v2
@@ -672,7 +951,7 @@ fn v3(b: Bytes, i: Pos, acc: Int) -> At
     match Bytes.get(b, i.value + 3)
         Option.None -> At(value = 0, at = Pos(value = -1))
         Option.Some(x) -> match x < 128
-            true -> At(value = acc + Bits.and(x, 127) * 2097152, at = orNone(posOf(i.value + 4)))
+            true -> ended1(x, acc + x * 2097152, i.value + 4)
             false -> v4(b, i, acc + Bits.and(x, 127) * 2097152)
 
 verify v3
@@ -684,7 +963,7 @@ fn v4(b: Bytes, i: Pos, acc: Int) -> At
     match Bytes.get(b, i.value + 4)
         Option.None -> At(value = 0, at = Pos(value = -1))
         Option.Some(x) -> match x < 128
-            true -> At(value = acc + Bits.and(x, 127) * 268435456, at = orNone(posOf(i.value + 5)))
+            true -> ended1(x, acc + x * 268435456, i.value + 5)
             false -> v5(b, i, acc + Bits.and(x, 127) * 268435456)
 
 verify v4
@@ -696,7 +975,7 @@ fn v5(b: Bytes, i: Pos, acc: Int) -> At
     match Bytes.get(b, i.value + 5)
         Option.None -> At(value = 0, at = Pos(value = -1))
         Option.Some(x) -> match x < 128
-            true -> At(value = acc + Bits.and(x, 127) * 34359738368, at = orNone(posOf(i.value + 6)))
+            true -> ended1(x, acc + x * 34359738368, i.value + 6)
             false -> v6(b, i, acc + Bits.and(x, 127) * 34359738368)
 
 verify v5
@@ -708,7 +987,7 @@ fn v6(b: Bytes, i: Pos, acc: Int) -> At
     match Bytes.get(b, i.value + 6)
         Option.None -> At(value = 0, at = Pos(value = -1))
         Option.Some(x) -> match x < 128
-            true -> At(value = acc + Bits.and(x, 127) * 4398046511104, at = orNone(posOf(i.value + 7)))
+            true -> ended1(x, acc + x * 4398046511104, i.value + 7)
             false -> v7(b, i, acc + Bits.and(x, 127) * 4398046511104)
 
 verify v6
@@ -720,7 +999,7 @@ fn v7(b: Bytes, i: Pos, acc: Int) -> At
     match Bytes.get(b, i.value + 7)
         Option.None -> At(value = 0, at = Pos(value = -1))
         Option.Some(x) -> match x < 128
-            true -> At(value = acc + Bits.and(x, 127) * 562949953421312, at = orNone(posOf(i.value + 8)))
+            true -> ended1(x, acc + x * 562949953421312, i.value + 8)
             false -> v8(b, i, acc + Bits.and(x, 127) * 562949953421312)
 
 verify v7
@@ -732,7 +1011,7 @@ fn v8(b: Bytes, i: Pos, acc: Int) -> At
     match Bytes.get(b, i.value + 8)
         Option.None -> At(value = 0, at = Pos(value = -1))
         Option.Some(x) -> match x < 128
-            true -> At(value = acc + Bits.and(x, 127) * 72057594037927936, at = orNone(posOf(i.value + 9)))
+            true -> ended1(x, acc + x * 72057594037927936, i.value + 9)
             false -> v9(b, i, acc + Bits.and(x, 127) * 72057594037927936)
 
 verify v8
@@ -740,34 +1019,40 @@ verify v8
     v8(Bytes.fromList([128]), Pos(value = 0), 0).at.value => -1
 
 fn v9(b: Bytes, i: Pos, acc: Int) -> At
-    ? "The tenth and last byte of the varint at i, of weight 2^63, the only one that takes the value past 2^63; acc is the value of the nine before it. A tenth byte saying another follows makes no varint (VarintsByValue)."
+    ? "The tenth and last byte of the varint at i, of weight 2^63, the only one that takes the value past 2^63; acc is the value of the nine before it. Below 2^64 and minimal, it is exactly 1 (VarintsByValue, MinimalVarints)."
     match Bytes.get(b, i.value + 9)
         Option.None -> At(value = 0, at = Pos(value = -1))
-        Option.Some(x) -> match x < 128
-            true -> At(value = acc + x * 9223372036854775808, at = orNone(posOf(i.value + 10)))
-            false -> At(value = 0, at = Pos(value = -1))
+        Option.Some(x) -> match x == 1
+            true -> At(value = acc + 9223372036854775808, at = orNone(posOf(i.value + 10)))
+            false -> At(value = -1, at = Pos(value = -1))
 
 verify v9
-    v9(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 2]), Pos(value = 0), 5) => At(value = 18446744073709551621, at = Pos(value = 10))
+    v9(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 1]), Pos(value = 0), 5) => At(value = 9223372036854775813, at = Pos(value = 10))
+    v9(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 2]), Pos(value = 0), 5) => At(value = -1, at = Pos(value = -1))
     v9(Bytes.fromList([128, 128, 128, 128, 128, 128, 128, 128, 128, 128]), Pos(value = 0), 0).at.value => -1
 
 fn textAt(b: Bytes, n: At) -> Result<String, String>
-    ? "The n.value bytes at n.at.value as UTF-8 text."
-    match Bool.and(n.at.value >= 0, n.at.value + n.value <= Bytes.len(b))
-        false -> Result.Err("a string runs past the chunk")
-        true -> match String.fromUtf8(Bytes.take(Bytes.drop(b, n.at.value), n.value))
-            Result.Ok(s) -> Result.Ok(s)
-            Result.Err(e) -> Result.Err("a string is not UTF-8: {e}")
+    ? "The n.value bytes at n.at.value, which the caller knows are there, as well-formed UTF-8 text (RFC 3629, as Rust's str holds it)."
+    match String.fromUtf8(Bytes.take(Bytes.drop(b, n.at.value), n.value))
+        Result.Ok(s) -> Result.Ok(s)
+        Result.Err(e) -> Result.Err("a string is not UTF-8: {e}")
 
 verify textAt
     textAt(Bytes.fromList([2, 104, 105]), At(value = 2, at = Pos(value = 1))) => Result.Ok("hi")
-    textAt(Bytes.fromList([2, 104]), At(value = 2, at = Pos(value = 1))) => Result.Err("a string runs past the chunk")
+    textAt(Bytes.fromList([2, 192, 128]), At(value = 2, at = Pos(value = 1))) => Result.Err("a string is not UTF-8: invalid UTF-8")
+
+fn inChunk(b: Bytes, n: At) -> Bool
+    ? "Whether the n.value bytes at n.at.value are all in the chunk."
+    Bool.and(n.at.value >= 0, n.at.value + n.value <= Bytes.len(b))
+
+verify inChunk
+    inChunk(Bytes.fromList([2, 104]), At(value = 2, at = Pos(value = 1))) => false
 
 fn idsAt(b: Bytes, i: Pos) -> Ids
     ? "A list of varints: its length, then its elements; at is -1 when it runs past the chunk."
     n = vAt(b, i)
     match n.at.value < 0
-        true -> Ids(ids = [], at = Pos(value = -1))
+        true -> Ids(ids = [n.value], at = Pos(value = -1))
         false -> idsFrom(b, n.at, n.value, [])
 
 verify idsAt
@@ -786,11 +1071,12 @@ verify idsFrom
 fn idsNext(b: Bytes, x: At, n: Int, acc: List<Int>) -> Ids
     ? "One element read; the rest follow."
     match x.at.value < 0
-        true -> Ids(ids = [], at = Pos(value = -1))
+        true -> Ids(ids = [x.value], at = Pos(value = -1))
         false -> idsFrom(b, x.at, n - 1, List.prepend(x.value, acc))
 
 verify idsNext
     idsNext(Bytes.fromList([]), At(value = 0, at = Pos(value = -1)), 1, []).at.value => -1
+    idsNext(Bytes.fromList([]), At(value = -1, at = Pos(value = -1)), 1, []).ids => [-1]
 
 fn back(t: Tables, d: Int) -> Int
     ? "The expression d back from the next one; 0 back names none and gives -1, which the tables then report as unknown."
@@ -820,7 +1106,6 @@ fn recordAt(t: Tables, b: Bytes, tag: Int, i: Pos) -> Done
         14 -> lit(t, b, vAt(b, i), true)
         15 -> lit(t, b, vAt(b, i), false)
         16 -> proj(t, b, vAt(b, i))
-        17 -> mdata(t, vAt(b, i))
         18 -> decl(t, b, i)
         19 -> exportRec(t, b, i)
         _ -> Done.Bad("unknown record tag {tag}")
@@ -846,11 +1131,11 @@ fn app(t: Tables, b: Bytes, f: At) -> Done
     fi = back(t, f.value)
     ai = back(t, a.value)
     match Bool.or(f.at.value < 0, a.at.value < 0)
-        true -> Done.Short
+        true -> cut(t, [f, a])
         false -> added(Export.Items.appAt(t, ie, fi, ai), a.at)
 
 verify app
-    app(Export.Tables.empty(), Bytes.fromList([1]), At(value = 1, at = Pos(value = 1))) => Done.Short
+    app(Export.Tables.empty(), Bytes.fromList([1]), At(value = 1, at = Pos(value = 1))) => Done.Short(Export.Tables.empty())
 
 fn binder(t: Tables, b: Bytes, i: Pos, isLam: Bool) -> Done
     ? "11 lambda, 12 pi: the binder annotation, the name, how far back the type and the body are."
@@ -860,8 +1145,8 @@ fn binder(t: Tables, b: Bytes, i: Pos, isLam: Bool) -> Done
     ie = t.nextExpr
     ti = back(t, ty.value)
     bo = back(t, body.value)
-    match Bool.or(Bool.or(n.at.value < 0, ty.at.value < 0), body.at.value < 0)
-        true -> Done.Short
+    match Bool.or(Bool.or(n.at.value < 0, ty.at.value < 0), Bool.or(body.at.value < 0, i.value >= Bytes.len(b)))
+        true -> cut(t, [n, ty, body])
         false -> match binderInfo(octet(b, i.value))
             Option.None -> Done.Bad("unknown binder annotation {octet(b, i.value)}")
             Option.Some(bi) -> added(Export.Items.binderAt(t, ie, n.value, ti, bo, bi, isLam), body.at)
@@ -886,17 +1171,17 @@ fn bvar(t: Tables, k: At) -> Done
     ? "7: a bound variable."
     ie = t.nextExpr
     match k.at.value < 0
-        true -> Done.Short
+        true -> cut(t, [k])
         false -> added(Export.Tables.addExpr(t, ie, Core.Exprs.bvar(k.value)), k.at)
 
 verify bvar
-    bvar(Export.Tables.empty(), At(value = 0, at = Pos(value = -1))) => Done.Short
+    bvar(Export.Tables.empty(), At(value = 0, at = Pos(value = -1))) => Done.Short(Export.Tables.empty())
 
 fn sort(t: Tables, l: At) -> Done
     ? "8: the sort of a level."
     ie = t.nextExpr
     match l.at.value < 0
-        true -> Done.Short
+        true -> cut(t, [l])
         false -> added(Export.Items.sortAt(t, ie, l.value), l.at)
 
 verify sort
@@ -907,7 +1192,7 @@ fn cnst(t: Tables, b: Bytes, n: At) -> Done
     us = idsAt(b, n.at)
     ie = t.nextExpr
     match Bool.or(n.at.value < 0, us.at.value < 0)
-        true -> Done.Short
+        true -> cut(t, [n, asAt(us)])
         false -> added(Export.Items.constAt(t, ie, n.value, us.ids), us.at)
 
 verify cnst
@@ -923,30 +1208,58 @@ fn letE(t: Tables, b: Bytes, n: At) -> Done
     vi = back(t, v.value)
     bo = back(t, body.value)
     match Bool.or(Bool.or(n.at.value < 0, ty.at.value < 0), Bool.or(v.at.value < 0, body.at.value < 0))
-        true -> Done.Short
+        true -> cut(t, [n, ty, v, body])
         false -> added(Export.Items.letAt(t, ie, n.value, ti, vi, bo), body.at)
 
 verify letE
     letE(Export.Tables.empty(), Bytes.fromList([0, 1, 1, 1]), At(value = 0, at = Pos(value = 1))) => Done.Bad("unknown expression index -1")
 
 fn lit(t: Tables, b: Bytes, n: At, isNat: Bool) -> Done
-    ? "14 a Nat by its decimal digits, 15 a string."
-    match textAt(b, n)
-        Result.Err(e) -> Done.Bad(e)
-        Result.Ok(s) -> added(litOf(t, s, isNat), orNone(posOf(n.at.value + n.value)))
+    ? "14 a Nat by its minimal little-endian bytes (NatAsBytes), 15 a string; a literal past the chunk is read again."
+    match n.at.value < 0
+        true -> cut(t, [n])
+        false -> match inChunk(b, n)
+            false -> Done.Short(t)
+            true -> match isNat
+                true -> natAt(t, b, n.at.value, n.value)
+                false -> match textAt(b, n)
+                    Result.Err(e) -> Done.Bad(e)
+                    Result.Ok(x) -> added(Export.Tables.addExpr(t, t.nextExpr, Core.Exprs.strLit(x)), orNone(posOf(n.at.value + n.value)))
 
 verify lit
-    lit(Export.Tables.empty(), Bytes.fromList([1, 55]), At(value = 1, at = Pos(value = 1)), true) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.natLit(7)), Export.Tables.empty()), Pos(value = 2))
+    lit(Export.Tables.empty(), Bytes.fromList([1, 7]), At(value = 1, at = Pos(value = 1)), true) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.natLit(7)), Export.Tables.empty()), Pos(value = 2))
+    lit(Export.Tables.empty(), Bytes.fromList([2, 7]), At(value = 2, at = Pos(value = 1)), true) => Done.Short(Export.Tables.empty())
 
-fn litOf(t: Tables, s: String, isNat: Bool) -> Result<Tables, String>
-    ? "The literal, a Nat checked as the ndjson reader checks it."
-    ie = t.nextExpr
-    match isNat
-        true -> Export.Tables.addExpr(t, ie, Export.Items.natOf(s)?)
-        false -> Export.Tables.addExpr(t, ie, Core.Exprs.strLit(s))
+decision NatAsBytes
+    date = "2026-11-12"
+    reason =
+        "A Nat literal is its minimal little-endian base-256 digits (OWNER-2):"
+        "zero is no bytes, and the last byte of any other is not zero. It"
+        "is read from its last byte down, each step a multiplication by 256,"
+        "linear in the bytes for the literals exports hold."
+    chosen = "NatAsBytes"
+    rejected = ["DecimalDigits"]
+    impacts = [lit, natAt, leValue]
 
-verify litOf
-    litOf(Export.Tables.empty(), "-1", true) => Result.Err("negative Nat literal")
+fn natAt(t: Tables, b: Bytes, i: Int, n: Int) -> Done
+    ? "The n bytes at i, the last not zero, as a Nat literal (NatAsBytes)."
+    match Bool.and(n > 0, octet(b, i + n - 1) == 0)
+        true -> Done.Bad("a Nat literal ends in a zero byte")
+        false -> added(Export.Tables.addExpr(t, t.nextExpr, Core.Exprs.natLit(leValue(b, i, i + n - 1, 0))), orNone(posOf(i + n)))
+
+verify natAt
+    natAt(Export.Tables.empty(), Bytes.fromList([0, 1, 0]), 1, 2) => Done.Bad("a Nat literal ends in a zero byte")
+    natAt(Export.Tables.empty(), Bytes.fromList([0, 0, 1]), 1, 2) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.natLit(256)), Export.Tables.empty()), Pos(value = 3))
+    natAt(Export.Tables.empty(), Bytes.fromList([0]), 1, 0) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.natLit(0)), Export.Tables.empty()), Pos(value = 1))
+
+fn leValue(b: Bytes, i: Int, j: Int, acc: Int) -> Int
+    ? "Bytes i to j as a little-endian number, read from the last; acc is the value of those after j (NatAsBytes)."
+    match j < i
+        true -> acc
+        false -> leValue(b, i, j - 1, acc * 256 + octet(b, j))
+
+verify leValue
+    leValue(Bytes.fromList([1, 2]), 0, 1, 0) => 513
 
 fn proj(t: Tables, b: Bytes, n: At) -> Done
     ? "16: a projection, the structure's name, the field and how far back the structure is."
@@ -954,7 +1267,7 @@ fn proj(t: Tables, b: Bytes, n: At) -> Done
     s = vAt(b, k.at)
     si = back(t, s.value)
     match Bool.or(n.at.value < 0, Bool.or(k.at.value < 0, s.at.value < 0))
-        true -> Done.Short
+        true -> cut(t, [n, k, s])
         false -> added(projOf(t, n.value, k.value, si), s.at)
 
 verify proj
@@ -970,33 +1283,16 @@ fn projOf(t: Tables, n: Int, k: Int, s: Int) -> Result<Tables, String>
 verify projOf
     projOf(Export.Tables.empty(), 5, 0, 0) => Result.Err("unknown name index 5")
 
-fn mdata(t: Tables, d: At) -> Done
-    ? "17: metadata, which stands for the expression it wraps."
-    x = back(t, d.value)
-    match d.at.value < 0
-        true -> Done.Short
-        false -> added(mdataOf(t, x), d.at)
-
-verify mdata
-    mdata(Export.Tables.empty(), At(value = 1, at = Pos(value = 1))) => Done.Bad("unknown expression index -1")
-
-fn mdataOf(t: Tables, x: Int) -> Result<Tables, String>
-    ? "Expression x again under the next id."
-    e = Export.Tables.expr(t, x)?
-    ie = t.nextExpr
-    Export.Tables.addExpr(t, ie, e)
-
-verify mdataOf
-    mdataOf(Export.Tables.empty(), 0) => Result.Err("unknown expression index 0")
-
 fn nameStr(t: Tables, b: Bytes, pre: At) -> Done
     ? "1: a name, its prefix and a string."
     s = vAt(b, pre.at)
     match Bool.or(pre.at.value < 0, s.at.value < 0)
-        true -> Done.Short
-        false -> match textAt(b, s)
-            Result.Err(e) -> Done.Bad(e)
-            Result.Ok(x) -> nameAdded(t, pre.value, x, orNone(posOf(s.at.value + s.value)))
+        true -> cut(t, [pre, s])
+        false -> match inChunk(b, s)
+            false -> Done.Short(t)
+            true -> match textAt(b, s)
+                Result.Err(e) -> Done.Bad(e)
+                Result.Ok(x) -> nameAdded(t, pre.value, x, orNone(posOf(s.at.value + s.value)))
 
 verify nameStr
     nameStr(Export.Tables.empty(), Bytes.fromList([0, 1, 97]), At(value = 0, at = Pos(value = 1))) => Done.Next(Result.withDefault(Export.Items.nameStrAt(Export.Tables.empty(), 1, 0, "a"), Export.Tables.empty()), Pos(value = 3))
@@ -1014,7 +1310,7 @@ fn nameNum(t: Tables, b: Bytes, pre: At) -> Done
     k = vAt(b, pre.at)
     i = t.nextName
     match Bool.or(pre.at.value < 0, k.at.value < 0)
-        true -> Done.Short
+        true -> cut(t, [pre, k])
         false -> added(Export.Items.nameNumAt(t, i, pre.value, k.value), k.at)
 
 verify nameNum
@@ -1024,7 +1320,7 @@ fn succ(t: Tables, l: At) -> Done
     ? "3: the successor of a level."
     i = t.nextLevel
     match l.at.value < 0
-        true -> Done.Short
+        true -> cut(t, [l])
         false -> added(Export.Items.succAdded(t, i, l.value), l.at)
 
 verify succ
@@ -1035,7 +1331,7 @@ fn pair(t: Tables, b: Bytes, a: At, isMax: Bool) -> Done
     c = vAt(b, a.at)
     i = t.nextLevel
     match Bool.or(a.at.value < 0, c.at.value < 0)
-        true -> Done.Short
+        true -> cut(t, [a, c])
         false -> added(Export.Items.levelsRead(t, i, a.value, c.value, isMax), c.at)
 
 verify pair
@@ -1045,7 +1341,7 @@ fn param(t: Tables, n: At) -> Done
     ? "6: a universe parameter by its name."
     i = t.nextLevel
     match n.at.value < 0
-        true -> Done.Short
+        true -> cut(t, [n])
         false -> added(Export.Items.paramAdded(t, i, n.value), n.at)
 
 verify param
@@ -1054,17 +1350,17 @@ verify param
 fn decl(t: Tables, b: Bytes, i: Pos) -> Done
     ? "18: a declaration, its kind first; every kind but an inductive block then has a head."
     match Bytes.get(b, i.value)
-        Option.None -> Done.Short
+        Option.None -> Done.Short(t)
         Option.Some(5) -> inductiveFrom(t, b, orNone(posOf(i.value + 1)))
         Option.Some(k) -> match headAt(t, b, orNone(posOf(i.value + 1)))
-            Got.GotShort -> Done.Short
+            Got.GotShort -> Done.Short(t)
             Got.GotBad(e) -> Done.Bad(e)
             Got.GHead(head, j) -> declKind(t, b, k, head, j)
             _ -> Done.Bad("malformed")
 
 verify decl
     decl(Export.Tables.empty(), Bytes.fromList([0, 7, 0, 1]), Pos(value = 0)) => Done.Bad("unknown name index 7")
-    decl(Export.Tables.empty(), Bytes.fromList([5, 0, 0, 0]), Pos(value = 0)) => Done.Next(Export.Tables.addDecl(Export.Tables.empty(), Decl.Induct([], [], [])), Pos(value = 4))
+    decl(Export.Tables.empty(), Bytes.fromList([5, 0, 0, 0]), Pos(value = 0)) => added(Export.Tables.addDecl(Export.Tables.empty(), Decl.Induct([], [], [])), Pos(value = 4))
 
 type Got
     GHead(Head, Pos)
@@ -1085,7 +1381,7 @@ fn headAt(t: Tables, b: Bytes, i: Pos) -> Got
     ty = vAt(b, ps.at)
     ti = back(t, ty.value)
     match Bool.or(n.at.value < 0, Bool.or(ps.at.value < 0, ty.at.value < 0))
-        true -> Got.GotShort
+        true -> gcut([n, asAt(ps), ty])
         false -> match Export.Declarations.headOf(t, n.value, ps.ids, ti)
             Result.Ok(h) -> Got.GHead(h, ty.at)
             Result.Err(e) -> Got.GotBad(e)
@@ -1110,7 +1406,7 @@ verify declKind
 fn declAdded(t: Tables, d: Result<Decl, String>, at: Pos) -> Done
     ? "A declaration added, going on at at."
     match d
-        Result.Ok(x) -> Done.Next(Export.Tables.addDecl(t, x), at)
+        Result.Ok(x) -> added(Export.Tables.addDecl(t, x), at)
         Result.Err(e) -> Done.Bad(e)
 
 verify declAdded
@@ -1132,7 +1428,7 @@ verify boolAt
 fn axiom(t: Tables, head: Head, u: Int, at: Pos) -> Done
     ? "Axiom: whether it is unsafe."
     match u < 0
-        true -> Done.Short
+        true -> Done.Short(t)
         false -> match u > 1
             true -> Done.Bad("a bool byte is neither 0 nor 1")
             false -> declAdded(t, Result.Ok(Decl.Axiom(head, u == 1)), at)
@@ -1143,8 +1439,8 @@ verify axiom
 fn defn(t: Tables, b: Bytes, head: Head, v: At) -> Done
     ? "Definition: how far back its value is, its hints (0 opaque, 1 abbrev, 2 regular and the height), its safety (0 safe, 1 unsafe, 2 partial) and its group."
     vi = back(t, v.value)
-    match v.at.value < 0
-        true -> Done.Short
+    match Bool.or(v.at.value < 0, v.at.value >= Bytes.len(b))
+        true -> cut(t, [v])
         false -> match octet(b, v.at.value)
             0 -> defSafety(t, b, head, vi, Hints.Opaque, orNone(posOf(v.at.value + 1)))
             1 -> defSafety(t, b, head, vi, Hints.Abbrev, orNone(posOf(v.at.value + 1)))
@@ -1157,17 +1453,17 @@ verify defn
 fn defRegular(t: Tables, b: Bytes, head: Head, v: Int, h: At) -> Done
     ? "Regular hints with their height."
     match h.at.value < 0
-        true -> Done.Short
+        true -> cut(t, [h])
         false -> defSafety(t, b, head, v, Hints.Regular(h.value), h.at)
 
 verify defRegular
-    defRegular(Export.Tables.empty(), Bytes.fromList([]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0, At(value = 0, at = Pos(value = -1))) => Done.Short
+    defRegular(Export.Tables.empty(), Bytes.fromList([]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 0, At(value = 0, at = Pos(value = -1))) => Done.Short(Export.Tables.empty())
 
 fn defSafety(t: Tables, b: Bytes, head: Head, v: Int, hints: Hints, i: Pos) -> Done
     ? "Safety, then the group."
     all = idsAt(b, orNone(posOf(i.value + 1)))
     match Bool.or(i.value >= Bytes.len(b), all.at.value < 0)
-        true -> Done.Short
+        true -> cut(t, [asAt(all)])
         false -> match safetyOf(octet(b, i.value))
             Option.None -> Done.Bad("unknown safety {octet(b, i.value)}")
             Option.Some(s) -> defAdded(t, head, v, hints, s, all)
@@ -1207,7 +1503,7 @@ fn thm(t: Tables, b: Bytes, head: Head, v: At) -> Done
     all = idsAt(b, v.at)
     vi = back(t, v.value)
     match Bool.or(v.at.value < 0, all.at.value < 0)
-        true -> Done.Short
+        true -> cut(t, [v, asAt(all)])
         false -> thmAdded(t, head, vi, all)
 
 verify thm
@@ -1235,7 +1531,7 @@ fn opaq(t: Tables, b: Bytes, head: Head, v: At) -> Done
     all = idsAt(b, orNone(posOf(v.at.value + 1)))
     vi = back(t, v.value)
     match Bool.or(Bool.or(v.at.value < 0, u < 0), all.at.value < 0)
-        true -> Done.Short
+        true -> cut(t, [v, asAt(all)])
         false -> match u > 1
             true -> Done.Bad("a bool byte is neither 0 nor 1")
             false -> opaqAdded(t, head, vi, u == 1, all)
@@ -1262,7 +1558,7 @@ verify opaqOf
 fn quot(t: Tables, head: Head, k: Int, at: Pos, there: Bool) -> Done
     ? "Quotient constant: 0 the type, 1 the constructor, 2 lift, 3 ind."
     match there
-        false -> Done.Short
+        false -> Done.Short(t)
         true -> match k
             0 -> declAdded(t, Result.Ok(Decl.Quot(head, QuotKind.QType)), at)
             1 -> declAdded(t, Result.Ok(Decl.Quot(head, QuotKind.QCtor)), at)
@@ -1277,16 +1573,16 @@ fn inductiveFrom(t: Tables, b: Bytes, i: Pos) -> Done
     ? "Inductive block: the types, the constructors and the recursors, each list with its length first."
     n = vAt(b, i)
     match n.at.value < 0
-        true -> Done.Short
+        true -> cut(t, [n])
         false -> afterTypes(t, b, typesAt(t, b, n.at, n.value, []))
 
 verify inductiveFrom
-    inductiveFrom(Export.Tables.empty(), Bytes.fromList([0, 0, 0]), Pos(value = 0)) => Done.Next(Export.Tables.addDecl(Export.Tables.empty(), Decl.Induct([], [], [])), Pos(value = 3))
+    inductiveFrom(Export.Tables.empty(), Bytes.fromList([0, 0, 0]), Pos(value = 0)) => added(Export.Tables.addDecl(Export.Tables.empty(), Decl.Induct([], [], [])), Pos(value = 3))
 
 fn afterTypes(t: Tables, b: Bytes, ts: Got) -> Done
     ? "The types read; the constructors next."
     match ts
-        Got.GotShort -> Done.Short
+        Got.GotShort -> Done.Short(t)
         Got.GotBad(e) -> Done.Bad(e)
         Got.GTypes(types, i) -> afterCtors(t, b, types, ctorsCounted(t, b, vAt(b, i)))
         _ -> Done.Bad("malformed")
@@ -1297,7 +1593,7 @@ verify afterTypes
 fn ctorsCounted(t: Tables, b: Bytes, n: At) -> Got
     ? "The constructors after their count."
     match n.at.value < 0
-        true -> Got.GotShort
+        true -> gcut([n])
         false -> ctorsAt(t, b, n.at, n.value, [])
 
 verify ctorsCounted
@@ -1306,18 +1602,18 @@ verify ctorsCounted
 fn afterCtors(t: Tables, b: Bytes, types: List<IndType>, cs: Got) -> Done
     ? "The constructors read; the recursors next."
     match cs
-        Got.GotShort -> Done.Short
+        Got.GotShort -> Done.Short(t)
         Got.GotBad(e) -> Done.Bad(e)
         Got.GCtors(ctors, i) -> afterRecs(t, types, ctors, recsCounted(t, b, vAt(b, i)))
         _ -> Done.Bad("malformed")
 
 verify afterCtors
-    afterCtors(Export.Tables.empty(), Bytes.fromList([]), [], Got.GotShort) => Done.Short
+    afterCtors(Export.Tables.empty(), Bytes.fromList([]), [], Got.GotShort) => Done.Short(Export.Tables.empty())
 
 fn recsCounted(t: Tables, b: Bytes, n: At) -> Got
     ? "The recursors after their count."
     match n.at.value < 0
-        true -> Got.GotShort
+        true -> gcut([n])
         false -> recsAt(t, b, n.at, n.value, [])
 
 verify recsCounted
@@ -1326,7 +1622,7 @@ verify recsCounted
 fn afterRecs(t: Tables, types: List<IndType>, ctors: List<Ctor>, rs: Got) -> Done
     ? "The block."
     match rs
-        Got.GotShort -> Done.Short
+        Got.GotShort -> Done.Short(t)
         Got.GotBad(e) -> Done.Bad(e)
         Got.GRecs(recs, i) -> declAdded(t, Result.Ok(Decl.Induct(types, ctors, recs)), i)
         _ -> Done.Bad("malformed")
@@ -1369,7 +1665,7 @@ fn indTypeRest(t: Tables, b: Bytes, head: Head, i: Pos) -> Got
     r = boolAt(b, nn.at.value)
     rf = boolAt(b, nn.at.value + 1)
     match Bool.or(Bool.or(Bool.or(u < 0, np.at.value < 0), Bool.or(ni.at.value < 0, all.at.value < 0)), Bool.or(Bool.or(cs.at.value < 0, nn.at.value < 0), Bool.or(r < 0, rf < 0)))
-        true -> Got.GotShort
+        true -> gcut([np, ni, asAt(all), asAt(cs), nn])
         false -> match Bool.or(Bool.or(u > 1, r > 1), rf > 1)
             true -> Got.GotBad("a bool byte is neither 0 nor 1")
             false -> indTypeOf(t, head, u == 1, np.value, ni.value, all.ids, cs.ids, nn.value, r == 1, rf == 1, orNone(posOf(nn.at.value + 2)))
@@ -1420,7 +1716,7 @@ fn ctorRest(t: Tables, b: Bytes, head: Head, i: Pos) -> Got
     np = vAt(b, ci.at)
     nf = vAt(b, np.at)
     match Bool.or(Bool.or(u < 0, ind.at.value < 0), Bool.or(Bool.or(ci.at.value < 0, np.at.value < 0), nf.at.value < 0))
-        true -> Got.GotShort
+        true -> gcut([ind, ci, np, nf])
         false -> match u > 1
             true -> Got.GotBad("a bool byte is neither 0 nor 1")
             false -> match Export.Tables.name(t, ind.value)
@@ -1464,7 +1760,7 @@ fn recRest(t: Tables, b: Bytes, head: Head, i: Pos) -> Got
     nmi = vAt(b, nm.at)
     nr = vAt(b, nmi.at)
     match Bool.or(Bool.or(Bool.or(u < 0, all.at.value < 0), Bool.or(np.at.value < 0, ni.at.value < 0)), Bool.or(Bool.or(nm.at.value < 0, nmi.at.value < 0), nr.at.value < 0))
-        true -> Got.GotShort
+        true -> gcut([asAt(all), np, ni, nm, nmi, nr])
         false -> match u > 1
             true -> Got.GotBad("a bool byte is neither 0 nor 1")
             false -> recRules(t, b, head, u == 1, all.ids, [np.value, ni.value, nm.value, nmi.value], rulesAt(t, b, nr.at, nr.value, []))
@@ -1507,7 +1803,7 @@ fn rulesAt(t: Tables, b: Bytes, i: Pos, n: Int, acc: List<RecRule>) -> Got
     match n <= 0
         true -> Got.GRules(List.reverse(acc), i)
         false -> match Bool.or(c.at.value < 0, Bool.or(nf.at.value < 0, rhs.at.value < 0))
-            true -> Got.GotShort
+            true -> gcut([c, nf, rhs])
             false -> match ruleOf(t, c.value, nf.value, ri)
                 Result.Err(e) -> Got.GotBad(e)
                 Result.Ok(r) -> rulesAt(t, b, rhs.at, n - 1, List.prepend(r, acc))

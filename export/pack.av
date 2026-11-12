@@ -1,13 +1,15 @@
 module Pack
     intent =
-        "Writes an export in Susz, Pestka's binary export format"
-        "(docs/susz.md): the lines of a lean4export file, read with the"
-        "reader's own line parser, become records with implicit ids. Version"
-        "0 puts every record in one block, in the order of the file; version"
-        "2, the default, is version 0 rewritten by Export.Split with each"
-        "theorem's own proof in a block of its own. The packer copies"
-        "structure only; the reader trusts none of it and computes every hash"
-        "and range itself."
+        "Writes an export in Susz 1 (susz-v-next.md; docs/susz.md): the"
+        "lines of a lean4export file, read with the reader's own line"
+        "parser, become records with implicit ids, which Export.Split then"
+        "lays out with each theorem's own proof in a block of its own, the"
+        "frontier, INDEX unless asked not to, SOURCE and the trailer. The"
+        "packer copies structure only; the reader trusts none of it and"
+        "computes every hash and range itself. It refuses what a Susz 1"
+        "reader would reject: a name declared twice, a number past 2^64 - 1"
+        "where the format holds a u64, a proof naming a constant not"
+        "declared before its theorem."
     exposes [pack, image]
     exposes opaque [Cnt]
     depends [Bytes, Json.Line, Json.Access, Core.Names, Core.Lazy, Core.Exprs, Core.Decls, Export.Reader, Export.Items, Export.Lines, Export.Split, Export.Susz]
@@ -114,14 +116,12 @@ fn lvs(q: P, xs: List<Int>, acc: List<Int>) -> Result<List<Int>, String>
 verify lvs
     lvs(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), [3], []) => Result.Err("unknown level index 3")
 
-fn pack(src: String, dst: String, version: Int, workers: Int) -> Result<String, String>
-    ? "Packs src into dst in Susz of version 0 or 2; the counts written, or why not. Version 2 is packed in one step (OneStepPack), its lines parsed on workers (ParsedInRounds)."
+fn pack(src: String, dst: String, workers: Int, indexOn: Bool) -> Result<String, String>
+    ? "Packs src into dst in Susz 1, with INDEX or without; the counts written, or why not. It is packed in one step (OneStepPack), its lines parsed on workers (ParsedInRounds)."
     ! [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     match Disk.writeBytes(dst, Bytes.fromList([]))
         Result.Err(e) -> Result.Err("cannot write {dst}: {e}")
-        Result.Ok(_) -> match version == 2
-            true -> Export.Split.written2(dst, onePacked(src, workers)?)
-            false -> versioned(trailedTo(chunked(src, dst, 0, "", Option.None, 1)), dst, version)
+        Result.Ok(_) -> Export.Split.written2(dst, onePacked(src, workers, indexOn)?)
 
 decision OneStepPack
     date = "2026-11-11"
@@ -173,15 +173,15 @@ fn slotsFor(size: Int) -> Int
 verify slotsFor
     slotsFor(0) => 2
 
-fn onePacked(src: String, workers: Int) -> Result<Laid, String>
-    ? "The ndjson export at src packed into version 2 in one step (OneStepPack): on one worker line by line, on several in rounds (ParsedInRounds)."
+fn onePacked(src: String, workers: Int, indexOn: Bool) -> Result<Laid, String>
+    ? "The ndjson export at src packed into Susz 1 in one step (OneStepPack): on one worker line by line, on several in rounds (ParsedInRounds)."
     ! [Disk.readBytesAt, Disk.size]
     size = Disk.size(src)?
     x = x0(slotsFor(size))?
     o = match workers <= 1
         true -> bChunked(src, 0, chunkBytes(), Option.None, x, 1)?
         false -> cStart(src, workers, x)?
-    oneLaid(o)
+    oneLaid(o, indexOn)
 
 decision ParsedInRounds
     date = "2026-11-11"
@@ -487,8 +487,8 @@ fn flushRun(q: P, run: Int) -> P
         false -> q
 
 verify flushRun
-    flushRun(started("", ""), 3).out => [3, 20, 0, 0, 0, 0, 0, 90, 83, 85, 83]
-    flushRun(started("", ""), 0).out => [0, 0, 0, 0, 0, 90, 83, 85, 83]
+    flushRun(started("", ""), 3).out => [3, 20]
+    flushRun(started("", ""), 0).out => []
 
 fn ref(q: P, e: Int) -> Result<Int, String>
     ? "The Susz id of expression e, which must be defined."
@@ -533,7 +533,7 @@ verify bindCode
 fn colDone(q: P, ie: Int, x: X) -> Result<QX, String>
     ? "The expression counted; refused past what the columns hold (PartsInOneWord in Export.Split)."
     match q.exprs >= Export.Split.partsLimit()
-        true -> Result.Err("too many expressions")
+        true -> Result.Err("limit: too many expressions")
         false -> Result.Ok(QX(q = P.update(q, exprs = q.exprs + 1, er = define(q.er, ie, q.exprs)), x = x))
 
 verify colDone
@@ -559,13 +559,13 @@ record One
     q: P
     x: X
 
-fn oneLaid(o: One) -> Result<Laid, String>
+fn oneLaid(o: One, indexOn: Bool) -> Result<Laid, String>
     ? "The split's later passes on the records packed, with what was noted while packing them: the last run record written and the columns' last chunks put in place first."
     q = flushRun(o.q, o.x.run)
     x = lastStashed(o.x, q.exprs)
     b = Bytes.fromList(List.reverse(q.out))?
     a = A(eoff = x.eoff, parts = x.parts, owner = x.owner, names = Vector.fromList(List.take(List.fromVector(x.names), q.names)), known = x.known, exprs = q.exprs, decls = q.decls)
-    Export.Split.laidAfter(b, q.start, Bytes.len(b), q.names, q.levels, q.decls, q.exprs, a)
+    Export.Split.laidAfter(b, q.start, Bytes.len(b), q.names, q.levels, q.decls, q.exprs, a, indexOn)
 
 fn lastStashed(x: X, exprs: Int) -> X
     ? "The current chunks put in place as the last ones, when there are expressions."
@@ -908,7 +908,7 @@ fn noted(x: X, q: P, l: Line, e0: Int, n0: Int, d0: Int, before: Int) -> Result<
         false -> match q.names > n0
             true -> nameLined(x, n0, q, l, before)
             false -> match q.decls > d0
-                true -> Result.Ok(declNoted(x, d0, Export.Split.declOf(newBytes(q.out, List.len(q.out) - before), Export.Split.at(1), e0)))
+                true -> declNoted(x, d0, Export.Split.declOf(newBytes(q.out, List.len(q.out) - before), Export.Split.at(1), e0))
                 false -> Result.Ok(x)
 
 fn newBytes(out: List<Int>, n: Int) -> Bytes
@@ -987,71 +987,54 @@ fn doubled(v: Vector<Name>, w: Vector<Name>, i: Int) -> Vector<Name>
         Option.None -> w
         Option.Some(n) -> doubled(v, Option.withDefault(Vector.set(w, i, n), w), i + 1)
 
-fn declNoted(x: X, di: Int, d: DeclP) -> X
-    ? "A declaration's references seed their owners, and the names it places keep its code unless it is skipped."
+fn declNoted(x: X, di: Int, d: DeclP) -> Result<X, String>
+    ? "A declaration's references seed their owners, and every name it declares is kept with its index; a name declared before is refused (DeclaredByStoredHash in Export.Split)."
     knownNoted(X.update(x, owner = Export.Split.seeded(x.owner, d.pieces, d.value, di)), di, d)
 
-fn knownNoted(x: X, di: Int, d: DeclP) -> X
-    ? "The names d places with its code, unless it is skipped: the names are read first and the map written after, each field of x on its own, so that neither is copied."
-    ns = placedNames(x.names, d.names, d.skip, [])
-    X.update(x, known = placedList(x.known, ns, Core.Lazy.codeOf(di, d.kind == 5)))
+fn knownNoted(x: X, di: Int, d: DeclP) -> Result<X, String>
+    ? "The names d declares with its index: the names are read first and the map written after, each field of x on its own, so that neither is copied."
+    ns = declaredNames(x.names, d.names, [])
+    Result.Ok(X.update(x, known = declaredList(x.known, ns, di)?))
 
 verify knownNoted
-    Map.len(knownNoted(x00(), 0, Export.Split.declOf(Bytes.fromList([18, 0, 0, 0, 1, 0]), Export.Split.at(1), 1)).known) => 1
+    Map.len(Result.withDefault(knownNoted(X.update(x00(), names = Vector.fromList([Core.Names.anon(), Core.Names.str(Core.Names.anon(), "a")])), 0, Export.Split.declOf(Bytes.fromList([18, 0, 1, 0, 1, 1]), Export.Split.at(1), 1)), x00()).known) => 1
+    knownNoted(Result.withDefault(knownNoted(X.update(x00(), names = Vector.fromList([Core.Names.anon(), Core.Names.str(Core.Names.anon(), "a")])), 0, Export.Split.declOf(Bytes.fromList([18, 0, 1, 0, 1, 1]), Export.Split.at(1), 1)), x00()), 1, Export.Split.declOf(Bytes.fromList([18, 0, 1, 0, 1, 0]), Export.Split.at(1), 1)) == Result.Ok(x00()) => false
 
-fn placedNames(names: Vector<Name>, ns: List<Int>, skip: Bool, acc: List<Name>) -> List<Name>
-    ? "The names of ids ns, none when the declaration is skipped."
-    match skip
-        true -> []
-        false -> match ns
-            [] -> acc
-            [n, ..rest] -> placedNames(names, rest, skip, List.prepend(Option.withDefault(Vector.get(names, n), Core.Names.anon()), acc))
-
-verify placedNames
-    placedNames(Vector.fromList([Core.Names.anon()]), [0], true, []) => []
-    List.len(placedNames(Vector.fromList([Core.Names.anon()]), [0], false, [])) => 1
-
-fn placedList(known: Map<Int, List<Placed>>, ns: List<Name>, code: Int) -> Map<Int, List<Placed>>
-    ? "Each name placed with code, unless placed before (PlacesByStoredHash in Export.Split)."
+fn declaredNames(names: Vector<Name>, ns: List<Int>, acc: List<Name>) -> List<Name>
+    ? "The names of ids ns, skipped or not."
     match ns
-        [] -> known
-        [n, ..rest] -> placedList(Export.Split.placedOne(known, n, code), rest, code)
+        [] -> acc
+        [n, ..rest] -> declaredNames(names, rest, List.prepend(Option.withDefault(Vector.get(names, n), Core.Names.anon()), acc))
 
-verify placedList
-    Map.len(placedList({}, [Core.Names.anon(), Core.Names.anon()], 4)) => 1
+verify declaredNames
+    List.len(declaredNames(Vector.fromList([Core.Names.anon()]), [0], [])) => 1
+
+fn declaredList(known: Map<Int, List<Placed>>, ns: List<Name>, di: Int) -> Result<Map<Int, List<Placed>>, String>
+    ? "Each name declared by declaration di, none twice (DeclaredByStoredHash in Export.Split)."
+    match ns
+        [] -> Result.Ok(known)
+        [n, ..rest] -> declaredList(Export.Split.declaredOne(known, n, di)?, rest, di)
+
+verify declaredList
+    declaredList({}, [Core.Names.str(Core.Names.anon(), "a"), Core.Names.str(Core.Names.anon(), "a")], 4) => Result.Err("declaration 4: a is declared twice")
 
 decision PackedInMemory
     date = "2026-11-11"
     reason =
-        "pestka FILE.ndjson packs the export into Susz of version 2 in"
-        "memory and reads that, with no file between: the lines are packed"
-        "as for a file, but a packer with no path keeps its output instead"
-        "of appending it, version 0 is the bytes it kept and the trailer,"
-        "and Export.Split.image lays them out as version 2. Each stage"
+        "pestka FILE.ndjson packs the export into Susz 1 in memory and reads"
+        "that, with no file between: the lines are packed as for a file,"
+        "with no INDEX, which a full check never reads, and"
+        "Export.Split.imageOf lays the bytes out as an image. Each stage"
         "returns only bytes, so what it built is freed before the next one"
         "runs and before checking."
     chosen = "PackedInMemory"
     rejected = ["TemporaryFile"]
-    impacts = [image, written, onePacked]
+    impacts = [image, onePacked]
 
 fn image(src: String, workers: Int) -> Result<Image, String>
-    ? "The ndjson export at src packed into Susz of version 2 in memory (PackedInMemory), in one step (OneStepPack), its lines parsed on workers (ParsedInRounds)."
+    ? "The ndjson export at src packed into Susz 1 in memory, without INDEX (PackedInMemory), in one step (OneStepPack), its lines parsed on workers (ParsedInRounds)."
     ! [Disk.readBytesAt, Disk.size]
-    Export.Split.imageOf(onePacked(src, workers)?)
-
-fn trailedTo(r: Result<P, String>) -> Result<String, String>
-    ? "The last bytes and the trailer appended to the file."
-    ! [Disk.appendBytes]
-    trailed(written(r?)?)
-
-fn versioned(r: Result<String, String>, dst: String, version: Int) -> Result<String, String>
-    ? "Version 0 as written, or rewritten as version 2."
-    ! [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
-    match r
-        Result.Err(e) -> Result.Err(e)
-        Result.Ok(m) -> match version == 2
-            true -> Export.Split.split(dst)
-            false -> Result.Ok(m)
+    Export.Split.imageOf(onePacked(src, workers, false)?)
 
 fn chunkBytes() -> Int
     ? "How much of the ndjson file one chunk reads."
@@ -1060,93 +1043,25 @@ fn chunkBytes() -> Int
 verify chunkBytes
     chunkBytes() > 0 => true
 
-fn chunked(src: String, dst: String, offset: Int, carry: String, p: Option<P>, line: Int) -> Result<P, String>
-    ? "Reads the chunk at offset; carry is the unfinished last line of the chunk before; p is the packer once the header line is read."
-    ! [Disk.readBytesAt, Disk.writeBytes, Disk.appendBytes]
-    match Disk.readBytesAt(src, offset, chunkBytes())
-        Result.Err(e) -> Result.Err("cannot read {src}: {e}")
-        Result.Ok(b) -> match Bytes.len(b) == 0
-            true -> finished(lines(dst, p, [carry], line))
-            false -> decoded(src, dst, offset, carry, p, line, b, 0)
 
-fn decoded(src: String, dst: String, offset: Int, carry: String, p: Option<P>, line: Int, b: Bytes, cut: Int) -> Result<P, String>
-    ? "The chunk as text, leaving out the bytes of a character its end cuts in two."
-    ! [Disk.readBytesAt, Disk.writeBytes, Disk.appendBytes]
-    match String.fromUtf8(Bytes.take(b, Bytes.len(b) - cut))
-        Result.Err(e) -> match cut >= 3
-            true -> Result.Err("cannot read {src}: {e}")
-            false -> decoded(src, dst, offset, carry, p, line, b, cut + 1)
-        Result.Ok(t) -> split(src, dst, offset + Bytes.len(b) - cut, joined(carry, String.split(t, "\n")), p, line)
 
-fn joined(carry: String, parts: List<String>) -> List<String>
-    ? "The parts with the carry put in front of the first."
-    match parts
-        [] -> [carry]
-        [first, ..rest] -> List.prepend(carry + first, rest)
 
-verify joined
-    joined("ab", ["c", "d"]) => ["abc", "d"]
-
-fn split(src: String, dst: String, next: Int, parts: List<String>, p: Option<P>, line: Int) -> Result<P, String>
-    ? "Packs the complete lines of a chunk and writes what they gave; the last part waits for the next chunk."
-    ! [Disk.readBytesAt, Disk.writeBytes, Disk.appendBytes]
-    match lines(dst, p, List.take(parts, List.len(parts) - 1), line)
-        Lined.Bad(e) -> Result.Err(e)
-        Lined.Done(q, at) -> chunked(src, dst, next, lastOf(parts), flushed(q)?, at)
-
-fn lastOf(parts: List<String>) -> String
-    ? "The last part."
-    match List.drop(parts, List.len(parts) - 1)
-        [x, .._] -> x
-        [] -> ""
-
-verify lastOf
-    lastOf(["a", "b"]) => "b"
-
-type Lined
-    Done(Option<P>, Int)
-    Bad(String)
-
-fn lines(dst: String, p: Option<P>, ls: List<String>, line: Int) -> Lined
-    ? "Packs lines in order; line 1 is the header; empty lines are skipped, as the reader skips them."
-    match ls
-        [] -> Lined.Done(p, line)
-        [l, ..rest] -> match p
-            Option.None -> afterHeader(dst, l, rest, line)
-            Option.Some(q) -> match l == ""
-                true -> lines(dst, p, rest, line + 1)
-                false -> match lineOf(q, Export.Reader.parseLine(l))
-                    Result.Ok(r) -> lines(dst, Option.Some(r), rest, line + 1)
-                    Result.Err(e) -> Lined.Bad("line {line}: {e}")
-
-verify lines
-    lines("", Option.None, [], 3) => Lined.Done(Option.None, 3)
-
-fn afterHeader(dst: String, l: String, rest: List<String>, line: Int) -> Lined
-    ? "The header line: its version is checked as the reader checks it, and its meta object is written after the signature."
-    match Export.Reader.header(l)
-        Result.Err(e) -> Lined.Bad("line 1: {e}")
-        Result.Ok(v) -> match Export.Reader.supported(v)
-            false -> Lined.Bad("format version {v} is not supported")
-            true -> lines(dst, Option.Some(started(dst, metaText(l))), rest, line + 1)
-
-verify afterHeader
-    afterHeader("", "[]", [], 1) => Lined.Bad("line 1: the header is not an object")
 
 fn metaText(l: String) -> String
-    ? "The meta object of the header line: the text between the meta key and the last brace."
+    ? "The meta object of the header line, byte for byte: the text between the meta key and the last brace (SOURCE, spec section 9)."
     String.slice(l, 8, String.len(l) - 1)
 
 verify metaText
     metaText("{{\"meta\":{{\"a\":1}}}}") => "{{\"a\":1}}"
 
 fn started(dst: String, meta: String) -> P
-    ? "The signature SUSZ, the version 0, three bytes kept zero, then the meta text."
-    out = text(List.reverse([83, 85, 83, 90, 0, 0, 0, 0]), meta)
+    ? "A packer with the meta text first, as its bytes, which SOURCE holds; the records follow."
+    b = String.toUtf8(meta)
+    out = bytesOnto(b, 0, Bytes.len(b), [])
     P(path = dst, out = out, written = 0, start = List.len(out), names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {}))
 
 verify started
-    started("x", "ab").start => 11
+    started("x", "ab").start => 2
 
 fn octetsOnto(xs: List<Int>, acc: List<Int>) -> List<Int>
     ? "xs put onto the reversed output."
@@ -1231,54 +1146,7 @@ verify idsOnto
 verify ids
     ids([], [1, 2]) => [2, 1, 2]
 
-fn flushed(p: Option<P>) -> Result<Option<P>, String>
-    ? "Appends what the lines packed so far gave to the file."
-    ! [Disk.appendBytes]
-    match p
-        Option.None -> Result.Ok(p)
-        Option.Some(q) -> Result.Ok(Option.Some(written(q)?))
 
-fn written(q: P) -> Result<P, String>
-    ? "The bytes of q's output appended to the file; a packer with no path keeps them (PackedInMemory)."
-    ! [Disk.appendBytes]
-    match q.path == ""
-        true -> Result.Ok(q)
-        false -> appended(q, Bytes.fromList(List.reverse(q.out))?)
-
-fn appended(q: P, bs: Bytes) -> Result<P, String>
-    ? "bs appended to the file."
-    ! [Disk.appendBytes]
-    match Disk.appendBytes(q.path, bs)
-        Result.Err(e) -> Result.Err("cannot write: {e}")
-        Result.Ok(_) -> Result.Ok(P(path = q.path, out = [], written = q.written + Bytes.len(bs), start = q.start, names = q.names, levels = q.levels, exprs = q.exprs, decls = q.decls, nr = q.nr, lr = q.lr, er = q.er))
-
-fn finished(l: Lined) -> Result<P, String>
-    ? "The packer after the last record."
-    match l
-        Lined.Bad(e) -> Result.Err(e)
-        Lined.Done(Option.None, _) -> Result.Err("empty file")
-        Lined.Done(Option.Some(q), _) -> Result.Ok(q)
-
-verify finished
-    finished(Lined.Bad("x")) => Result.Err("x")
-    finished(Lined.Done(Option.None, 1)) => Result.Err("empty file")
-
-fn trailer(q: P) -> List<Int>
-    ? "The trailer, reversed: the four counts, the number of blocks, then for the one block its offset and length (u64) and the first name, level, expression and declaration it defines (u32); last the trailer's own length and the closing signature ZSUS (docs/susz.md)."
-    counts = u32(u32(u32(u32([], q.names), q.levels), q.exprs), q.decls)
-    block = u32(u32(u32(u32(u64(u64(u32(counts, 1), q.start), q.written - q.start), 1), 1), 0), 0)
-    octetsOnto([90, 83, 85, 83], u32(block, List.len(block) + 8))
-
-verify trailer
-    List.len(trailer(P(path = "", out = [], written = 10, start = 4, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})))) => 60
-
-fn trailed(q: P) -> Result<String, String>
-    ? "The trailer appended."
-    ! [Disk.appendBytes]
-    t = trailer(q)
-    match Disk.appendBytes(q.path, Bytes.fromList(List.reverse(t))?)
-        Result.Err(e) -> Result.Err("cannot write: {e}")
-        Result.Ok(_) -> Result.Ok("names {q.names - 1}, levels {q.levels - 1}, expressions {q.exprs}, declarations {q.decls}, {q.written + List.len(t)} bytes")
 
 fn withName(q: P, i: Int, out: List<Int>) -> P
     ? "q with a name record appended: the file's name i is the next Susz name."
@@ -1396,7 +1264,7 @@ fn recordOf(q: P, l: Line) -> Result<P, String>
         Line.LevelSucc(i, a) -> succ(q, i, a)
         Line.LevelParam(i, n) -> param(q, i, n)
         Line.LevelPair(i, a, b, isMax) -> levelPair(q, i, a, b, isMax)
-        Line.BVar(ie, k) -> Result.Ok(withExpr(q, ie, uv(List.prepend(7, q.out), k)))
+        Line.BVar(ie, k) -> Result.Ok(withExpr(q, ie, uv(List.prepend(7, q.out), u64Field(k)?)))
         Line.Sort(ie, lev) -> sort(q, ie, lev)
         Line.Const(ie, n, us) -> cnst(q, ie, n, us)
         Line.LetE(ie, n, ty, v, b) -> letE(q, ie, n, ty, v, b)
@@ -1478,9 +1346,37 @@ verify nameStr
     Result.withDefault(nameStr(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, 0, "a"), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {}))).names => 2
 
 fn nameNum(q: P, i: Int, pre: Int, k: Int) -> Result<P, String>
-    ? "2: the prefix and the number."
+    ? "2: the prefix and the number, a u64 (OWNER-1, U64Fields)."
     p = nm(q, pre)?
-    Result.Ok(withName(q, i, uv(uv(List.prepend(2, q.out), p), k)))
+    Result.Ok(withName(q, i, uv(uv(List.prepend(2, q.out), p), u64Field(k)?)))
+
+decision U64Fields
+    date = "2026-11-12"
+    reason =
+        "Every varint of Susz 1 is below 2^64 (spec section 3), a name's"
+        "number too (OWNER-1); lean4export writes them from counters, far"
+        "below. A number the export gives past that, or below zero, is"
+        "refused by the packer, which writes only files a reader accepts."
+    chosen = "U64Fields"
+    rejected = ["NatBytesForNumbers"]
+    impacts = [u64Field, n64, nameNum, recordOf, defn]
+
+fn u64Field(k: Int) -> Result<Int, String>
+    ? "k when it fits a u64 (U64Fields)."
+    match Bool.and(k >= 0, k <= 18446744073709551615)
+        true -> Result.Ok(k)
+        false -> Result.Err("limit: the number {k} does not fit in 64 bits")
+
+verify u64Field
+    u64Field(18446744073709551616) => Result.Err("limit: the number 18446744073709551616 does not fit in 64 bits")
+    u64Field(3) => Result.Ok(3)
+
+fn n64(o: List<Tuple<String, J>>, key: String) -> Result<Int, String>
+    ? "The number at key, when it fits a u64 (U64Fields)."
+    u64Field(Json.Access.int(o, key)?)
+
+verify n64
+    n64([("a", J.JInt(-1))], "a") => Result.Err("limit: the number -1 does not fit in 64 bits")
 
 verify nameNum
     nameNum(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, 0, 4) => Result.Ok(P(path = "", out = [4, 0, 2], written = 0, start = 0, names = 2, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})))
@@ -1549,6 +1445,17 @@ fn hintsOnto(acc: List<Int>, h: Hints) -> List<Int>
 verify hintsOnto
     hintsOnto([], Hints.Regular(3)) => [3, 2]
 
+fn hintsFit(h: Hints) -> Result<Unit, String>
+    ? "A regular height fits a u64 (U64Fields)."
+    match h
+        Hints.Regular(k) -> match u64Field(k)
+            Result.Ok(_) -> Result.Ok(Unit)
+            Result.Err(e) -> Result.Err(e)
+        _ -> Result.Ok(Unit)
+
+verify hintsFit
+    hintsFit(Hints.Regular(-1)) == Result.Ok(Unit) => false
+
 fn safetyByte(s: Safety) -> Int
     ? "0 safe, 1 unsafe, 2 partial."
     match s
@@ -1562,6 +1469,7 @@ verify safetyByte
 fn defn(q: P, name: Int, params: List<Int>, ty: Int, v: Int, h: Hints, s: Safety, all: List<Int>) -> Result<P, String>
     ? "Kind 1: head, value, hints, safety, group."
     hd = head(q, List.prepend(1, List.prepend(18, q.out)), name, params, ty)?
+    _ = hintsFit(h)?
     dv = back(q, v)?
     group = nms(q, all, [])?
     Result.Ok(withDecl(q, ids(List.prepend(safetyByte(s), hintsOnto(uv(hd, dv), h)), group)))
@@ -1663,7 +1571,7 @@ verify binderOf
 fn exprRest(q: P, ie: Int, fs: List<Tuple<String, J>>) -> Result<P, String>
     ? "The less common expression kinds."
     match Json.Access.has(fs, "bvar")
-        true -> Result.Ok(withExpr(q, ie, uv(List.prepend(7, q.out), Json.Access.int(fs, "bvar")?)))
+        true -> Result.Ok(withExpr(q, ie, uv(List.prepend(7, q.out), n64(fs, "bvar")?)))
         false -> match Json.Access.has(fs, "sort")
             true -> sort(q, ie, Json.Access.int(fs, "sort")?)
             false -> match Json.Access.has(fs, "const")
@@ -1695,12 +1603,42 @@ verify exprRarer
     exprRarer(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 0, []) => Result.Err("unknown expression kind")
 
 fn natLine(q: P, ie: Int, digits: String) -> Result<P, String>
-    ? "14: a Nat literal's digits, once the reader's tables would take them (Export.Items.natOf): a sign or anything but digits is refused here, by its line, as the ndjson reader refuses it."
-    _ = Export.Items.natOf(digits)?
-    Result.Ok(withExpr(q, ie, text(List.prepend(14, q.out), digits)))
+    ? "14: a Nat literal as its minimal little-endian bytes (NatAsBytes in Export.Susz), once the reader's tables would take its digits (Export.Items.natOf): a sign or anything but digits is refused here, by its line, as the ndjson reader refuses it."
+    n = Export.Items.natOf(digits)?
+    Result.Ok(withExpr(q, ie, natOnto(List.prepend(14, q.out), natValue(n))))
+
+fn natValue(e: Expr) -> Int
+    ? "The value of a Nat literal Export.Items.natOf made."
+    match e
+        Expr.NatLit(v) -> v
+        _ -> 0
+
+verify natValue
+    natValue(Core.Exprs.natLit(5)) => 5
+
+fn natOnto(acc: List<Int>, n: Int) -> List<Int>
+    ? "n as nat bytes onto the reversed output: its byte count, then its base-256 digits, lowest first, the last not zero."
+    ds = leDigits(n, [])
+    octetsOnto(List.reverse(ds), uv(acc, List.len(ds)))
+
+verify natOnto
+    natOnto([], 0) => [0]
+    natOnto([], 256) => [1, 0, 2]
+    natOnto([], 255) => [255, 1]
+
+fn leDigits(n: Int, acc: List<Int>) -> List<Int>
+    ? "n's base-256 digits, highest first."
+    match n <= 0
+        true -> acc
+        false -> leDigits(Int.div(n, 256), List.prepend(Int.mod(n, 256), acc))
+
+verify leDigits
+    leDigits(513, []) => [2, 1]
+    leDigits(0, []) => []
 
 verify natLine
     natLine(started("", "{{}}"), 0, "-3") => Result.Err("negative Nat literal")
+    Result.withDefault(natLine(started("", ""), 0, "256"), started("", "")).out => [1, 0, 2, 14]
 
 fn letObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Name, type, value and body."
@@ -1710,18 +1648,30 @@ fn projObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Structure name, field index and how far back the structure is."
     ds = back(q, Json.Access.int(o, "struct")?)?
     n = nm(q, Json.Access.int(o, "typeName")?)?
-    Result.Ok(withExpr(q, ie, uv(uv(uv(List.prepend(16, q.out), n), Json.Access.int(o, "idx")?), ds)))
+    Result.Ok(withExpr(q, ie, uv(uv(uv(List.prepend(16, q.out), n), n64(o, "idx")?), ds)))
 
 verify projObj
     projObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 2, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 2, m = {})), 2, [("idx", J.JInt(0)), ("struct", J.JInt(5)), ("typeName", J.JInt(1))]) => Result.Err("unknown expression index 5")
 
+decision MdataNotWritten
+    date = "2026-11-12"
+    reason =
+        "Susz 1 keeps no metadata (OWNER-7): an mdata line is not written,"
+        "and its id stands for the expression it wraps, so that a reference"
+        "to it is a reference to that expression. Its id is mapped to the"
+        "wrapped expression's (IdsRenumbered); no export the tests and"
+        "corpora hold has such a line."
+    chosen = "MdataNotWritten"
+    rejected = ["MdataAsAnAlias"]
+    impacts = [mdataObj]
+
 fn mdataObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
-    ? "How far back the wrapped expression is."
-    d = back(q, Json.Access.int(o, "expr")?)?
-    Result.Ok(withExpr(q, ie, uv(List.prepend(17, q.out), d)))
+    ? "No record: the line's id names the wrapped expression (MdataNotWritten)."
+    k = ref(q, Json.Access.int(o, "expr")?)?
+    Result.Ok(P.update(q, er = Ren.update(q.er, m = Map.set(q.er.m, ie, k))))
 
 verify mdataObj
-    Result.withDefault(mdataObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 2, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 2, m = {})), 2, [("expr", J.JInt(1))]), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {}))).exprs => 3
+    Result.withDefault(mdataObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 2, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 2, m = {})), 5, [("expr", J.JInt(1))]), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {}))) => P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 2, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 2, m = {5 => 1}))
 
 fn declObj(q: P, k: String, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "A declaration line by its kind."
@@ -1763,7 +1713,7 @@ fn hintsObj(j: J) -> Result<Hints, String>
     match j
         J.JStr("opaque") -> Result.Ok(Hints.Opaque)
         J.JStr("abbrev") -> Result.Ok(Hints.Abbrev)
-        J.JObj(fs) -> Result.Ok(Hints.Regular(Json.Access.int(fs, "regular")?))
+        J.JObj(fs) -> Result.Ok(Hints.Regular(n64(fs, "regular")?))
         _ -> Result.Err("malformed hints")
 
 verify hintsObj
@@ -1847,8 +1797,8 @@ verify partOnto
 
 fn typeOnto(q: P, h: List<Int>, o: List<Tuple<String, J>>) -> Result<List<Int>, String>
     ? "unsafe, numParams, numIndices, all, ctors, numNested, isRec, isReflexive."
-    a = uv(uv(List.prepend(boolByte(Json.Access.bool(o, "isUnsafe")?), h), Json.Access.int(o, "numParams")?), Json.Access.int(o, "numIndices")?)
-    b = uv(ids(ids(a, nms(q, Json.Access.ints(o, "all")?, [])?), nms(q, Json.Access.ints(o, "ctors")?, [])?), Json.Access.int(o, "numNested")?)
+    a = uv(uv(List.prepend(boolByte(Json.Access.bool(o, "isUnsafe")?), h), n64(o, "numParams")?), n64(o, "numIndices")?)
+    b = uv(ids(ids(a, nms(q, Json.Access.ints(o, "all")?, [])?), nms(q, Json.Access.ints(o, "ctors")?, [])?), n64(o, "numNested")?)
     Result.Ok(List.prepend(boolByte(Json.Access.bool(o, "isReflexive")?), List.prepend(boolByte(Json.Access.bool(o, "isRec")?), b)))
 
 verify typeOnto
@@ -1857,7 +1807,7 @@ verify typeOnto
 fn ctorOnto(q: P, h: List<Int>, o: List<Tuple<String, J>>) -> Result<List<Int>, String>
     ? "unsafe, induct, cidx, numParams, numFields."
     a = uv(List.prepend(boolByte(Json.Access.bool(o, "isUnsafe")?), h), nm(q, Json.Access.int(o, "induct")?)?)
-    Result.Ok(uv(uv(uv(a, Json.Access.int(o, "cidx")?), Json.Access.int(o, "numParams")?), Json.Access.int(o, "numFields")?))
+    Result.Ok(uv(uv(uv(a, n64(o, "cidx")?), n64(o, "numParams")?), n64(o, "numFields")?))
 
 verify ctorOnto
     ctorOnto(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), [], []) => Result.Err("missing key 'isUnsafe'")
@@ -1865,7 +1815,7 @@ verify ctorOnto
 fn recOnto(q: P, h: List<Int>, o: List<Tuple<String, J>>) -> Result<List<Int>, String>
     ? "unsafe, all, numParams, numIndices, numMotives, numMinors, rules, k."
     a = ids(List.prepend(boolByte(Json.Access.bool(o, "isUnsafe")?), h), nms(q, Json.Access.ints(o, "all")?, [])?)
-    b = uv(uv(uv(uv(a, Json.Access.int(o, "numParams")?), Json.Access.int(o, "numIndices")?), Json.Access.int(o, "numMotives")?), Json.Access.int(o, "numMinors")?)
+    b = uv(uv(uv(uv(a, n64(o, "numParams")?), n64(o, "numIndices")?), n64(o, "numMotives")?), n64(o, "numMinors")?)
     rules = Json.Access.arr(o, "rules")?
     c = rulesOnto(q, uv(b, List.len(rules)), rules)?
     Result.Ok(List.prepend(boolByte(Json.Access.bool(o, "k")?), c))
@@ -1877,7 +1827,7 @@ fn rulesOnto(q: P, acc: List<Int>, xs: List<J>) -> Result<List<Int>, String>
     ? "Each rule: ctor, nfields and how far back its right-hand side is."
     match xs
         [] -> Result.Ok(acc)
-        [J.JObj(o), ..rest] -> rulesOnto(q, uv(uv(uv(acc, nm(q, Json.Access.int(o, "ctor")?)?), Json.Access.int(o, "nfields")?), back(q, Json.Access.int(o, "rhs")?)?), rest)
+        [J.JObj(o), ..rest] -> rulesOnto(q, uv(uv(uv(acc, nm(q, Json.Access.int(o, "ctor")?)?), n64(o, "nfields")?), back(q, Json.Access.int(o, "rhs")?)?), rest)
         _ -> Result.Err("expected an object")
 
 verify rulesOnto
@@ -1885,7 +1835,7 @@ verify rulesOnto
 
 
 verify oneLaid
-    Export.Split.laidMessage2(oneLaid(One(q = started("", "{{}}"), x = x00()))) == "" => false
+    Export.Split.laidMessage2(oneLaid(One(q = started("", "{{}}"), x = x00()), true)) == "" => false
 
 fn capOf(r: Result<X, String>) -> Result<Int, String>
     ? "How many expressions x has room for, or why there is no x, for examples."
@@ -1938,4 +1888,4 @@ verify doubled
     Vector.len(doubled(Vector.fromList([Core.Names.anon()]), Vector.fromList([Core.Names.anon(), Core.Names.anon()]), 0)) => 2
 
 verify declNoted
-    Export.Split.cget(declNoted(roomFor(x00(), 0), 0, Export.Split.declOf(Bytes.fromList([18, 2, 0, 0, 1, 1, 0]), Export.Split.at(1), 1)).owner, 0) => -2
+    Export.Split.cget(Result.withDefault(declNoted(roomFor(X.update(x00(), names = Vector.fromList([Core.Names.anon(), Core.Names.str(Core.Names.anon(), "a")])), 0), 0, Export.Split.declOf(Bytes.fromList([18, 2, 1, 0, 1, 1, 0]), Export.Split.at(1), 1)), x00()).owner, 0) => -2
