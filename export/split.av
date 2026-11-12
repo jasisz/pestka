@@ -412,6 +412,24 @@ verify nat32
     nat32(7).value => 7
     nat32(-7).value => 0
 
+fn u32Word(n: Int) -> Result<U32, String>
+    ? "A u32 reckoned on a machine word: the bound of u32Of, a constructor of its own so that its argument stays a word (ExprColumns)."
+    match Bool.and(n >= 0, n <= 4294967295)
+        true -> Result.Ok(U32(value = n))
+        false -> Result.Err("number out of range")
+
+verify u32Word
+    u32Word(-1) => Result.Err("number out of range")
+
+fn u32Step(n: Int) -> U32
+    ? "n reckoned on a word as a u32, 0 when it is out of range."
+    match u32Word(n)
+        Result.Ok(x) -> x
+        Result.Err(_) -> U32(value = 0)
+
+verify u32Step
+    u32Step(7).value => 7
+
 noChunk32: Vector<U32> = Vector.fromList([nat32(0)])
 
 fn cnew32(n: Int) -> Vector<Vector<U32>>
@@ -962,46 +980,46 @@ decision NumberedAsWritten
 record IdsW
     done: Vector<Vector<U32>>
     cur: Vector<U32>
-    base: Int
+    base: Ix
 
 fn idsW(n: Int) -> Result<IdsW, String>
     ? "Room for n new numbers: the chunks to come, and the current one, from expression 0, filled in order."
-    Result.Ok(IdsW(done = Vector.new(Int.div(n + 65535, 65536), noChunk32)?, cur = Vector.new(65536, nat32(0)), base = 0))
+    Result.Ok(IdsW(done = Vector.new(Int.div(n + 65535, 65536), noChunk32)?, cur = Vector.new(65536, nat32(0)), base = Ix(value = 0)))
 
 verify idsW
-    Result.withDefault(idsW(1), IdsW(done = Vector.fromList([]), cur = Vector.fromList([]), base = 0)).done == Vector.fromList([noChunk32]) => true
+    Result.withDefault(idsW(1), IdsW(done = Vector.fromList([]), cur = Vector.fromList([]), base = Ix(value = 0))).done == Vector.fromList([noChunk32]) => true
 
-fn idSet(w: IdsW, e: Int, v: Int) -> IdsW
+fn idSet(w: IdsW, e: Ix, v: Ix) -> IdsW
     ? "v as the number of e, the next one in order, set in the current chunk in place; a full chunk is put in its place (ChunkedNumbers, NumberedAsWritten)."
-    j = Bits.and(e, 65535)
-    w1 = IdsW.update(w, cur = chunkSet32(w.cur, j, v))
+    j = Bits.and(e.value, 65535)
+    w1 = IdsW.update(w, cur = Option.withDefault(Vector.set(w.cur, j, u32Step(v.value)), w.cur))
     match j == 65535
-        true -> idsFlipped(w1, Int.div(e, 65536))
+        true -> idsFlipped(w1, Int.div(e.value, 65536))
         false -> w1
 
 verify idSet
-    idOf(idSet(idSet(Result.withDefault(idsW(2), IdsW(done = Vector.fromList([]), cur = Vector.fromList([]), base = 0)), 0, 5), 1, 7), 1) => 7
+    idOf(idSet(idSet(Result.withDefault(idsW(2), IdsW(done = Vector.fromList([]), cur = Vector.fromList([]), base = Ix(value = 0))), ixAt(0), ixAt(5)), ixAt(1), ixAt(7)), ixAt(1)) => 7
 
 fn idsFlipped(w: IdsW, ci: Int) -> IdsW
     ? "The current chunk put in place as chunk ci, and a new one begun, each field on its own."
     w1 = IdsW.update(w, done = cput32(w.done, ci, w.cur))
     w2 = IdsW.update(w1, cur = Vector.new(65536, nat32(0)))
-    IdsW.update(w2, base = (ci + 1) * 65536)
+    IdsW.update(w2, base = ixStep((ci + 1) * 65536))
 
 verify idsFlipped
-    Vector.len(idsFlipped(IdsW(done = Vector.fromList([noChunk32]), cur = Vector.fromList([nat32(3)]), base = 0), 0).cur) => 65536
+    Vector.len(idsFlipped(IdsW(done = Vector.fromList([noChunk32]), cur = Vector.fromList([nat32(3)]), base = Ix(value = 0)), 0).cur) => 65536
 
-fn idOf(w: IdsW, c: Int) -> Int
+fn idOf(w: IdsW, c: Ix) -> Int
     ? "The number of expression c, set before: in the current chunk, or in its chunk put in place (NumberedAsWritten)."
-    match c >= w.base
-        true -> match Vector.get(w.cur, c - w.base)
+    match c.value >= w.base.value
+        true -> match Vector.get(w.cur, c.value - w.base.value)
             Option.Some(u) -> u.value
             Option.None -> -1
-        false -> cget32(w.done, c)
+        false -> uget(w.done, c)
 
 verify idOf
-    idOf(ids0(1), 0) => 0
-    idOf(ids0(1), -1) => -1
+    idOf(ids0(1), ixAt(0)) => 0
+    idOf(ids0(1), ixAt(-1)) => -1
 
 fn wanted(v: Vector<Int>, i: Int) -> Vector<Int>
     ? "Item i on the frontier."
@@ -1032,7 +1050,7 @@ verify sortWanted
 
 record Acc
     out: List<Int>
-    k: Int
+    k: Ix
     mark: Int
     fine: Bool
 
@@ -1048,9 +1066,9 @@ record W
     fE: Int
     nameId: Int
     levelId: Int
-    ei: Int
+    ei: Ix
     di: Int
-    mainNext: Int
+    mainNext: Ix
     lazy: Int
     open: Vector<Acc>
     ids: IdsW
@@ -1086,7 +1104,7 @@ verify zeroed
 
 fn fresh() -> W
     ? "Nothing written yet; names and levels start at 1, after the implicit 0."
-    W(main = [], mainChunks = [], mainBytes = 0, proofs = Bytes.fromList([]), proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = 0, di = 0, mainNext = 0, lazy = 0, open = Vector.fromList([]), ids = ids0(0))
+    W(main = [], mainChunks = [], mainBytes = 0, proofs = Bytes.fromList([]), proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = Ix(value = 0), di = 0, mainNext = Ix(value = 0), lazy = 0, open = Vector.fromList([]), ids = ids0(0))
 
 verify fresh
     fresh().nameId => 1
@@ -1206,9 +1224,9 @@ fn laid(meta: Bytes, names: Int, levels: Int, decls: Int, exprs: Int, w: W) -> R
     hd = Bytes.concat(Bytes.fromList([83, 85, 83, 90, 2, 0, 0, 0]), meta)
     ws = flushProofs(flushMain(w)?)?
     moff = Bytes.len(hd)
-    t = u64(u64(u64(u64(u32(u32(u32(u32([], names), levels), ws.mainNext), decls), moff), ws.mainBytes), moff + ws.mainBytes), ws.proofBytes)
+    t = u64(u64(u64(u64(u32(u32(u32(u32([], names), levels), ws.mainNext.value), decls), moff), ws.mainBytes), moff + ws.mainBytes), ws.proofBytes)
     tr = Bytes.fromList(List.reverse(List.prepend(83, List.prepend(85, List.prepend(83, List.prepend(90, u32(t, 56)))))))?
-    Result.Ok(Laid(hd = hd, mains = List.reverse(ws.mainChunks), proofs = List.concat(List.reverse(ws.proofChunks), [tr]), message = "names {names - 1}, levels {levels - 1}, expressions {exprs} ({ws.mainNext} in the main block, {exprs - ws.mainNext} in {ws.lazy} proof blocks), declarations {decls}, frontier {ws.fN} names, {ws.fL} levels, {ws.fE} expressions, {moff + ws.mainBytes + ws.proofBytes + 56} bytes"))
+    Result.Ok(Laid(hd = hd, mains = List.reverse(ws.mainChunks), proofs = List.concat(List.reverse(ws.proofChunks), [tr]), message = "names {names - 1}, levels {levels - 1}, expressions {exprs} ({ws.mainNext.value} in the main block, {exprs - ws.mainNext.value} in {ws.lazy} proof blocks), declarations {decls}, frontier {ws.fN} names, {ws.fL} levels, {ws.fE} expressions, {moff + ws.mainBytes + ws.proofBytes + 56} bytes"))
 
 fn appendAll(path: String, cs: List<Bytes>, hd: Bytes) -> Result<Unit, String>
     ? "The header written, then each chunk appended."
@@ -1278,7 +1296,7 @@ fn mainOut(w: W, out: List<Int>) -> W
 fn blockLength(open: Vector<Acc>, di: Int) -> Int
     ? "How many expressions the block of declaration di holds so far."
     match Vector.get(open, di)
-        Option.Some(a) -> a.k
+        Option.Some(a) -> a.k.value
         Option.None -> 0
 
 verify blockLength
@@ -1290,13 +1308,13 @@ fn mainExprOut(w: W, out: List<Int>) -> W
     W.update(w1, ids = idSet(w1.ids, w1.ei, w1.mainNext))
 
 verify mainExprOut
-    idOf(mainExprOut(W.update(fresh(), ids = ids0(1), mainNext = 3), []).ids, 0) => 3
+    idOf(mainExprOut(W.update(fresh(), ids = ids0(1), mainNext = ixAt(3)), []).ids, ixAt(0)) => 3
 
 
 fn written(b: Bytes, p: Pos, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols) -> Result<W, String>
     ? "The last pass: each record of version 0 written into the main block or its block; a record at none ran past the block (ReadAsTheReaderReads)."
     match off(p) < 0
-        true -> Result.Err("record {w.ei + w.di + w.nameId + w.levelId - 1}: the block ends inside it")
+        true -> Result.Err("record {w.ei.value + w.di + w.nameId + w.levelId - 1}: the block ends inside it")
         false -> match off(p) >= off(end)
             true -> Result.Ok(w)
             false -> writtenAt(b, p, end, flushedIf(w)?, owner, nameF, levelF, codes, cs, tagAt(b, p))
@@ -1305,12 +1323,12 @@ fn writtenAt(b: Bytes, p: Pos, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF
     ? "One record by its tag. An expression record is read once, by the function that writes it, which says where it ends (WrittenAsRead)."
     match tag
         20 -> colsRun(b, rv(b, next1(p)), end, w, owner, nameF, levelF, codes, cs)
-        18 -> declWritten(b, end, w, owner, nameF, levelF, codes, cs, declOf(b, next1(p), w.ei))
+        18 -> declWritten(b, end, w, owner, nameF, levelF, codes, cs, declOf(b, next1(p), w.ei.value))
         _ -> match tag <= 2
             true -> nameWritten(b, skipRecord(b, p), end, W.update(w, main = copied(w.main, b, p, skipRecord(b, p))), owner, nameF, levelF, codes, cs, geti(nameF, w.nameId))
             false -> match tag <= 6
                 true -> levelWritten(b, skipRecord(b, p), end, W.update(w, main = copied(w.main, b, p, skipRecord(b, p))), owner, nameF, levelF, codes, cs, geti(levelF, w.levelId))
-                false -> exprWritten(b, p, end, w, owner, nameF, levelF, codes, cs, cget(owner, w.ei))
+                false -> exprWritten(b, p, end, w, owner, nameF, levelF, codes, cs, nget(owner, w.ei))
 
 fn nameWritten(b: Bytes, q: Pos, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, f: Int) -> Result<W, String>
     ? "A name, then its frontier entry when a block names it."
@@ -1324,17 +1342,17 @@ fn levelWritten(b: Bytes, q: Pos, end: Pos, w: W, owner: Vector<Vector<Num>>, na
         true -> written(b, q, end, W.update(w, main = List.prepend(1, List.prepend(1, List.prepend(19, w.main))), fL = w.fL + 1, levelId = w.levelId + 1), owner, nameF, seti(levelF, w.levelId, w.fL), codes, cs)
         false -> written(b, q, end, W.update(w, levelId = w.levelId + 1), owner, nameF, levelF, codes, cs)
 
-fn exprWritten(b: Bytes, p: Pos, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Int) -> Result<W, String>
+fn exprWritten(b: Bytes, p: Pos, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Num) -> Result<W, String>
     ? "An expression: into the main block, with its frontier entry when a block names it (-3), or into its owner's block."
-    match o >= 0
+    match o.value >= 0
         true -> blockDone(b, end, blockWritten(b, p, w, owner, nameF, levelF, codes, cs, o), owner, nameF, levelF, codes, cs)
         false -> mainDone(b, end, w, mainExpr(b, p, w.ei, w.mainNext, w.ids, w.main), owner, nameF, levelF, codes, cs, o)
 
 fn blockDone(b: Bytes, end: Pos, bw: BW, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols) -> Result<W, String>
     ? "On after an expression of a block, from where its record ended."
-    written(b, bw.at, end, W.update(bw.w, ei = bw.w.ei + 1), owner, nameF, levelF, codes, cs)
+    written(b, bw.at, end, W.update(bw.w, ei = ixStep(bw.w.ei.value + 1)), owner, nameF, levelF, codes, cs)
 
-fn mainDone(b: Bytes, end: Pos, w: W, r: RA, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Int) -> Result<W, String>
+fn mainDone(b: Bytes, end: Pos, w: W, r: RA, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Num) -> Result<W, String>
     ? "On after a main expression, from where its record ended."
     mainExprWritten(b, r.at, end, mainExprOut(w, r.out), owner, nameF, levelF, codes, cs, o)
 
@@ -1357,17 +1375,17 @@ record BW
     w: W
     at: Pos
 
-fn mainExprWritten(b: Bytes, q: Pos, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Int) -> Result<W, String>
+fn mainExprWritten(b: Bytes, q: Pos, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Num) -> Result<W, String>
     ? "After a main expression: its frontier entry, the frontier index kept in its owner as -(index + 4)."
-    match o == -3
-        true -> written(b, q, end, W.update(w, main = List.prepend(1, List.prepend(2, List.prepend(19, w.main))), fE = w.fE + 1, ei = w.ei + 1, mainNext = w.mainNext + 1), cset(owner, w.ei, 0 - w.fE - 4), nameF, levelF, codes, cs)
-        false -> written(b, q, end, W.update(w, ei = w.ei + 1, mainNext = w.mainNext + 1), owner, nameF, levelF, codes, cs)
+    match o.value == -3
+        true -> written(b, q, end, W.update(w, main = List.prepend(1, List.prepend(2, List.prepend(19, w.main))), fE = w.fE + 1, ei = ixStep(w.ei.value + 1), mainNext = ixStep(w.mainNext.value + 1)), nset(owner, w.ei, num(0 - w.fE - 4)), nameF, levelF, codes, cs)
+        false -> written(b, q, end, W.update(w, ei = ixStep(w.ei.value + 1), mainNext = ixStep(w.mainNext.value + 1)), owner, nameF, levelF, codes, cs)
 
-fn mainRef(acc: List<Int>, e: Int, d: Int, next: Int, ids: IdsW) -> List<Int>
+fn mainRef(acc: List<Int>, e: Ix, d: Int, next: Ix, ids: IdsW) -> List<Int>
     ? "A reference d back from expression e, as how far back its main number is from next."
-    uv(acc, next - idOf(ids, e - d))
+    uv(acc, next.value - idOf(ids, back(e, d)))
 
-fn mainExpr(b: Bytes, p: Pos, e: Int, next: Int, ids: IdsW, acc: List<Int>) -> RA
+fn mainExpr(b: Bytes, p: Pos, e: Ix, next: Ix, ids: IdsW, acc: List<Int>) -> RA
     ? "The expression record at p in the main block: only references change."
     match tagAt(b, p)
         10 -> mainRefs(b, next1(p), 2, e, next, ids, List.prepend(10, acc))
@@ -1385,25 +1403,25 @@ fn copiedTo(acc: List<Int>, b: Bytes, p: Pos, q: Pos) -> RA
 verify copiedTo
     copiedTo([], Bytes.fromList([7, 1]), at(0), at(2)) => RA(out = [1, 7], at = at(2))
 
-fn mainCopied(b: Bytes, p: Pos, q: Pos, n: Int, e: Int, next: Int, ids: IdsW, acc: List<Int>) -> RA
+fn mainCopied(b: Bytes, p: Pos, q: Pos, n: Int, e: Ix, next: Ix, ids: IdsW, acc: List<Int>) -> RA
     ? "The record's bytes from p to q copied, then its n references at q."
     mainRefs(b, q, n, e, next, ids, copied(acc, b, p, q))
 
-fn mainRefs(b: Bytes, p: Pos, n: Int, e: Int, next: Int, ids: IdsW, acc: List<Int>) -> RA
+fn mainRefs(b: Bytes, p: Pos, n: Int, e: Ix, next: Ix, ids: IdsW, acc: List<Int>) -> RA
     ? "n references at p, and where they end."
     match n <= 0
         true -> RA(out = acc, at = p)
         false -> mainRefAt(b, rv(b, p), n, e, next, ids, acc)
 
-fn mainRefAt(b: Bytes, x: At, n: Int, e: Int, next: Int, ids: IdsW, acc: List<Int>) -> RA
+fn mainRefAt(b: Bytes, x: At, n: Int, e: Ix, next: Ix, ids: IdsW, acc: List<Int>) -> RA
     ? "One reference read; the rest follow."
     mainRefs(b, x.at, n - 1, e, next, ids, mainRef(acc, e, x.value, next, ids))
 
-fn blockWritten(b: Bytes, p: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Int) -> BW
+fn blockWritten(b: Bytes, p: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Num) -> BW
     ? "An expression of o's block, after a mark when it stood before a later declaration than the block's last record."
-    a1 = markedAt(Option.withDefault(Vector.get(w.open, o), acc0()), w.di)
+    a1 = markedAt(Option.withDefault(Vector.get(w.open, o.value), acc0()), w.di)
     r = blockExpr(b, p, w.ei, o, a1.k, owner, w.ids, nameF, levelF, codes, a1.mark, a1.out)
-    w1 = W.update(w, open = Option.withDefault(Vector.set(w.open, o, Acc(out = r.out, k = a1.k + 1, mark = a1.mark, fine = Bool.and(a1.fine, r.fine))), w.open))
+    w1 = W.update(w, open = Option.withDefault(Vector.set(w.open, o.value, Acc(out = r.out, k = ixStep(a1.k.value + 1), mark = a1.mark, fine = Bool.and(a1.fine, r.fine))), w.open))
     BW(w = W.update(w1, ids = idSet(w1.ids, w1.ei, a1.k)), at = r.at)
 
 fn colsRun(b: Bytes, n: At, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols) -> Result<W, String>
@@ -1418,30 +1436,30 @@ fn colsWritten(b: Bytes, q: Pos, left: Int, end: Pos, w: W, owner: Vector<Vector
 
 fn colWritten(b: Bytes, q: Pos, left: Int, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols) -> Result<W, String>
     ? "One expression of the columns, by its owner."
-    o = cget(owner, w.ei)
-    k = cget(cs.kind, w.ei)
-    c1 = cget32(cs.c1, w.ei)
-    c2 = cget32(cs.c2, w.ei)
-    match o >= 0
+    o = nget(owner, w.ei)
+    k = nget(cs.kind, w.ei)
+    c1 = part(cs.c1, w.ei)
+    c2 = part(cs.c2, w.ei)
+    match o.value >= 0
         true -> colsWritten(b, q, left - 1, end, colBlock(w, owner, nameF, o, k, c1, c2), owner, nameF, levelF, codes, cs)
         false -> colMainDone(b, q, left, end, mainExprOut(w, colMain(w.main, k, c1, c2, w.mainNext, w.ids)), owner, nameF, levelF, codes, cs, o)
 
-fn colMainDone(b: Bytes, q: Pos, left: Int, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Int) -> Result<W, String>
+fn colMainDone(b: Bytes, q: Pos, left: Int, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Num) -> Result<W, String>
     ? "After a main expression of the columns: its frontier entry, as mainExprWritten."
-    match o == -3
-        true -> colFrontier(b, q, left, end, cset(owner, w.ei, 0 - w.fE - 4), w, nameF, levelF, codes, cs)
-        false -> colsWritten(b, q, left - 1, end, W.update(w, ei = w.ei + 1, mainNext = w.mainNext + 1), owner, nameF, levelF, codes, cs)
+    match o.value == -3
+        true -> colFrontier(b, q, left, end, nset(owner, w.ei, num(0 - w.fE - 4)), w, nameF, levelF, codes, cs)
+        false -> colsWritten(b, q, left - 1, end, W.update(w, ei = ixStep(w.ei.value + 1), mainNext = ixStep(w.mainNext.value + 1)), owner, nameF, levelF, codes, cs)
 
 fn colFrontier(b: Bytes, q: Pos, left: Int, end: Pos, owner: Vector<Vector<Num>>, w: W, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols) -> Result<W, String>
     ? "The frontier entry of a main expression of the columns, its owner already set to its index."
-    colsWritten(b, q, left - 1, end, W.update(w, main = List.prepend(1, List.prepend(2, List.prepend(19, w.main))), fE = w.fE + 1, ei = w.ei + 1, mainNext = w.mainNext + 1), owner, nameF, levelF, codes, cs)
+    colsWritten(b, q, left - 1, end, W.update(w, main = List.prepend(1, List.prepend(2, List.prepend(19, w.main))), fE = w.fE + 1, ei = ixStep(w.ei.value + 1), mainNext = ixStep(w.mainNext.value + 1)), owner, nameF, levelF, codes, cs)
 
 verify colFrontier
     Result.withDefault(colFrontier(Bytes.fromList([]), at(0), 1, at(0), cnew(1, -2), fresh(), Vector.fromList([]), Vector.fromList([]), codes0(), cols0()), fresh()).fE => 1
 
-fn colHead(acc: List<Int>, k: Int) -> List<Int>
+fn colHead(acc: List<Int>, k: Num) -> List<Int>
     ? "The tag of kind word k, and a binder's annotation byte."
-    code = Bits.and(k, 15)
+    code = Bits.and(k.value, 15)
     match code == 1
         true -> List.prepend(10, acc)
         false -> match code <= 5
@@ -1449,53 +1467,53 @@ fn colHead(acc: List<Int>, k: Int) -> List<Int>
             false -> List.prepend(code - 6, List.prepend(12, acc))
 
 verify colHead
-    colHead([], 1) => [10]
-    colHead([], 3) => [1, 11]
-    colHead([], 9) => [3, 12]
+    colHead([], num(1)) => [10]
+    colHead([], num(3)) => [1, 11]
+    colHead([], num(9)) => [3, 12]
 
-fn colMain(acc: List<Int>, k: Int, c1: Int, c2: Int, next: Int, ids: IdsW) -> List<Int>
+fn colMain(acc: List<Int>, k: Num, c1: Ix, c2: Ix, next: Ix, ids: IdsW) -> List<Int>
     ? "An expression of the columns in the main block: its name as it is, its parts by how far back their main numbers are from next."
-    h = match Bits.and(k, 15) == 1
+    h = match Bits.and(k.value, 15) == 1
         true -> colHead(acc, k)
-        false -> uv(colHead(acc, k), Bits.shiftRight(k, 4))
-    uv(uv(h, next - idOf(ids, c1)), next - idOf(ids, c2))
+        false -> uv(colHead(acc, k), Bits.shiftRight(k.value, 4))
+    uv(uv(h, next.value - idOf(ids, c1)), next.value - idOf(ids, c2))
 
 verify colMain
-    colMain([], 1, 0, 0, 1, ids0(1)) => [1, 1, 10]
-    colMain([], 34, 0, 0, 1, ids0(1)) => [1, 1, 2, 0, 11]
+    colMain([], num(1), ixAt(0), ixAt(0), ixAt(1), ids0(1)) => [1, 1, 10]
+    colMain([], num(34), ixAt(0), ixAt(0), ixAt(1), ids0(1)) => [1, 1, 2, 0, 11]
 
-fn colBlock(w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, o: Int, k: Int, c1: Int, c2: Int) -> W
+fn colBlock(w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, o: Num, k: Num, c1: Ix, c2: Ix) -> W
     ? "An expression of the columns into o's block, after a mark when it stood before a later declaration than the block's last record, as blockWritten; numbered the block's next (NumberedAsWritten)."
-    a1 = markedAt(Option.withDefault(Vector.get(w.open, o), acc0()), w.di)
+    a1 = markedAt(Option.withDefault(Vector.get(w.open, o.value), acc0()), w.di)
     out = colBlockOut(a1.out, k, c1, c2, o, a1.k, owner, w.ids, nameF)
-    w1 = W.update(w, open = Option.withDefault(Vector.set(w.open, o, Acc(out = out, k = a1.k + 1, mark = a1.mark, fine = a1.fine)), w.open))
+    w1 = W.update(w, open = Option.withDefault(Vector.set(w.open, o.value, Acc(out = out, k = ixStep(a1.k.value + 1), mark = a1.mark, fine = a1.fine)), w.open))
     w2 = W.update(w1, ids = idSet(w1.ids, w1.ei, a1.k))
-    W.update(w2, ei = w2.ei + 1)
+    W.update(w2, ei = ixStep(w2.ei.value + 1))
 
-fn colBlockOut(acc: List<Int>, k: Int, c1: Int, c2: Int, o: Int, n: Int, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>) -> List<Int>
+fn colBlockOut(acc: List<Int>, k: Num, c1: Ix, c2: Ix, o: Num, n: Ix, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>) -> List<Int>
     ? "An expression of the columns in its block: the name by its frontier number, the parts by the block's own numbers and the frontier's."
-    h = match Bits.and(k, 15) == 1
+    h = match Bits.and(k.value, 15) == 1
         true -> colHead(acc, k)
-        false -> uv(colHead(acc, k), geti(nameF, Bits.shiftRight(k, 4)))
+        false -> uv(colHead(acc, k), geti(nameF, Bits.shiftRight(k.value, 4)))
     blockRefC(blockRefC(h, c1, o, n, owner, ids), c2, o, n, owner, ids)
 
-fn blockRefC(acc: List<Int>, c: Int, o: Int, k: Int, owner: Vector<Vector<Num>>, ids: IdsW) -> List<Int>
+fn blockRefC(acc: List<Int>, c: Ix, o: Num, k: Ix, owner: Vector<Vector<Num>>, ids: IdsW) -> List<Int>
     ? "A reference to expression c from number k of o's block: back among the block's own, else past them into the frontier."
-    oc = cget(owner, c)
-    match oc == o
-        true -> uv(acc, k - idOf(ids, c))
-        false -> uv(acc, k + 1 + (0 - oc - 4))
+    oc = nget(owner, c)
+    match oc.value == o.value
+        true -> uv(acc, k.value - idOf(ids, c))
+        false -> uv(acc, k.value + 1 + (0 - oc.value - 4))
 
 verify blockRefC
-    blockRefC([], 0, 0, 1, cnew(1, 0), ids0(1)) => [1]
-    blockRefC([], 0, 0, 1, cnew(1, -4), ids0(1)) => [2]
+    blockRefC([], ixAt(0), num(0), ixAt(1), cnew(1, 0), ids0(1)) => [1]
+    blockRefC([], ixAt(0), num(0), ixAt(1), cnew(1, -4), ids0(1)) => [2]
 
 fn acc0() -> Acc
     ? "A block not yet begun."
-    Acc(out = [], k = 0, mark = 0, fine = true)
+    Acc(out = [], k = Ix(value = 0), mark = 0, fine = true)
 
 verify acc0
-    acc0().k => 0
+    acc0().k.value => 0
 
 fn markedAt(a: Acc, di: Int) -> Acc
     ? "A mark record first when the block's last mark is not di."
@@ -1504,28 +1522,28 @@ fn markedAt(a: Acc, di: Int) -> Acc
         false -> Acc.update(a, out = uv(List.prepend(19, a.out), di), mark = di)
 
 verify markedAt
-    markedAt(Acc(out = [], k = 0, mark = 0, fine = true), 3).out => [3, 19]
+    markedAt(Acc(out = [], k = Ix(value = 0), mark = 0, fine = true), 3).out => [3, 19]
 
 record BE
     out: List<Int>
     fine: Bool
     at: Pos
 
-fn blockRef(acc: List<Int>, e: Int, d: Int, o: Int, k: Int, owner: Vector<Vector<Num>>, ids: IdsW) -> List<Int>
+fn blockRef(acc: List<Int>, e: Ix, d: Int, o: Num, k: Ix, owner: Vector<Vector<Num>>, ids: IdsW) -> List<Int>
     ? "A reference d back from expression e, number k of o's block: as blockRefC."
-    blockRefC(acc, e - d, o, k, owner, ids)
+    blockRefC(acc, back(e, d), o, k, owner, ids)
 
-fn blockRefs(b: Bytes, p: Pos, n: Int, e: Int, o: Int, k: Int, owner: Vector<Vector<Num>>, ids: IdsW, acc: List<Int>) -> RA
+fn blockRefs(b: Bytes, p: Pos, n: Int, e: Ix, o: Num, k: Ix, owner: Vector<Vector<Num>>, ids: IdsW, acc: List<Int>) -> RA
     ? "n references at p, and where they end."
     match n <= 0
         true -> RA(out = acc, at = p)
         false -> blockRefAt(b, rv(b, p), n, e, o, k, owner, ids, acc)
 
-fn blockRefAt(b: Bytes, x: At, n: Int, e: Int, o: Int, k: Int, owner: Vector<Vector<Num>>, ids: IdsW, acc: List<Int>) -> RA
+fn blockRefAt(b: Bytes, x: At, n: Int, e: Ix, o: Num, k: Ix, owner: Vector<Vector<Num>>, ids: IdsW, acc: List<Int>) -> RA
     ? "One reference read; the rest follow."
     blockRefs(b, x.at, n - 1, e, o, k, owner, ids, blockRef(acc, e, x.value, o, k, owner, ids))
 
-fn blockExpr(b: Bytes, p: Pos, e: Int, o: Int, k: Int, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, mark: Int, acc: List<Int>) -> BE
+fn blockExpr(b: Bytes, p: Pos, e: Ix, o: Num, k: Ix, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, mark: Int, acc: List<Int>) -> BE
     ? "The expression record at p in its block: references, names and levels by the block's own numbers and the frontier's; a constant, projection or literal says whether its names are placed before mark (PlaceCodes)."
     match tagAt(b, p)
         10 -> fineRA(blockRefs(b, next1(p), 2, e, o, k, owner, ids, List.prepend(10, acc)), true)
@@ -1554,7 +1572,7 @@ fn sortBlock(b: Bytes, l: At, levelF: Vector<Int>, acc: List<Int>) -> BE
 verify sortBlock
     sortBlock(Bytes.fromList([]), At(value = 0, at = at(2)), Vector.fromList([5]), []) => BE(out = [5, 8], fine = true, at = at(2))
 
-fn blockNamed(b: Bytes, nm: At, n: Int, e: Int, o: Int, k: Int, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>, acc: List<Int>) -> RA
+fn blockNamed(b: Bytes, nm: At, n: Int, e: Ix, o: Num, k: Ix, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>, acc: List<Int>) -> RA
     ? "A binder's or a let's name by its frontier number, then its n references."
     blockRefs(b, nm.at, n, e, o, k, owner, ids, uv(acc, geti(nameF, nm.value)))
 
@@ -1583,7 +1601,7 @@ fn levelOut(b: Bytes, x: At, n: Int, levelF: Vector<Int>, acc: List<Int>) -> RA
     ? "One level read; the rest follow."
     levelsOut(b, x.at, n - 1, levelF, uv(acc, geti(levelF, x.value)))
 
-fn projBlock(b: Bytes, p: Pos, e: Int, o: Int, k: Int, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>, codes: Codes, mark: Int, acc: List<Int>) -> BE
+fn projBlock(b: Bytes, p: Pos, e: Ix, o: Num, k: Ix, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>, codes: Codes, mark: Int, acc: List<Int>) -> BE
     ? "A projection: its frontier name, its field, its structure."
     n = rv(b, next1(p))
     i = rv(b, n.at)
@@ -1599,7 +1617,7 @@ fn lazyWritten(b: Bytes, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vect
     ? "Kind 6: head, the block's length, whether its names are placed, group; the block, its count first, goes to the proof section."
     match a
         Option.None -> Result.Err("declaration {w.di}: its block is missing")
-        Option.Some(x) -> lazyOut(b, end, w, owner, nameF, levelF, codes, cs, d, x, x.k)
+        Option.Some(x) -> lazyOut(b, end, w, owner, nameF, levelF, codes, cs, d, x, x.k.value)
 
 fn lazyOut(b: Bytes, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, d: DeclP, x: Acc, n: Int) -> Result<W, String>
     ? "The theorem and its block written."
@@ -1623,15 +1641,15 @@ decision BlocksAsBytes
     rejected = ["BlocksConcatenated"]
     impacts = [lazyOut, W, flushProofs]
 
-fn declPieces(b: Bytes, ps: List<Piece>, e: Int, next: Int, ids: IdsW, value: Int, blen: Int, fine: Bool, acc: List<Int>) -> List<Int>
+fn declPieces(b: Bytes, ps: List<Piece>, e: Ix, next: Ix, ids: IdsW, value: Int, blen: Int, fine: Bool, acc: List<Int>) -> List<Int>
     ? "A declaration's pieces: raw bytes copied, references by main numbers; the value of a theorem with a block (value, else -1) is its block's length and the placed byte."
     match ps
         [] -> acc
         [Piece.Raw(s, t), ..rest] -> declPieces(b, rest, e, next, ids, value, blen, fine, copied(acc, b, s, t))
-        [Piece.Ref(x), ..rest] -> declPieces(b, rest, e, next, ids, value, blen, fine, uv(acc, next - idOf(ids, x)))
+        [Piece.Ref(x), ..rest] -> declPieces(b, rest, e, next, ids, value, blen, fine, uv(acc, next.value - idOf(ids, ixAt(x))))
         [Piece.Val(x), ..rest] -> match value >= 0
             true -> declPieces(b, rest, e, next, ids, value, blen, fine, List.prepend(placedByte(fine), uv(acc, blen)))
-            false -> declPieces(b, rest, e, next, ids, value, blen, fine, uv(acc, next - idOf(ids, x)))
+            false -> declPieces(b, rest, e, next, ids, value, blen, fine, uv(acc, next.value - idOf(ids, ixAt(x))))
 
 fn placedByte(fine: Bool) -> Int
     ? "1 when every name is placed."
@@ -1771,33 +1789,33 @@ verify levelWritten
     Result.withDefault(levelWritten(Bytes.fromList([]), at(0), at(0), fresh(), cnew(0, 0), Vector.fromList([]), Vector.fromList([-2, -1]), codes0(), cols0(), -1), fresh()).fL => 1
 
 verify exprWritten
-    Result.withDefault(exprWritten(Bytes.fromList([7, 0]), at(0), at(2), fresh(), cnew(1, -2), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), -2), fresh()).mainNext => 1
+    Result.withDefault(exprWritten(Bytes.fromList([7, 0]), at(0), at(2), fresh(), cnew(1, -2), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), num(-2)), fresh()).mainNext.value => 1
 
 verify mainExprWritten
-    Result.withDefault(mainExprWritten(Bytes.fromList([7, 0]), at(2), at(2), fresh(), cnew(1, -3), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), -3), fresh()).fE => 1
+    Result.withDefault(mainExprWritten(Bytes.fromList([7, 0]), at(2), at(2), fresh(), cnew(1, -3), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), num(-3)), fresh()).fE => 1
 
 verify mainRef
-    mainRef([], 3, 1, 5, IdsW(done = cset32(cnew32(3), 2, 1), cur = Vector.fromList([]), base = 65536)) => [4]
+    mainRef([], ixAt(3), 1, ixAt(5), IdsW(done = cset32(cnew32(3), 2, 1), cur = Vector.fromList([]), base = ixAt(65536))) => [4]
 
 verify mainExpr
-    mainExpr(Bytes.fromList([17, 1]), at(0), 1, 1, ids0(1), []).out => [1, 17]
-    mainExpr(Bytes.fromList([7, 5]), at(0), 1, 1, ids0(1), []).out => [5, 7]
+    mainExpr(Bytes.fromList([17, 1]), at(0), ixAt(1), ixAt(1), ids0(1), []).out => [1, 17]
+    mainExpr(Bytes.fromList([7, 5]), at(0), ixAt(1), ixAt(1), ids0(1), []).out => [5, 7]
 
 verify mainRefs
-    mainRefs(Bytes.fromList([]), at(0), 0, 0, 0, ids0(0), [3]).out => [3]
+    mainRefs(Bytes.fromList([]), at(0), 0, ixAt(0), ixAt(0), ids0(0), [3]).out => [3]
 
 verify blockWritten
-    Option.withDefault(Vector.get(blockWritten(Bytes.fromList([7, 3]), at(0), W.update(fresh(), di = 2, open = Vector.fromList([acc0()])), cnew(1, 0), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), 0).w.open, 0), Acc(out = [], k = 0, mark = 0, fine = true)).out => [3, 7, 2, 19]
+    Option.withDefault(Vector.get(blockWritten(Bytes.fromList([7, 3]), at(0), W.update(fresh(), di = 2, open = Vector.fromList([acc0()])), cnew(1, 0), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), num(0)).w.open, 0), Acc(out = [], k = Ix(value = 0), mark = 0, fine = true)).out => [3, 7, 2, 19]
 
 verify blockRef
-    blockRef([], 1, 1, 0, 1, cnew(1, 0), ids0(1)) => [1]
-    blockRef([], 1, 1, 0, 1, cnew(1, -4), ids0(1)) => [2]
+    blockRef([], ixAt(1), 1, num(0), ixAt(1), cnew(1, 0), ids0(1)) => [1]
+    blockRef([], ixAt(1), 1, num(0), ixAt(1), cnew(1, -4), ids0(1)) => [2]
 
 verify blockRefs
-    blockRefs(Bytes.fromList([]), at(0), 0, 0, 0, 0, cnew(0, 0), ids0(0), [3]).out => [3]
+    blockRefs(Bytes.fromList([]), at(0), 0, ixAt(0), num(0), ixAt(0), cnew(0, 0), ids0(0), [3]).out => [3]
 
 verify blockExpr
-    blockExpr(Bytes.fromList([7, 3]), at(0), 0, 0, 0, cnew(1, 0), ids0(1), Vector.fromList([]), Vector.fromList([]), codes0(), 0, []).out => [3, 7]
+    blockExpr(Bytes.fromList([7, 3]), at(0), ixAt(0), num(0), ixAt(0), cnew(1, 0), ids0(1), Vector.fromList([]), Vector.fromList([]), codes0(), 0, []).out => [3, 7]
 
 verify constBlock
     constBlock(Bytes.fromList([9, 0, 0]), at(0), Vector.fromList([5]), Vector.fromList([]), Codes(names = Vector.fromList([0]), nat = 0, str = []), 1, []).out => [0, 5, 9]
@@ -1806,7 +1824,7 @@ verify levelsOut
     levelsOut(Bytes.fromList([]), at(0), 0, Vector.fromList([]), [2]).out => [2]
 
 verify projBlock
-    projBlock(Bytes.fromList([16, 0, 2, 1]), at(0), 1, 0, 1, cnew(1, 0), ids0(1), Vector.fromList([3]), Codes(names = Vector.fromList([Core.Lazy.never()]), nat = 0, str = []), 0, []).out => [1, 2, 3, 16]
+    projBlock(Bytes.fromList([16, 0, 2, 1]), at(0), ixAt(1), num(0), ixAt(1), cnew(1, 0), ids0(1), Vector.fromList([3]), Codes(names = Vector.fromList([Core.Lazy.never()]), nat = 0, str = []), 0, []).out => [1, 2, 3, 16]
 
 verify declWritten
     Result.withDefault(declWritten(Bytes.fromList([]), at(0), fresh(), cnew(0, 0), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), DeclP(kind = 4, pieces = [], names = [], skip = false, value = -1, end = at(0))), fresh()).di => 1
@@ -1815,11 +1833,11 @@ verify lazyWritten
     lazyWritten(Bytes.fromList([]), at(0), fresh(), cnew(0, 0), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), DeclP(kind = 2, pieces = [], names = [], skip = false, value = 0, end = at(0)), Option.None) => Result.Err("declaration 0: its block is missing")
 
 verify lazyOut
-    Result.withDefault(lazyOut(Bytes.fromList([]), at(0), fresh(), cnew(0, 0), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), DeclP(kind = 2, pieces = [Piece.Val(0)], names = [], skip = false, value = 0, end = at(0)), Acc(out = [3, 7], k = 1, mark = 0, fine = true), 1), fresh()).proofs => Bytes.fromList([1, 7, 3])
-    Result.withDefault(lazyOut(Bytes.fromList([]), at(0), fresh(), cnew(0, 0), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), DeclP(kind = 2, pieces = [Piece.Val(0)], names = [], skip = false, value = 0, end = at(0)), Acc(out = [3, 7], k = 1, mark = 0, fine = true), 1), fresh()).main => [1, 3, 6, 18]
+    Result.withDefault(lazyOut(Bytes.fromList([]), at(0), fresh(), cnew(0, 0), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), DeclP(kind = 2, pieces = [Piece.Val(0)], names = [], skip = false, value = 0, end = at(0)), Acc(out = [3, 7], k = ixAt(1), mark = 0, fine = true), 1), fresh()).proofs => Bytes.fromList([1, 7, 3])
+    Result.withDefault(lazyOut(Bytes.fromList([]), at(0), fresh(), cnew(0, 0), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), DeclP(kind = 2, pieces = [Piece.Val(0)], names = [], skip = false, value = 0, end = at(0)), Acc(out = [3, 7], k = ixAt(1), mark = 0, fine = true), 1), fresh()).main => [1, 3, 6, 18]
 
 verify declPieces
-    declPieces(Bytes.fromList([5, 6]), [Piece.Raw(at(0), at(2))], 0, 0, ids0(0), -1, 0, false, []) => [6, 5]
+    declPieces(Bytes.fromList([5, 6]), [Piece.Raw(at(0), at(2))], ixAt(0), ixAt(0), ids0(0), -1, 0, false, []) => [6, 5]
 
 verify ctorRest
     ctorRest(Bytes.fromList([0, 0, 0, 0, 0]), cur0(0)).p => at(5)
@@ -1831,16 +1849,16 @@ verify wantedLevel
     Vector.get(wantedLevel(Bytes.fromList([]), Vector.fromList([-2]), At(value = 0, at = at(0)), 1), 0) => Option.Some(-1)
 
 verify mainCopied
-    mainCopied(Bytes.fromList([7, 5]), at(0), at(2), 0, 0, 0, ids0(0), []).out => [5, 7]
+    mainCopied(Bytes.fromList([7, 5]), at(0), at(2), 0, ixAt(0), ixAt(0), ids0(0), []).out => [5, 7]
 
 verify mainRefAt
-    mainRefAt(Bytes.fromList([]), At(value = 1, at = at(0)), 1, 3, 5, IdsW(done = cset32(cnew32(3), 2, 1), cur = Vector.fromList([]), base = 65536), []).out => [4]
+    mainRefAt(Bytes.fromList([]), At(value = 1, at = at(0)), 1, ixAt(3), ixAt(5), IdsW(done = cset32(cnew32(3), 2, 1), cur = Vector.fromList([]), base = ixAt(65536)), []).out => [4]
 
 verify blockRefAt
-    blockRefAt(Bytes.fromList([]), At(value = 1, at = at(0)), 1, 1, 0, 1, cnew(1, 0), ids0(1), []).out => [1]
+    blockRefAt(Bytes.fromList([]), At(value = 1, at = at(0)), 1, ixAt(1), num(0), ixAt(1), cnew(1, 0), ids0(1), []).out => [1]
 
 verify blockNamed
-    blockNamed(Bytes.fromList([]), At(value = 0, at = at(0)), 0, 0, 0, 0, cnew(0, 0), ids0(0), Vector.fromList([6]), []).out => [6]
+    blockNamed(Bytes.fromList([]), At(value = 0, at = at(0)), 0, ixAt(0), num(0), ixAt(0), cnew(0, 0), ids0(0), Vector.fromList([6]), []).out => [6]
 
 verify levelOut
     levelOut(Bytes.fromList([]), At(value = 0, at = at(0)), 1, Vector.fromList([4]), []).out => [4]
@@ -1898,24 +1916,24 @@ verify handedK
 
 verify colsWritten
     colsWritten(Bytes.fromList([]), at(0), 0, at(0), fresh(), cnew(0, 0), Vector.fromList([]), Vector.fromList([]), codes0(), cols0()) => Result.Ok(fresh())
-    Result.withDefault(colsWritten(Bytes.fromList([]), at(0), 1, at(0), W.update(fresh(), ei = 2, mainNext = 2, ids = ids0(3)), cnew(3, -2), Vector.fromList([]), Vector.fromList([]), codes0(), cols2(1, 0, 1)), fresh()).main => [2, 2, 10]
+    Result.withDefault(colsWritten(Bytes.fromList([]), at(0), 1, at(0), W.update(fresh(), ei = ixAt(2), mainNext = ixAt(2), ids = ids0(3)), cnew(3, -2), Vector.fromList([]), Vector.fromList([]), codes0(), cols2(1, 0, 1)), fresh()).main => [2, 2, 10]
 
 verify colWritten
-    Result.withDefault(colWritten(Bytes.fromList([]), at(0), 1, at(0), W.update(fresh(), ei = 2, mainNext = 2, ids = ids0(3)), cnew(3, -3), Vector.fromList([]), Vector.fromList([]), codes0(), cols2(1, 0, 1)), fresh()).fE => 1
+    Result.withDefault(colWritten(Bytes.fromList([]), at(0), 1, at(0), W.update(fresh(), ei = ixAt(2), mainNext = ixAt(2), ids = ids0(3)), cnew(3, -3), Vector.fromList([]), Vector.fromList([]), codes0(), cols2(1, 0, 1)), fresh()).fE => 1
 
 verify colMainDone
-    Result.withDefault(colMainDone(Bytes.fromList([]), at(0), 1, at(0), fresh(), cnew(1, -2), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), -2), fresh()).mainNext => 1
+    Result.withDefault(colMainDone(Bytes.fromList([]), at(0), 1, at(0), fresh(), cnew(1, -2), Vector.fromList([]), Vector.fromList([]), codes0(), cols0(), num(-2)), fresh()).mainNext.value => 1
 
 verify colBlock
-    Option.withDefault(Vector.get(colBlock(W.update(fresh(), ei = 2, open = Vector.fromList([acc0()]), ids = ids0(3)), cset(cnew(3, 0), 1, -4), Vector.fromList([]), 0, 1, 0, 1).open, 0), acc0()).out => [1, 0, 10]
+    Option.withDefault(Vector.get(colBlock(W.update(fresh(), ei = ixAt(2), open = Vector.fromList([acc0()]), ids = ids0(3)), cset(cnew(3, 0), 1, -4), Vector.fromList([]), num(0), num(1), ixAt(0), ixAt(1)).open, 0), acc0()).out => [1, 0, 10]
 
 verify colBlockOut
-    colBlockOut([], 1, 0, 1, 0, 1, cset(cnew(2, 0), 1, -4), ids0(2), Vector.fromList([])) => [2, 1, 10]
-    colBlockOut([], 98, 0, 1, 0, 1, cnew(2, 0), ids0(2), Vector.fromList([5, 5, 5, 5, 5, 5, 7])) => [1, 1, 7, 0, 11]
+    colBlockOut([], num(1), ixAt(0), ixAt(1), num(0), ixAt(1), cset(cnew(2, 0), 1, -4), ids0(2), Vector.fromList([])) => [2, 1, 10]
+    colBlockOut([], num(98), ixAt(0), ixAt(1), num(0), ixAt(1), cnew(2, 0), ids0(2), Vector.fromList([5, 5, 5, 5, 5, 5, 7])) => [1, 1, 7, 0, 11]
 
 fn ids0(n: Int) -> IdsW
     ? "Numbers for n expressions, none set, for examples."
-    IdsW(done = cnew32(n), cur = Vector.new(65536, nat32(0)), base = 0)
+    IdsW(done = cnew32(n), cur = Vector.new(65536, nat32(0)), base = Ix(value = 0))
 
 verify ids0
     Vector.len(ids0(1).done) => 1
