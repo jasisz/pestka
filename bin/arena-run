@@ -1,0 +1,32 @@
+#!/bin/sh
+# The Lean Kernel Arena entry: packs lean4export's ndjson into Susz 1 with the
+# Rust packer (github.com/jasisz/susz, without INDEX), then checks the Susz
+# file with Pestka on WORKERS workers (four by default).
+#
+#   bin/arena-run FILE.ndjson [WORKERS]
+#
+# Exit status: 0 accepted, 1 rejected, 2 declined, as the Arena counts them.
+# The packer's 1 (not a valid export) is a rejection; its 2 (cannot pack: a
+# limit, an unknown record or key) or any other failure, a signal included,
+# is a decline. Otherwise Pestka's status is passed through, so the wrapper
+# never gives 0 unless Pestka accepted. SUSZ and PESTKA name the binaries;
+# the temporary file goes to TMPDIR (default /tmp) and is removed on exit.
+in=${1:?usage: bin/arena-run FILE.ndjson [WORKERS]}
+workers=${2:-4}
+root=$(cd "$(dirname "$0")/.." && pwd)
+susz=${SUSZ:-$root/.susz/bin/susz}
+pestka=${PESTKA:-$root/.build/target/release/main}
+tmp=$(mktemp "${TMPDIR:-/tmp}/pestka-arena.XXXXXX") || {
+  echo "declined: cannot make a temporary file"
+  exit 2
+}
+trap 'rm -f "$tmp"' EXIT
+trap 'rm -f "$tmp"; exit 2' HUP INT TERM
+why=$("$susz" pack --no-index "$in" "$tmp" 2>&1 >/dev/null)
+status=$?
+case $status in
+  0) ;;
+  1) echo "rejected: ${why:-the packer found the export invalid}"; exit 1 ;;
+  *) echo "declined: ${why:-the packer failed} (susz status $status)"; exit 2 ;;
+esac
+"$pestka" "$tmp" "$workers"
