@@ -1395,14 +1395,22 @@ fn laid(meta: Bytes, names: Int, levels: Int, decls: Int, exprs: Int, w: W, know
     hd = Bytes.fromList([83, 85, 83, 90, 13, 10, 26, 10, 1, 0, 0, 0, 0, 0, 0, 0])
     proofs = match ws.lazy > 0
         true -> List.reverse(ws.proofChunks)
-        false -> []
+        false -> noChunks()
     index = match ws.indexOn
         true -> [indexBytes(decls, ws.idx, known)?]
-        false -> []
+        false -> noChunks()
     es = sectionEntries(ws.mainBytes, ws.lazy > 0, ws.proofBytes, ws.indexOn, Bytes.len(joinAll(index)), Bytes.len(meta))
     tr = trailerBytes(names, levels, ws.mainNext.value, decls, es)?
     total = 16 + ws.mainBytes + ws.proofBytes + Bytes.len(joinAll(index)) + Bytes.len(meta) + Bytes.len(tr)
     Result.Ok(Laid(hd = hd, mains = List.reverse(ws.mainChunks), after = List.concat(proofs, List.concat(index, [meta, tr])), message = "names {names - 1}, levels {levels - 1}, expressions {exprs} ({ws.mainNext.value} in MAIN, {exprs - ws.mainNext.value} in {ws.lazy} proof blocks), declarations {decls}, frontier {ws.fN} names, {ws.fL} levels, {ws.fE} expressions, {total} bytes"))
+
+
+fn noChunks() -> List<Bytes>
+    ? "No parts. A named function, as an empty list in a match arm of laid was given the wrong list type on wasm-gc (Aver 0.33.1 and 0.34.0-dev)."
+    []
+
+verify noChunks
+    List.len(noChunks()) => 0
 
 
 fn sectionEntries(mainLen: Int, hasProofs: Bool, proofsLen: Int, hasIndex: Bool, indexLen: Int, sourceLen: Int) -> List<Tuple<Int, Int>>

@@ -1074,19 +1074,10 @@ fn started(dst: String, meta: String) -> P
 verify started
     started("x", "ab").start => 2
 
-fn octetsOnto(xs: List<Int>, acc: List<Int>) -> List<Int>
-    ? "xs put onto the reversed output."
-    match xs
-        [] -> acc
-        [x, ..rest] -> octetsOnto(rest, List.prepend(x, acc))
-
-verify octetsOnto
-    octetsOnto([1, 2], [0]) => [2, 1, 0]
-
 fn uv(acc: List<Int>, n: Int) -> List<Int>
-    ? "n as a varint, little-endian base 128, onto the reversed output."
+    ? "n as a varint, little-endian base 128, onto the reversed output. n is never negative: every number written is a length or comes from a check that refuses a negative one (nm, lv, back, u64Field), so the mask of the last byte changes nothing; it shows the byte is one."
     match n < 128
-        true -> List.prepend(n, acc)
+        true -> List.prepend(Bits.and(n, 127), acc)
         false -> match n < 4611686018427387904
             true -> uv(List.prepend(Bits.and(n, 127) + 128, acc), Bits.shiftRight(n, 7))
             false -> uv(List.prepend(Int.mod(n, 128) + 128, acc), Int.div(n, 128))
@@ -1097,7 +1088,7 @@ verify uv
 
 fn u32(acc: List<Int>, n: Int) -> List<Int>
     ? "n as four bytes, little-endian."
-    octetsOnto([Int.mod(n, 256), Int.mod(Int.div(n, 256), 256), Int.mod(Int.div(n, 65536), 256), Int.mod(Int.div(n, 16777216), 256)], acc)
+    List.prepend(Int.mod(Int.div(n, 16777216), 256), List.prepend(Int.mod(Int.div(n, 65536), 256), List.prepend(Int.mod(Int.div(n, 256), 256), List.prepend(Int.mod(n, 256), acc))))
 
 verify u32
     u32([], 513) => [0, 0, 2, 1]
@@ -1668,23 +1659,32 @@ verify natValue
 
 fn natOnto(acc: List<Int>, n: Int) -> List<Int>
     ? "n as nat bytes onto the reversed output: its byte count, then its base-256 digits, lowest first, the last not zero."
-    ds = leDigits(n, [])
-    octetsOnto(List.reverse(ds), uv(acc, List.len(ds)))
+    digitsOnto(uv(acc, digitCount(n)), n)
 
 verify natOnto
     natOnto([], 0) => [0]
     natOnto([], 256) => [1, 0, 2]
     natOnto([], 255) => [255, 1]
 
-fn leDigits(n: Int, acc: List<Int>) -> List<Int>
-    ? "n's base-256 digits, highest first."
+fn digitCount(n: Int) -> Int
+    ? "How many base-256 digits n has, 0 for 0."
+    match n <= 0
+        true -> 0
+        false -> 1 + digitCount(Int.div(n, 256))
+
+verify digitCount
+    digitCount(513) => 2
+    digitCount(0) => 0
+
+fn digitsOnto(acc: List<Int>, n: Int) -> List<Int>
+    ? "n's base-256 digits, lowest first, onto the reversed output."
     match n <= 0
         true -> acc
-        false -> leDigits(Int.div(n, 256), List.prepend(Int.mod(n, 256), acc))
+        false -> digitsOnto(List.prepend(Int.mod(n, 256), acc), Int.div(n, 256))
 
-verify leDigits
-    leDigits(513, []) => [2, 1]
-    leDigits(0, []) => []
+verify digitsOnto
+    digitsOnto([], 513) => [2, 1]
+    digitsOnto([], 0) => []
 
 verify natLine
     natLine(started("", "{{}}"), 0, "-3") => Result.Err("negative Nat literal")
@@ -1800,23 +1800,27 @@ verify opaqueObj
 fn quotObj(q: P, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Decl kind 4: head and which quotient constant."
     h = headObj(q, List.prepend(4, List.prepend(18, q.out)), o)?
-    k = quotByte(Json.Access.text(o, "kind")?)?
-    Result.Ok(withDecl(q, List.prepend(k, h)))
+    s = Json.Access.text(o, "kind")?
+    k = quotByte(s)
+    match k >= 0
+        true -> Result.Ok(withDecl(q, List.prepend(k, h)))
+        false -> Result.Err("unknown quot kind '{s}'")
 
 verify quotObj
     quotObj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), []) => Result.Err("missing key 'name'")
 
-fn quotByte(s: String) -> Result<Int, String>
-    ? "0 type, 1 ctor, 2 lift, 3 ind."
+fn quotByte(s: String) -> Int
+    ? "0 type, 1 ctor, 2 lift, 3 ind; -1 for any other kind, which quotObj refuses."
     match s
-        "type" -> Result.Ok(0)
-        "ctor" -> Result.Ok(1)
-        "lift" -> Result.Ok(2)
-        "ind" -> Result.Ok(3)
-        _ -> Result.Err("unknown quot kind '{s}'")
+        "type" -> 0
+        "ctor" -> 1
+        "lift" -> 2
+        "ind" -> 3
+        _ -> -1
 
 verify quotByte
-    quotByte("ind") => Result.Ok(3)
+    quotByte("ind") => 3
+    quotByte("x") => -1
 
 fn inductiveObj(q: P, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Decl kind 5: the types, constructors and recursors, each list with its length first."
