@@ -141,28 +141,28 @@ decision OneStepPack
     impacts = [onePacked, X, noted, oneLines]
 
 record X
-    eoff: Vector<Vector<Int>>
+    eoff: Vector<Vector<Num>>
     c1: Vector<Vector<U32>>
     c2: Vector<Vector<U32>>
-    kc: Vector<Int>
+    kc: Vector<Num>
     ac: Vector<U32>
     bc: Vector<U32>
     run: Int
-    owner: Vector<Vector<Int>>
+    owner: Vector<Vector<Num>>
     cap: Int
     names: Vector<Name>
     known: Map<Name, Int>
 
 fn x0(slots: Int) -> Result<X, String>
     ? "Nothing noted yet: room for slots chunks of 65536 expressions, none made but the columns' first, and for 4096 names."
-    Result.Ok(X(eoff = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, c1 = Vector.new(Int.max(slots, 1), Export.Split.noChunk32)?, c2 = Vector.new(Int.max(slots, 1), Export.Split.noChunk32)?, kc = Vector.new(65536, 0), ac = Vector.new(65536, Export.Split.nat32(0)), bc = Vector.new(65536, Export.Split.nat32(0)), run = 0, owner = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, cap = 0, names = Vector.new(4096, Core.Names.anon()), known = {}))
+    Result.Ok(X(eoff = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, c1 = Vector.new(Int.max(slots, 1), Export.Split.noChunk32)?, c2 = Vector.new(Int.max(slots, 1), Export.Split.noChunk32)?, kc = Vector.new(65536, Export.Split.num(0)), ac = Vector.new(65536, Export.Split.nat32(0)), bc = Vector.new(65536, Export.Split.nat32(0)), run = 0, owner = Vector.new(Int.max(slots, 1), Export.Split.noChunk)?, cap = 0, names = Vector.new(4096, Core.Names.anon()), known = {}))
 
 verify x0
     capOf(x0(2)) => Result.Ok(0)
 
 fn x00() -> X
     ? "Nothing noted, for examples."
-    X(eoff = Vector.fromList([Export.Split.noChunk]), c1 = Vector.fromList([Export.Split.noChunk32]), c2 = Vector.fromList([Export.Split.noChunk32]), kc = Vector.new(65536, 0), ac = Vector.new(65536, Export.Split.nat32(0)), bc = Vector.new(65536, Export.Split.nat32(0)), run = 0, owner = Vector.fromList([Export.Split.noChunk]), cap = 0, names = Vector.fromList([Core.Names.anon()]), known = {})
+    X(eoff = Vector.fromList([Export.Split.noChunk]), c1 = Vector.fromList([Export.Split.noChunk32]), c2 = Vector.fromList([Export.Split.noChunk32]), kc = Vector.new(65536, Export.Split.num(0)), ac = Vector.new(65536, Export.Split.nat32(0)), bc = Vector.new(65536, Export.Split.nat32(0)), run = 0, owner = Vector.fromList([Export.Split.noChunk]), cap = 0, names = Vector.fromList([Core.Names.anon()]), known = {})
 
 verify x00
     x00().cap => 0
@@ -506,12 +506,12 @@ fn colSet(x: X, e: Int, k: Int, c1: Int, c2: Int) -> X
 verify colSet
     colSet(x00(), 0, 1, 0, 0).run => 1
 
-fn kSet(c: Vector<Int>, j: Int, v: Int) -> Vector<Int>
+fn kSet(c: Vector<Num>, j: Int, v: Int) -> Vector<Num>
     ? "c with v at j, in place."
-    Option.withDefault(Vector.set(c, j, v), c)
+    Option.withDefault(Vector.set(c, j, Export.Split.num(v)), c)
 
 verify kSet
-    Vector.get(kSet(Vector.fromList([0]), 0, 2), 0) => Option.Some(2)
+    Vector.len(kSet(Vector.fromList([Export.Split.num(0)]), 0, 2)) => 1
 
 fn uSet(c: Vector<U32>, j: Int, v: Int) -> Vector<U32>
     ? "c with v at j, in place."
@@ -553,7 +553,7 @@ verify stashed
 
 fn freshChunks(x: X) -> X
     ? "New current chunks, each field on its own."
-    x1 = X.update(x, kc = Vector.new(65536, 0))
+    x1 = X.update(x, kc = Vector.new(65536, Export.Split.num(0)))
     x2 = X.update(x1, ac = Vector.new(65536, Export.Split.nat32(0)))
     X.update(x2, bc = Vector.new(65536, Export.Split.nat32(0)))
 
@@ -738,9 +738,9 @@ fn chunksMoved(x: X) -> X
 verify chunksMoved
     chunksMoved(x00()) => x00()
 
-fn chunkMade(v: Vector<Vector<Int>>, ci: Int, init: Int) -> Vector<Vector<Int>>
+fn chunkMade(v: Vector<Vector<Num>>, ci: Int, init: Int) -> Vector<Vector<Num>>
     ? "Chunk ci made, all init."
-    Option.withDefault(Vector.set(v, ci, Vector.new(65536, init)), v)
+    Option.withDefault(Vector.set(v, ci, Vector.new(65536, Export.Split.num(init))), v)
 
 fn exprNoted(x: X, e: Int, before: Int) -> X
     ? "Where expression e starts, as its kind word (ExprColumns)."
@@ -1680,7 +1680,7 @@ verify chunkMade
     Vector.len(Option.withDefault(Vector.get(chunkMade(Vector.fromList([Export.Split.noChunk]), 0, 3), 0), Export.Split.noChunk)) => 65536
 
 verify exprNoted
-    Vector.get(exprNoted(roomFor(x00(), 0), 0, 7).kc, 0) => Option.Some(112)
+    Vector.get(exprNoted(roomFor(x00(), 0), 0, 7).kc, 0) => Option.Some(Export.Split.num(112))
 
 verify nameNoted
     capOf(nameNoted(x00(), 1, Bytes.fromList([2, 0, 3]))) => Result.Ok(0)
