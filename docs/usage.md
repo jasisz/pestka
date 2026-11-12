@@ -36,19 +36,19 @@ cd lean4export && echo leanprover/lean4:v4.34.1 > lean-toolchain && lake build
 
 ### Susz
 
-An export can be packed once into Susz 1, a binary form of it
-([format](susz.md)), and checked from that as often as needed:
+Convert the export to [Susz](https://github.com/jasisz/susz) once and check
+the Susz file. That is the fast way:
 
 ```bash
-.build/target/release/main pack mathlib.ndjson mathlib.susz   # 5.90 GB to 653 MB (638 MB with --no-index)
+cargo install --git https://github.com/jasisz/susz
+susz pack --no-index mathlib.ndjson mathlib.susz   # 5.90 GB to 608 MB, a few seconds
 .build/target/release/main mathlib.susz [WORKERS]
 ```
 
-Pestka recognises a Susz file by its first bytes. It reads it into the same
-tables as the ndjson file and checks it the same way, with the same verdict;
-only a malformed record is named by its number rather than its line. The
-packer refuses what the reader would reject while reading. Measured
-numbers are in [the benchmarks](benchmarks.md#susz).
+Pestka also accepts the ndjson file directly and converts it in memory with
+its own converter, which is slower. `main pack` writes a Susz file with that
+converter; the bytes are the same as from `susz pack`. More in
+[Susz in Pestka](susz.md), numbers in [the benchmarks](benchmarks.md#susz).
 
 ## Commands
 
@@ -63,7 +63,7 @@ Compiled to Rust, which is the build meant for large inputs:
 ```bash
 bin/build                  # aver compile + cargo build --release into .build/
 bin/build-pgo TRAIN.ndjson # the same, guided by a profile of checking TRAIN
-.build/target/release/main [--low-memory] FILE.ndjson [WORKERS]
+.build/target/release/main [--low-memory] FILE.susz [WORKERS]   # or FILE.ndjson
 tests/run.sh               # fixtures in file order and with --reorder-always
 tests/arena.sh DIR         # small Arena tests, in both orders, under bin/capped
 python3 tests/soundness.py corpus DIR --exclude '*/perf/*' --max-bytes 4000000

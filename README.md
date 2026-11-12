@@ -19,9 +19,14 @@
 ---
 
 Pestka checks Lean proofs with its own implementation of Lean’s type theory.
-Give it a [lean4export](https://github.com/leanprover/lean4export) file and it
-checks the declarations, down to universe levels, reduction and recursors.
-Lean itself is not involved in the check.
+Give it an export of a Lean environment and it checks the declarations, down
+to universe levels, reduction and recursors. Lean itself is not involved in
+the check.
+
+Pestka is built around [Susz](https://github.com/jasisz/susz), a binary form
+of [lean4export](https://github.com/leanprover/lean4export) files. It also
+reads lean4export's ndjson directly, but converting it to Susz first with the
+`susz` tool is much faster.
 
 Pestka follows the reference kernel's substitution-based approach.
 **It does not use normalization by evaluation (NbE).** The experiment is
@@ -72,11 +77,17 @@ The last line should be:
 accepted
 ```
 
-To check your own export:
+To check your own export, convert it to Susz and check that:
 
 ```sh
-.build/target/release/main MyModule.ndjson
+cargo install --git https://github.com/jasisz/susz
+susz pack --no-index MyModule.ndjson MyModule.susz
+.build/target/release/main MyModule.susz
 ```
+
+Passing the ndjson file straight to Pestka works too. Pestka then converts it
+in memory with its own converter, written in Aver, which gives the same bytes
+but is several times slower than `susz`.
 
 Pestka uses four workers by default. Pass a worker count as the second
 argument, for example `MyModule.ndjson 1`. Each declaration sees only the
@@ -98,8 +109,9 @@ Pestka implements Lean's type theory, including:
   compared against the export.
 - Quotients, proof irrelevance, and the Nat and String literal extensions.
 
-The input format is **lean4export NDJSON 3.1.0**. The last output line and
-exit code give the result:
+The input is [Susz 1](https://github.com/jasisz/susz/blob/main/docs/spec.md)
+or lean4export ndjson 3.1.0. The last output line and exit code give the
+result:
 
 | Output | Exit code | Meaning |
 | :--- | :---: | :--- |

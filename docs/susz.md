@@ -1,68 +1,54 @@
-# Susz
+# Susz in Pestka
 
-Susz (`.susz`, Polish for dried fruit: the export with the water of JSON
-pressed out) is the binary form of a lean4export 3.1 export that Pestka reads
-and writes. The format is **Susz 1**, specified apart from Pestka, with the
-reference Rust crate `susz` (spec: `susz-v-next.md`, to become the crate's
-`SPEC.md`). This page lists only what is Pestka's own: its commands and its
-implementation limits. The internal versions 0 and 2 are gone; a file of
-either is rejected by its signature.
+Pestka reads [Susz 1](https://github.com/jasisz/susz). The format, its rules
+and the reference `susz` tool live in that repository. This page only covers
+what is specific to Pestka.
 
 ## Commands
 
-- `pestka pack [--no-index] FILE.ndjson FILE.susz [WORKERS]` writes the
-  canonical layout (spec section 9): MAIN, PROOFS, INDEX (left out with
-  `--no-index`), SOURCE. Its bytes are those of `susz pack`, for both
-  settings.
-- `pestka FILE.susz [WORKERS]` checks a file, recognised by its first four
-  bytes, `SUSZ`. The verdict never depends on INDEX or SOURCE, which a full
-  check does not read.
-- `pestka FILE.ndjson [WORKERS]` packs the export into Susz 1 in memory,
-  without INDEX, and checks that (`NdjsonThroughSusz` in `main.av`); an
-  export the packer refuses, or whose image the reader does not accept, is
-  read by the ndjson reader, so a bad line is reported by its number.
+```sh
+main FILE.susz [WORKERS]                                # check a Susz file
+main FILE.ndjson [WORKERS]                              # convert in memory, then check
+main pack [--no-index] FILE.ndjson FILE.susz [WORKERS]  # write a Susz file
+```
 
-The packer refuses what a reader would reject: a name declared twice, a
-number past 2^64 - 1 where the format holds a u64, more than 2^32 - 1 items
-of a kind, and a proof block naming a constant not declared before its
-theorem (rule P). `mdata` lines are not written; their ids stand for the
-expression they wrap.
+Pestka tells the two inputs apart by the first four bytes of the file.
+
+For ndjson input, Pestka converts the export in memory with its own
+converter, written in Aver, and checks the result. If the converter refuses
+the file, or the result is not accepted by the reader, Pestka falls back to
+reading the ndjson line by line, so a broken line is reported by its number.
+
+`pack` writes exactly the bytes `susz pack` writes, with or without the index.
+We test that on every export we have. It is a second implementation of the
+spec, and a benchmark for Aver. For real use, `susz pack` is faster.
+
+A full check never reads the index or the source section.
 
 ## Checking order
 
-Pestka may check declarations out of file order (`CheckedByNamespace` in
-`check/decl.av`). It does so only when every constant a declaration's MAIN
-expressions name is placed before it (`NamesPlacedWhereRead`), and checks the
-declarations up to the one placing the last constant a literal stands for
-(`Nat`, `String`, `String.ofList`, `List`, `Char`, `Char.ofNat`) in file order
-first (`LiteralPrefix`, spec OWNER-9). Proof blocks obey rule P and declared
-names are unique, so a block never names a constant that a checking order
-could make visible to it.
+Pestka may check declarations out of file order, grouped by namespace, which
+makes its caches work better. Before it does, it checks in file order every
+declaration up to the one that declares the last of the constants that
+literals depend on (`Nat`, `String`, `String.ofList`, `List`, `Char`,
+`Char.ofNat`). The format guarantees the rest is safe: a proof block can only
+name constants declared before its theorem, and declared names are unique.
 
-## Implementation limits
+## Limits
 
-Each declines the file (spec 7.2), as a function of its bytes alone:
+Pestka declines a file, rather than rejecting it, when it hits one of its own
+limits:
 
-- A proof block of more than 2^24 expressions (Aver's largest vector): the
-  theorem declines when it is checked, in the order of declarations, so an
-  earlier failure still rejects the file.
-- Frontier entries of one kind whose items do not grow: Pestka's packer, as
-  every canonical packer, lists items in the order of their records; a file
-  that lists an item below the last one of its kind is declined rather than
-  checked against every item listed (an item equal to the last one is a
-  duplicate and rejected).
-- A number in a field Pestka holds as a machine word past its range: ids and
-  counts are at most 2^32 - 1 by the format; offsets and lengths below 2^62.
-
-A MAIN record longer than the 1 MB margin of the 16 MB chunks MAIN is read in
-is read again from its start with a larger chunk; no record is declined for
-its length.
+- A proof block with more than 2^24 expressions. The theorem is declined when
+  it is checked, so an earlier real error in the file still wins.
+- Frontier entries of one kind that are not listed in increasing order.
+  Canonical packers always list them in order.
+- A number above 2^62 in an offset or length. Ids and counts are already at
+  most 2^32 - 1 by the format.
 
 ## Error messages
 
-Structural errors name the section (`header`, `trailer`, `directory`, `MAIN`,
-`PROOFS`, `PAD`), the absolute offset of the record or field and the record's
-number from 1, as the spec's section 8 asks, for example
-`MAIN @ 1042: record 17: unknown name index 9`. A proof block's error is its
-theorem's: `Foo.bar: PROOFS @ 18342117: record 12: C is not declared before
-the theorem`, reported in the order of declarations with every other failure.
+Errors say where they are: the section, the byte offset and the record number,
+for example `MAIN @ 1042: record 17: unknown name index 9`. An error inside a
+proof block is reported as its theorem's failure, in declaration order:
+`Foo.bar: PROOFS @ 18342117: record 12: C is not declared before the theorem`.
