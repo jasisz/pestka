@@ -1,7 +1,7 @@
 module Lazy
     intent =
         "A theorem's proof that is built only when it is asked for (a proof"
-        "block of a Susz 1 file, susz-v-next.md section 6): the bytes of its"
+        "block of a Susz 1 file; see the Susz 1 spec, section 6): the bytes of its"
         "block in the file's PROOFS section, the frontier tables of names,"
         "levels and expressions that the reader built from MAIN, and what"
         "the theorem's record says of the block: how many expressions it"
@@ -83,10 +83,10 @@ verify valued
 decision DeclaredBefore
     date = "2026-11-12"
     reason =
-        "Susz 1 drops the marks and the placed byte of version 2 (spec"
-        "section 10.6): a block of theorem T may name in a constant or a"
-        "projection only a name whose declaration index is below T's (rule"
-        "P), and every declared name is declared once (OWNER-8), so a name"
+        "A block of theorem T may name in a constant or a projection only a"
+        "name whose declaration index is below T's (rule P, Susz 1 spec,"
+        "section 6). Every declared name is declared once (section 5.2), so"
+        "a name"
         "has one index, which the reader looks up once per frontier name"
         "when MAIN is read. A block pays one vector read and a comparison"
         "per constant, and keeps no state between records. A name declared"
@@ -203,7 +203,7 @@ fn short() -> Step
 decision MinimalVarints
     date = "2026-11-12"
     reason =
-        "Susz 1 varints are minimal and below 2^64 (spec section 3): a"
+        "Susz 1 varints are minimal and below 2^64 (Susz 1 spec, section 3): a"
         "varint of more than one byte does not end in 0x00, and the tenth"
         "byte, of weight 2^63, is exactly 1. One comparison on the last"
         "byte. A varint that breaks it is malformed, value -1 at none,"
@@ -291,7 +291,7 @@ fn built(s: Store, b: Bytes, bd: Bounds, i: LPos, k: Int, n: Int, xs: Vector<Exp
             Option.Some(tag) -> withOne(s, b, bd, i, k, n, xs, recordOf(s, b, xs, k, bd, tag, lorNone(lposOf(i.value + 1))))
 
 fn withOne(s: Store, b: Bytes, bd: Bounds, i: LPos, k: Int, n: Int, xs: Vector<Expr>, r: Step) -> Decoded
-    ? "Goes on after expression k, or stops at a bad one, named by where its record starts and its number in the block (spec section 8)."
+    ? "Goes on after expression k, or stops at a bad one, named by where its record starts and its number in the block (Susz 1 spec, section 8)."
     match r
         Step.Got(e, at) -> built(s, b, bd, at, k + 1, n, placed(xs, k, e))
         Step.Bad(e) -> Decoded.Broken("PROOFS @ {bd.at + i.value}: record {k + 1}: {e}")
@@ -335,7 +335,7 @@ fn levelAt(s: Store, bd: Bounds, i: Int) -> Option<Level>
         false -> Option.None
 
 fn recordOf(s: Store, b: Bytes, xs: Vector<Expr>, k: Int, bd: Bounds, tag: Int, i: LPos) -> Step
-    ? "The record with tag, its fields at i; applications first, the most common. A block holds expression records only, tags 7 to 16 (spec 10.5)."
+    ? "The record with tag, its fields at i; applications first, the most common. A block holds expression records only, tags 7 to 16 (Susz 1 spec, section 6)."
     match tag
         10 -> appOf(s, xs, k, bd, b, vAt(b, i))
         11 -> binderOf(s, b, xs, k, bd, i, true)

@@ -54,7 +54,7 @@ fn packed(r: Result<String, String>) -> Int
         Result.Err(e) -> printed("cannot pack: {e}", packFailure(e))
 
 fn packFailure(e: String) -> Int
-    ? "1 when the export is not a valid one, 2 when it cannot be packed: past a limit of the format or of Pestka, or of a format version Pestka does not read (spec OPEN 11)."
+    ? "1 when the export is not a valid one, 2 when it cannot be packed: past a limit of the format or of Pestka, or of a format version Pestka does not read (Susz 1 spec, section 9.2)."
     match Bool.or(String.contains(e, "limit: "), String.contains(e, "is not supported"))
         true -> 2
         false -> 1

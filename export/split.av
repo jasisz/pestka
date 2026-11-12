@@ -1,7 +1,7 @@
 module Split
     intent =
         "Lays the records the packer wrote (Export.Pack) out as Susz 1"
-        "(susz-v-next.md, section 9): every expression that only one"
+        "(Susz 1 spec, section 9): every expression that only one"
         "theorem's proof reaches moves into that theorem's block in PROOFS,"
         "the rest stays in MAIN, renumbered densely, and MAIN lists the"
         "frontier the blocks name. The packer notes, as it writes each"
@@ -391,18 +391,17 @@ decision ExprColumns
     date = "2026-11-12"
     reason =
         "On mathlib 98.4% of the expressions are applications, lambdas and"
-        "pis (98.8% on Init). The packer encoded each as a record of version"
-        "0, and the passes after decoded it three times (owners, numbers,"
-        "writing) before writing it again. They are kept as numbers"
+        "pis (98.8% on Init). Kept as records, each would be decoded three"
+        "times by the passes (owners, numbers, writing) before it is"
+        "written again. They are kept as numbers"
         "instead: a kind word per expression (where its record starts,"
         "times 16, for a record; else 1 for an application, 2 to 5 for a"
         "lambda and 6 to 9 for a pi by binder, plus 16 times its name) and"
         "its two parts by absolute id, as u32 (U32). The records between"
         "them carry a run record (tag 20, a count) where such expressions"
-        "stood, so the last pass writes them in their place. The bytes"
-        "written are those of version 0 rewritten."
+        "stood, so the last pass writes them in their place."
     chosen = "ExprColumns"
-    rejected = ["VersionZeroRecords"]
+    rejected = ["RecordsForAll"]
     impacts = [Cols, U32, walkBack, written, colsWritten]
 
 decision PartsInOneWord
@@ -806,8 +805,8 @@ decision DeclaredByStoredHash
     reason =
         "Every declared name is kept with the index of the declaration that"
         "declares it: a name declared twice, or a declaration named by the"
-        "anonymous name, is refused (unique declared names, OWNER-8; spec"
-        "OPEN 2 and 3), and INDEX lists every declared name. A map"
+        "anonymous name, is refused (Susz 1 spec, sections 5.2 and 9.2),"
+        "and INDEX lists every declared name. A map"
         "keyed by the name hashes its key by walking it, every component's"
         "text and every prefix. A name carries its hash (HashInsideName in"
         "Core.Names), equal names the same one, so the names are kept by"
@@ -1379,7 +1378,7 @@ verify frontierListed
 decision SectionsAndDirectory
     date = "2026-11-12"
     reason =
-        "A canonical file (spec section 9) is the 16-byte header, then MAIN,"
+        "A canonical file (Susz 1 spec, section 9) is the 16-byte header, then MAIN,"
         "PROOFS when a theorem has a block, INDEX unless --no-index, and"
         "SOURCE, the meta object of the export's header line byte for byte;"
         "then the trailer: the four counts, a directory entry per section in"
@@ -1420,7 +1419,7 @@ verify sectionEntries
     sectionEntries(10, false, 0, true, 4, 2) => [(1, 10), (5, 4), (3, 2)]
 
 fn trailerBytes(names: Int, levels: Int, exprs: Int, decls: Int, es: List<Tuple<Int, Int>>) -> Result<Bytes, String>
-    ? "The counts, the directory and the trailer's length and ZSUS (SectionsAndDirectory); a count past 2^32 - 1 refuses the file (spec 7.1)."
+    ? "The counts, the directory and the trailer's length and ZSUS (SectionsAndDirectory); a count past 2^32 - 1 refuses the file (Susz 1 spec, section 7.1)."
     _ = countsFit([names, levels, exprs, decls])?
     d = directoryOnto(u32(u32(u32(u32(u32([], names), levels), exprs), decls), List.len(es)), es, 16)
     Bytes.fromList(List.reverse(List.prepend(83, List.prepend(85, List.prepend(83, List.prepend(90, u32(d, 28 + 24 * List.len(es))))))))
@@ -1429,7 +1428,7 @@ verify trailerBytes
     Result.withDefault(trailerBytes(1, 1, 0, 0, [(1, 0)]), Bytes.fromList([])) => Bytes.fromList([1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 52, 0, 0, 0, 90, 83, 85, 83])
 
 fn countsFit(xs: List<Int>) -> Result<Unit, String>
-    ? "Every count at most 2^32 - 1 (spec 7.1)."
+    ? "Every count at most 2^32 - 1 (Susz 1 spec, section 7.1)."
     match xs
         [] -> Result.Ok(Unit)
         [x, ..rest] -> match x <= 4294967295
@@ -1467,7 +1466,7 @@ verify u16
 decision IndexByDeclarations
     date = "2026-11-12"
     reason =
-        "INDEX (spec section 6a) lists for each declaration its kind, where"
+        "INDEX (Susz 1 spec, section 6a) lists for each declaration its kind, where"
         "its record starts in MAIN as the distance from the one before, and"
         "a block's length; then every declared name once, sorted by its key"
         "(each component 01, length, UTF-8, or 02 and the number, root"
@@ -1669,7 +1668,7 @@ verify mainExprOut
 
 
 fn written(b: Bytes, p: Pos, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, cs: Cols) -> Result<W, String>
-    ? "The last pass: each record of version 0 written into the main block or its block; a record at none ran past the block (ReadAsTheReaderReads)."
+    ? "The last pass: each record the packer wrote, written into the main block or its block; a record at none ran past the block (ReadAsTheReaderReads)."
     match off(p) < 0
         true -> Result.Err("record {w.ei.value + w.di.value + w.nameId + w.levelId - 1}: the block ends inside it")
         false -> match off(p) >= off(end)
@@ -2008,7 +2007,7 @@ fn blockRefAt(b: Bytes, x: At, n: Int, e: Ix, o: Num, k: Ix, owner: Vector<Vecto
     blockRefs(b, x.at, n - 1, e, o, k, owner, ids, blockRef(acc, e, x.value, o, k, owner, ids))
 
 fn blockExpr(b: Bytes, p: Pos, e: Ix, o: Num, k: Ix, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>, levelF: Vector<Int>, acc: List<Int>) -> RA
-    ? "The expression record at p in its block: references, names and levels by the block's own numbers and the frontier's. A constant not declared before the theorem is written as it is: the theorem then fails when it is checked (rule P, spec OPEN 1)."
+    ? "The expression record at p in its block: references, names and levels by the block's own numbers and the frontier's. A constant not declared before the theorem is written as it is: the theorem then fails when it is checked (rule P, Susz 1 spec, sections 6 and 9)."
     match tagAt(b, p)
         10 -> blockRefs(b, next1(p), 2, e, o, k, owner, ids, List.prepend(10, acc))
         11 -> blockNamed(b, rv(b, next2(p)), 2, e, o, k, owner, ids, nameF, List.prepend(tagAt(b, next1(p)), List.prepend(11, acc)))

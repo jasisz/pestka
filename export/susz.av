@@ -1,6 +1,6 @@
 module Susz
     intent =
-        "Reads an export in Susz 1 (susz-v-next.md, the spec; docs/susz.md"
+        "Reads an export in Susz 1 (the Susz 1 spec; docs/susz.md"
         "lists Pestka's own limits): the records of a lean4export file"
         "without the text, ids implicit and dense, an expression naming"
         "earlier ones by how far back they are, in sections a directory at"
@@ -49,7 +49,7 @@ decision ChunkWithMargin
         "left: a record crosses the end of a chunk only when it is longer"
         "than 1 MB; the longest in mathlib is a few kilobytes. Such a record"
         "is read again from its start with a chunk twice as long, as often"
-        "as it takes, so no record is declined for its length (spec 7.2:"
+        "as it takes, so no record is declined for its length (section 7.2:"
         "a limit that depends on buffering is lifted). A record that runs"
         "past the end of MAIN is truncated."
     chosen = "ChunkWithMargin"
@@ -258,7 +258,7 @@ fn readImage(m: Image) -> Outcome
 decision ErrorsInFileOrder
     date = "2026-11-12"
     reason =
-        "The spec (section 8) orders structural errors: the header, then the"
+        "The Susz 1 spec (section 8.1) orders structural errors: the header, then the"
         "trailer and the directory, then MAIN's records in file order, each"
         "named by its section, the absolute offset of the record (of the"
         "field for the header, trailer and directory) and the record's"
@@ -292,8 +292,8 @@ decision HeaderAndDirectory
         "(5) are informational, and a full check never reads SOURCE or"
         "INDEX. An unknown section that must be understood declines the"
         "file; an unknown informational one is skipped. Another major"
-        "version declines; the internal versions 0 and 2 are rejected by"
-        "their signature."
+        "version declines (Susz 1 spec, sections 4 and 8.1). A file with"
+        "another signature is not Susz."
     chosen = "HeaderAndDirectory"
     rejected = ["VersionByteAndFixedTrailer"]
     impacts = [withHeader, withTail, withTrailer, entries, entry, flagsOf]
@@ -607,7 +607,7 @@ decision FrontierAndRuleP
         "every item right after its record, so the ids of each kind only"
         "grow, an id listed again is the last one or below it, and one"
         "below the last is declined rather than looked up (an"
-        "implementation limit, spec 7.2), since keeping every id listed"
+        "implementation limit, Susz 1 spec, section 7.2), since keeping every id listed"
         "would cost a set as large as the frontier."
     chosen = "FrontierAndRuleP"
     rejected = ["FrontierAtTheEnd", "NamesListedPerBlock", "FrontierIdSet"]
@@ -915,7 +915,7 @@ decision VarintsByValue
 decision MinimalVarints
     date = "2026-11-12"
     reason =
-        "Every value has one encoding (spec section 3), which canonical"
+        "Every value has one encoding (Susz 1 spec, section 3), which canonical"
         "packing needs: a malformed varint, one not minimal or not below"
         "2^64, reads as value -1 at none, told apart from one that runs past"
         "the chunk (value 0 at none) by cut, so that it is an error of its"
@@ -1265,7 +1265,8 @@ verify lit
 decision NatAsBytes
     date = "2026-11-12"
     reason =
-        "A Nat literal is its minimal little-endian base-256 digits (OWNER-2):"
+        "A Nat literal is its minimal little-endian base-256 digits (Susz 1"
+        "spec, section 3):"
         "zero is no bytes, and the last byte of any other is not zero. It"
         "is read from its last byte down, each step a multiplication by 256,"
         "linear in the bytes for the literals exports hold."

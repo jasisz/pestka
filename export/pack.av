@@ -1,15 +1,16 @@
 module Pack
     intent =
-        "Writes an export in Susz 1 (susz-v-next.md; docs/susz.md): the"
+        "Writes an export in Susz 1 (the Susz 1 spec; docs/susz.md): the"
         "lines of a lean4export file, read with the reader's own line"
         "parser, become records with implicit ids, which Export.Split then"
         "lays out with each theorem's own proof in a block of its own, the"
         "frontier, INDEX unless asked not to, SOURCE and the trailer. The"
         "packer copies structure only; the reader trusts none of it and"
-        "computes every hash and range itself. It refuses what a Susz 1"
-        "reader would reject: a name declared twice, a number past 2^64 - 1"
-        "where the format holds a u64, a proof naming a constant not"
-        "declared before its theorem."
+        "computes every hash and range itself. It refuses an export no"
+        "well-formed file can hold, such as a name declared twice or a"
+        "number past 2^64 - 1 where the format holds a u64 (Susz 1 spec,"
+        "section 9.2). A proof naming a constant not declared before its"
+        "theorem is written as it is, and that theorem then fails."
     exposes [pack, image]
     exposes opaque [Cnt]
     depends [Bytes, Json.Line, Json.Access, Core.Names, Core.Lazy, Core.Exprs, Core.Decls, Export.Reader, Export.Items, Export.Lines, Export.Split, Export.Susz]
@@ -126,19 +127,17 @@ fn pack(src: String, dst: String, workers: Int, indexOn: Bool) -> Result<String,
 decision OneStepPack
     date = "2026-11-11"
     reason =
-        "Version 2 was packed in two steps: the lines became version 0, and"
-        "Export.Split read version 0 again, a first pass over every record"
-        "finding where each expression starts, building the names, seeding"
-        "owners from the declarations and keeping where each name is first"
+        "Export.Split needs to know where each expression starts, the"
+        "names, each declaration's references and where each name is first"
         "placed. The packer knows all of that as it writes each record, so"
         "it notes it then: where the expression starts, the name it built,"
         "and a declaration's references, names and skip read from the bytes"
         "it just wrote, with the decoder the split uses (declOf), so both"
-        "agree. Version 0 is still kept in memory as the records to rewrite,"
-        "and the split's later passes run on it unchanged, so the bytes"
-        "written are those of the two steps."
+        "agree. Reading the written records again in a first pass would"
+        "cost a pass over every record. The records stay in memory for the"
+        "split's later passes to rewrite."
     chosen = "OneStepPack"
-    rejected = ["VersionZeroReadAgain"]
+    rejected = ["RecordsReadAgain"]
     impacts = [onePacked, X, noted, oneLines]
 
 record X
@@ -1060,7 +1059,7 @@ verify chunkBytes
 
 
 fn metaText(l: String) -> String
-    ? "The meta object of the header line, byte for byte: the text between the meta key and the last brace (SOURCE, spec section 9)."
+    ? "The meta object of the header line, byte for byte: the text between the meta key and the last brace (SOURCE, Susz 1 spec, section 9)."
     String.slice(l, 8, String.len(l) - 1)
 
 verify metaText
@@ -1358,17 +1357,17 @@ verify nameStr
     Result.withDefault(nameStr(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, 0, "a"), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {}))).names => 2
 
 fn nameNum(q: P, i: Int, pre: Int, k: Int) -> Result<P, String>
-    ? "2: the prefix and the number, a u64 (OWNER-1, U64Fields)."
+    ? "2: the prefix and the number, a u64 (U64Fields)."
     p = nm(q, pre)?
     Result.Ok(withName(q, i, uv(uv(List.prepend(2, q.out), p), u64Field(k)?)))
 
 decision U64Fields
     date = "2026-11-12"
     reason =
-        "Every varint of Susz 1 is below 2^64 (spec section 3), a name's"
-        "number too (OWNER-1); lean4export writes them from counters, far"
-        "below. A number the export gives past that, or below zero, is"
-        "refused by the packer, which writes only files a reader accepts."
+        "Every varint of Susz 1 is below 2^64, a name's number too (Susz 1"
+        "spec, sections 3 and 5.1). lean4export writes them from counters,"
+        "far below. The packer refuses a number past that, or below zero,"
+        "since it writes only well-formed files (section 9.2)."
     chosen = "U64Fields"
     rejected = ["NatBytesForNumbers"]
     impacts = [u64Field, n64, nameNum, recordOf, defn]
@@ -1511,7 +1510,7 @@ decision KeysAsKnown
         "outside its kind's keys, or a second kind on an expression or level"
         "line, may carry meaning a newer lean4export added, so packing stops"
         "with it as not supported, the class of the Rust packer's refusal"
-        "(exit 2), and is not dropped silently (spec 9.1). The lines the"
+        "(exit 2), and is not dropped silently (Susz 1 spec, section 9.2). The lines the"
         "fast path reads have their keys by their bytes."
     chosen = "KeysAsKnown"
     rejected = ["UnknownKeysIgnored"]
@@ -1709,7 +1708,7 @@ verify projObj
 decision MdataNotWritten
     date = "2026-11-12"
     reason =
-        "Susz 1 keeps no metadata (OWNER-7): an mdata line is not written,"
+        "Susz 1 keeps no metadata (Susz 1 spec, section 9.1): an mdata line is not written,"
         "and its id stands for the expression it wraps, so that a reference"
         "to it is a reference to that expression. Its id is mapped to the"
         "wrapped expression's (IdsRenumbered); no export the tests and"

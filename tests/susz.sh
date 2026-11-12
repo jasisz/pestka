@@ -30,7 +30,7 @@ same() {
     return 0
   fi
   # A malformed record is placed by its line in ndjson and by its offset and
-  # record number in Susz (spec section 8); the rest must be the same.
+  # record number in Susz (Susz 1 spec, section 8); the rest must be the same.
   sed -E 's/^rejected: (line [0-9]+|MAIN @ [0-9]+: record [0-9]+): /rejected: /' "$tmp/a" >"$tmp/a2"
   sed -E 's/^rejected: (line [0-9]+|MAIN @ [0-9]+: record [0-9]+): /rejected: /' "$tmp/b" >"$tmp/b2"
   if [ "$a" -eq "$b" ] && cmp -s "$tmp/a2" "$tmp/b2"; then

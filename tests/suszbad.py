@@ -8,7 +8,7 @@ mode may change a section's length: the directory follows. INDEX is copied
 as it is, and so goes stale when MAIN changes, which a full check must not
 notice (it never reads INDEX).
 
-Each mode names what the reader must find, and where (spec section 8): a
+Each mode names what the reader must find, and where (Susz 1 spec, section 8): a
 damaged proof block is its theorem's error, reported in the order of
 declarations; damage outside the blocks rejects the file before checking.
 
