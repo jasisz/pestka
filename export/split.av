@@ -228,6 +228,25 @@ verify ixAt
     ixAt(5).value => 5
     ixAt(-9).value => -1
 
+fn ixWord(n: Int) -> Result<Ix, String>
+    ? "An id reckoned on a machine word: the bound of ixOf, a constructor of its own so that its argument stays a word (IdsInRange)."
+    match Bool.and(n >= -1, n <= 1099511627776)
+        true -> Result.Ok(Ix(value = n))
+        false -> Result.Err("id out of range")
+
+verify ixWord
+    ixWord(-2) => Result.Err("id out of range")
+
+fn ixStep(n: Int) -> Ix
+    ? "The id n reckoned on a word, none when it is out of range (IdsInRange)."
+    match ixWord(n)
+        Result.Ok(x) -> x
+        Result.Err(_) -> Ix(value = -1)
+
+verify ixStep
+    ixStep(5).value => 5
+    ixStep(-9).value => -1
+
 fn cnew(n: Int, x: Int) -> Vector<Vector<Num>>
     ? "n numbers x, in chunks of 65536 (ChunkedNumbers)."
     Vector.fromList(chunksOf(Int.div(n + 65535, 65536), x, []))
@@ -246,14 +265,19 @@ verify chunksOf
 
 fn cget(v: Vector<Vector<Num>>, i: Int) -> Int
     ? "Number i, -1 when there is none (ChunkedNumbers, IdsInRange)."
-    x = ixAt(i)
+    nget(v, ixAt(i)).value
+
+fn nget(v: Vector<Vector<Num>>, x: Ix) -> Num
+    ? "Number x, -1 when there is none (ChunkedNumbers, IdsInRange)."
     match x.value < 0
-        true -> -1
+        true -> Num(value = -1)
         false -> match Vector.get(v, Int.div(x.value, 65536))
-            Option.Some(c) -> match Vector.get(c, Int.mod(x.value, 65536))
-                Option.Some(u) -> u.value
-                Option.None -> -1
-            Option.None -> -1
+            Option.Some(c) -> Option.withDefault(Vector.get(c, Int.mod(x.value, 65536)), Num(value = -1))
+            Option.None -> Num(value = -1)
+
+verify nget
+    nget(cnew(1, 5), ixAt(0)).value => 5
+    nget(cnew(1, 5), ixAt(-1)).value => -1
 
 verify cget
     cget(cnew(1, 5), 0) => 5
@@ -261,7 +285,10 @@ verify cget
 
 fn cset(v: Vector<Vector<Num>>, i: Int, x: Int) -> Vector<Vector<Num>>
     ? "v with x as number i: its chunk taken out, set and put back (ChunkedNumbers, IdsInRange)."
-    k = ixAt(i)
+    nset(v, ixAt(i), num(x))
+
+fn nset(v: Vector<Vector<Num>>, k: Ix, x: Num) -> Vector<Vector<Num>>
+    ? "v with x as number k: its chunk taken out, set and put back (ChunkedNumbers, IdsInRange)."
     ci = Int.div(Int.max(k.value, 0), 65536)
     match Bool.and(k.value >= 0, ci < Vector.len(v))
         false -> v
@@ -272,12 +299,15 @@ fn cset(v: Vector<Vector<Num>>, i: Int, x: Int) -> Vector<Vector<Num>>
 verify cset
     cget(cset(cset(cnew(70000, 0), 65537, 9), 2, 4), 65537) => 9
 
-fn chunkSet(c: Vector<Num>, j: Int, x: Int) -> Vector<Num>
+verify nset
+    nget(nset(cnew(70000, 0), ixAt(65537), num(9)), ixAt(65537)).value => 9
+
+fn chunkSet(c: Vector<Num>, j: Int, x: Num) -> Vector<Num>
     ? "c with x at j."
-    Option.withDefault(Vector.set(c, j, num(x)), c)
+    Option.withDefault(Vector.set(c, j, x), c)
 
 verify chunkSet
-    Vector.get(chunkSet(Vector.fromList([num(0)]), 0, 2), 0) => Option.Some(num(2))
+    Vector.get(chunkSet(Vector.fromList([num(0)]), 0, num(2)), 0) => Option.Some(num(2))
 
 fn cput(v: Vector<Vector<Num>>, ci: Int, c: Vector<Num>) -> Vector<Vector<Num>>
     ? "c back as chunk ci."
@@ -323,6 +353,24 @@ fn num(n: Int) -> Num
 verify num
     num(-7).value => -7
     num(4611686018427387904).value => 0
+
+fn numWord(n: Int) -> Result<Num, String>
+    ? "A number of a chunk reckoned on a machine word: the bound of numOf, a constructor of its own so that its argument stays a word (NumbersAsWords)."
+    match Bool.and(n >= -4611686018427387904, n <= 4611686018427387903)
+        true -> Result.Ok(Num(value = n))
+        false -> Result.Err("number out of range")
+
+verify numWord
+    numWord(4611686018427387904) => Result.Err("number out of range")
+
+fn numStep(n: Int) -> Num
+    ? "n reckoned on a word as a number of a chunk, 0 when it is out of range."
+    match numWord(n)
+        Result.Ok(x) -> x
+        Result.Err(_) -> Num(value = 0)
+
+verify numStep
+    numStep(-7).value => -7
 
 decision ExprColumns
     date = "2026-11-12"
@@ -384,7 +432,10 @@ verify chunks32
 
 fn cget32(v: Vector<Vector<U32>>, i: Int) -> Int
     ? "Number i, -1 when there is none (ChunkedNumbers, IdsInRange)."
-    x = ixAt(i)
+    uget(v, ixAt(i))
+
+fn uget(v: Vector<Vector<U32>>, x: Ix) -> Int
+    ? "Number x, -1 when there is none (ChunkedNumbers, IdsInRange)."
     match x.value < 0
         true -> -1
         false -> match Vector.get(v, Int.div(x.value, 65536))
@@ -395,6 +446,16 @@ fn cget32(v: Vector<Vector<U32>>, i: Int) -> Int
 
 verify cget32
     cget32(cnew32(1), -1) => -1
+
+verify uget
+    uget(cnew32(1), ixAt(0)) => 0
+
+fn part(v: Vector<Vector<U32>>, x: Ix) -> Ix
+    ? "The part of expression x a column holds, an id (ExprColumns, IdsInRange)."
+    ixStep(uget(v, x))
+
+verify part
+    part(cnew32(1), ixAt(0)).value => 0
 
 fn cset32(v: Vector<Vector<U32>>, i: Int, x: Int) -> Vector<Vector<U32>>
     ? "v with x as number i: its chunk taken out, set and put back (ChunkedNumbers, IdsInRange)."
@@ -428,12 +489,12 @@ record Cols
     c1: Vector<Vector<U32>>
     c2: Vector<Vector<U32>>
 
-fn recordAt(k: Int) -> Pos
+fn recordAt(k: Num) -> Pos
     ? "Where the record of a kind word that names one starts (ExprColumns)."
-    at(Bits.shiftRight(k, 4))
+    at(Bits.shiftRight(k.value, 4))
 
 verify recordAt
-    off(recordAt(48)) => 3
+    off(recordAt(num(48))) => 3
 
 fn skipList(b: Bytes, p: Pos) -> Pos
     ? "Past a list of varints at p."
@@ -740,99 +801,99 @@ decision FrontierInWalkBack
     rejected = ["PassOfNumbers"]
     impacts = [valueCode, handOn, walkBack, walkBackAt, walkBlock, walkRecord]
 
-fn handOn(owner: Vector<Vector<Num>>, c: Int, o: Int) -> Vector<Vector<Num>>
+fn handOn(owner: Vector<Vector<Num>>, c: Ix, o: Num) -> Vector<Vector<Num>>
     ? "Expression c reached from an expression of owner o, a block or the main block (-2), in the walk back: two owners make the main block, and the frontier (-3) once a block is one of them; a theorem's value reached from the main block is of the main block, off the frontier (FrontierInWalkBack)."
-    x = cget(owner, c)
-    match x == -1
-        true -> cset(owner, c, o)
-        false -> match x == o
+    x = nget(owner, c)
+    match x.value == -1
+        true -> nset(owner, c, o)
+        false -> match x.value == o.value
             true -> owner
             false -> handOnOther(owner, c, o, x)
 
 verify handOn
-    cget(handOn(cnew(1, -1), 0, 3), 0) => 3
-    cget(handOn(cnew(1, -2), 0, 3), 0) => -3
-    cget(handOn(cnew(1, 3), 0, -2), 0) => -3
-    cget(handOn(cnew(1, -5), 0, -2), 0) => -2
-    cget(handOn(cnew(1, -5), 0, 1), 0) => -3
+    cget(handOn(cnew(1, -1), ixAt(0), num(3)), 0) => 3
+    cget(handOn(cnew(1, -2), ixAt(0), num(3)), 0) => -3
+    cget(handOn(cnew(1, 3), ixAt(0), num(-2)), 0) => -3
+    cget(handOn(cnew(1, -5), ixAt(0), num(-2)), 0) => -2
+    cget(handOn(cnew(1, -5), ixAt(0), num(1)), 0) => -3
 
-fn handOnOther(owner: Vector<Vector<Num>>, c: Int, o: Int, x: Int) -> Vector<Vector<Num>>
+fn handOnOther(owner: Vector<Vector<Num>>, c: Ix, o: Num, x: Num) -> Vector<Vector<Num>>
     ? "c, of owner x, reached from o as well."
-    match x <= -5
-        true -> match o == -2
-            true -> cset(owner, c, -2)
-            false -> match o == -5 - x
-                true -> cset(owner, c, o)
-                false -> cset(owner, c, -3)
-        false -> match x == -3
+    match x.value <= -5
+        true -> match o.value == -2
+            true -> nset(owner, c, Num(value = -2))
+            false -> match o.value == -5 - x.value
+                true -> nset(owner, c, o)
+                false -> nset(owner, c, Num(value = -3))
+        false -> match x.value == -3
             true -> owner
-            false -> cset(owner, c, -3)
+            false -> nset(owner, c, Num(value = -3))
 
 verify handOnOther
-    cget(handOnOther(cnew(1, -5), 0, 0, -5), 0) => 0
-    cget(handOnOther(cnew(1, -3), 0, 0, -3), 0) => -3
+    cget(handOnOther(cnew(1, -5), ixAt(0), num(0), num(-5)), 0) => 0
+    cget(handOnOther(cnew(1, -3), ixAt(0), num(0), num(-3)), 0) => -3
 
 record F
     owner: Vector<Vector<Num>>
     nameF: Vector<Int>
     levelF: Vector<Int>
 
-fn walkBack(b: Bytes, e: Int, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>) -> F
+fn walkBack(b: Bytes, e: Ix, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>) -> F
     ? "The second pass, from the last expression to the first: each hands its owner, final once it is met, to its parts, and one of a block puts its names and levels on the frontier; one no declaration reached goes to the main block (OwnersByOneWalkBack, FrontierInWalkBack)."
-    match e < 0
+    match e.value < 0
         true -> F(owner = owner, nameF = nameF, levelF = levelF)
-        false -> walkBackAt(b, e, cs, owner, nameF, levelF, cget(owner, e))
+        false -> walkBackAt(b, e, cs, owner, nameF, levelF, nget(owner, e))
 
-fn walkBackAt(b: Bytes, e: Int, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, o: Int) -> F
+fn walkBackAt(b: Bytes, e: Ix, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, o: Num) -> F
     ? "Expression e, of owner o: a block's, the main block's (on the frontier or not), a theorem's value or none yet."
-    match o >= 0
-        true -> walkBlock(b, e, cs, owner, nameF, levelF, o, cget(cs.kind, e))
-        false -> match o == -1
-            true -> walkBackAt(b, e, cs, cset(owner, e, -2), nameF, levelF, -2)
-            false -> match o >= -3
-                true -> walkBack(b, e - 1, cs, handedK(b, cs, e, owner, -2, cget(cs.kind, e)), nameF, levelF)
-                false -> walkBackAt(b, e, cs, cset(owner, e, -5 - o), nameF, levelF, -5 - o)
+    match o.value >= 0
+        true -> walkBlock(b, e, cs, owner, nameF, levelF, o, nget(cs.kind, e))
+        false -> match o.value == -1
+            true -> walkBackAt(b, e, cs, nset(owner, e, Num(value = -2)), nameF, levelF, Num(value = -2))
+            false -> match o.value >= -3
+                true -> walkBack(b, ixStep(e.value - 1), cs, handedK(b, cs, e, owner, Num(value = -2), nget(cs.kind, e)), nameF, levelF)
+                false -> walkBackAt(b, e, cs, nset(owner, e, numStep(-5 - o.value)), nameF, levelF, numStep(-5 - o.value))
 
-fn walkBlock(b: Bytes, e: Int, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, o: Int, k: Int) -> F
+fn walkBlock(b: Bytes, e: Ix, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, o: Num, k: Num) -> F
     ? "Expression e of block o, of kind word k: its owner handed to its parts, its names and levels on the frontier; an application or a binder read from the columns (ExprColumns)."
-    match Bits.and(k, 15)
+    match Bits.and(k.value, 15)
         0 -> walkRecord(b, e, cs, owner, nameF, levelF, o, recordAt(k))
-        1 -> walkBack(b, e - 1, cs, handOn(handOn(owner, cget32(cs.c1, e), o), cget32(cs.c2, e), o), nameF, levelF)
-        _ -> walkBack(b, e - 1, cs, handOn(handOn(owner, cget32(cs.c1, e), o), cget32(cs.c2, e), o), wanted(nameF, Bits.shiftRight(k, 4)), levelF)
+        1 -> walkBack(b, ixStep(e.value - 1), cs, handOn(handOn(owner, part(cs.c1, e), o), part(cs.c2, e), o), nameF, levelF)
+        _ -> walkBack(b, ixStep(e.value - 1), cs, handOn(handOn(owner, part(cs.c1, e), o), part(cs.c2, e), o), wanted(nameF, Bits.shiftRight(k.value, 4)), levelF)
 
-fn walkRecord(b: Bytes, e: Int, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, o: Int, p: Pos) -> F
+fn walkRecord(b: Bytes, e: Ix, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, o: Num, p: Pos) -> F
     ? "Expression e of block o read from its record at p."
     match tagAt(b, p)
-        8 -> walkBack(b, e - 1, cs, owner, nameF, sortWanted(b, levelF, p))
+        8 -> walkBack(b, ixStep(e.value - 1), cs, owner, nameF, sortWanted(b, levelF, p))
         9 -> walkConst(b, e, cs, owner, nameF, levelF, rv(b, next1(p)))
         11 -> walkNamed(b, e, cs, owner, nameF, levelF, o, rv(b, next2(p)), 2)
         12 -> walkNamed(b, e, cs, owner, nameF, levelF, o, rv(b, next2(p)), 2)
         13 -> walkNamed(b, e, cs, owner, nameF, levelF, o, rv(b, next1(p)), 3)
         16 -> walkNamed(b, e, cs, owner, nameF, levelF, o, rv(b, next1(p)), 0)
-        _ -> walkBack(b, e - 1, cs, handed(b, p, e, owner, o), nameF, levelF)
+        _ -> walkBack(b, ixStep(e.value - 1), cs, handed(b, p, e, owner, o), nameF, levelF)
 
 verify walkRecord
-    walkRecord(Bytes.fromList([9, 3, 1, 0]), 0, cols0(), cnew(1, 0), Vector.fromList([-2, -2, -2, -2]), Vector.fromList([-2]), 0, at(0)).nameF => Vector.fromList([-2, -2, -2, -1])
-    walkRecord(Bytes.fromList([9, 3, 1, 0]), 0, cols0(), cnew(1, 0), Vector.fromList([-2, -2, -2, -2]), Vector.fromList([-2]), 0, at(0)).levelF => Vector.fromList([-1])
+    walkRecord(Bytes.fromList([9, 3, 1, 0]), ixAt(0), cols0(), cnew(1, 0), Vector.fromList([-2, -2, -2, -2]), Vector.fromList([-2]), num(0), at(0)).nameF => Vector.fromList([-2, -2, -2, -1])
+    walkRecord(Bytes.fromList([9, 3, 1, 0]), ixAt(0), cols0(), cnew(1, 0), Vector.fromList([-2, -2, -2, -2]), Vector.fromList([-2]), num(0), at(0)).levelF => Vector.fromList([-1])
 
 verify walkBlock
-    walkBlock(Bytes.fromList([]), 2, cols2(34, 0, 1), cnew(3, -1), Vector.fromList([-2, -2, -2]), Vector.fromList([]), 0, 34).nameF => Vector.fromList([-2, -2, -1])
+    walkBlock(Bytes.fromList([]), ixAt(2), cols2(34, 0, 1), cnew(3, -1), Vector.fromList([-2, -2, -2]), Vector.fromList([]), num(0), num(34)).nameF => Vector.fromList([-2, -2, -1])
 
-fn walkConst(b: Bytes, e: Int, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, nm: At) -> F
+fn walkConst(b: Bytes, e: Ix, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, nm: At) -> F
     ? "A constant of a block: its name and its levels on the frontier."
-    walkBack(b, e - 1, cs, owner, wanted(nameF, nm.value), wantedList(b, levelF, rv(b, nm.at)))
+    walkBack(b, ixStep(e.value - 1), cs, owner, wanted(nameF, nm.value), wantedList(b, levelF, rv(b, nm.at)))
 
-fn walkNamed(b: Bytes, e: Int, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, o: Int, nm: At, parts: Int) -> F
+fn walkNamed(b: Bytes, e: Ix, cs: Cols, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, o: Num, nm: At, parts: Int) -> F
     ? "A binder (2 parts), a let (3) or a projection (0, its field then its structure) of a block: its name on the frontier, its owner handed to its parts."
-    walkBack(b, e - 1, cs, namedParts(b, rv(b, nm.at), e, owner, o, parts), wanted(nameF, nm.value), levelF)
+    walkBack(b, ixStep(e.value - 1), cs, namedParts(b, rv(b, nm.at), e, owner, o, parts), wanted(nameF, nm.value), levelF)
 
 verify walkConst
-    walkConst(Bytes.fromList([0]), 0, cols0(), cnew(1, 0), Vector.fromList([-2]), Vector.fromList([-2]), At(value = 0, at = at(0))).nameF => Vector.fromList([-1])
+    walkConst(Bytes.fromList([0]), ixAt(0), cols0(), cnew(1, 0), Vector.fromList([-2]), Vector.fromList([-2]), At(value = 0, at = at(0))).nameF => Vector.fromList([-1])
 
 verify walkNamed
-    cget(walkNamed(Bytes.fromList([0, 1]), 1, cols0(), cnew(2, -2), Vector.fromList([-2]), Vector.fromList([]), 0, At(value = 0, at = at(0)), 0).owner, 0) => -3
+    cget(walkNamed(Bytes.fromList([0, 1]), ixAt(1), cols0(), cnew(2, -2), Vector.fromList([-2]), Vector.fromList([]), num(0), At(value = 0, at = at(0)), 0).owner, 0) => -3
 
-fn namedParts(b: Bytes, x: At, e: Int, owner: Vector<Vector<Num>>, o: Int, parts: Int) -> Vector<Vector<Num>>
+fn namedParts(b: Bytes, x: At, e: Ix, owner: Vector<Vector<Num>>, o: Num, parts: Int) -> Vector<Vector<Num>>
     ? "The parts after a name: x is the first field after it."
     match parts
         2 -> two(b, x, e, owner, o)
@@ -840,16 +901,16 @@ fn namedParts(b: Bytes, x: At, e: Int, owner: Vector<Vector<Num>>, o: Int, parts
         _ -> one(rv(b, x.at), e, owner, o)
 
 verify namedParts
-    cget(namedParts(Bytes.fromList([1]), At(value = 1, at = at(0)), 1, cnew(1, -2), 0, 0), 0) => -3
-    cget(namedParts(Bytes.fromList([1]), At(value = 1, at = at(0)), 1, cnew(2, -1), 4, 2), 0) => 4
+    cget(namedParts(Bytes.fromList([1]), At(value = 1, at = at(0)), ixAt(1), cnew(1, -2), num(0), 0), 0) => -3
+    cget(namedParts(Bytes.fromList([1]), At(value = 1, at = at(0)), ixAt(1), cnew(2, -1), num(4), 2), 0) => 4
 
-fn handedK(b: Bytes, cs: Cols, e: Int, owner: Vector<Vector<Num>>, o: Int, k: Int) -> Vector<Vector<Num>>
+fn handedK(b: Bytes, cs: Cols, e: Ix, owner: Vector<Vector<Num>>, o: Num, k: Num) -> Vector<Vector<Num>>
     ? "o handed to the parts of expression e of kind word k: read from its record, or from the columns (ExprColumns)."
-    match Bits.and(k, 15) == 0
+    match Bits.and(k.value, 15) == 0
         true -> handed(b, recordAt(k), e, owner, o)
-        false -> handOn(handOn(owner, cget32(cs.c1, e), o), cget32(cs.c2, e), o)
+        false -> handOn(handOn(owner, part(cs.c1, e), o), part(cs.c2, e), o)
 
-fn handed(b: Bytes, p: Pos, e: Int, owner: Vector<Vector<Num>>, o: Int) -> Vector<Vector<Num>>
+fn handed(b: Bytes, p: Pos, e: Ix, owner: Vector<Vector<Num>>, o: Num) -> Vector<Vector<Num>>
     ? "o handed to the parts of the expression record at p."
     match tagAt(b, p)
         10 -> two(b, rv(b, next1(p)), e, owner, o)
@@ -860,20 +921,28 @@ fn handed(b: Bytes, p: Pos, e: Int, owner: Vector<Vector<Num>>, o: Int) -> Vecto
         17 -> one(rv(b, next1(p)), e, owner, o)
         _ -> owner
 
-fn one(x: At, e: Int, owner: Vector<Vector<Num>>, o: Int) -> Vector<Vector<Num>>
+fn one(x: At, e: Ix, owner: Vector<Vector<Num>>, o: Num) -> Vector<Vector<Num>>
     ? "One part."
-    handOn(owner, e - x.value, o)
+    handOn(owner, back(e, x.value), o)
 
-fn two(b: Bytes, x: At, e: Int, owner: Vector<Vector<Num>>, o: Int) -> Vector<Vector<Num>>
+fn back(e: Ix, d: Int) -> Ix
+    ? "The id d back from e, none when it is not one: d is read from the file, any size (IdsInRange)."
+    ixAt(e.value - d)
+
+verify back
+    back(ixAt(5), 2).value => 3
+    back(ixAt(5), 9).value => -1
+
+fn two(b: Bytes, x: At, e: Ix, owner: Vector<Vector<Num>>, o: Num) -> Vector<Vector<Num>>
     ? "Two parts."
     y = rv(b, x.at)
-    handOn(handOn(owner, e - x.value, o), e - y.value, o)
+    handOn(handOn(owner, back(e, x.value), o), back(e, y.value), o)
 
-fn letParts(b: Bytes, x: At, e: Int, owner: Vector<Vector<Num>>, o: Int) -> Vector<Vector<Num>>
+fn letParts(b: Bytes, x: At, e: Ix, owner: Vector<Vector<Num>>, o: Num) -> Vector<Vector<Num>>
     ? "A let's type, value and body."
     y = rv(b, x.at)
     z = rv(b, y.at)
-    handOn(handOn(handOn(owner, e - x.value, o), e - y.value, o), e - z.value, o)
+    handOn(handOn(handOn(owner, back(e, x.value), o), back(e, y.value), o), back(e, z.value), o)
 
 decision NumberedAsWritten
     date = "2026-11-12"
@@ -1115,7 +1184,7 @@ fn withV0(b: Bytes, tr: Bytes) -> Result<Laid, String>
 fn laidAfter(b: Bytes, base: Int, end: Int, names: Int, levels: Int, decls: Int, exprs: Int, a: A) -> Result<Laid, String>
     ? "The passes after the first, from what the first found in b, the records of version 0 from base to end, of these counts (OneStepPack in Export.Pack): owners and the frontier handed back, then the writing, which numbers (FrontierInWalkBack, NumberedAsWritten)."
     cs = Cols(kind = a.eoff, c1 = a.c1, c2 = a.c2)
-    f = walkBack(b, a.exprs - 1, cs, a.owner, Vector.new(names, -2)?, Vector.new(levels, -2)?)
+    f = walkBack(b, ixAt(a.exprs - 1), cs, a.owner, Vector.new(names, -2)?, Vector.new(levels, -2)?)
     codes = Codes(names = Vector.fromList(codesOf(a.known, List.fromVector(a.names), [])), nat = codeIn(a.known, Core.Names.str(Core.Names.anon(), "Nat")), str = codesOf(a.known, litNames, []))
     w = written(b, at(base), at(end), zeroes(W.update(fresh(), open = Vector.new(decls, acc0())?, ids = idsW(a.exprs)?), geti(f.nameF, 0) == -1, geti(f.levelF, 0) == -1), f.owner, zeroed(f.nameF), zeroed(f.levelF), codes, cs)?
     laid(Bytes.take(Bytes.drop(b, 8), base - 8), names, levels, decls, exprs, w)
@@ -1640,25 +1709,25 @@ verify seeded
     cget(seeded(cnew(2, -1), [Piece.Ref(1), Piece.Val(1)], 1, 7), 1) => -2
 
 verify walkBack
-    cget(walkBack(Bytes.fromList([7, 0, 10, 1, 1]), 1, colsK(cset(cnew(2, 0), 1, 32)), cset(cnew(2, -1), 1, 4), Vector.fromList([]), Vector.fromList([])).owner, 0) => 4
-    cget(walkBack(Bytes.fromList([7, 0, 10, 1, 1]), 1, colsK(cset(cnew(2, 0), 1, 32)), cset(cnew(2, -1), 1, -5), Vector.fromList([]), Vector.fromList([])).owner, 0) => 0
-    cget(walkBack(Bytes.fromList([7, 0, 10, 1, 1]), 1, colsK(cset(cnew(2, 0), 1, 32)), cset(cset(cnew(2, -1), 1, 4), 0, -2), Vector.fromList([]), Vector.fromList([])).owner, 0) => -3
-    cget(walkBack(Bytes.fromList([7, 0, 10, 1, 1]), 1, colsK(cset(cnew(2, 0), 1, 32)), cset(cset(cnew(2, -1), 1, -2), 0, -5), Vector.fromList([]), Vector.fromList([])).owner, 0) => -2
+    cget(walkBack(Bytes.fromList([7, 0, 10, 1, 1]), ixAt(1), colsK(cset(cnew(2, 0), 1, 32)), cset(cnew(2, -1), 1, 4), Vector.fromList([]), Vector.fromList([])).owner, 0) => 4
+    cget(walkBack(Bytes.fromList([7, 0, 10, 1, 1]), ixAt(1), colsK(cset(cnew(2, 0), 1, 32)), cset(cnew(2, -1), 1, -5), Vector.fromList([]), Vector.fromList([])).owner, 0) => 0
+    cget(walkBack(Bytes.fromList([7, 0, 10, 1, 1]), ixAt(1), colsK(cset(cnew(2, 0), 1, 32)), cset(cset(cnew(2, -1), 1, 4), 0, -2), Vector.fromList([]), Vector.fromList([])).owner, 0) => -3
+    cget(walkBack(Bytes.fromList([7, 0, 10, 1, 1]), ixAt(1), colsK(cset(cnew(2, 0), 1, 32)), cset(cset(cnew(2, -1), 1, -2), 0, -5), Vector.fromList([]), Vector.fromList([])).owner, 0) => -2
 
 verify walkBackAt
-    cget(walkBackAt(Bytes.fromList([7, 0]), 0, colsK(cnew(1, 0)), cnew(1, -1), Vector.fromList([]), Vector.fromList([]), -1).owner, 0) => -2
+    cget(walkBackAt(Bytes.fromList([7, 0]), ixAt(0), colsK(cnew(1, 0)), cnew(1, -1), Vector.fromList([]), Vector.fromList([]), num(-1)).owner, 0) => -2
 
 verify handed
-    cget(handed(Bytes.fromList([17, 1]), at(0), 1, cnew(1, -1), 5), 0) => 5
+    cget(handed(Bytes.fromList([17, 1]), at(0), ixAt(1), cnew(1, -1), num(5)), 0) => 5
 
 verify one
-    cget(one(At(value = 1, at = at(0)), 1, cnew(1, -1), 3), 0) => 3
+    cget(one(At(value = 1, at = at(0)), ixAt(1), cnew(1, -1), num(3)), 0) => 3
 
 verify two
-    cget(two(Bytes.fromList([1]), At(value = 1, at = at(0)), 2, cnew(2, -1), 3), 1) => 3
+    cget(two(Bytes.fromList([1]), At(value = 1, at = at(0)), ixAt(2), cnew(2, -1), num(3)), 1) => 3
 
 verify letParts
-    cget(letParts(Bytes.fromList([1, 1]), At(value = 1, at = at(0)), 1, cnew(1, -1), 3), 0) => 3
+    cget(letParts(Bytes.fromList([1, 1]), At(value = 1, at = at(0)), ixAt(1), cnew(1, -1), num(3)), 0) => 3
 
 
 
@@ -1822,8 +1891,8 @@ verify cols2
     cget32(cols2(1, 0, 1).c2, 2) => 1
 
 verify handedK
-    cget(handedK(Bytes.fromList([]), cols2(1, 0, 1), 2, cnew(3, -1), 5, 1), 1) => 5
-    cget(handedK(Bytes.fromList([17, 1]), cols2(1, 0, 1), 1, cnew(3, -1), 5, 0), 0) => 5
+    cget(handedK(Bytes.fromList([]), cols2(1, 0, 1), ixAt(2), cnew(3, -1), num(5), num(1)), 1) => 5
+    cget(handedK(Bytes.fromList([17, 1]), cols2(1, 0, 1), ixAt(1), cnew(3, -1), num(5), num(0)), 0) => 5
 
 
 
