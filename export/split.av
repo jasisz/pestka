@@ -13,7 +13,7 @@ module Split
         "expression's owner to its parts; one numbers expressions in the main"
         "block and in their blocks and finds the frontier; the last writes."
         "The writer is deterministic: the same file gives the same bytes."
-    exposes [split, image, imageOf, laidMessage2, written2, laidAfter, Laid, A, Cols, DeclP, Placed, placedOne, declOf, seeded, placedUnlessSkipped, nameStrAt, nameNumAt, at, cset, cget, noChunk, nat32, noChunk32, cget32, cnew32, num, numStep, u32Step]
+    exposes [split, image, imageOf, laidMessage2, written2, laidAfter, Laid, A, Cols, DeclP, Placed, placedOne, declOf, seeded, placedUnlessSkipped, nameStrAt, nameNumAt, at, cset, cget, noChunk, nat32, noChunk32, cget32, cnew32, num, numStep, u32Step, partsOf, partsLimit]
     exposes opaque [Ix, U32, Num]
     depends [Bytes, Core.Names, Core.Lazy, Export.Susz]
     effects [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
@@ -406,6 +406,67 @@ decision ExprColumns
     rejected = ["VersionZeroRecords"]
     impacts = [Cols, U32, walkBack, written, colsWritten]
 
+decision PartsInOneWord
+    date = "2026-11-12"
+    reason =
+        "An application's or a binder's two parts were two columns of u32,"
+        "each read through its own chunk by the walk back and by the writer"
+        "and each set by the packer. They are one column of words now, the"
+        "first part in the low 31 bits and the second above them, read and"
+        "set once. So the columns hold expressions below 2^31 (partsLimit):"
+        "the packer refuses a file with more, which would not fit in memory"
+        "as these passes hold it anyway."
+    chosen = "PartsInOneWord"
+    rejected = ["ColumnPerPart"]
+    impacts = [Cols, partsOf, first, second, partsLimit, walkBlock, handedK, colWritten]
+
+fn partsLimit() -> Int
+    ? "The ids the columns hold are below this, 2^31 - 1 (PartsInOneWord)."
+    2147483647
+
+verify partsLimit
+    partsLimit() => 2147483647
+
+fn partsOf(c1: Int, c2: Int) -> Num
+    ? "Parts c1 and c2 as one word; a part out of range as 0, as nat32 makes it (PartsInOneWord)."
+    partsWord(u32Step(c1), u32Step(c2))
+
+verify partsOf
+    first(partsOf(3, 5)).value => 3
+    second(partsOf(3, 5)).value => 5
+    second(partsOf(3, -5)).value => 0
+    first(partsOf(2147483647, 5)).value => 0
+
+fn partsWord(a: U32, b: U32) -> Num
+    ? "Parts a and b, each below 2^32, as one word, each 0 unless below partsLimit (PartsInOneWord)."
+    numStep(Bits.or(partBits(a), partBits(b) * 2147483648))
+
+verify partsWord
+    second(partsWord(nat32(1), nat32(4294967295))).value => 0
+
+fn partBits(a: U32) -> Int
+    ? "a when the columns hold it, else 0."
+    match a.value < 2147483647
+        true -> a.value
+        false -> 0
+
+verify partBits
+    partBits(nat32(2147483647)) => 0
+
+fn first(p: Num) -> Ix
+    ? "The first part of a word of parts (PartsInOneWord)."
+    ixStep(Bits.and(p.value, 2147483647))
+
+verify first
+    first(num(2147483649)).value => 1
+
+fn second(p: Num) -> Ix
+    ? "The second part of a word of parts (PartsInOneWord)."
+    ixStep(Bits.shiftRight(p.value, 31))
+
+verify second
+    second(num(2147483649)).value => 1
+
 record U32
     value: Int
 
@@ -484,13 +545,6 @@ verify cget32
 verify uget
     uget(cnew32(1), ixAt(0)) => 0
 
-fn part(v: Vector<Vector<U32>>, x: Ix) -> Ix
-    ? "The part of expression x a column holds, an id (ExprColumns, IdsInRange)."
-    ixStep(uget(v, x))
-
-verify part
-    part(cnew32(1), ixAt(0)).value => 0
-
 fn cset32(v: Vector<Vector<U32>>, i: Int, x: Int) -> Vector<Vector<U32>>
     ? "v with x as number i: its chunk taken out, set and put back (ChunkedNumbers, IdsInRange)."
     k = ixAt(i)
@@ -520,8 +574,7 @@ verify cput32
 
 record Cols
     kind: Vector<Vector<Num>>
-    c1: Vector<Vector<U32>>
-    c2: Vector<Vector<U32>>
+    parts: Vector<Vector<Num>>
 
 fn recordAt(k: Num) -> Pos
     ? "Where the record of a kind word that names one starts (ExprColumns)."
@@ -730,8 +783,7 @@ fn rules(b: Bytes, c: Cur, n: Int) -> Cur
 
 record A
     eoff: Vector<Vector<Num>>
-    c1: Vector<Vector<U32>>
-    c2: Vector<Vector<U32>>
+    parts: Vector<Vector<Num>>
     owner: Vector<Vector<Num>>
     names: Vector<Name>
     known: Map<Int, List<Placed>>
@@ -741,7 +793,7 @@ record A
 fn scanned(b: Bytes, p: Pos, end: Pos, ei: Int, di: Int, nameId: Int, eoff: Vector<Vector<Num>>, owner: Vector<Vector<Num>>, names: Vector<Name>, known: Map<Int, List<Placed>>) -> A
     ? "The first pass: names built, where each expression starts, owners seeded by the declarations, and where each name is first placed (OwnersByOneWalkBack, PlaceCodes). A record at none stops it; the last pass, reading the same records, reports it (ReadAsTheReaderReads)."
     match Bool.or(off(p) >= off(end), off(p) < 0)
-        true -> A(eoff = eoff, c1 = Vector.fromList([]), c2 = Vector.fromList([]), owner = owner, names = names, known = known, exprs = ei, decls = di)
+        true -> A(eoff = eoff, parts = Vector.fromList([]), owner = owner, names = names, known = known, exprs = ei, decls = di)
         false -> match tagAt(b, p)
             1 -> scanned(b, skipRecord(b, p), end, ei, di, nameId + 1, eoff, owner, Option.withDefault(Vector.set(names, nameId, nameStrAt(b, p, names)), names), known)
             2 -> scanned(b, skipRecord(b, p), end, ei, di, nameId + 1, eoff, owner, Option.withDefault(Vector.set(names, nameId, nameNumAt(b, p, names)), names), known)
@@ -1004,8 +1056,8 @@ fn walkBlock(b: Bytes, e: Ix, cs: Cols, owner: Own, nameF: Vector<Int>, levelF: 
     ? "Expression e of block o, of kind word k: its owner handed to its parts, its names and levels on the frontier; an application or a binder read from the columns (ExprColumns)."
     match Bits.and(k.value, 15)
         0 -> walkRecord(b, e, cs, owner, nameF, levelF, o, recordAt(k))
-        1 -> walkBack(b, ixStep(e.value - 1), cs, handOn(handOn(owner, part(cs.c1, e), o), part(cs.c2, e), o), nameF, levelF)
-        _ -> walkBack(b, ixStep(e.value - 1), cs, handOn(handOn(owner, part(cs.c1, e), o), part(cs.c2, e), o), wanted(nameF, Bits.shiftRight(k.value, 4)), levelF)
+        1 -> walkBack(b, ixStep(e.value - 1), cs, handOnParts(owner, nget(cs.parts, e), o), nameF, levelF)
+        _ -> walkBack(b, ixStep(e.value - 1), cs, handOnParts(owner, nget(cs.parts, e), o), wanted(nameF, Bits.shiftRight(k.value, 4)), levelF)
 
 fn walkRecord(b: Bytes, e: Ix, cs: Cols, owner: Own, nameF: Vector<Int>, levelF: Vector<Int>, o: Num, p: Pos) -> F
     ? "Expression e of block o read from its record at p."
@@ -1054,7 +1106,14 @@ fn handedK(b: Bytes, cs: Cols, e: Ix, owner: Own, o: Num, k: Num) -> Own
     ? "o handed to the parts of expression e of kind word k: read from its record, or from the columns (ExprColumns)."
     match Bits.and(k.value, 15) == 0
         true -> handed(b, recordAt(k), e, owner, o)
-        false -> handOn(handOn(owner, part(cs.c1, e), o), part(cs.c2, e), o)
+        false -> handOnParts(owner, nget(cs.parts, e), o)
+
+fn handOnParts(owner: Own, ps: Num, o: Num) -> Own
+    ? "o handed to the two parts of an expression of the columns, ps its word of parts (PartsInOneWord)."
+    handOn(handOn(owner, first(ps), o), second(ps), o)
+
+verify handOnParts
+    cget(owned(handOnParts(own(cnew(2, -1)), partsOf(0, 1), num(4))), 1) => 4
 
 fn handed(b: Bytes, p: Pos, e: Ix, owner: Own, o: Num) -> Own
     ? "o handed to the parts of the expression record at p."
@@ -1331,7 +1390,7 @@ fn withV0(b: Bytes, tr: Bytes) -> Result<Laid, String>
 
 fn laidAfter(b: Bytes, base: Int, end: Int, names: Int, levels: Int, decls: Int, exprs: Int, a: A) -> Result<Laid, String>
     ? "The passes after the first, from what the first found in b, the records of version 0 from base to end, of these counts (OneStepPack in Export.Pack): owners and the frontier handed back, then the writing, which numbers (FrontierInWalkBack, NumberedAsWritten)."
-    cs = Cols(kind = a.eoff, c1 = a.c1, c2 = a.c2)
+    cs = Cols(kind = a.eoff, parts = a.parts)
     f = walkBack(b, ixAt(a.exprs - 1), cs, own(a.owner), Vector.new(names, -2)?, Vector.new(levels, -2)?)
     codes = Codes(names = Vector.fromList(codesOf(a.known, List.fromVector(a.names), [])), nat = codeIn(a.known, Core.Names.str(Core.Names.anon(), "Nat")), str = codesOf(a.known, litNames, []))
     w = written(b, at(base), at(end), zeroes(W.update(fresh(), open = Vector.new(decls, acc0())?, ids = idsW(a.exprs)?), geti(f.nameF, 0) == -1, geti(f.levelF, 0) == -1), f.owner, zeroed(f.nameF), zeroed(f.levelF), codes, cs)?
@@ -1573,8 +1632,9 @@ fn colWritten(b: Bytes, q: Pos, left: Num, end: Pos, w: W, owner: Vector<Vector<
     ? "One expression of the columns, by its owner."
     o = nget(owner, w.ei)
     k = nget(cs.kind, w.ei)
-    c1 = part(cs.c1, w.ei)
-    c2 = part(cs.c2, w.ei)
+    ps = nget(cs.parts, w.ei)
+    c1 = first(ps)
+    c2 = second(ps)
     match o.value >= 0
         true -> colsWritten(b, q, numStep(left.value - 1), end, colBlock(w, owner, nameF, o, k, c1, c2), owner, nameF, levelF, codes, cs)
         false -> colMainDone(b, q, left, end, colMainW(w, k, c1, c2), owner, nameF, levelF, codes, cs, o)
@@ -2130,7 +2190,7 @@ verify laid
     List.len(Result.withDefault(laid(Bytes.fromList([]), 1, 1, 0, 0, fresh()), Laid(hd = Bytes.fromList([]), mains = [], proofs = [], message = "")).proofs) => 1
 
 verify laidAfter
-    laidMessage2(laidAfter(Bytes.fromList([83, 85, 83, 90, 0, 0, 0, 0, 0]), 9, 9, 1, 1, 0, 0, A(eoff = cnew(0, 0), c1 = cnew32(0), c2 = cnew32(0), owner = cnew(0, -1), names = Vector.fromList([Core.Names.anon()]), known = {}, exprs = 0, decls = 0))) == "" => false
+    laidMessage2(laidAfter(Bytes.fromList([83, 85, 83, 90, 0, 0, 0, 0, 0]), 9, 9, 1, 1, 0, 0, A(eoff = cnew(0, 0), parts = cnew(0, 0), owner = cnew(0, -1), names = Vector.fromList([Core.Names.anon()]), known = {}, exprs = 0, decls = 0))) == "" => false
 
 fn laidMessage2(r: Result<Laid, String>) -> String
     ? "What a laid file says of itself, or why there is none, for examples."
@@ -2146,7 +2206,7 @@ verify imageOf
 
 fn colsK(kind: Vector<Vector<Num>>) -> Cols
     ? "Columns of kind words only, for examples."
-    Cols(kind = kind, c1 = cnew32(0), c2 = cnew32(0))
+    Cols(kind = kind, parts = cnew(0, 0))
 
 verify colsK
     Vector.len(colsK(cnew(1, 0)).kind) => 1
@@ -2160,10 +2220,10 @@ verify cols0
 
 fn cols2(k: Int, c1: Int, c2: Int) -> Cols
     ? "Three expressions, the last of kind word k with parts c1 and c2, for examples."
-    Cols(kind = cset(cnew(3, 0), 2, k), c1 = cset32(cnew32(3), 2, c1), c2 = cset32(cnew32(3), 2, c2))
+    Cols(kind = cset(cnew(3, 0), 2, k), parts = nset(cnew(3, 0), ixAt(2), partsOf(c1, c2)))
 
 verify cols2
-    cget32(cols2(1, 0, 1).c2, 2) => 1
+    second(nget(cols2(1, 0, 1).parts, ixAt(2))).value => 1
 
 verify handedK
     cget(owned(handedK(Bytes.fromList([]), cols2(1, 0, 1), ixAt(2), own(cnew(3, -1)), num(5), num(1))), 1) => 5
