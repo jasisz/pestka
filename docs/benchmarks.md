@@ -36,18 +36,21 @@ below that profile was made from.
 
 ### Susz
 
-`mathlib` packed into [Susz](susz.md) by `pestka pack` (5.90 GB of ndjson to
-661 MB, in about a minute) and checked from that, with the same build as the
-table above and the same verdict and output. `bin/build-pgo` also packs the
-export it is given into Susz and checks that, so both readers are in the
-profile: that took 6 G off reading Susz and left ndjson where it was.
+`mathlib` packed into [Susz 1](susz.md) by the Rust `susz` tool, then checked
+from the Susz file. Measured on the same Apple M2 Pro with a PGO build, but
+compiled by Aver main (44483f9), not 0.33.1. The machine was loaded (load
+average about 6 to 7) during these runs, so the times are a little high.
 
-| | From ndjson | From Susz |
-|---|---|---|
-| Reading, to the `constants` line, one thread | 23.8 s, 184.1 G | 11.0 s, 95.3 G |
-| Reading, four workers | 14.6 s, 239.4 G | 10.8 s, 95.3 G (read on one thread) |
-| Whole check, four workers | 76.7 s, 7.6 GB, 1313.7 G | 70.6 s, 7.6 GB, 1155.9 G |
-| Whole check, one worker | 184 s, 7.0 GB, 1196.9 G | 179 s, 7.1 GB, 1108.0 G |
+| Step | Instructions | Time | Peak |
+|---|---|---|---|
+| `susz pack --no-index`: 5.90 GB of ndjson to a 637 MB file | 34.3 G | 6.0 s | 2.7 GB |
+| Pestka on the Susz file, four workers | 1123.3 G | 70.2 s | 6.22 GB |
+| The same export as ndjson, today's Arena build, one worker | 1222.6 G | 210 s | 6.93 GB |
+
+Packing and checking together take about 1158 G and 76 s. Packing and
+checking do not run at the same time, so the peak is Pestka's. For a large
+export, run `susz pack` first and then check the Susz file. `pestka pack`
+writes the same bytes but is slower.
 
 ### As WebAssembly
 
