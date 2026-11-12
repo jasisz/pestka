@@ -21,10 +21,23 @@ module Susz
     effects [Disk.readBytesAt, Disk.size]
 
 fn isSusz(path: String) -> Bool
-    ? "Whether the file starts with Susz's signature, SUSZ: such a file is read as Susz, and one of an internal version is rejected by its header."
-    ! [Disk.readBytesAt]
+    ? "Whether the file starts with Susz's signature, SUSZ, or ends with its closing one, ZSUS: such a file is read as Susz, and one whose header is not that of Susz 1 is rejected or declined by it. No ndjson export ends in ZSUS, since its last line would not be JSON."
+    ! [Disk.readBytesAt, Disk.size]
     match Disk.readBytesAt(path, 0, 4)
-        Result.Ok(b) -> b == Bytes.fromList([83, 85, 83, 90])
+        Result.Ok(b) -> match b == Bytes.fromList([83, 85, 83, 90])
+            true -> true
+            false -> endsSusz(path)
+        Result.Err(_) -> false
+
+fn endsSusz(path: String) -> Bool
+    ? "Whether the file's last four bytes are ZSUS."
+    ! [Disk.readBytesAt, Disk.size]
+    match Disk.size(path)
+        Result.Ok(n) -> match n >= 8
+            true -> match Disk.readBytesAt(path, n - 4, 4)
+                Result.Ok(b) -> b == Bytes.fromList([90, 83, 85, 83])
+                Result.Err(_) -> false
+            false -> false
         Result.Err(_) -> false
 
 decision ChunkWithMargin
