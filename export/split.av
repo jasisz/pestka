@@ -1458,7 +1458,7 @@ fn colWritten(b: Bytes, q: Pos, left: Num, end: Pos, w: W, owner: Vector<Vector<
     c2 = part(cs.c2, w.ei)
     match o.value >= 0
         true -> colsWritten(b, q, numStep(left.value - 1), end, colBlock(w, owner, nameF, o, k, c1, c2), owner, nameF, levelF, codes, cs)
-        false -> colMainDone(b, q, left, end, mainExprOut(w, colMain(w.main, k, c1, c2, w.mainNext, w.ids)), owner, nameF, levelF, codes, cs, o)
+        false -> colMainDone(b, q, left, end, colMainW(w, k, c1, c2), owner, nameF, levelF, codes, cs, o)
 
 fn colMainDone(b: Bytes, q: Pos, left: Num, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, levelF: Vector<Int>, codes: Codes, cs: Cols, o: Num) -> Result<W, String>
     ? "After a main expression of the columns: its frontier entry, as mainExprWritten."
@@ -1472,6 +1472,32 @@ fn colFrontier(b: Bytes, q: Pos, left: Num, end: Pos, owner: Vector<Vector<Num>>
 
 verify colFrontier
     Result.withDefault(colFrontier(Bytes.fromList([]), at(0), num(1), at(0), cnew(1, -2), fresh(), Vector.fromList([]), Vector.fromList([]), codes0(), cols0()), fresh()).fE => 1
+
+fn colMainW(w: W, k: Num, c1: Ix, c2: Ix) -> W
+    ? "An expression of the columns written into the main block, as colMain writes it and mainExprOut counts it; the main block's list moved out of w and onto, never read as a copy (BlocksTakenOut)."
+    code = Bits.and(k.value, 15)
+    d1 = numStep(w.mainNext.value - idOf(w.ids, c1))
+    d2 = numStep(w.mainNext.value - idOf(w.ids, c2))
+    w1 = W.update(w, main = List.prepend(colTag(code), w.main))
+    w2 = match code == 1
+        true -> w1
+        false -> W.update(w1, main = uwn(List.prepend(code - headBase(code), w1.main), numStep(Bits.shiftRight(k.value, 4))))
+    w3 = W.update(w2, main = uwn(uwn(w2.main, d1), d2))
+    W.update(w3, ids = idSet(w3.ids, w3.ei, w3.mainNext))
+
+verify colMainW
+    colMainW(W.update(fresh(), ids = ids0(1), mainNext = ixAt(1)), num(34), ixAt(0), ixAt(0)).main => colMain([], num(34), ixAt(0), ixAt(0), ixAt(1), ids0(1))
+    colMainW(W.update(fresh(), ids = ids0(1), mainNext = ixAt(1)), num(1), ixAt(0), ixAt(0)).main => colMain([], num(1), ixAt(0), ixAt(0), ixAt(1), ids0(1))
+
+fn colTag(code: Int) -> Int
+    ? "The tag of kind code code: 10 for an application (1), 11 for a lambda, 12 for a pi."
+    match code == 1
+        true -> 10
+        false -> headTag(code)
+
+verify colTag
+    colTag(1) => 10
+    colTag(7) => 12
 
 fn colHead(acc: List<Int>, k: Num) -> List<Int>
     ? "The tag of kind word k, and a binder's annotation byte."
@@ -1500,11 +1526,89 @@ verify colMain
 
 fn colBlock(w: W, owner: Vector<Vector<Num>>, nameF: Vector<Int>, o: Num, k: Num, c1: Ix, c2: Ix) -> W
     ? "An expression of the columns into o's block, after a mark when it stood before a later declaration than the block's last record, as blockWritten; numbered the block's next (NumberedAsWritten)."
-    a1 = markedAt(Option.withDefault(Vector.get(w.open, o.value), acc0()), w.di)
-    out = colBlockOut(a1.out, k, c1, c2, o, a1.k, owner, w.ids, nameF)
-    w1 = W.update(w, open = Option.withDefault(Vector.set(w.open, o.value, Acc(out = out, k = ixStep(a1.k.value + 1), mark = a1.mark, fine = a1.fine)), w.open))
-    w2 = W.update(w1, ids = idSet(w1.ids, w1.ei, a1.k))
+    n = openCount(w.open, o)
+    w1 = W.update(w, open = colOpened(w.open, w.di, k, c1, c2, o, owner, w.ids, nameF))
+    w2 = W.update(w1, ids = idSet(w1.ids, w1.ei, n))
     W.update(w2, ei = ixStep(w2.ei.value + 1))
+
+decision BlocksTakenOut
+    date = "2026-11-12"
+    reason =
+        "An expression written into its block read the block's open record"
+        "out of the vector of open blocks as a copy, so the bytes written"
+        "onto it went to a list held twice: each byte claimed its place"
+        "with an atomic exchange and took a second hold on the buffer. The"
+        "open record is now taken out with a placeholder put in its place"
+        "(acc0, which allocates nothing), written to as the only holder and"
+        "put back."
+    chosen = "BlocksTakenOut"
+    rejected = ["BlocksReadAsCopies"]
+    impacts = [colBlock, colOpened, openCount]
+
+fn openCount(v: Vector<Acc>, o: Num) -> Ix
+    ? "How many expressions block o holds so far, 0 when there is no such block."
+    match Vector.get(v, o.value)
+        Option.Some(a) -> a.k
+        Option.None -> Ix(value = 0)
+
+verify openCount
+    openCount(Vector.fromList([acc0()]), num(3)) => Ix(value = 0)
+
+fn colOpened(v: Vector<Acc>, di: Ix, k: Num, c1: Ix, c2: Ix, o: Num, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>) -> Vector<Acc>
+    ? "The open blocks with an expression of the columns written into block o, taken out while it is written (BlocksTakenOut); unchanged when there is no such block."
+    i = o.value
+    z = acc0()
+    match Vector.get(v, i)
+        Option.None -> v
+        Option.Some(a) -> openPut(Option.withDefault(Vector.set(v, i, z), v), i, colAcc(markedAt(a, di), k, c1, c2, o, owner, ids, nameF))
+
+verify colOpened
+    Option.withDefault(Vector.get(colOpened(Vector.fromList([acc0()]), ixAt(0), num(1), ixAt(0), ixAt(0), num(0), cnew(1, 0), ids0(1), Vector.fromList([])), 0), acc0()).k => ixAt(1)
+
+fn colAcc(a: Acc, k: Num, c1: Ix, c2: Ix, o: Num, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>) -> Acc
+    ? "Block a with the expression written and counted, as colBlockOut writes it."
+    code = Bits.and(k.value, 15)
+    h = match code == 1
+        true -> List.prepend(10, a.out)
+        false -> uv(List.prepend(code - headBase(code), List.prepend(headTag(code), a.out)), geti(nameF, Bits.shiftRight(k.value, 4)))
+    Acc(out = uwn(uwn(h, refBack(c1, o, a.k, owner, ids)), refBack(c2, o, a.k, owner, ids)), k = ixStep(a.k.value + 1), mark = a.mark, fine = a.fine)
+
+verify colAcc
+    colAcc(acc0(), num(1), ixAt(0), ixAt(0), num(0), cnew(1, -4), ids0(1), Vector.fromList([])).out => colBlockOut([], num(1), ixAt(0), ixAt(0), num(0), ixAt(0), cnew(1, -4), ids0(1), Vector.fromList([]))
+    colAcc(acc0(), num(98), ixAt(0), ixAt(1), num(0), cnew(2, 0), ids0(2), Vector.fromList([5, 5, 5, 5, 5, 5, 7])).out => colBlockOut([], num(98), ixAt(0), ixAt(1), num(0), ixAt(0), cnew(2, 0), ids0(2), Vector.fromList([5, 5, 5, 5, 5, 5, 7]))
+    colAcc(acc0(), num(35), ixAt(0), ixAt(1), num(0), cnew(2, 0), ids0(2), Vector.fromList([5, 5, 5])).out => colBlockOut([], num(35), ixAt(0), ixAt(1), num(0), ixAt(0), cnew(2, 0), ids0(2), Vector.fromList([5, 5, 5]))
+
+fn headTag(code: Int) -> Int
+    ? "The tag of a binder's kind code: 11 for a lambda (2 to 5), 12 for a pi."
+    match code <= 5
+        true -> 11
+        false -> 12
+
+verify headTag
+    headTag(3) => 11
+
+fn headBase(code: Int) -> Int
+    ? "What a binder's kind code less its annotation is: 2 for a lambda, 6 for a pi."
+    match code <= 5
+        true -> 2
+        false -> 6
+
+verify headBase
+    headBase(9) => 6
+
+fn refBack(c: Ix, o: Num, k: Ix, owner: Vector<Vector<Num>>, ids: IdsW) -> Num
+    ? "How far back a reference to expression c from number k of o's block is, as blockRefC writes it."
+    oc = nget(owner, c)
+    match oc.value == o.value
+        true -> numStep(k.value - idOf(ids, c))
+        false -> numStep(k.value + 1 + (0 - oc.value - 4))
+
+verify refBack
+    refBack(ixAt(0), num(0), ixAt(1), cnew(1, 0), ids0(1)) => num(1)
+
+fn openPut(v: Vector<Acc>, i: Int, a: Acc) -> Vector<Acc>
+    ? "a back as block i."
+    Option.withDefault(Vector.set(v, i, a), v)
 
 fn colBlockOut(acc: List<Int>, k: Num, c1: Ix, c2: Ix, o: Num, n: Ix, owner: Vector<Vector<Num>>, ids: IdsW, nameF: Vector<Int>) -> List<Int>
     ? "An expression of the columns in its block: the name by its frontier number, the parts by the block's own numbers and the frontier's."
