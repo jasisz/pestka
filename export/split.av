@@ -13,7 +13,7 @@ module Split
         "expression's owner to its parts; one numbers expressions in the main"
         "block and in their blocks and finds the frontier; the last writes."
         "The writer is deterministic: the same file gives the same bytes."
-    exposes [split, image, imageOf, laidMessage2, written2, laidAfter, Laid, A, Cols, DeclP, declOf, seeded, placedUnlessSkipped, nameStrAt, nameNumAt, at, cset, cget, noChunk, nat32, noChunk32, cget32, cnew32, num]
+    exposes [split, image, imageOf, laidMessage2, written2, laidAfter, Laid, A, Cols, DeclP, Placed, placedOne, declOf, seeded, placedUnlessSkipped, nameStrAt, nameNumAt, at, cset, cget, noChunk, nat32, noChunk32, cget32, cnew32, num]
     exposes opaque [Ix, U32, Num]
     depends [Bytes, Core.Names, Core.Lazy, Export.Susz]
     effects [Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
@@ -734,11 +734,11 @@ record A
     c2: Vector<Vector<U32>>
     owner: Vector<Vector<Num>>
     names: Vector<Name>
-    known: Map<Name, Int>
+    known: Map<Int, List<Placed>>
     exprs: Int
     decls: Int
 
-fn scanned(b: Bytes, p: Pos, end: Pos, ei: Int, di: Int, nameId: Int, eoff: Vector<Vector<Num>>, owner: Vector<Vector<Num>>, names: Vector<Name>, known: Map<Name, Int>) -> A
+fn scanned(b: Bytes, p: Pos, end: Pos, ei: Int, di: Int, nameId: Int, eoff: Vector<Vector<Num>>, owner: Vector<Vector<Num>>, names: Vector<Name>, known: Map<Int, List<Placed>>) -> A
     ? "The first pass: names built, where each expression starts, owners seeded by the declarations, and where each name is first placed (OwnersByOneWalkBack, PlaceCodes). A record at none stops it; the last pass, reading the same records, reports it (ReadAsTheReaderReads)."
     match Bool.or(off(p) >= off(end), off(p) < 0)
         true -> A(eoff = eoff, c1 = Vector.fromList([]), c2 = Vector.fromList([]), owner = owner, names = names, known = known, exprs = ei, decls = di)
@@ -762,30 +762,68 @@ fn nameNumAt(b: Bytes, p: Pos, names: Vector<Name>) -> Name
     k = rv(b, pre.at)
     Core.Names.num(Option.withDefault(Vector.get(names, pre.value), Core.Names.anon()), k.value)
 
-fn declScanned(b: Bytes, end: Pos, ei: Int, di: Int, nameId: Int, eoff: Vector<Vector<Num>>, owner: Vector<Vector<Num>>, names: Vector<Name>, known: Map<Name, Int>, d: DeclP) -> A
+fn declScanned(b: Bytes, end: Pos, ei: Int, di: Int, nameId: Int, eoff: Vector<Vector<Num>>, owner: Vector<Vector<Num>>, names: Vector<Name>, known: Map<Int, List<Placed>>, d: DeclP) -> A
     ? "A declaration: its references seed their owners, a theorem's value with the theorem, and the names it places keep its code unless Pestka skips it."
     scanned(b, d.end, end, ei, di + 1, nameId, eoff, seeded(owner, d.pieces, d.value, di), names, placedUnlessSkipped(known, names, d, di))
 
-fn placedUnlessSkipped(known: Map<Name, Int>, names: Vector<Name>, d: DeclP, di: Int) -> Map<Name, Int>
+fn placedUnlessSkipped(known: Map<Int, List<Placed>>, names: Vector<Name>, d: DeclP, di: Int) -> Map<Int, List<Placed>>
     ? "The names d places, with its code, unless Pestka skips it."
     match d.skip
         true -> known
         false -> placedAll(known, names, d.names, Core.Lazy.codeOf(di, d.kind == 5))
 
-fn placedAll(known: Map<Name, Int>, names: Vector<Name>, ns: List<Int>, code: Int) -> Map<Name, Int>
+fn placedAll(known: Map<Int, List<Placed>>, names: Vector<Name>, ns: List<Int>, code: Int) -> Map<Int, List<Placed>>
     ? "Each name placed with code, unless placed before."
     match ns
         [] -> known
         [n, ..rest] -> placedAll(placedOne(known, Option.withDefault(Vector.get(names, n), Core.Names.anon()), code), names, rest, code)
 
-fn placedOne(known: Map<Name, Int>, nm: Name, code: Int) -> Map<Name, Int>
-    ? "nm placed with code, unless placed before."
-    match Map.has(known, nm)
-        true -> known
-        false -> Map.set(known, nm, code)
+decision PlacesByStoredHash
+    date = "2026-11-12"
+    reason =
+        "Where each name is first placed was a map keyed by the name, and"
+        "a map hashes its key by walking it, every component's text and"
+        "every prefix: once per name placed, again each time the map grew,"
+        "and once for every name of the file when the codes were read,"
+        "though most names are placed by no declaration. A name carries its"
+        "hash (HashInsideName in Core.Names), equal names the same one, so"
+        "the places are kept by that hash, each with the names of that hash"
+        "placed so far; a name is compared only with those, and a name no"
+        "declaration placed is found absent by one lookup of a number."
+    chosen = "PlacesByStoredHash"
+    rejected = ["PlacesByName"]
+    impacts = [Placed, placedOne, codeIn]
+
+record Placed
+    name: Name
+    code: Int
+
+fn placedOne(known: Map<Int, List<Placed>>, nm: Name, code: Int) -> Map<Int, List<Placed>>
+    ? "nm placed with code, unless placed before (PlacesByStoredHash)."
+    h = Core.Names.hashOf(nm)
+    match Map.get(known, h)
+        Option.None -> Map.set(known, h, [Placed(name = nm, code = code)])
+        Option.Some(ps) -> match placedIn(ps, nm)
+            Option.Some(_) -> known
+            Option.None -> Map.set(known, h, List.prepend(Placed(name = nm, code = code), ps))
 
 verify placedOne
-    Map.get(placedOne(placedOne({}, Core.Names.anon(), 2), Core.Names.anon(), 4), Core.Names.anon()) => Option.Some(2)
+    codeIn(placedOne(placedOne({}, Core.Names.anon(), 2), Core.Names.anon(), 4), Core.Names.anon()) => 2
+    codeIn(placedOne(placedOne({}, Core.Names.anon(), 2), Core.Names.str(Core.Names.anon(), "a"), 4), Core.Names.str(Core.Names.anon(), "a")) => 4
+    codeIn(placedOne({}, Core.Names.anon(), 2), Core.Names.str(Core.Names.anon(), "a")) => Core.Lazy.never()
+    codeIn(placedOne({1 => [Placed(name = Core.Names.str(Core.Names.anon(), "b"), code = 3)]}, Core.Names.anon(), 2), Core.Names.anon()) => 2
+
+fn placedIn(ps: List<Placed>, n: Name) -> Option<Int>
+    ? "The code n was placed with among ps, the names placed of n's hash."
+    match ps
+        [] -> Option.None
+        [p, ..rest] -> match p.name == n
+            true -> Option.Some(p.code)
+            false -> placedIn(rest, n)
+
+verify placedIn
+    placedIn([Placed(name = Core.Names.anon(), code = 5)], Core.Names.anon()) => Option.Some(5)
+    placedIn([], Core.Names.anon()) => Option.None
 
 fn seeded(owner: Vector<Vector<Num>>, ps: List<Piece>, value: Int, di: Int) -> Vector<Vector<Num>>
     ? "Each reference of a declaration marked: a theorem's value with its value code (valueCode), every other with the main block."
@@ -1225,15 +1263,17 @@ fn laidAfter(b: Bytes, base: Int, end: Int, names: Int, levels: Int, decls: Int,
 
 litNames: List<Name> = [Core.Names.str(Core.Names.anon(), "Nat"), Core.Names.str(Core.Names.anon(), "String"), Core.Names.str(Core.Names.str(Core.Names.anon(), "String"), "ofList"), Core.Names.str(Core.Names.anon(), "List"), Core.Names.str(Core.Names.anon(), "Char"), Core.Names.str(Core.Names.str(Core.Names.anon(), "Char"), "ofNat")]
 
-fn codesOf(known: Map<Name, Int>, ns: List<Name>, acc: List<Int>) -> List<Int>
+fn codesOf(known: Map<Int, List<Placed>>, ns: List<Name>, acc: List<Int>) -> List<Int>
     ? "The place code of each name, in order (PlaceCodes)."
     match ns
         [] -> List.reverse(acc)
         [n, ..rest] -> codesOf(known, rest, List.prepend(codeIn(known, n), acc))
 
-fn codeIn(known: Map<Name, Int>, n: Name) -> Int
-    ? "n's place code, or never."
-    Option.withDefault(Map.get(known, n), Core.Lazy.never())
+fn codeIn(known: Map<Int, List<Placed>>, n: Name) -> Int
+    ? "n's place code, or never (PlacesByStoredHash)."
+    match Map.get(known, Core.Names.hashOf(n))
+        Option.None -> Core.Lazy.never()
+        Option.Some(ps) -> Option.withDefault(placedIn(ps, n), Core.Lazy.never())
 
 fn laid(meta: Bytes, names: Int, levels: Int, decls: Int, exprs: Int, w: W) -> Result<Laid, String>
     ? "The file's parts: header, main block, proof section, trailer."
@@ -1832,10 +1872,10 @@ verify nameNumAt
     nameNumAt(Bytes.fromList([2, 0, 3]), at(0), Vector.fromList([Core.Names.anon()])) => Core.Names.num(Core.Names.anon(), 3)
 
 verify declScanned
-    Map.get(declScanned(Bytes.fromList([]), at(0), 0, 0, 1, cnew(1, 0), cnew(1, -1), Vector.fromList([Core.Names.anon()]), {}, DeclP(kind = 0, pieces = [], names = [0], skip = false, value = -1, end = at(0))).known, Core.Names.anon()) => Option.Some(0)
+    codeIn(declScanned(Bytes.fromList([]), at(0), 0, 0, 1, cnew(1, 0), cnew(1, -1), Vector.fromList([Core.Names.anon()]), {}, DeclP(kind = 0, pieces = [], names = [0], skip = false, value = -1, end = at(0))).known, Core.Names.anon()) => 0
 
 verify placedUnlessSkipped
-    Map.get(placedUnlessSkipped({}, Vector.fromList([Core.Names.anon()]), DeclP(kind = 5, pieces = [], names = [0], skip = false, value = -1, end = at(0)), 2), Core.Names.anon()) => Option.Some(5)
+    codeIn(placedUnlessSkipped({}, Vector.fromList([Core.Names.anon()]), DeclP(kind = 5, pieces = [], names = [0], skip = false, value = -1, end = at(0)), 2), Core.Names.anon()) => 5
     Map.len(placedUnlessSkipped({}, Vector.fromList([Core.Names.anon()]), DeclP(kind = 5, pieces = [], names = [0], skip = true, value = -1, end = at(0)), 2)) => 0
 
 verify placedAll
@@ -1882,7 +1922,7 @@ verify wantedLevels
 
 
 verify codesOf
-    codesOf({Core.Names.anon() => 4}, [Core.Names.anon()], []) => [4]
+    codesOf(placedOne({}, Core.Names.anon(), 4), [Core.Names.anon()], []) => [4]
 
 verify flushMain
     Result.withDefault(flushMain(W.update(fresh(), main = [1])), fresh()).mainBytes => 1

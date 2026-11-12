@@ -151,7 +151,7 @@ record X
     owner: Vector<Vector<Num>>
     cap: Int
     names: Vector<Name>
-    known: Map<Name, Int>
+    known: Map<Int, List<Placed>>
 
 fn x0(slots: Int) -> Result<X, String>
     ? "Nothing noted yet: room for slots chunks of 65536 expressions, none made but the columns' first, and for 4096 names."
@@ -816,16 +816,14 @@ verify placedNames
     placedNames(Vector.fromList([Core.Names.anon()]), [0], true, []) => []
     List.len(placedNames(Vector.fromList([Core.Names.anon()]), [0], false, [])) => 1
 
-fn placedList(known: Map<Name, Int>, ns: List<Name>, code: Int) -> Map<Name, Int>
-    ? "Each name placed with code, unless placed before."
+fn placedList(known: Map<Int, List<Placed>>, ns: List<Name>, code: Int) -> Map<Int, List<Placed>>
+    ? "Each name placed with code, unless placed before (PlacesByStoredHash in Export.Split)."
     match ns
         [] -> known
-        [n, ..rest] -> match Map.has(known, n)
-            true -> placedList(known, rest, code)
-            false -> placedList(Map.set(known, n, code), rest, code)
+        [n, ..rest] -> placedList(Export.Split.placedOne(known, n, code), rest, code)
 
 verify placedList
-    Map.get(placedList({}, [Core.Names.anon()], 4), Core.Names.anon()) => Option.Some(4)
+    Map.len(placedList({}, [Core.Names.anon(), Core.Names.anon()], 4)) => 1
 
 decision PackedInMemory
     date = "2026-11-11"
