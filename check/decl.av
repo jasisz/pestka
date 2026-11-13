@@ -12,8 +12,8 @@ module Decl
         "checked apart; the verdict names the first failure in file order,"
         "as checking strictly in order would."
     exposes [Run, Job, Admitted, Chunk, Checked, Checking, Part, checkAll, checkPart, skippedAmong, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Cache, Check.Shapes, Check.State, Check.Tc, Check.IndAdd]
-    effects []
+    depends [Bytes, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Cache, Check.Shapes, Check.State, Check.Tc, Check.IndAdd]
+    effects [Disk.readBytesAt]
 
 record Run
     env: Env
@@ -69,23 +69,32 @@ record Checking
     held: List<Checked>
 
 fn checkAll(decls: List<Decl>) -> Result<Run, Fail>
-    ? "Builds the environment, then checks the deferred declarations before the first failure the building met, one after another."
+    ? "Builds the environment, then checks the deferred declarations before the first failure the building met, one after another. A proof block still in its file is not read here: checkHeld reads them."
+    ! [Disk.readBytesAt]
     a = admit(decls)
     finish(a, checkJobs(List.reverse(a.run.jobs), a.run.env, Facts.update(noFacts(), closed = a.run.closed), a.at))
 
 fn admit(decls: List<Decl>) -> Admitted
     ? "Builds the environment from nothing; the deferred declarations wait in the result."
+    ! [Disk.readBytesAt]
     admitAll(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), decls)
 
 verify admit
     admit([]).at => 0
+
+fn emptyAdmitted() -> Admitted
+    ? "What building nothing gives, for examples."
+    Admitted(run = Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), failure = Option.None, at = 0)
+
+verify emptyAdmitted
+    emptyAdmitted().at => 0
 
 fn due(a: Admitted) -> List<Job>
     ? "The deferred declarations in file order, those before the building's failure."
     List.reverse(dropLate(a.run.jobs, a.at, []))
 
 verify due
-    due(admit([])) => []
+    due(emptyAdmitted()) => []
 
 fn dropLate(jobs: List<Job>, limit: Int, acc: List<Job>) -> List<Job>
     ? "Keeps the jobs before limit; jobs come newest first and go out oldest first."
@@ -504,6 +513,7 @@ verify keyOf
 
 fn checkParallel(decls: List<Decl>, workers: Int, memory: Memory) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations on workers at once: runs of 16 consecutive declarations are dealt to the workers in turn, which evens out their loads, and each worker checks its runs in file order."
+    ! [Disk.readBytesAt]
     checkHeld(decls, workers, memory, false, false).run
 
 verify checkParallel
@@ -527,6 +537,7 @@ decision FactsHeldToExit
 
 fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always: Bool) -> Checking
     ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit); the maps carried are bounded as the memory mode says (LowMemoryMode) and shared out among the workers (FrugalWorkers); always groups by namespace whatever the count, for tests (CheckedByNamespace)."
+    ! [Disk.readBytesAt]
     a = admit(decls)
     w = Int.max(workers, 1)
     unit = unitFor(w)
@@ -570,6 +581,7 @@ record Part
 
 fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory) -> Part
     ? "A subset check: the environment built from decls, the declarations before the last target and the targets, then of the deferred declarations only the targets, at the positions targets lists in increasing order, checked on workers; unchecked counts the deferred declarations admitted without a check (SubsetAdmitsUnchecked)."
+    ! [Disk.readBytesAt]
     a = admit(decls)
     w = Int.max(workers, 1)
     unit = unitFor(w)
@@ -786,6 +798,7 @@ verify reverseEach
 
 fn runWorkers(groups: List<List<Chunk>>) -> List<Checked>
     ? "Every group on a worker of its own: the list is halved, and the halves run as an independent product."
+    ! [Disk.readBytesAt]
     match groups
         [] -> []
         [g] -> [checkGroup(g)]
@@ -796,6 +809,7 @@ verify runWorkers
 
 fn halves(left: List<List<Chunk>>, right: List<List<Chunk>>) -> List<Checked>
     ? "The two halves at once."
+    ! [Disk.readBytesAt]
     match (runWorkers(left), runWorkers(right))!
         (l, r) -> List.concat(l, r)
 
@@ -804,7 +818,8 @@ verify halves
 
 fn checkGroup(g: List<Chunk>) -> Checked
     ? "One worker: its runs in file order with the facts kept across declarations, stopping at the first failure."
-    groupLoop(g, noFacts(), 0, Option.None, 0)
+    ! [Disk.readBytesAt]
+    groupLoop(g, {}, noFacts(), 0, Option.None, 0)
 
 verify checkGroup
     checkGroup([]) => Checked(failure = Option.None, at = 0, count = 0, kept = noFacts())
@@ -816,48 +831,67 @@ fn noFacts() -> Facts
 verify noFacts
     Core.Cache.size(noFacts().unfolds) => 0
 
-fn groupLoop(g: List<Chunk>, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Checked
-    ? "Run after run; fail is the failure found so far, at its position in the file."
+fn groupLoop(g: List<Chunk>, held: Map<Int, Bytes>, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Checked
+    ? "Run after run, with the proof blocks the worker holds (BlockReadForItsCheck); fail is the failure found so far, at its position in the file."
+    ! [Disk.readBytesAt]
     match g
         [] -> Checked(failure = fail, at = at, count = count, kept = kept)
-        [c, ..rest] -> chunkLoop(c.jobs, c.env, c.limits, rest, kept, count, fail, at)
+        [c, ..rest] -> chunkLoop(c.jobs, Check.State.envWithHeld(c.env, held), c.limits, rest, kept, count, fail, at)
 
 verify groupLoop
-    groupLoop([], noFacts(), 2, Option.None, 0).count => 2
+    groupLoop([], {}, noFacts(), 2, Option.None, 0).count => 2
 
 fn checkChunk(c: Chunk) -> Checked
     ? "Checks one run of deferred declarations with facts of its own; the first failure is reported with its place in the file."
+    ! [Disk.readBytesAt]
     chunkLoop(c.jobs, c.env, c.limits, [], noFacts(), 0, Option.None, 0)
 
 verify checkChunk
     checkChunk(Chunk(env = Check.State.envEmpty(), jobs = [], limits = Check.State.limitsOf(65536, Memory.Fast))) => Checked(failure = Option.None, at = 0, count = 0, kept = noFacts())
 
 fn chunkLoop(jobs: List<Job>, env: Env, limits: Limits, more: List<Chunk>, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Checked
-    ? "One job after another, then the next run, until one fails. Each job gets the facts kept from the ones before it; they are moved into its checker here, in the loop that owns them, so that every map reaches the checker with one owner and is updated in place."
+    ? "One job after another, then the next run, until one fails. Each job gets its proof block read (BlockReadForItsCheck) and the facts kept from the ones before it."
+    ! [Disk.readBytesAt]
     match jobs
-        [] -> groupLoop(more, kept, count, fail, at)
+        [] -> groupLoop(more, Check.State.envHeld(env), kept, count, fail, at)
         [j, ..rest] -> match Bool.and(fail != Option.None, j.pos > at)
             true -> chunkLoop(rest, env, limits, more, kept, count, fail, at)
-            false -> chunkNext(jobChecks(j, St.update(checkerFor(env, j), limits = limits, closed = kept.closed, unfoldCache = kept.unfolds, levelTypes = kept.types, vars = kept.vars, lctx = kept.lctx, next = kept.next, topLevel = kept.topLevel, inferCache = kept.inferCache, checkCache = kept.checkCache, whnfCache = kept.whnfCache, coreCache = kept.coreCache, eqOk = kept.eqOk, eqFail = kept.eqFail, eqNo = kept.eqNo, rules = kept.rules)), j, env, limits, rest, more, count, fail, at)
+            false -> chunkStep(readJob(j), j, env, limits, rest, more, kept, count, fail, at)
 
 verify chunkLoop
     chunkLoop([], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), [], noFacts(), 3, Option.None, 0).count => 3
 
+fn chunkStep(r: Result<Job, Fail>, j: Job, env: Env, limits: Limits, rest: List<Job>, more: List<Chunk>, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Checked
+    ? "The job checked once its block is read, or failed when it cannot be. The facts are moved into its checker here, in the loop that owns them, so that every map reaches the checker with one owner and is updated in place."
+    ! [Disk.readBytesAt]
+    match r
+        Result.Ok(jr) -> chunkNext(jobChecks(jr, St.update(checkerFor(env, jr), limits = limits, closed = kept.closed, unfoldCache = kept.unfolds, levelTypes = kept.types, vars = kept.vars, lctx = kept.lctx, next = kept.next, topLevel = kept.topLevel, inferCache = kept.inferCache, checkCache = kept.checkCache, whnfCache = kept.whnfCache, coreCache = kept.coreCache, eqOk = kept.eqOk, eqFail = kept.eqFail, eqNo = kept.eqNo, rules = kept.rules)), jr, env, limits, rest, more, count, fail, at)
+        Result.Err(e) -> chunkNext(Result.Err(e), j, env, limits, rest, more, count, fail, at)
+
 fn chunkNext(r: Result<Facts, Fail>, j: Job, env: Env, limits: Limits, rest: List<Job>, more: List<Chunk>, count: Int, fail: Option<Fail>, at: Int) -> Checked
-    ? "Goes on after a failure too, now with the named failure and its position, checking only declarations placed before it: the runs are not in file order, and the earliest failure is the one reported."
+    ? "Goes on after a failure too, now with the named failure and its position, checking only declarations placed before it: the runs are not in file order, and the earliest failure is the one reported. A job that wants a proof block is checked again once it is read (BlockReadForItsCheck)."
+    ! [Disk.readBytesAt]
     match r
         Result.Ok(kept) -> chunkLoop(rest, env, limits, more, kept, count + 1, fail, at)
+        Result.Err(Fail.Wants(w, st)) -> wanted(readSpot(w), w, carried(st), j, env, limits, rest, more, count, fail, at)
         Result.Err(e) -> chunkLoop(rest, env, limits, more, noFacts(), count, Option.Some(failNamed(e, j.head.name)), j.pos)
 
 verify chunkNext
     chunkNext(Result.Err(Fail.Reject("bad")), Job(pos = 4, upTo = 0, head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.bvar(0)), value = Option.None, isThm = false), Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), [], [], 0, Option.None, 0) => Checked(failure = Option.Some(Fail.Reject("x: bad")), at = 4, count = 0, kept = noFacts())
+
+fn wanted(r: Result<Bytes, Fail>, w: Spot, kept: Facts, j: Job, env: Env, limits: Limits, rest: List<Job>, more: List<Chunk>, count: Int, fail: Option<Fail>, at: Int) -> Checked
+    ? "The job again, from the facts its stopped check found, with the block it wanted held from now on; or failed when the block cannot be read (BlockReadForItsCheck)."
+    ! [Disk.readBytesAt]
+    match r
+        Result.Ok(b) -> chunkLoop(List.prepend(j, rest), Check.State.envHolding(env, w.decl, b), limits, more, kept, count, fail, at)
+        Result.Err(e) -> chunkLoop(rest, env, limits, more, noFacts(), count, Option.Some(failNamed(e, j.head.name)), j.pos)
 
 fn combine(a: Admitted, results: List<Checked>) -> Result<Run, Fail>
     ? "The first failure in file order across the chunks and the building; otherwise the run with every deferred declaration counted."
     firstOf(results, a.failure, a.at, 0, a)
 
 verify combine
-    combine(admit([]), [Checked(failure = Option.Some(Fail.Reject("b")), at = 9, count = 0, kept = noFacts()), Checked(failure = Option.Some(Fail.Reject("a")), at = 2, count = 0, kept = noFacts())]) => Result.Err(Fail.Reject("a"))
+    combine(emptyAdmitted(), [Checked(failure = Option.Some(Fail.Reject("b")), at = 9, count = 0, kept = noFacts()), Checked(failure = Option.Some(Fail.Reject("a")), at = 2, count = 0, kept = noFacts())]) => Result.Err(Fail.Reject("a"))
 
 fn firstOf(rs: List<Checked>, best: Option<Fail>, bestAt: Int, count: Int, a: Admitted) -> Result<Run, Fail>
     ? "Keeps the earliest failure seen so far."
@@ -872,15 +906,79 @@ fn firstOf(rs: List<Checked>, best: Option<Fail>, bestAt: Int, count: Int, a: Ad
                 false -> firstOf(rest, best, bestAt, count + r.count, a)
 
 verify firstOf
-    firstOf([], Option.None, 0, 5, admit([])) == Result.Err(Fail.Reject("x")) => false
+    firstOf([], Option.None, 0, 5, emptyAdmitted()) == Result.Err(Fail.Reject("x")) => false
 
 fn admitAll(run: Run, decls: List<Decl>) -> Admitted
-    ? "One declaration at a time; the first failure stops the building and is kept with its position. A declaration is checked against the environment, which it only reads, and added after: a failure leaves the run as it was without a copy of it kept, so the environment always has one owner and is added to in place."
+    ? "One declaration at a time; the first failure stops the building and is kept with its position. A declaration is checked against the environment, which it only reads, and added after: a failure leaves the run as it was without a copy of it kept, so the environment always has one owner and is added to in place. One that wants a proof block is built again once the environment holds it, which every worker then holds too (WantedBlocksStopTheCheck in Check.State)."
+    ! [Disk.readBytesAt]
     match decls
         [] -> Admitted(run = run, failure = Option.None, at = run.pos)
         [d, ..rest] -> match prepared(run.env, d)
             Result.Ok(a) -> admitAll(applied(run, a), rest)
+            Result.Err(Fail.Wants(w, _)) -> admitHeld(run, d, rest, w, readSpot(w))
             Result.Err(e) -> Admitted(run = run, failure = Option.Some(failNamed(e, Core.Decls.nameOf(d))), at = run.pos)
+
+fn admitHeld(run: Run, d: Decl, rest: List<Decl>, w: Spot, r: Result<Bytes, Fail>) -> Admitted
+    ? "d built again with the block it wanted held, or failed when the block cannot be read."
+    ! [Disk.readBytesAt]
+    match r
+        Result.Ok(b) -> admitAll(Run.update(run, env = Check.State.envHolding(run.env, w.decl, b)), List.prepend(d, rest))
+        Result.Err(e) -> Admitted(run = run, failure = Option.Some(failNamed(e, Core.Decls.nameOf(d))), at = run.pos)
+
+decision BlockReadForItsCheck
+    date = "2026-11-13"
+    reason =
+        "A theorem whose proof block lies in its file (BlocksReadWhenChecked"
+        "in Core.Lazy) has the block read just before it is checked, by the"
+        "worker checking it, and the bytes go with the job: nothing keeps"
+        "them once its check ends. A declaration that unfolds a theorem whose"
+        "block the worker does not hold stops with Wants"
+        "(WantedBlocksStopTheCheck in Check.State); the worker reads the"
+        "block, holds it in its environment for the rest of its runs, and"
+        "checks the declaration again from the facts the stopped check had"
+        "found. A block that cannot be read, or reads short, declines the"
+        "declaration that needed it, in the order of declarations with every"
+        "other failure. Reading blocks one by one, in the order checked,"
+        "costs a system call or three per theorem."
+    chosen = "BlockReadForItsCheck"
+    rejected = ["RunReadAhead", "BlocksOfTheRunHeld"]
+    impacts = [readSpot, readJob, chunkLoop, chunkStep, chunkNext, wanted, admitAll, admitHeld]
+
+fn readSpot(w: Spot) -> Result<Bytes, Fail>
+    ? "A proof block's bytes from its file; a read that fails or comes back short declines (BlockReadForItsCheck)."
+    ! [Disk.readBytesAt]
+    match Disk.readBytesAt(w.path, w.at, w.length)
+        Result.Ok(b) -> wholeBlock(w, b)
+        Result.Err(e) -> Result.Err(Fail.Decline("cannot read the proof block at {w.at} of {w.path}: {e}"))
+
+fn wholeBlock(w: Spot, b: Bytes) -> Result<Bytes, Fail>
+    ? "The bytes read, when they are the whole block."
+    match Bytes.len(b) == w.length
+        true -> Result.Ok(b)
+        false -> Result.Err(Fail.Decline("cannot read the proof block at {w.at} of {w.path}: {Bytes.len(b)} of {w.length} bytes"))
+
+verify wholeBlock
+    wholeBlock(Spot(path = "f", at = 3, length = 2, decl = 0), Bytes.fromList([1])) => Result.Err(Fail.Decline("cannot read the proof block at 3 of f: 1 of 2 bytes"))
+    wholeBlock(Spot(path = "f", at = 3, length = 1, decl = 0), Bytes.fromList([1])) => Result.Ok(Bytes.fromList([1]))
+
+fn readJob(j: Job) -> Result<Job, Fail>
+    ? "The job with its own proof block read, when it lies in the file (BlockReadForItsCheck)."
+    ! [Disk.readBytesAt]
+    match j.value
+        Option.Some(p) -> match Core.Lazy.spotOf(p)
+            Option.Some(w) -> jobWithBytes(j, p, readSpot(w))
+            Option.None -> Result.Ok(j)
+        Option.None -> Result.Ok(j)
+
+fn jobWithBytes(j: Job, p: Proof, r: Result<Bytes, Fail>) -> Result<Job, Fail>
+    ? "The job whose proof is decoded from the bytes read."
+    match r
+        Result.Ok(b) -> Result.Ok(Job.update(j, value = Option.Some(Core.Lazy.withBytes(p, b))))
+        Result.Err(e) -> Result.Err(e)
+
+verify jobWithBytes
+    jobWithBytes(job2("a", 0), Proof.Built(Core.Exprs.bvar(0)), Result.Err(Fail.Decline("x"))) => Result.Err(Fail.Decline("x"))
+    jobWithBytes(job2("a", 0), Proof.Built(Core.Exprs.bvar(0)), Result.Ok(Bytes.fromList([]))) == Result.Ok(Job.update(job2("a", 0), value = Option.Some(Proof.Built(Core.Exprs.bvar(0))))) => true
 
 verify admitAll
     admitAll(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), []).at => 0
@@ -1048,9 +1146,11 @@ fn failNamed(e: Fail, n: Name) -> Fail
     match e
         Fail.Reject(m) -> Fail.Reject("{Core.Names.render(n)}: {m}")
         Fail.Decline(m) -> Fail.Decline("{Core.Names.render(n)}: {m}")
+        Fail.Wants(_, _) -> e
 
 verify failNamed
     failNamed(Fail.Decline("d"), Core.Names.str(Core.Names.anon(), "y")) => Fail.Decline("y: d")
+    failNamed(Fail.Reject("r"), Core.Names.str(Core.Names.anon(), "y")) => Fail.Reject("y: r")
 
 type Addition
     Skipped

@@ -640,12 +640,19 @@ decision FrontierAndRuleP
     impacts = [exportRec, exportedKind, lazyThm, withProofs, storeOf]
 
 fn withProofs(src: Src, t: Tables, d: Dir) -> Outcome
-    ? "The frontier MAIN listed, with the declaration index of each of its names, and PROOFS read whole; every lazy theorem gets its block's bytes (FrontierAndRuleP)."
+    ? "The frontier MAIN listed, with the declaration index of each of its names; every lazy theorem gets where its block lies in the file, read when it is checked, or its block's bytes from an image in memory (FrontierAndRuleP, BlocksReadWhenChecked in Core.Lazy)."
     ! [Disk.readBytesAt]
     s = storeOf(t)
-    match bytesAt(src, d.proofs, d.proofsLength)
-        Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
-        Result.Ok(pb) -> Outcome.Read(packedAll(Export.Tables.finish(t), s, pb))
+    match src
+        Src.File(path) -> Outcome.Read(packedAll(Export.Tables.finish(t), s, Blocks.InFile(path)))
+        Src.Memory(_) -> match bytesAt(src, d.proofs, d.proofsLength)
+            Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
+            Result.Ok(pb) -> Outcome.Read(packedAll(Export.Tables.finish(t), s, Blocks.InMemory(pb)))
+        Src.Part(path, _) -> Outcome.Read(packedAll(Export.Tables.finish(t), s, Blocks.InFile(path)))
+
+type Blocks
+    InMemory(Bytes)
+    InFile(String)
 
 fn storeOf(t: Tables) -> Store
     ? "The frontier, and the declaration index of each of its names (FrontierAndRuleP)."
@@ -673,7 +680,7 @@ fn declIn(known: Map<Name, Int>, n: Name) -> Int
 verify declIn
     declIn({}, Core.Names.anon()) => Core.Lazy.never()
 
-fn packedAll(p: Parsed, s: Store, pb: Bytes) -> Parsed
+fn packedAll(p: Parsed, s: Store, pb: Blocks) -> Parsed
     ? "The declarations with their proofs packed, and the expressions counted as the file holds them: MAIN's and those each theorem's record says its block holds, which decoding holds it to."
     ds = packedDecls(p.decls, s, pb, [], 0)
     Parsed.update(p, decls = ds.decls, exprs = p.exprs + ds.count)
@@ -682,13 +689,13 @@ record Packing
     decls: List<Decl>
     count: Int
 
-fn packedDecls(ds: List<Decl>, s: Store, pb: Bytes, acc: List<Decl>, count: Int) -> Packing
+fn packedDecls(ds: List<Decl>, s: Store, pb: Blocks, acc: List<Decl>, count: Int) -> Packing
     ? "Each declaration, a lazy theorem with its block; count is what the blocks so far hold."
     match ds
         [] -> Packing(decls = List.reverse(acc), count = count)
         [d, ..rest] -> packedNext(rest, s, pb, acc, count, packedDecl(d, s, pb))
 
-fn packedNext(ds: List<Decl>, s: Store, pb: Bytes, acc: List<Decl>, count: Int, d: Decl) -> Packing
+fn packedNext(ds: List<Decl>, s: Store, pb: Blocks, acc: List<Decl>, count: Int, d: Decl) -> Packing
     ? "d kept, its block's count added."
     packedDecls(ds, s, pb, List.prepend(d, acc), count + blockCount(d))
 
@@ -697,16 +704,27 @@ fn blockCount(d: Decl) -> Int
     match d
         Decl.Thm(_, p, _) -> match p
             Proof.Deferred(Source.SuszBlock(_, _, bd)) -> bd.count
+            Proof.Deferred(Source.SuszFile(_, _, _, bd)) -> bd.count
             _ -> 0
         _ -> 0
 
-fn packedDecl(d: Decl, s: Store, pb: Bytes) -> Decl
+fn packedDecl(d: Decl, s: Store, pb: Blocks) -> Decl
     ? "A theorem whose proof is a spot in PROOFS gets that block's bytes."
     match d
         Decl.Thm(h, p, all) -> match p
-            Proof.Deferred(Source.SuszSpot(o, l, bd)) -> Decl.Thm(h, Proof.Deferred(Source.SuszBlock(s, Bytes.take(Bytes.drop(pb, o), l), bd)), all)
+            Proof.Deferred(Source.SuszSpot(o, l, bd)) -> Decl.Thm(h, Proof.Deferred(blockAt(pb, s, o, l, bd)), all)
             _ -> d
         _ -> d
+
+fn blockAt(pb: Blocks, s: Store, o: Int, l: Int, bd: Bounds) -> Source
+    ? "A block of l bytes at o in PROOFS: its bytes from memory, or where it lies in the file (BlocksReadWhenChecked in Core.Lazy)."
+    match pb
+        Blocks.InMemory(b) -> Source.SuszBlock(s, Bytes.take(Bytes.drop(b, o), l), bd)
+        Blocks.InFile(path) -> Source.SuszFile(path, s, l, bd)
+
+verify blockAt
+    blockAt(Blocks.InFile("f"), Core.Lazy.emptyStore(), 2, 3, Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 1, at = 9)) => Source.SuszFile("f", Core.Lazy.emptyStore(), 3, Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 1, at = 9))
+    blockAt(Blocks.InMemory(Bytes.fromList([1, 2, 3])), Core.Lazy.emptyStore(), 1, 1, Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 1, at = 9)) => Source.SuszBlock(Core.Lazy.emptyStore(), Bytes.fromList([2]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 1, at = 9))
 
 fn exportRec(t: Tables, b: Bytes, i: Pos) -> Done
     ? "19: a frontier entry, a name (kind 0), level (1) or expression (2) by how far back it is from the next of its kind; it is the next of the frontier of its kind (FrontierAndRuleP)."
@@ -821,20 +839,21 @@ fn lazyDone(d: Done, at: Int) -> Done
         _ -> d
 
 verify packedAll
-    packedAll(Export.Tables.finish(Export.Tables.empty()), Core.Lazy.emptyStore(), Bytes.fromList([])).exprs => 0
+    packedAll(Export.Tables.finish(Export.Tables.empty()), Core.Lazy.emptyStore(), Blocks.InMemory(Bytes.fromList([]))).exprs => 0
 
 verify packedDecls
-    packedDecls([Decl.Thm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Deferred(Source.SuszSpot(0, 2, Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 1, at = 16))), [])], Core.Lazy.emptyStore(), Bytes.fromList([7, 3]), [], 0).count => 1
+    packedDecls([Decl.Thm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Deferred(Source.SuszSpot(0, 2, Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 1, at = 16))), [])], Core.Lazy.emptyStore(), Blocks.InMemory(Bytes.fromList([7, 3])), [], 0).count => 1
 
 verify packedNext
-    packedNext([], Core.Lazy.emptyStore(), Bytes.fromList([]), [], 3, Decl.Induct([], [], [])).count => 3
+    packedNext([], Core.Lazy.emptyStore(), Blocks.InMemory(Bytes.fromList([])), [], 3, Decl.Induct([], [], [])).count => 3
 
 verify blockCount
     blockCount(Decl.Induct([], [], [])) => 0
+    blockCount(Decl.Thm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Deferred(Source.SuszFile("f", Core.Lazy.emptyStore(), 2, Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 4, at = 0))), [])) => 4
     blockCount(Decl.Thm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Deferred(Source.SuszBlock(Core.Lazy.emptyStore(), Bytes.fromList([7, 3]), Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 5, at = 0))), [])) => 5
 
 verify packedDecl
-    packedDecl(Decl.Induct([], [], []), Core.Lazy.emptyStore(), Bytes.fromList([])) => Decl.Induct([], [], [])
+    packedDecl(Decl.Induct([], [], []), Core.Lazy.emptyStore(), Blocks.InMemory(Bytes.fromList([]))) => Decl.Induct([], [], [])
 
 verify lazyAdded
     lazyAdded(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 4, 1, Ids(ids = [], at = Pos(value = 0))) == Done.Short(Export.Tables.empty()) => false
@@ -2394,4 +2413,4 @@ fn partProofs(src: Src, d: Dir, s: Store, t: Tables) -> Outcome
     ! [Disk.readBytesAt]
     match bytesAt(src, d.proofs, t.proofAt)
         Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
-        Result.Ok(pb) -> Outcome.Read(Parsed.update(packedAll(Export.Tables.finish(t), s, pb), targets = d.targets))
+        Result.Ok(pb) -> Outcome.Read(Parsed.update(packedAll(Export.Tables.finish(t), s, Blocks.InMemory(pb)), targets = d.targets))

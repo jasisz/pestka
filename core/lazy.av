@@ -14,7 +14,7 @@ module Lazy
         "rule P, declared before the theorem; a block that disagrees is an"
         "error of its declaration, the same whenever and however often it is"
         "decoded."
-    exposes [Proof, Source, Store, Bounds, Decoded, force, forced, valued, emptyStore, never]
+    exposes [Proof, Source, Store, Bounds, Decoded, Spot, forced, valued, emptyStore, never, spotOf, withBytes, heldValue]
     exposes opaque [LPos]
     depends [Bytes, Core.Names, Core.Levels, Core.Exprs]
     effects []
@@ -37,8 +37,10 @@ decision OneDeferredProof
     date = "2026-11-11"
     reason =
         "A proof is either built or deferred, and checking (Check.Decl,"
-        "Check.State.valueOf and valued) sees only Proof and forced: it never"
-        "knows where a deferred proof's bytes are. A source of bytes is a"
+        "Check.State.valueIn and valued) sees only Proof and forced: it never"
+        "knows where a deferred proof's bytes are, except that the effectful"
+        "loop of Check.Decl reads a block that lies in a file by its Spot"
+        "(BlocksReadWhenChecked). A source of bytes is a"
         "variant of Source with a decoder of its own, called by forced. A"
         "decoder builds a fresh term, keeps nothing of it, validates"
         "everything it reads as the reader of its format would, and gives"
@@ -54,6 +56,7 @@ decision OneDeferredProof
 type Source
     SuszSpot(Int, Int, Bounds)
     SuszBlock(Store, Bytes, Bounds)
+    SuszFile(String, Store, Int, Bounds)
 
 type Proof
     Built(Expr)
@@ -141,6 +144,7 @@ fn sourced(src: Source) -> Decoded
     match src
         Source.SuszSpot(_, _, _) -> Decoded.Broken("proof block: never read")
         Source.SuszBlock(s, b, bd) -> decoded(s, b, bd)
+        Source.SuszFile(_, _, _, _) -> Decoded.Broken("proof block: never read")
 
 verify sourced
     sourced(Source.SuszSpot(0, 0, bounds1(1))) => Decoded.Broken("proof block: never read")
@@ -149,6 +153,69 @@ verify forced
     forced(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([99, 0]), Bounds.update(bounds1(1), at = 100)))) => Decoded.Broken("PROOFS @ 100: record 1: unknown record tag 99")
     forced(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([7, 3, 0]), bounds1(1)))) => Decoded.Broken("PROOFS @ 2: record 2: 1 bytes after the last record")
     forced(Proof.Deferred(Source.SuszBlock(emptyStore(), Bytes.fromList([7, 3, 7]), bounds1(2)))) => Decoded.Broken("PROOFS @ 2: record 2: the block ends inside it")
+
+decision BlocksReadWhenChecked
+    date = "2026-11-13"
+    reason =
+        "PROOFS was read whole when the file was read and held to the end,"
+        "317 MB on mathlib, though a block is needed only while its theorem"
+        "is checked and, for a few hundred theorems, while a later"
+        "declaration unfolds one. A theorem read from a file now keeps where"
+        "its block lies (SuszFile: the file, the frontier, the length, and"
+        "the bounds with the offset), and checking reads the block when it"
+        "checks the theorem (Check.Decl, BlockReadForItsCheck) and drops it"
+        "after. A theorem unfolded elsewhere is unfolded from bytes the"
+        "checker holds by the theorem's declaration index (heldValue): one"
+        "it does not hold stops the declaration with the spot it wants"
+        "(Fail.Wants in Check.State), and the effectful loop reads it, keeps"
+        "it for the rest of its work and checks the declaration again."
+        "Decoding stays pure and gives the same term from the same bytes,"
+        "so a declaration's verdict does not depend on when or how often its"
+        "blocks are read. An image packed in memory from an ndjson file"
+        "keeps its bytes (SuszBlock): they are in memory anyway. Mapping the"
+        "file instead would count every touched page in the peak."
+    chosen = "BlocksReadWhenChecked"
+    rejected = ["ProofsReadWhole", "MappedProofs", "BlocksOfARunReadAhead"]
+    impacts = [Source, Spot, spotOf, withBytes, heldValue, sourced]
+
+record Spot
+    path: String
+    at: Int
+    length: Int
+    decl: Int
+
+fn spotOf(p: Proof) -> Option<Spot>
+    ? "Where a proof's block lies in its file, when it is still there to be read (BlocksReadWhenChecked)."
+    match p
+        Proof.Deferred(Source.SuszFile(path, _, l, bd)) -> Option.Some(Spot(path = path, at = bd.at, length = l, decl = bd.decl))
+        _ -> Option.None
+
+verify spotOf
+    spotOf(Proof.Deferred(Source.SuszFile("f", emptyStore(), 2, Bounds.update(bounds1(1), decl = 4, at = 9)))) => Option.Some(Spot(path = "f", at = 9, length = 2, decl = 4))
+    spotOf(Proof.Built(Core.Exprs.bvar(0))) => Option.None
+
+fn withBytes(p: Proof, b: Bytes) -> Proof
+    ? "A proof whose block lies in a file, with the bytes read from there: decoded as if they had been read with the file (BlocksReadWhenChecked)."
+    match p
+        Proof.Deferred(Source.SuszFile(_, s, _, bd)) -> Proof.Deferred(Source.SuszBlock(s, b, bd))
+        _ -> p
+
+verify withBytes
+    force(withBytes(Proof.Deferred(Source.SuszFile("f", emptyStore(), 2, bounds1(1))), Bytes.fromList([7, 3]))) => Core.Exprs.bvar(3)
+    withBytes(Proof.Built(Core.Exprs.bvar(1)), Bytes.fromList([7, 3])) => Proof.Built(Core.Exprs.bvar(1))
+
+fn heldValue(p: Proof, held: Map<Int, Bytes>) -> Result<Expr, Spot>
+    ? "The value delta reduction unfolds: the term, decoded from the bytes held for its declaration when its block lies in a file, or where to read the block when they are not held (BlocksReadWhenChecked)."
+    match p
+        Proof.Deferred(Source.SuszFile(path, s, l, bd)) -> match Map.get(held, bd.decl)
+            Option.Some(b) -> Result.Ok(force(Proof.Deferred(Source.SuszBlock(s, b, bd))))
+            Option.None -> Result.Err(Spot(path = path, at = bd.at, length = l, decl = bd.decl))
+        _ -> Result.Ok(force(p))
+
+verify heldValue
+    heldValue(Proof.Built(Core.Exprs.bvar(2)), {}) => Result.Ok(Core.Exprs.bvar(2))
+    heldValue(Proof.Deferred(Source.SuszFile("f", emptyStore(), 2, bounds1(1))), {0 => Bytes.fromList([7, 3])}) => Result.Ok(Core.Exprs.bvar(3))
+    heldValue(Proof.Deferred(Source.SuszFile("f", emptyStore(), 2, bounds1(1))), {}) => Result.Err(Spot(path = "f", at = 0, length = 2, decl = 0))
 
 fn broken() -> Expr
     ? "What a block that does not decode stands for: a constant that no environment has."

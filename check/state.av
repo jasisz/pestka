@@ -6,13 +6,14 @@ module State
         "scope, and the caches. Aver has"
         "no mutable state, so every checking function takes a St and returns"
         "the St it leaves behind inside its result."
-    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, Memory, Limits, limitsOf, unbounded, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueOf, valued, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, paramLevels, cacheGetAt, cachePutAt, quotSeen, quotMark]
-    depends [Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Subst, Core.Cache, Check.Shapes]
+    exposes [Fail, Const, Env, Placed, Local, Locals, St, RE, RB, RO, Memory, Limits, limitsOf, unbounded, envEmpty, envGet, envGetBefore, envHas, envSet, envSize, fresh, headOf, isUnsafe, isPartial, valueIn, valued, envHeld, envHolding, envWithHeld, hintsOf, lookup, declared, localType, localValue, mkBinding, cacheGet, cachePut, pairGet, pairPut, closedPairGet, closedPairPut, closedFailGet, closedFailPut, names, namesAt, closeVars, paramsTagOf, paramLevels, cacheGetAt, cachePutAt, quotSeen, quotMark]
+    depends [Bytes, Core.Hash, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Subst, Core.Cache, Check.Shapes]
     effects []
 
 type Fail
     Reject(String)
     Decline(String)
+    Wants(Core.Lazy.Spot, St)
 
 type Const
     CAxiom(Head, Bool)
@@ -127,6 +128,7 @@ record Env
     byHash: Map<Int, List<Placed>>
     size: Int
     qstated: List<Name>
+    held: Map<Int, Bytes>
 
 decision MapEnvironment
     date = "2026-10-22"
@@ -156,7 +158,7 @@ decision PlacedConstants
 
 fn envEmpty() -> Env
     ? "The empty environment."
-    Env(byHash = {}, size = 0, qstated = [])
+    Env(byHash = {}, size = 0, qstated = [], held = {})
 
 verify envEmpty
     envHas(envEmpty(), Core.Names.anon()) => false
@@ -255,7 +257,7 @@ fn envSet(env: Env, n: Name, c: Const) -> Env
     key = Core.Names.hashOf(n)
     at = env.size
     b = envBucket(env, key)
-    Env(byHash = Map.set(env.byHash, key, List.prepend(Placed(name = n, c = c, at = at), b)), size = at + 1, qstated = env.qstated)
+    Env(byHash = Map.set(env.byHash, key, List.prepend(Placed(name = n, c = c, at = at), b)), size = at + 1, qstated = env.qstated, held = env.held)
 
 verify envSet
     envHas(envSet(envSet(envEmpty(), Core.Names.str(Core.Names.anon(), "a"), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.str(Core.Names.anon(), "b"), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false)), Core.Names.str(Core.Names.anon(), "a")) => true
@@ -269,7 +271,7 @@ verify quotSeen
 
 fn quotMark(env: Env, n: Name) -> Env
     ? "Marks the name as stated by a quotient record."
-    Env(byHash = env.byHash, size = env.size, qstated = List.prepend(n, env.qstated))
+    Env(byHash = env.byHash, size = env.size, qstated = List.prepend(n, env.qstated), held = env.held)
 
 verify quotMark
     quotSeen(quotMark(envEmpty(), Core.Names.anon()), Core.Names.anon()) => true
@@ -394,18 +396,66 @@ fn isPartial(c: Const) -> Bool
 verify isPartial
     isPartial(Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Built(Core.Exprs.bvar(0)))) => false
 
-fn valueOf(c: Const) -> Option<Expr>
-    ? "The value delta reduction may unfold: definitions and theorems, never opaque constants."
-    match c
-        Const.CDefn(_, v, _, _, _) -> Option.Some(v)
-        Const.CThm(_, p) -> Option.Some(Core.Lazy.force(p))
-        _ -> Option.None
+decision WantedBlocksStopTheCheck
+    date = "2026-11-13"
+    reason =
+        "Delta reduction may unfold a theorem whose proof block is still in"
+        "the file (BlocksReadWhenChecked in Core.Lazy), and checking is pure:"
+        "it cannot read it. The environment carries the blocks its checker"
+        "holds, by declaration index (envHeld), and a theorem whose block is"
+        "not among them fails the declaration with Wants: where the block"
+        "lies, and the checker as it stood, so that its caches go on with"
+        "the declaration checked again once the block is read (Check.Decl)."
+        "Wants is never a verdict. Every place that unfolds a value passes"
+        "the failure on, and the one place that ends a computation on any"
+        "failure, deriving a rule (Check.Tc.ruleOf), hands Wants on with the"
+        "checker it was called with. A cached result is only ever put once"
+        "it is found, so what the checker carries out of a stopped"
+        "declaration holds as anything else it carries does. On mathlib a"
+        "few hundred theorems are unfolded by other declarations, each read"
+        "at most once per worker."
+    chosen = "WantedBlocksStopTheCheck"
+    rejected = ["ReadInsideChecking", "OpaqueWhenNotHeld", "EveryBlockHeld"]
+    impacts = [Fail, Env, valueIn, envHeld, envHolding, envWithHeld]
 
-verify valueOf
-    valueOf(Const.COpaque(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0), false)) => Option.None
+fn valueIn(st: St, c: Const) -> Result<Option<Expr>, Spot>
+    ? "The value delta reduction may unfold: definitions and theorems, never opaque constants; for a theorem whose block the checker does not hold, where the block lies, which the caller turns into Wants with the checker it holds (WantedBlocksStopTheCheck)."
+    match c
+        Const.CDefn(_, v, _, _, _) -> Result.Ok(Option.Some(v))
+        Const.CThm(_, p) -> match Core.Lazy.heldValue(p, st.env.held)
+            Result.Ok(v) -> Result.Ok(Option.Some(v))
+            Result.Err(s) -> Result.Err(s)
+        _ -> Result.Ok(Option.None)
+
+verify valueIn
+    valueIn(fresh(envEmpty(), [], Safety.Safe), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Built(Core.Exprs.bvar(1)))) => Result.Ok(Option.Some(Core.Exprs.bvar(1)))
+    valueIn(fresh(envEmpty(), [], Safety.Safe), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Deferred(Source.SuszFile("f", Core.Lazy.emptyStore(), 2, Bounds(decl = 5, names = 0, levels = 0, exprs = 0, count = 1, at = 40))))) => Result.Err(Spot(path = "f", at = 40, length = 2, decl = 5))
+    valueIn(fresh(envHolding(envEmpty(), 5, Bytes.fromList([7, 3])), [], Safety.Safe), Const.CThm(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Proof.Deferred(Source.SuszFile("f", Core.Lazy.emptyStore(), 2, Bounds(decl = 5, names = 0, levels = 0, exprs = 0, count = 1, at = 40))))) => Result.Ok(Option.Some(Core.Exprs.bvar(3)))
+    valueIn(fresh(envEmpty(), [], Safety.Safe), Const.COpaque(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Core.Exprs.bvar(0), false)) => Result.Ok(Option.None)
+
+fn envHeld(env: Env) -> Map<Int, Bytes>
+    ? "The proof blocks the environment's checkers hold, by declaration index (WantedBlocksStopTheCheck)."
+    env.held
+
+verify envHeld
+    Map.len(envHeld(envEmpty())) => 0
+
+fn envWithHeld(env: Env, held: Map<Int, Bytes>) -> Env
+    ? "The environment with the proof blocks a worker holds (WantedBlocksStopTheCheck)."
+    Env.update(env, held = held)
+
+verify envWithHeld
+    Map.len(envHeld(envWithHeld(envEmpty(), {1 => Bytes.fromList([2])}))) => 1
+
+fn envHolding(env: Env, decl: Int, b: Bytes) -> Env
+    ? "The environment with one more proof block held (WantedBlocksStopTheCheck)."
+    Env.update(env, held = Map.set(env.held, decl, b))
+
+verify envHolding
+    Map.len(envHeld(envHolding(envEmpty(), 3, Bytes.fromList([1])))) => 1
 
 fn valued(c: Const) -> Bool
-    ? "Whether valueOf gives a value, without building a packed theorem's proof."
+    ? "Whether valueIn gives a value, without building a packed theorem's proof."
     match c
         Const.CDefn(_, _, _, _, _) -> true
         Const.CThm(_, _) -> true
