@@ -400,11 +400,21 @@ fn appliedRunCols(q: P, x: X, ls: List<LineAt>, line: Int) -> Result<St, String>
     cap = cntAt(x.cap)
     appliedCols(q, line, colList(ls, x, e, names, cap, cntAt(0)))
 
+verify appliedRunCols
+    appliedRunCols(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), X.update(x00(), cap = 65536), [Option.withDefault(Export.Lines.lineAt(String.toUtf8("{{\"app\":{{\"arg\":0,\"fn\":0}},\"ie\":1}}\n"), Export.Lines.offAt(0)), Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0)))], 5) => Result.Ok(St(q = P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 2, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 2, m = {})), x = X.update(colPut(X.update(x00(), cap = 65536), cntAt(1), 1, 0, 0), run = 1), line = 6))
+    appliedRunCols(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), X.update(x00(), cap = 65536), [Option.withDefault(Export.Lines.lineAt(String.toUtf8("{{\"app\":{{\"arg\":0,\"fn\":0}},\"ie\":1}}\n"), Export.Lines.offAt(0)), Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0))), Export.Lines.lineOf(Line.Bad("x"), Export.Lines.offAt(0))], 5) => Result.Err("line 6: x")
+    Result.withDefault(appliedRunCols(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), [Option.withDefault(Export.Lines.lineAt(String.toUtf8("{{\"app\":{{\"arg\":0,\"fn\":0}},\"ie\":1}}\n"), Export.Lines.offAt(0)), Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0)))], 5), St(q = started("", ""), x = x00(), line = 0)).q.exprs => 2
+
 fn appliedCols(q: P, line: Int, r: CL) -> Result<St, String>
     ? "After a run of column lines: the expressions counted and defined and the run record's count grown, as bCols does; then the line the run stopped at."
     match r.taken.value > 0
         false -> appliedStep(q, r.x, r.rest, line)
         true -> appliedStep(P.update(q, exprs = r.e.value, er = Ren.update(q.er, below = r.e.value)), X.update(r.x, run = r.x.run + r.taken.value), r.rest, line + r.taken.value)
+
+verify appliedCols
+    appliedCols(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), 5, CL(x = x00(), rest = [], e = cntAt(1), taken = cntAt(0))) => Result.Ok(St(q = P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x = x00(), line = 5))
+    appliedCols(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), 5, CL(x = x00(), rest = [], e = cntAt(3), taken = cntAt(2))) => Result.Ok(St(q = P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 3, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 3, m = {})), x = X.update(x00(), run = 2), line = 7))
+    appliedCols(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), 5, CL(x = x00(), rest = [Export.Lines.lineOf(Line.Bad("x"), Export.Lines.offAt(0))], e = cntAt(3), taken = cntAt(2))) => Result.Err("line 7: x")
 
 fn appliedStep(q: P, x: X, ls: List<LineAt>, line: Int) -> Result<St, String>
     ? "The first line packed and noted, then the lines after it."
@@ -413,6 +423,12 @@ fn appliedStep(q: P, x: X, ls: List<LineAt>, line: Int) -> Result<St, String>
         [l, ..rest] -> match took(q, x, l)
             Result.Err(e) -> Result.Err("line {line}: {e}")
             Result.Ok(r) -> appliedLines(r.q, r.x, rest, line + 1)
+
+verify appliedStep
+    appliedStep(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), [], 4) => Result.Ok(St(q = P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x = x00(), line = 4))
+    appliedStep(started("", "{{}}"), x00(), [Export.Lines.lineOf(Line.Bad("x"), Export.Lines.offAt(0))], 3) => Result.Err("line 3: x")
+    Result.withDefault(appliedStep(started("", ""), x00(), [Export.Lines.lineOf(Line.BVar(0, 0), Export.Lines.offAt(0))], 1), St(q = started("", ""), x = x00(), line = 0)).line => 2
+    Result.withDefault(appliedStep(started("", ""), x00(), [Export.Lines.lineOf(Line.BVar(0, 0), Export.Lines.offAt(0))], 1), St(q = started("", ""), x = x00(), line = 0)).q.exprs => 1
 
 record CL
     x: X
@@ -646,11 +662,21 @@ fn bRunCols(b: Bytes, n: Off, s: Off, q: P, x: X, line: Int) -> Ran
     cap = cntAt(x.cap)
     bCols(b, n, q, line, colRun(b, n, s, x, e, names, cap, cntAt(0)))
 
+verify bRunCols
+    bRunCols(String.toUtf8("{{\"app\":{{\"arg\":0,\"fn\":0}},\"ie\":1}}\n"), Export.Lines.offAt(32), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), X.update(x00(), cap = 65536), 3) => Ran.Stopped(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 2, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 2, m = {})), X.update(colPut(X.update(x00(), cap = 65536), cntAt(1), 1, 0, 0), run = 1), Export.Lines.offAt(32), 4)
+    bRunCols(String.toUtf8("{{\"app\":{{\"arg\":0,\"fn\":0}},\"ie\":1}}\n{{\"app\":{{\"arg\":0,\"fn\":4}},\"ie\":2}}\n"), Export.Lines.offAt(64), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), X.update(x00(), cap = 65536), 3) => Ran.Failed("line 4: unknown expression index 4")
+    bRunCols(Bytes.fromList([]), Export.Lines.offAt(0), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), X.update(x00(), cap = 65536), 3) => Ran.Stopped(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), X.update(x00(), cap = 65536), Export.Lines.offAt(0), 3)
+
 fn bCols(b: Bytes, n: Off, q: P, line: Int, r: CR) -> Ran
     ? "After a run of column lines: the expressions counted and defined as their own ids, as colDone counts and defines each, and the run record's count grown, as colSet grows it; then the line the run stopped at."
     match r.taken.value > 0
         false -> bAfterCols(b, n, r.s, q, r.x, line, r.la)
         true -> bAfterCols(b, n, r.s, P.update(q, exprs = r.e.value, er = Ren.update(q.er, below = r.e.value)), X.update(r.x, run = r.x.run + r.taken.value), line + r.taken.value, r.la)
+
+verify bCols
+    bCols(Bytes.fromList([]), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), 3, CR(x = x00(), s = Export.Lines.offAt(0), e = cntAt(1), taken = cntAt(0), la = Option.None)) => Ran.Stopped(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), Export.Lines.offAt(0), 3)
+    bCols(Bytes.fromList([]), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), 3, CR(x = x00(), s = Export.Lines.offAt(0), e = cntAt(3), taken = cntAt(2), la = Option.None)) => Ran.Stopped(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 3, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 3, m = {})), X.update(x00(), run = 2), Export.Lines.offAt(0), 5)
+    bCols(Bytes.fromList([]), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), 3, CR(x = x00(), s = Export.Lines.offAt(0), e = cntAt(3), taken = cntAt(2), la = Option.Some(Export.Lines.lineOf(Line.Bad("x"), Export.Lines.offAt(0))))) => Ran.Failed("line 5: x")
 
 fn bAfterCols(b: Bytes, n: Off, s: Off, q: P, x: X, line: Int, la: Option<LineAt>) -> Ran
     ? "The line a run of column lines stopped at: packed from what lineAt read of it when it read it, else read by bStep."
@@ -659,6 +685,11 @@ fn bAfterCols(b: Bytes, n: Off, s: Off, q: P, x: X, line: Int, la: Option<LineAt
             Result.Err(e) -> Ran.Failed("line {line}: {e}")
             Result.Ok(r) -> bRun(b, n, l.next, r.q, r.x, line + 1)
         Option.None -> bStep(b, n, s, q, x, line)
+
+verify bAfterCols
+    bAfterCols(Bytes.fromList([]), Export.Lines.offAt(0), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), 3, Option.None) => Ran.Stopped(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), Export.Lines.offAt(0), 3)
+    bAfterCols(Bytes.fromList([]), Export.Lines.offAt(0), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), 3, Option.Some(Export.Lines.lineOf(Line.Bad("x"), Export.Lines.offAt(0)))) => Ran.Failed("line 3: x")
+    bAfterCols(String.toUtf8("{{\"app\":{{\"arg\":0,\"fn\":4}},\"ie\":2}}\n"), Export.Lines.offAt(32), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), 3, Option.None) => Ran.Failed("line 3: unknown expression index 4")
 
 fn bStep(b: Bytes, n: Off, s: Off, q: P, x: X, line: Int) -> Ran
     ? "The line at s read from the bytes and packed, then the lines after it (RunOfLines)."
@@ -673,6 +704,11 @@ fn bStep(b: Bytes, n: Off, s: Off, q: P, x: X, line: Int) -> Ran
                     Result.Err(e) -> Ran.Failed("line {line}: {e}")
                     Result.Ok(r) -> bRun(b, n, la.next, r.q, r.x, line + 1)
                 Option.None -> Ran.Stopped(q, x, s, line)
+
+verify bStep
+    bStep(Bytes.fromList([]), Export.Lines.offAt(0), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), 3) => Ran.Stopped(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), Export.Lines.offAt(0), 3)
+    bStep(String.toUtf8("[]\n"), Export.Lines.offAt(3), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), 3) => Ran.Stopped(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), Export.Lines.offAt(0), 3)
+    bStep(String.toUtf8("{{\"app\":{{\"arg\":0,\"fn\":4}},\"ie\":2}}\n"), Export.Lines.offAt(32), Export.Lines.offAt(0), P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 1, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 1, m = {})), x00(), 3) => Ran.Failed("line 3: unknown expression index 4")
 
 decision ColumnRuns
     date = "2026-11-12"
@@ -795,6 +831,13 @@ fn bindFits(la: LineAt, e: Cnt, names: Cnt) -> Bool
     body = Export.Lines.numOf(la.n4)
     nmi = Export.Lines.numOf(la.n2)
     Bool.and(Bool.and(Bool.and(Export.Lines.numOf(la.n1) == e.value, e.value < Export.Split.partsLimit()), Bool.and(nmi >= 0, nmi < names.value)), Bool.and(Bool.and(ty >= 0, ty < e.value), Bool.and(body >= 0, body < e.value)))
+
+verify bindFits
+    bindFits(Option.withDefault(Export.Lines.lineAt(String.toUtf8("{{\"ie\":7,\"lam\":{{\"binderInfo\":\"default\",\"body\":1,\"name\":2,\"type\":3}}}}\n"), Export.Lines.offAt(0)), Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0))), cntAt(7), cntAt(3)) => true
+    bindFits(Option.withDefault(Export.Lines.lineAt(String.toUtf8("{{\"ie\":7,\"lam\":{{\"binderInfo\":\"default\",\"body\":1,\"name\":2,\"type\":3}}}}\n"), Export.Lines.offAt(0)), Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0))), cntAt(8), cntAt(3)) => false
+    bindFits(Option.withDefault(Export.Lines.lineAt(String.toUtf8("{{\"ie\":7,\"lam\":{{\"binderInfo\":\"default\",\"body\":1,\"name\":2,\"type\":3}}}}\n"), Export.Lines.offAt(0)), Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0))), cntAt(7), cntAt(2)) => false
+    bindFits(Option.withDefault(Export.Lines.lineAt(String.toUtf8("{{\"ie\":7,\"lam\":{{\"binderInfo\":\"default\",\"body\":1,\"name\":2,\"type\":3}}}}\n"), Export.Lines.offAt(0)), Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0))), cntAt(3), cntAt(3)) => false
+    bindFits(Option.withDefault(Export.Lines.lineAt(String.toUtf8("{{\"ie\":7,\"lam\":{{\"binderInfo\":\"default\",\"body\":1,\"name\":2,\"type\":3}}}}\n"), Export.Lines.offAt(0)), Export.Lines.lineOf(Line.Blank, Export.Lines.offAt(0))), cntAt(7), cntAt(-1)) => false
 
 fn colPut(x: X, e: Cnt, k: Int, c1: Int, c2: Int) -> X
     ? "Expression e's kind word and parts set in the current chunks, as colSet sets them; the run is counted by the caller (ColumnRuns)."
@@ -1542,10 +1585,21 @@ fn nameStrObj(q: P, i: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     _ = Json.Access.only(o, ["pre", "str"])?
     nameStr(q, i, Json.Access.int(o, "pre")?, Json.Access.text(o, "str")?)
 
+verify nameStrObj
+    nameStrObj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, [("pre", J.JInt(0)), ("str", J.JStr("a"))]) => Result.Ok(P(path = "", out = [97, 1, 0, 1], written = 0, start = 0, names = 2, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})))
+    nameStrObj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, [("pre", J.JInt(5)), ("str", J.JStr("a"))]) => Result.Err("unknown name index 5")
+    nameStrObj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, [("pre", J.JInt(0)), ("str", J.JStr("a")), ("x", J.JInt(0))]) => Result.Err("unknown key 'x' is not supported")
+    nameStrObj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, [("pre", J.JInt(0))]) => Result.Err("missing key 'str'")
+
 fn nameNumObj(q: P, i: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Its prefix and number."
     _ = Json.Access.only(o, ["i", "pre"])?
     nameNum(q, i, Json.Access.int(o, "pre")?, Json.Access.int(o, "i")?)
+
+verify nameNumObj
+    nameNumObj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, [("i", J.JInt(4)), ("pre", J.JInt(0))]) => Result.Ok(P(path = "", out = [4, 0, 2], written = 0, start = 0, names = 2, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})))
+    nameNumObj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, [("i", J.JInt(4)), ("pre", J.JInt(0)), ("str", J.JStr("a"))]) => Result.Err("unknown key 'str' is not supported")
+    nameNumObj(P(path = "", out = [], written = 0, start = 0, names = 1, levels = 1, exprs = 0, decls = 0, nr = Ren(below = 1, m = {}), lr = Ren(below = 1, m = {}), er = Ren(below = 0, m = {})), 1, [("i", J.JStr("4")), ("pre", J.JInt(0))]) => Result.Err("key 'i' is not an integer")
 
 fn levelObj(q: P, i: Int, fs: List<Tuple<String, J>>) -> Result<P, String>
     ? "A level line in a form the reader parses as JSON."
@@ -1587,6 +1641,11 @@ fn appObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     _ = Json.Access.only(o, ["arg", "fn"])?
     app(q, ie, Json.Access.int(o, "fn")?, Json.Access.int(o, "arg")?)
 
+verify appObj
+    appObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 2, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 2, m = {})), 2, [("arg", J.JInt(1)), ("fn", J.JInt(0))]) => Result.Ok(P(path = "", out = [1, 2, 10], written = 0, start = 0, names = 2, levels = 2, exprs = 3, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 3, m = {})))
+    appObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 2, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 2, m = {})), 2, [("arg", J.JInt(1)), ("fn", J.JInt(2))]) => Result.Err("unknown expression index 2")
+    appObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 2, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 2, m = {})), 2, [("arg", J.JInt(1)), ("f", J.JInt(0))]) => Result.Err("unknown key 'f' is not supported")
+
 fn binderObj(q: P, ie: Int, o: List<Tuple<String, J>>, isLam: Bool) -> Result<P, String>
     ? "Name, type, body and annotation."
     _ = Json.Access.only(o, ["binderInfo", "body", "name", "type"])?
@@ -1625,6 +1684,11 @@ fn constObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Name and levels."
     _ = Json.Access.only(o, ["name", "us"])?
     cnst(q, ie, Json.Access.int(o, "name")?, Json.Access.ints(o, "us")?)
+
+verify constObj
+    constObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 2, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 2, m = {})), 2, [("name", J.JInt(1)), ("us", J.JArr([J.JInt(0), J.JInt(1)]))]) => Result.Ok(P(path = "", out = [1, 0, 2, 1, 9], written = 0, start = 0, names = 2, levels = 2, exprs = 3, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 3, m = {})))
+    constObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 2, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 2, m = {})), 2, [("name", J.JInt(1)), ("us", J.JArr([J.JInt(2)]))]) => Result.Err("unknown level index 2")
+    constObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 2, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 2, m = {})), 2, [("name", J.JInt(1))]) => Result.Err("missing key 'us'")
 
 fn exprRarer(q: P, ie: Int, fs: List<Tuple<String, J>>) -> Result<P, String>
     ? "Lets, literals, projections and metadata."
@@ -1694,6 +1758,11 @@ fn letObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Name, type, value and body."
     _ = Json.Access.only(o, ["body", "name", "nondep", "type", "value"])?
     letE(q, ie, Json.Access.int(o, "name")?, Json.Access.int(o, "type")?, Json.Access.int(o, "value")?, Json.Access.int(o, "body")?)
+
+verify letObj
+    letObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 3, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 3, m = {})), 3, [("body", J.JInt(2)), ("name", J.JInt(1)), ("nondep", J.JBool(false)), ("type", J.JInt(0)), ("value", J.JInt(1))]) => Result.Ok(P(path = "", out = [1, 2, 3, 1, 13], written = 0, start = 0, names = 2, levels = 2, exprs = 4, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 4, m = {})))
+    letObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 3, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 3, m = {})), 3, [("body", J.JInt(2)), ("name", J.JInt(1)), ("type", J.JInt(0)), ("value", J.JInt(1)), ("x", J.JNull)]) => Result.Err("unknown key 'x' is not supported")
+    letObj(P(path = "", out = [], written = 0, start = 0, names = 2, levels = 2, exprs = 3, decls = 0, nr = Ren(below = 2, m = {}), lr = Ren(below = 2, m = {}), er = Ren(below = 3, m = {})), 3, [("body", J.JInt(3)), ("name", J.JInt(1)), ("type", J.JInt(0)), ("value", J.JInt(1))]) => Result.Err("unknown expression index 3")
 
 fn projObj(q: P, ie: Int, o: List<Tuple<String, J>>) -> Result<P, String>
     ? "Structure name, field index and how far back the structure is."
