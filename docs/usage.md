@@ -40,7 +40,7 @@ Convert the export to [Susz](https://github.com/jasisz/susz) once and check
 the Susz file. That is the fast way:
 
 ```bash
-cargo install --git https://github.com/jasisz/susz
+cargo install susz
 susz pack --no-index mathlib.ndjson mathlib.susz   # 6.2 GB to 637 MB, about 5 s
 .build/target/release/main mathlib.susz [WORKERS]
 ```

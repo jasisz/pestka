@@ -80,7 +80,7 @@ accepted
 To check your own export, convert it to Susz and check that:
 
 ```sh
-cargo install --git https://github.com/jasisz/susz
+cargo install susz
 susz pack --no-index MyModule.ndjson MyModule.susz
 .build/target/release/main MyModule.susz
 ```
