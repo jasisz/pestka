@@ -3,7 +3,10 @@ module Main
         "Pestka's command line: read one lean4export file and give a verdict."
         "The verdict is the last line printed: accepted, rejected: <why> or"
         "declined: <why>. main returns the exit status: 0 accepted, 1 rejected,"
-        "2 declined."
+        "2 declined. With --only, a subset check of a Susz file names what it"
+        "checked instead: checked: <names> (subset; ...), 0; rejected and"
+        "declined as before; index invalid: <why>, 2, which is no verdict on"
+        "the file."
     depends [Core.Names, Check.State, Check.Decl, Export.Stream, Export.Tables, Export.Susz, Export.Pack]
     effects [Args.get, Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
 
@@ -39,12 +42,115 @@ verify withoutIndexFlag
     withoutIndexFlag(["--no-index", "a", "b"], []) => ["a", "b"]
 
 fn checked(args: List<String>) -> Int
-    ? "Reads and checks the file the arguments name; the exit status."
+    ? "Reads and checks the file the arguments name, or with --only NAMES the declarations named; the exit status."
+    ! [Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
+    match onlyOf(args)
+        Option.Some(names) -> checkedPart(withoutOnly(args, []), names)
+        Option.None -> checkedWhole(args)
+
+fn checkedWhole(args: List<String>) -> Int
+    ? "Reads and checks the whole file; the exit status."
     ! [Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     plain = withoutFlag(args, [])
     o = input(plain)
     v = report(o, workersIn(plain), memoryIn(args), List.contains(args, "--reorder-always"), List.contains(args, "--show-placed"))
     v.code
+
+fn onlyOf(args: List<String>) -> Option<List<String>>
+    ? "The names after --only, split at commas; none without the flag, and no names when it ends the arguments."
+    match args
+        [] -> Option.None
+        ["--only"] -> Option.Some([])
+        ["--only", names, .._] -> Option.Some(namesIn(String.split(names, ","), []))
+        [_, ..rest] -> onlyOf(rest)
+
+verify onlyOf
+    onlyOf(["--only", "a,b.*", "f"]) => Option.Some(["a", "b.*"])
+    onlyOf(["f", "--only"]) => Option.Some([])
+    onlyOf(["f", "2"]) => Option.None
+
+fn namesIn(xs: List<String>, acc: List<String>) -> List<String>
+    ? "The names that are not empty, in order."
+    match xs
+        [] -> List.reverse(acc)
+        [x, ..rest] -> match x == ""
+            true -> namesIn(rest, acc)
+            false -> namesIn(rest, List.prepend(x, acc))
+
+verify namesIn
+    namesIn(["a", "", "b"], []) => ["a", "b"]
+
+fn withoutOnly(args: List<String>, acc: List<String>) -> List<String>
+    ? "The arguments without --only and the names after it."
+    match args
+        [] -> List.reverse(acc)
+        ["--only"] -> List.reverse(acc)
+        ["--only", _, ..rest] -> withoutOnly(rest, acc)
+        [a, ..rest] -> withoutOnly(rest, List.prepend(a, acc))
+
+verify withoutOnly
+    withoutOnly(["--only", "a", "f", "2"], []) => ["f", "2"]
+    withoutOnly(["f", "--only"], []) => ["f"]
+
+fn checkedPart(args: List<String>, names: List<String>) -> Int
+    ? "A subset check of a Susz file with INDEX: the declarations named and what they need (SubsetAdmitsUnchecked in Check.Decl); the exit status."
+    ! [Console.print, Disk.readBytesAt, Disk.size]
+    plain = withoutFlag(args, [])
+    match plain
+        [path] -> partOf(path, names, 4, memoryIn(args))
+        [path, n] -> partOf(path, names, workersOf(n), memoryIn(args))
+        _ -> declined("usage: pestka --only NAME[,NAME...] FILE.susz [WORKERS]; NAME may be Foo.* for every name under Foo")
+
+fn partOf(path: String, names: List<String>, workers: Int, memory: Memory) -> Int
+    ? "A subset check needs names, and a Susz file: only Susz has INDEX."
+    ! [Console.print, Disk.readBytesAt, Disk.size]
+    match names
+        [] -> declined("--only needs at least one name")
+        _ -> match Export.Susz.isSusz(path)
+            false -> declined("--only checks part of a Susz file, by its INDEX: pack the export first (pestka pack FILE.ndjson FILE.susz)")
+            true -> partReport(Export.Susz.readPart(path, Export.Susz.planOf(names)), names, workers, memory).code
+
+fn partReport(o: Outcome, names: List<String>, workers: Int, memory: Memory) -> Verdict
+    ? "Prints the subset verdict: a file rejected or declined while reading is so here too; a bad INDEX ends the check as index invalid, status 2, no verdict on the file (Susz 1 spec, section 2)."
+    ! [Console.print]
+    match o
+        Outcome.Rejected(why) -> Verdict(code = rejected(why), held = Option.None)
+        Outcome.Declined(why) -> Verdict(code = declined(why), held = Option.None)
+        Outcome.IndexInvalid(why) -> Verdict(code = printed("index invalid: {why}", 2), held = Option.None)
+        Outcome.Read(p) -> partSummary(p, names, workers, memory)
+
+fn partSummary(p: Parsed, names: List<String>, workers: Int, memory: Memory) -> Verdict
+    ? "What was read, then the targets checked; a target Pestka skips, unsafe or partial, declines the check."
+    ! [Console.print]
+    Console.print("subset: {List.len(p.targets)} declarations asked for; the first {List.len(p.decls)} declarations of the file read")
+    match Check.Decl.skippedAmong(p.decls, p.targets, 0, [])
+        [n, .._] -> Verdict(code = declined("{Core.Names.render(n)} is unsafe or partial, which Pestka does not check"), held = Option.None)
+        [] -> partChecked(Check.Decl.checkPart(p.decls, p.targets, workers, memory), names, List.len(p.targets))
+
+fn partChecked(c: Check.Decl.Part, names: List<String>, n: Int) -> Verdict
+    ? "The subset verdict, with what checking found held to the end (FactsHeldToExit)."
+    ! [Console.print]
+    Verdict(code = partVerdict(c.checking.run, String.join(names, ","), n, c.unchecked), held = Option.Some(c.checking))
+
+fn partVerdict(r: Result<Run, Fail>, what: String, n: Int, unchecked: Int) -> Int
+    ? "checked, never accepted: the rest of the file is not checked, and the declarations before the targets were admitted as stated (SubsetAdmitsUnchecked)."
+    ! [Console.print]
+    match r
+        Result.Err(Fail.Reject(m)) -> rejected(m)
+        Result.Err(Fail.Decline(m)) -> declined(m)
+        Result.Ok(run) -> match run.trusted == 0
+            false -> declined("{run.trusted} nested inductive blocks are not checked yet")
+            true -> printed("checked: {what} ({targetsSaid(n)}subset; {unchecked} earlier declarations admitted unchecked)", 0)
+
+fn targetsSaid(n: Int) -> String
+    ? "How many declarations were asked for, when more than one."
+    match n == 1
+        true -> ""
+        false -> "{n} declarations; "
+
+verify targetsSaid
+    targetsSaid(1) => ""
+    targetsSaid(3) => "3 declarations; "
 
 fn packed(r: Result<String, String>) -> Int
     ? "pestka pack writes the export in Susz 1 (docs/susz.md), with INDEX unless --no-index: 0 when written, 1 when the export is not valid, 2 when it cannot be packed."
@@ -100,7 +206,7 @@ fn input(args: List<String>) -> Outcome
     match args
         [path] -> fileOf(path, 4)
         [path, n] -> fileOf(path, workersOf(n))
-        _ -> Outcome.Declined("usage: pestka [--low-memory] [--reorder-always] [--show-placed] FILE [WORKERS] | pestka pack [--no-index] FILE.ndjson FILE.susz [WORKERS]")
+        _ -> Outcome.Declined("usage: pestka [--low-memory] [--reorder-always] [--show-placed] FILE [WORKERS] | pestka --only NAME[,NAME...] FILE.susz [WORKERS] | pestka pack [--no-index] FILE.ndjson FILE.susz [WORKERS]")
 
 fn fileOf(path: String, workers: Int) -> Outcome
     ? "A Susz file by its signature, otherwise lean4export's ndjson, packed into Susz 1 in memory and read as Susz (NdjsonThroughSusz)."
@@ -173,6 +279,7 @@ fn report(o: Outcome, workers: Int, memory: Memory, always: Bool, show: Bool) ->
     match o
         Outcome.Rejected(why) -> Verdict(code = rejected(why), held = Option.None)
         Outcome.Declined(why) -> Verdict(code = declined(why), held = Option.None)
+        Outcome.IndexInvalid(why) -> Verdict(code = declined(why), held = Option.None)
         Outcome.Read(t) -> summary(t, workers, memory, always, show)
 
 fn summary(p: Parsed, workers: Int, memory: Memory, always: Bool, show: Bool) -> Verdict

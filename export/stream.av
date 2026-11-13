@@ -11,6 +11,7 @@ type Outcome
     Read(Parsed)
     Rejected(String)
     Declined(String)
+    IndexInvalid(String)
 
 type Fed
     More(Tables, Int)

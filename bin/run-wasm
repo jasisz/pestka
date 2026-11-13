@@ -9,7 +9,8 @@
 # instructions in collections.
 #
 # The exit status is Pestka's only when its verdict line agrees with it:
-# 0 with "accepted", 1 with "rejected: ...", 2 with "declined: ...". The
+# 0 with "accepted", 1 with "rejected: ...", 2 with "declined: ...", and
+# for --only 0 with "checked: ..." and 2 with "index invalid: ...". The
 # host ends with 1 when the program's thread throws, so anything else, a
 # crash of the host or of V8 included, exits with 3: a failure never reads
 # as a verdict.
@@ -22,7 +23,7 @@ code=$?
 cat "$out"
 last=$(tail -n 1 "$out")
 case "$code:$last" in
-  0:accepted|1:rejected:*|2:declined:*) exit "$code" ;;
+  0:accepted|0:checked:*|1:rejected:*|2:declined:*|2:index\ invalid:*) exit "$code" ;;
   *)
     echo "run-wasm: exit status $code with the last line '$last': an error, not a verdict" >&2
     exit 3

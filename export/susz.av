@@ -13,9 +13,11 @@ module Susz
         "of the PROOFS section, go to checking undecoded (Core.Lazy): MAIN,"
         "the frontier it lists and how the blocks fill PROOFS are checked"
         "here, each block when its declaration is checked. The INDEX and"
-        "SOURCE sections are never read: a full check's verdict does not"
-        "depend on them."
-    exposes [isSusz, readFile, readImage, Image, At, vAt, posAt, place, ahead, ahead1, ahead2, octetAt]
+        "SOURCE sections are never read by a full check: its verdict does"
+        "not depend on them. A subset check (readPart) reads INDEX to find"
+        "the declarations asked for, reads MAIN only up to the last of them"
+        "and holds every INDEX entry it relies on to the records."
+    exposes [isSusz, readFile, readImage, readPart, planOf, Plan, Ask, Image, At, vAt, posAt, place, ahead, ahead1, ahead2, octetAt]
     exposes opaque [Pos]
     depends [Bytes, Core.Names, Core.Exprs, Core.Decls, Core.Lazy, Export.Tables, Export.Items, Export.Declarations, Export.Stream]
     effects [Disk.readBytesAt, Disk.size]
@@ -201,6 +203,7 @@ record Image
 type Src
     File(String)
     Memory(Image)
+    Part(String, Plan)
 
 fn sizeOf(src: Src) -> Result<Int, String>
     ? "How many bytes the source holds (BytesFromFileOrMemory)."
@@ -208,6 +211,7 @@ fn sizeOf(src: Src) -> Result<Int, String>
     match src
         Src.File(path) -> Disk.size(path)
         Src.Memory(m) -> Result.Ok(Bytes.len(m.front) + Bytes.len(m.back))
+        Src.Part(path, _) -> Disk.size(path)
 
 verify sizeOf
     sizeOf(Src.Memory(Image(front = Bytes.fromList([1]), back = Bytes.fromList([2, 3])))) => Result.Ok(3)
@@ -218,6 +222,7 @@ fn bytesAt(src: Src, offset: Int, n: Int) -> Result<Bytes, String>
     match src
         Src.File(path) -> Disk.readBytesAt(path, offset, n)
         Src.Memory(m) -> Result.Ok(imageAt(m, offset, n))
+        Src.Part(path, _) -> Disk.readBytesAt(path, offset, n)
 
 verify bytesAt
     bytesAt(Src.Memory(Image(front = Bytes.fromList([1, 2]), back = Bytes.fromList([3]))), 1, 2) => Result.Ok(Bytes.fromList([2, 3]))
@@ -241,6 +246,7 @@ fn nameOf(src: Src) -> String
     match src
         Src.File(path) -> path
         Src.Memory(_) -> "the export packed in memory"
+        Src.Part(path, _) -> path
 
 verify nameOf
     nameOf(Src.File("f")) => "f"
@@ -363,6 +369,11 @@ record Dir
     ids: List<Int>
     must: Int
     mustEntry: Int
+    index: Int
+    indexLength: Int
+    upTo: Int
+    marks: Map<Int, Mark>
+    targets: List<Int>
 
 fn withTrailer(src: Src, end: Int, tr: Bytes) -> Outcome
     ? "The counts and the directory, whose section count must give the trailer's length; then the entries, the PAD sections and MAIN (HeaderAndDirectory)."
@@ -370,7 +381,7 @@ fn withTrailer(src: Src, end: Int, tr: Bytes) -> Outcome
     n = u32At(tr, 16)
     match Bytes.len(tr) == 28 + 24 * n
         false -> Outcome.Rejected("trailer @ {end + Bytes.len(tr) - 8}: a trailer length of {Bytes.len(tr)} bytes does not hold {n} directory entries")
-        true -> match entries(tr, 0, n, 16, end, Dir(names = u32At(tr, 0), levels = u32At(tr, 4), exprs = u32At(tr, 8), decls = u32At(tr, 12), countsAt = end, dirAt = end + 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1, mustEntry = 0))
+        true -> match entries(tr, 0, n, 16, end, Dir(names = u32At(tr, 0), levels = u32At(tr, 4), exprs = u32At(tr, 8), decls = u32At(tr, 12), countsAt = end, dirAt = end + 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1, mustEntry = 0, index = -1, indexLength = 0, upTo = -1, marks = {}, targets = []))
             Result.Err(o) -> o
             Result.Ok(d) -> padded(src, d, List.reverse(d.pads))
 
@@ -458,11 +469,12 @@ verify flagsOf
     flagsOf(6) => -1
 
 fn sectionKept(d: Dir, id: Int, off: Int, len: Int) -> Dir
-    ? "Where MAIN, PROOFS and each PAD lie; SOURCE and INDEX are not read."
+    ? "Where MAIN, PROOFS, INDEX and each PAD lie; SOURCE is not read, and INDEX only by a subset check (PartByIndex)."
     match id
         1 -> Dir.update(d, main = off, mainLength = len)
         2 -> Dir.update(d, proofs = off, proofsLength = len)
         4 -> Dir.update(d, pads = List.prepend((off, len), d.pads))
+        5 -> Dir.update(d, index = off, indexLength = len)
         _ -> d
 
 verify sectionKept
@@ -470,7 +482,7 @@ verify sectionKept
 
 fn dir0() -> Dir
     ? "A directory of nothing, for examples."
-    Dir(names = 1, levels = 1, exprs = 0, decls = 0, countsAt = 0, dirAt = 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1, mustEntry = 0)
+    Dir(names = 1, levels = 1, exprs = 0, decls = 0, countsAt = 0, dirAt = 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1, mustEntry = 0, index = -1, indexLength = 0, upTo = -1, marks = {}, targets = [])
 
 verify dir0
     dir0().main => -1
@@ -494,10 +506,22 @@ fn padded(src: Src, d: Dir, pads: List<Tuple<Int, Int>>) -> Outcome
     ? "Every PAD section all zero bytes, so that no byte of a file is free; then MAIN (HeaderAndDirectory)."
     ! [Disk.readBytesAt]
     match pads
-        [] -> refill(Rd(src = src, b = Bytes.fromList([]), base = 0, stop = d.main + d.mainLength, n = 0), Tables.update(Export.Tables.empty(), proofBase = Int.max(d.proofs, 0), proofLength = d.proofsLength), d.main, chunkBytes(), d)
+        [] -> mainOf(src, d)
         [(off, len), ..rest] -> match bytesAt(src, off, len)
             Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
             Result.Ok(b) -> padChecked(src, d, rest, off, firstNonZero(b, 0))
+
+fn mainOf(src: Src, d: Dir) -> Outcome
+    ? "MAIN, read whole; for a subset check, once INDEX has said which declarations are asked for and how far to read (PartByIndex)."
+    ! [Disk.readBytesAt]
+    match src
+        Src.Part(_, plan) -> indexed(src, d, plan)
+        _ -> mainFrom(src, d)
+
+fn mainFrom(src: Src, d: Dir) -> Outcome
+    ? "MAIN from its first chunk."
+    ! [Disk.readBytesAt]
+    refill(Rd(src = src, b = Bytes.fromList([]), base = 0, stop = d.main + d.mainLength, n = 0), Tables.update(Export.Tables.empty(), proofBase = Int.max(d.proofs, 0), proofLength = d.proofsLength), d.main, chunkBytes(), d)
 
 fn padChecked(src: Src, d: Dir, rest: List<Tuple<Int, Int>>, off: Int, i: Int) -> Outcome
     ? "The next PAD section, or the first byte of this one that is not zero."
@@ -538,7 +562,9 @@ fn step(r: Rd, t: Tables, i: Pos, d: Dir) -> Outcome
     ! [Disk.readBytesAt]
     match Bytes.get(r.b, i.value)
         Option.None -> short(r, t, i, d)
-        Option.Some(tag) -> stepped(r, i, d, recordAt(t, r.b, tag, orNone(posOf(i.value + 1))))
+        Option.Some(tag) -> match Bool.and(tag == 18, d.upTo >= 0)
+            true -> partStep(r, i, d, recordAt(t, r.b, tag, orNone(posOf(i.value + 1))))
+            false -> stepped(r, i, d, recordAt(t, r.b, tag, orNone(posOf(i.value + 1))))
 
 fn stepped(r: Rd, i: Pos, d: Dir, x: Done) -> Outcome
     ? "Goes on after a record, or stops at a bad one, named by its offset in the file and its number in MAIN, which do not depend on how the file is read (ErrorsInFileOrder). A record past the chunk is read again (short)."
@@ -1851,3 +1877,521 @@ fn ruleOf(t: Tables, c: Int, nf: Int, rhs: Int) -> Result<RecRule, String>
 
 verify ruleOf
     ruleOf(Export.Tables.empty(), 4, 0, 0) => Result.Err("unknown name index 4")
+
+decision PartByIndex
+    date = "2026-11-13"
+    reason =
+        "A subset check (Susz 1 spec, section 6a.2) checks the declarations"
+        "asked for by name, not the file. INDEX gives each declared name's"
+        "declaration, and each declaration's record offset in MAIN, its kind"
+        "and its block's length. Records only point back, so MAIN is still"
+        "decoded from its start, but only up to the record of the last"
+        "declaration asked for: the reader stops right after it, and reads"
+        "of PROOFS only the blocks of the theorems up to there, so a theorem"
+        "unfolded while checking can still be decoded. INDEX is trusted for"
+        "nothing (rule 1, section 6a.3): the whole section is decoded, its"
+        "sizes, the front coding, the order of the keys and the range of"
+        "every declaration index checked; each entry relied on, the asked"
+        "declarations' offset, kind and block, and the names they declare,"
+        "is held to the records as MAIN is read. A disagreement ends the"
+        "subset check as index invalid, which is no verdict on the file. A"
+        "structural error met in the prefix read still rejects the file,"
+        "as it is one; one past it is not seen. A name not in the table is"
+        "not found, a decline: INDEX could leave a name out, and only"
+        "reading all of MAIN would tell. A file without INDEX is declined"
+        "with how to pack one. Foo.* asks for every name under Foo, which"
+        "is one run of the sorted keys, since Foo's key is a prefix of"
+        "theirs."
+    chosen = "PartByIndex"
+    rejected = ["WholeMainThenPick", "OffsetsTrusted", "BinarySearchOverFrontCoding"]
+    impacts = [readPart, planOf, indexed, indexFound, namesScan, partStep, partEnded, markWrong]
+
+record Ask
+    text: String
+    key: Bytes
+    under: Bool
+
+record Plan
+    asked: List<Ask>
+
+record Mark
+    offset: Int
+    kind: Int
+    blockAt: Int
+    blockLength: Int
+    keys: List<Bytes>
+
+record Hit
+    key: Bytes
+    decl: Int
+
+record Found
+    marks: Map<Int, Mark>
+    targets: List<Int>
+    upTo: Int
+
+fn readPart(path: String, plan: Plan) -> Outcome
+    ? "Reads the declarations plan asks for and every declaration before the last of them (PartByIndex); the parsed result names them in targets."
+    ! [Disk.readBytesAt, Disk.size]
+    readSource(Src.Part(path, plan))
+
+fn planOf(names: List<String>) -> Plan
+    ? "What is asked for: each name as typed, Foo.* meaning every name under Foo (PartByIndex)."
+    Plan(asked = asksOf(names, []))
+
+verify planOf
+    planOf(["a", "b.*"]) => Plan(asked = [Ask(text = "a", key = Bytes.fromList([1, 1, 97]), under = false), Ask(text = "b.*", key = Bytes.fromList([1, 1, 98]), under = true)])
+
+fn asksOf(names: List<String>, acc: List<Ask>) -> List<Ask>
+    ? "Each name's key, in order."
+    match names
+        [] -> List.reverse(acc)
+        [n, ..rest] -> asksOf(rest, List.prepend(askOf(n), acc))
+
+verify asksOf
+    asksOf([], []) => []
+
+fn askOf(n: String) -> Ask
+    ? "A name, or with .* at its end the names under it."
+    match String.endsWith(n, ".*")
+        true -> Ask(text = n, key = dottedKey(String.slice(n, 0, String.len(n) - 2)), under = true)
+        false -> Ask(text = n, key = dottedKey(n), under = false)
+
+verify askOf
+    askOf("Nat.*").under => true
+    askOf("Nat.0").key => Bytes.fromList([1, 3, 78, 97, 116, 2, 0])
+
+fn dottedKey(n: String) -> Bytes
+    ? "The INDEX key of a name written with dots, as the reference reader makes it: a component of digits only is a number (Susz 1 spec, section 6a.1)."
+    Result.withDefault(Bytes.fromList(List.reverse(componentsOnto(String.split(n, "."), []))), Bytes.fromList([]))
+
+verify dottedKey
+    dottedKey("a.12") => Bytes.fromList([1, 1, 97, 2, 12])
+    dottedKey("x1") => Bytes.fromList([1, 2, 120, 49])
+
+fn componentsOnto(cs: List<String>, acc: List<Int>) -> List<Int>
+    ? "Each component's key onto the reversed output."
+    match cs
+        [] -> acc
+        [c, ..rest] -> componentsOnto(rest, componentOnto(c, Int.fromString(c), acc))
+
+verify componentsOnto
+    componentsOnto([], [3]) => [3]
+
+fn componentOnto(c: String, k: Result<Int, String>, acc: List<Int>) -> List<Int>
+    ? "02 and the number for a component of digits only (fewer than 20), else 01, the length and the UTF-8."
+    n = String.len(c)
+    match k
+        Result.Ok(v) -> match Bool.and(allDigits(String.chars(c)), Bool.and(n > 0, n < 20))
+            true -> uvOnto(List.prepend(2, acc), v)
+            false -> textOnto(c, acc)
+        Result.Err(_) -> textOnto(c, acc)
+
+verify componentOnto
+    componentOnto("-1", Result.Ok(-1), []) => [49, 45, 2, 1]
+    componentOnto("7", Result.Ok(7), []) => [7, 2]
+    componentOnto("a", Result.Err("x"), []) => [97, 1, 1]
+
+fn allDigits(cs: List<String>) -> Bool
+    ? "Every character a decimal digit."
+    match cs
+        [] -> true
+        [c, ..rest] -> match String.contains("0123456789", c)
+            true -> allDigits(rest)
+            false -> false
+
+verify allDigits
+    allDigits(["1", "x"]) => false
+    allDigits(["1", "2"]) => true
+    allDigits([]) => true
+
+fn textOnto(c: String, acc: List<Int>) -> List<Int>
+    ? "A string component: 01, the length and the UTF-8 bytes."
+    u = String.toUtf8(c)
+    bytesOnto(uvOnto(List.prepend(1, acc), Bytes.len(u)), u, 0)
+
+verify textOnto
+    textOnto("ab", []) => [98, 97, 2, 1]
+
+fn uvOnto(acc: List<Int>, n: Int) -> List<Int>
+    ? "n as a varint onto the reversed output."
+    match n < 128
+        true -> List.prepend(n, acc)
+        false -> uvOnto(List.prepend(Bits.or(Bits.and(n, 127), 128), acc), Bits.shiftRight(n, 7))
+
+verify uvOnto
+    uvOnto([], 300) => [2, 172]
+    uvOnto([], 5) => [5]
+
+fn bytesOnto(acc: List<Int>, b: Bytes, i: Int) -> List<Int>
+    ? "b's bytes from i on, onto the reversed output."
+    match Bytes.get(b, i)
+        Option.None -> acc
+        Option.Some(x) -> bytesOnto(List.prepend(x, acc), b, i + 1)
+
+verify bytesOnto
+    bytesOnto([], Bytes.fromList([5, 6]), 1) => [6]
+
+fn keyOf(n: Name) -> Bytes
+    ? "A name's INDEX key, root first (Susz 1 spec, section 6a.1)."
+    Result.withDefault(Bytes.fromList(List.reverse(keyOnto(n, []))), Bytes.fromList([]))
+
+verify keyOf
+    keyOf(Core.Names.num(Core.Names.str(Core.Names.anon(), "ab"), 300)) => Bytes.fromList([1, 2, 97, 98, 2, 172, 2])
+
+fn keyOnto(n: Name, acc: List<Int>) -> List<Int>
+    ? "n's key onto the reversed output."
+    match n
+        Name.Anon -> acc
+        Name.Str(pre, x, _) -> textOnto(x, keyOnto(pre, acc))
+        Name.Num(pre, k, _) -> uvOnto(List.prepend(2, keyOnto(pre, acc)), k)
+
+verify keyOnto
+    keyOnto(Core.Names.anon(), []) => []
+    keyOnto(Core.Names.str(Core.Names.anon(), "a"), []) => [97, 1, 1]
+    keyOnto(Core.Names.num(Core.Names.anon(), 3), []) => [3, 2]
+
+fn indexed(src: Src, d: Dir, plan: Plan) -> Outcome
+    ? "INDEX read whole and the declarations asked for found in it; then MAIN up to the last of them (PartByIndex)."
+    ! [Disk.readBytesAt]
+    match d.index < 0
+        true -> Outcome.Declined("{nameOf(src)} has no INDEX section, which checking part of a file needs: pack it without --no-index")
+        false -> match bytesAt(src, d.index, d.indexLength)
+            Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
+            Result.Ok(b) -> withFound(src, d, plan, indexFound(b, d.decls, plan.asked))
+
+fn withFound(src: Src, d: Dir, plan: Plan, r: Result<Tuple<Found, List<Hit>>, String>) -> Outcome
+    ? "A bad INDEX ends the subset check; a name it does not hold is not found; otherwise MAIN, with the entries to hold to its records."
+    ! [Disk.readBytesAt]
+    match r
+        Result.Err(e) -> Outcome.IndexInvalid("INDEX @ {d.index}: {e}")
+        Result.Ok((f, hits)) -> match notFound(plan.asked, hits, [])
+            [] -> mainFrom(src, Dir.update(d, upTo = f.upTo, marks = f.marks, targets = f.targets))
+            miss -> Outcome.Declined("not found: {String.join(miss, ", ")}: the file's INDEX declares no such name")
+
+fn notFound(asked: List<Ask>, hits: List<Hit>, acc: List<String>) -> List<String>
+    ? "The names asked for that no hit answers, in order."
+    match asked
+        [] -> List.reverse(acc)
+        [a, ..rest] -> match anyHit(a, hits)
+            true -> notFound(rest, hits, acc)
+            false -> notFound(rest, hits, List.prepend(a.text, acc))
+
+verify notFound
+    notFound([askOf("a"), askOf("b")], [Hit(key = dottedKey("a"), decl = 0)], []) => ["b"]
+    notFound([], [], []) => []
+
+fn anyHit(a: Ask, hits: List<Hit>) -> Bool
+    ? "Some hit is what a asks for."
+    match hits
+        [] -> false
+        [h, ..rest] -> match asks(a, h.key)
+            true -> true
+            false -> anyHit(a, rest)
+
+verify anyHit
+    anyHit(askOf("a.*"), [Hit(key = dottedKey("a.b"), decl = 0)]) => true
+    anyHit(askOf("a.*"), [Hit(key = dottedKey("a"), decl = 0)]) => false
+    anyHit(askOf("a"), []) => false
+
+fn asks(a: Ask, key: Bytes) -> Bool
+    ? "Whether key is a's name, or for Foo.* a name under Foo: its key starts with Foo's and is longer, and a key's components delimit themselves, so that is a name whose first components are Foo's."
+    match a.under
+        false -> key == a.key
+        true -> Bool.and(Bytes.len(key) > Bytes.len(a.key), Bytes.take(key, Bytes.len(a.key)) == a.key)
+
+verify asks
+    asks(askOf("ab.*"), dottedKey("abc.d")) => false
+    asks(askOf("ab.*"), dottedKey("ab.d")) => true
+
+fn askedBy(asked: List<Ask>, key: Bytes) -> Bool
+    ? "Whether some ask is answered by key."
+    match asked
+        [] -> false
+        [a, ..rest] -> match asks(a, key)
+            true -> true
+            false -> askedBy(rest, key)
+
+verify askedBy
+    askedBy([], Bytes.fromList([])) => false
+    askedBy([askOf("a")], dottedKey("a")) => true
+
+fn indexFound(b: Bytes, decls: Int, asked: List<Ask>) -> Result<Tuple<Found, List<Hit>>, String>
+    ? "INDEX's declaration count, which must be the file's, its entries, its name table with the names asked for, then the entries of the declarations they name (PartByIndex)."
+    n = vAt(b, posAt(0))
+    match n.at.value < 0
+        true -> Result.Err("byte 0: a bad varint")
+        false -> match n.value == decls
+            false -> Result.Err("decl-count {n.value}, the file has {decls} declarations")
+            true -> namesFrom(b, n.at, entriesPast(b, n.at, 0, n.value)?, n.value, asked)
+
+verify indexFound
+    indexFound(Bytes.fromList([2]), 1, []) => Result.Err("decl-count 2, the file has 1 declarations")
+    indexFound(Bytes.fromList([1, 0, 0, 1, 0, 3, 1, 1, 97, 0]), 1, [askOf("a")]) => Result.Ok((Found(marks = {0 => Mark(offset = 0, kind = 0, blockAt = -1, blockLength = 0, keys = [dottedKey("a")])}, targets = [0], upTo = 1), [Hit(key = dottedKey("a"), decl = 0)]))
+    indexFound(Bytes.fromList([1, 0, 0, 1, 0, 3, 1, 1, 97, 0, 9]), 1, [askOf("a")]) => Result.Err("byte 10: bytes after the name table")
+
+fn entriesPast(b: Bytes, p: Pos, i: Int, nd: Int) -> Result<Pos, String>
+    ? "Entry i of nd and those after it: a kind up to 6, a varint, and for kind 6 one more; where the name table starts."
+    match i >= nd
+        true -> Result.Ok(p)
+        false -> match Bytes.get(b, p.value)
+            Option.None -> Result.Err("entry {i} runs past the section")
+            Option.Some(k) -> match k > 6
+                true -> Result.Err("byte {p.value}: entry {i}: kind {k}")
+                false -> entryPast(b, p, i, nd, k, vAt(b, ahead1(p)))
+
+verify entriesPast
+    entriesPast(Bytes.fromList([7, 0]), posAt(0), 0, 1) => Result.Err("byte 0: entry 0: kind 7")
+    entriesPast(Bytes.fromList([6, 0]), posAt(0), 0, 1) => Result.Err("byte 0: entry 0: a bad varint")
+
+fn entryPast(b: Bytes, p: Pos, i: Int, nd: Int, k: Int, delta: At) -> Result<Pos, String>
+    ? "Past the delta, and a block's length for kind 6."
+    match delta.at.value < 0
+        true -> Result.Err("byte {p.value}: entry {i}: a bad varint")
+        false -> match k == 6
+            false -> entriesPast(b, delta.at, i + 1, nd)
+            true -> entryBlockPast(b, p, i, nd, vAt(b, delta.at))
+
+fn entryBlockPast(b: Bytes, p: Pos, i: Int, nd: Int, l: At) -> Result<Pos, String>
+    ? "Past a block's length."
+    match l.at.value < 0
+        true -> Result.Err("byte {p.value}: entry {i}: a bad varint")
+        false -> entriesPast(b, l.at, i + 1, nd)
+
+verify entryBlockPast
+    entryBlockPast(Bytes.fromList([]), posAt(0), 0, 1, At(value = 3, at = posAt(2))) => Result.Ok(posAt(2))
+
+verify entryPast
+    entryPast(Bytes.fromList([0, 0]), posAt(0), 0, 1, 0, At(value = 0, at = posAt(2))) => Result.Ok(posAt(2))
+
+fn namesFrom(b: Bytes, first: Pos, p: Pos, nd: Int, asked: List<Ask>) -> Result<Tuple<Found, List<Hit>>, String>
+    ? "The name table after the entries; first is where the entries start."
+    nn = vAt(b, p)
+    match nn.at.value < 0
+        true -> Result.Err("byte {p.value}: a bad varint")
+        false -> match nn.value * 3 > Bytes.len(b) - nn.at.value
+            true -> Result.Err("byte {p.value}: name-count {nn.value} runs past the section")
+            false -> hitsFound(b, first, nd, namesScan(b, nn.at, 0, nn.value, nd, Bytes.fromList([]), asked, [])?)
+
+fn hitsFound(b: Bytes, first: Pos, nd: Int, hits: List<Hit>) -> Result<Tuple<Found, List<Hit>>, String>
+    ? "The declarations the hits name, in order, and their entries."
+    byDecl = keysByDecl(hits, {})
+    targets = List.reverse(Map.keys(byDecl))
+    upTo = lastOf(targets) + 1
+    Result.Ok((Found(marks = marked(b, first, 0, upTo, 0, 0, byDecl, {}), targets = List.reverse(targets), upTo = upTo), hits))
+
+verify hitsFound
+    hitsFound(Bytes.fromList([0]), posAt(1), 1, []) => Result.Ok((Found(marks = {}, targets = [], upTo = 0), []))
+
+verify namesFrom
+    namesFrom(Bytes.fromList([9]), posAt(1), posAt(0), 1, []) => Result.Err("byte 0: name-count 9 runs past the section")
+
+fn lastOf(xs: List<Int>) -> Int
+    ? "The first of xs, the largest when they come largest first; -1 for none."
+    match xs
+        [] -> -1
+        [x, .._] -> x
+
+verify lastOf
+    lastOf([]) => -1
+    lastOf([4, 2]) => 4
+
+fn keysByDecl(hits: List<Hit>, m: Map<Int, List<Bytes>>) -> Map<Int, List<Bytes>>
+    ? "The keys found, by the declaration INDEX says declares each."
+    match hits
+        [] -> m
+        [h, ..rest] -> keysByDecl(rest, Map.set(m, h.decl, List.prepend(h.key, Option.withDefault(Map.get(m, h.decl), []))))
+
+verify keysByDecl
+    Map.len(keysByDecl([Hit(key = Bytes.fromList([1]), decl = 3), Hit(key = Bytes.fromList([2]), decl = 3)], {})) => 1
+
+fn namesScan(b: Bytes, p: Pos, i: Int, nn: Int, nd: Int, cur: Bytes, asked: List<Ask>, acc: List<Hit>) -> Result<List<Hit>, String>
+    ? "Name entry i of nn and those after it, each key the previous one's first bytes and a suffix, checked as the spec asks (section 6a.3): the shared bytes at most the previous key, the suffix not empty, the shared bytes the whole common prefix and the keys increasing, the declaration in range; then nothing after the table. The keys asked for are kept with their declarations (PartByIndex)."
+    match i >= nn
+        true -> match p.value == Bytes.len(b)
+            true -> Result.Ok(List.reverse(acc))
+            false -> Result.Err("byte {p.value}: bytes after the name table")
+        false -> nameEntry(b, p, i, nn, nd, cur, asked, acc, vAt(b, p))
+
+verify namesScan
+    namesScan(Bytes.fromList([0, 1, 5, 0, 0, 1, 4, 0]), posAt(0), 0, 2, 1, Bytes.fromList([]), [], []) => Result.Err("byte 4: name 1: keys out of order")
+    namesScan(Bytes.fromList([0, 1, 5, 0, 0, 1, 5, 0]), posAt(0), 0, 2, 1, Bytes.fromList([]), [], []) => Result.Err("byte 4: name 1: shared 0 is not the whole common prefix")
+    namesScan(Bytes.fromList([0, 1, 5, 0, 2, 1, 6, 0]), posAt(0), 0, 2, 1, Bytes.fromList([]), [], []) => Result.Err("byte 4: name 1: shared 2 is longer than the previous key")
+    namesScan(Bytes.fromList([0, 0, 0]), posAt(0), 0, 1, 1, Bytes.fromList([]), [], []) => Result.Err("byte 0: name 0: an empty suffix or one past the section")
+    namesScan(Bytes.fromList([0, 1, 5, 1]), posAt(0), 0, 1, 1, Bytes.fromList([]), [], []) => Result.Err("byte 0: name 0: declaration 1 of 1")
+    namesScan(Bytes.fromList([0, 1, 5, 0, 1, 1, 6, 0]), posAt(0), 0, 2, 1, Bytes.fromList([]), [], []) => Result.Ok([])
+
+fn nameEntry(b: Bytes, p: Pos, i: Int, nn: Int, nd: Int, cur: Bytes, asked: List<Ask>, acc: List<Hit>, s: At) -> Result<List<Hit>, String>
+    ? "The shared count read; then the suffix's length and the suffix."
+    l = vAt(b, s.at)
+    match Bool.or(s.at.value < 0, l.at.value < 0)
+        true -> Result.Err("byte {p.value}: name {i}: a bad varint")
+        false -> match Bool.and(l.value >= 1, l.at.value + l.value <= Bytes.len(b))
+            false -> Result.Err("byte {p.value}: name {i}: an empty suffix or one past the section")
+            true -> nameKeyed(b, p, i, nn, nd, cur, asked, acc, s.value, Bytes.take(Bytes.drop(b, l.at.value), l.value), vAt(b, ahead(l.at, l.value)))
+
+fn nameKeyed(b: Bytes, p: Pos, i: Int, nn: Int, nd: Int, cur: Bytes, asked: List<Ask>, acc: List<Hit>, shared: Int, suffix: Bytes, dl: At) -> Result<List<Hit>, String>
+    ? "The declaration read and the key checked against the one before; the next entry follows."
+    match dl.at.value < 0
+        true -> Result.Err("byte {p.value}: name {i}: a bad varint")
+        false -> match shared > Bytes.len(cur)
+            true -> Result.Err("byte {p.value}: name {i}: shared {shared} is longer than the previous key")
+            false -> match frontWrong(cur, shared, octet(suffix, 0))
+                1 -> Result.Err("byte {p.value}: name {i}: shared {shared} is not the whole common prefix")
+                2 -> Result.Err("byte {p.value}: name {i}: keys out of order")
+                _ -> match dl.value >= nd
+                    true -> Result.Err("byte {p.value}: name {i}: declaration {dl.value} of {nd}")
+                    false -> nameNext(b, dl.at, i, nn, nd, Bytes.concat(Bytes.take(cur, shared), suffix), asked, acc, dl.value)
+
+fn nameNext(b: Bytes, p: Pos, i: Int, nn: Int, nd: Int, key: Bytes, asked: List<Ask>, acc: List<Hit>, owner: Int) -> Result<List<Hit>, String>
+    ? "The key kept when it is asked for; on to the next entry."
+    match askedBy(asked, key)
+        true -> namesScan(b, p, i + 1, nn, nd, key, asked, List.prepend(Hit(key = key, decl = owner), acc))
+        false -> namesScan(b, p, i + 1, nn, nd, key, asked, acc)
+
+verify nameNext
+    nameNext(Bytes.fromList([]), posAt(0), 0, 1, 1, dottedKey("a"), [askOf("a")], [], 0) => Result.Ok([Hit(key = dottedKey("a"), decl = 0)])
+
+verify nameKeyed
+    nameKeyed(Bytes.fromList([]), posAt(0), 0, 1, 1, Bytes.fromList([]), [], [], 0, Bytes.fromList([5]), At(value = 0, at = Pos(value = -1))) => Result.Err("byte 0: name 0: a bad varint")
+
+verify nameEntry
+    nameEntry(Bytes.fromList([0]), posAt(0), 0, 1, 1, Bytes.fromList([]), [], [], At(value = 0, at = posAt(1))) => Result.Err("byte 0: name 0: a bad varint")
+
+fn frontWrong(cur: Bytes, shared: Int, first: Int) -> Int
+    ? "0 when a key of cur's first shared bytes then a suffix starting with first is coded right after cur; 1 when shared is not the whole common prefix; 2 when the key is not past cur."
+    match Bytes.get(cur, shared)
+        Option.None -> 0
+        Option.Some(c) -> match c == first
+            true -> 1
+            false -> match first < c
+                true -> 2
+                false -> 0
+
+verify frontWrong
+    frontWrong(Bytes.fromList([1, 2]), 2, 9) => 0
+    frontWrong(Bytes.fromList([1, 2]), 1, 2) => 1
+    frontWrong(Bytes.fromList([1, 2]), 1, 1) => 2
+    frontWrong(Bytes.fromList([1, 2]), 1, 3) => 0
+
+fn marked(b: Bytes, p: Pos, i: Int, upTo: Int, off: Int, boff: Int, byDecl: Map<Int, List<Bytes>>, acc: Map<Int, Mark>) -> Map<Int, Mark>
+    ? "The entries before upTo again, which entriesPast found well formed, summed to offsets in MAIN and in PROOFS; the declarations asked for get what INDEX says of them."
+    match i >= upTo
+        true -> acc
+        false -> markedOne(b, i, upTo, octet(b, p.value), vAt(b, ahead1(p)), boff, off, byDecl, acc)
+
+fn markedOne(b: Bytes, i: Int, upTo: Int, k: Int, delta: At, boff: Int, off: Int, byDecl: Map<Int, List<Bytes>>, acc: Map<Int, Mark>) -> Map<Int, Mark>
+    ? "Entry i: its offset, and a block's place and length."
+    l = vAt(b, delta.at)
+    blen = match k == 6
+        true -> l.value
+        false -> 0
+    next = match k == 6
+        true -> l.at
+        false -> delta.at
+    at = match k == 6
+        true -> boff
+        false -> -1
+    here = off + delta.value
+    marked(b, next, i + 1, upTo, here, boff + blen, byDecl, markIf(acc, i, Mark(offset = here, kind = k, blockAt = at, blockLength = blen, keys = []), Map.get(byDecl, i)))
+
+fn markIf(acc: Map<Int, Mark>, i: Int, m: Mark, keys: Option<List<Bytes>>) -> Map<Int, Mark>
+    ? "Declaration i's mark, when names asked for are declared by it."
+    match keys
+        Option.None -> acc
+        Option.Some(ks) -> Map.set(acc, i, Mark.update(m, keys = ks))
+
+verify markIf
+    markIf({}, 0, Mark(offset = 0, kind = 0, blockAt = -1, blockLength = 0, keys = []), Option.None) => {}
+    Map.len(markIf({}, 0, Mark(offset = 0, kind = 0, blockAt = -1, blockLength = 0, keys = []), Option.Some([]))) => 1
+
+verify markedOne
+    Map.len(markedOne(Bytes.fromList([6, 3, 9]), 0, 1, 6, At(value = 3, at = posAt(2)), 0, 0, {0 => [Bytes.fromList([])]}, {})) => 1
+
+verify marked
+    marked(Bytes.fromList([6, 3, 9, 0, 2]), posAt(0), 0, 2, 0, 0, {1 => [Bytes.fromList([])]}, {}) => {1 => Mark(offset = 5, kind = 0, blockAt = -1, blockLength = 0, keys = [Bytes.fromList([])])}
+
+fn partStep(r: Rd, i: Pos, d: Dir, x: Done) -> Outcome
+    ? "A declaration record of a subset read: what INDEX says of it held to it, and reading stopped after the last declaration asked for (PartByIndex)."
+    ! [Disk.readBytesAt]
+    match x
+        Done.Next(t, at) -> partNext(r, i, d, t, at, Map.get(d.marks, t.declCount - 1))
+        _ -> stepped(r, i, d, x)
+
+fn partNext(r: Rd, i: Pos, d: Dir, t: Tables, at: Pos, m: Option<Mark>) -> Outcome
+    ? "The entry of a declaration asked for, held to its record."
+    ! [Disk.readBytesAt]
+    match m
+        Option.None -> partGo(r, i, d, t, at)
+        Option.Some(k) -> match markWrong(k, r.base + i.value - d.main, octet(r.b, i.value + 1), t.decls, t.declCount - 1)
+            "" -> partGo(r, i, d, t, at)
+            e -> Outcome.IndexInvalid("INDEX @ {d.index}: {e}")
+
+fn partGo(r: Rd, i: Pos, d: Dir, t: Tables, at: Pos) -> Outcome
+    ? "On to the next record, or done after the last declaration asked for."
+    ! [Disk.readBytesAt]
+    match t.declCount >= d.upTo
+        true -> partEnded(r.src, t, d)
+        false -> stepped(r, i, d, Done.Next(t, at))
+
+fn markWrong(m: Mark, off: Int, kind: Int, ds: List<Decl>, n: Int) -> String
+    ? "What INDEX says of declaration n that its record, the newest of ds, does not: its offset from the start of MAIN, its kind, its block's place and length, the names it declares; empty when all hold (Susz 1 spec, section 6a.3)."
+    match off == m.offset
+        false -> "entry {n}: offset {m.offset}, its record is at {off}"
+        true -> match kind == m.kind
+            false -> "entry {n}: kind {m.kind}, its record's is {kind}"
+            true -> match ds
+                [] -> "entry {n}: no record"
+                [d, .._] -> declWrong(m, d, n)
+
+verify markWrong
+    markWrong(Mark(offset = 3, kind = 0, blockAt = -1, blockLength = 0, keys = []), 4, 0, [], 0) => "entry 0: offset 3, its record is at 4"
+    markWrong(Mark(offset = 3, kind = 1, blockAt = -1, blockLength = 0, keys = []), 3, 0, [], 0) => "entry 0: kind 1, its record's is 0"
+
+fn declWrong(m: Mark, d: Decl, n: Int) -> String
+    ? "A block's place and length, then the names."
+    match d
+        Decl.Thm(_, Proof.Deferred(Source.SuszSpot(o, l, _)), _) -> match Bool.and(o == m.blockAt, l == m.blockLength)
+            false -> "entry {n}: a block of {m.blockLength} bytes at {m.blockAt}, its record's is {l} bytes at {o}"
+            true -> namesWrong(m.keys, keysOf(Export.Tables.declNames(d), []), n)
+        _ -> namesWrong(m.keys, keysOf(Export.Tables.declNames(d), []), n)
+
+verify declWrong
+    declWrong(Mark(offset = 0, kind = 0, blockAt = -1, blockLength = 0, keys = [dottedKey("b")]), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "a"), params = [], ty = Core.Exprs.bvar(0)), false), 0) => "a name INDEX gives declaration 0 is not declared by it"
+    declWrong(Mark(offset = 0, kind = 0, blockAt = -1, blockLength = 0, keys = [dottedKey("a")]), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "a"), params = [], ty = Core.Exprs.bvar(0)), false), 0) => ""
+
+fn keysOf(ns: List<Name>, acc: List<Bytes>) -> List<Bytes>
+    ? "Each name's key."
+    match ns
+        [] -> acc
+        [n, ..rest] -> keysOf(rest, List.prepend(keyOf(n), acc))
+
+verify keysOf
+    keysOf([], []) => []
+    keysOf([Core.Names.str(Core.Names.anon(), "a")], []) => [dottedKey("a")]
+
+fn namesWrong(keys: List<Bytes>, declared: List<Bytes>, n: Int) -> String
+    ? "Every key INDEX gives declaration n among the keys of the names its record declares."
+    match keys
+        [] -> ""
+        [k, ..rest] -> match List.contains(declared, k)
+            true -> namesWrong(rest, declared, n)
+            false -> "a name INDEX gives declaration {n} is not declared by it"
+
+verify namesWrong
+    namesWrong([], [], 0) => ""
+    namesWrong([dottedKey("a")], [dottedKey("b")], 2) => "a name INDEX gives declaration 2 is not declared by it"
+
+fn partEnded(src: Src, t: Tables, d: Dir) -> Outcome
+    ? "The declarations read, with the blocks of their theorems: the first bytes of PROOFS, which those blocks fill; the declarations asked for named (PartByIndex)."
+    ! [Disk.readBytesAt]
+    match t.proofAt > 0
+        false -> Outcome.Read(Parsed.update(Export.Tables.finish(t), targets = d.targets))
+        true -> partProofs(src, d, storeOf(t), t)
+
+fn partProofs(src: Src, d: Dir, s: Store, t: Tables) -> Outcome
+    ? "The blocks so far read and given to their theorems."
+    ! [Disk.readBytesAt]
+    match bytesAt(src, d.proofs, t.proofAt)
+        Result.Err(e) -> Outcome.Declined("cannot read {nameOf(src)}: {e}")
+        Result.Ok(pb) -> Outcome.Read(Parsed.update(packedAll(Export.Tables.finish(t), s, pb), targets = d.targets))

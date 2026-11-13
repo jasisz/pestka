@@ -11,7 +11,7 @@ module Decl
         "environment at its own place in the file, so that they can be"
         "checked apart; the verdict names the first failure in file order,"
         "as checking strictly in order would."
-    exposes [Run, Job, Admitted, Chunk, Checked, Checking, checkAll, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
+    exposes [Run, Job, Admitted, Chunk, Checked, Checking, Part, checkAll, checkPart, skippedAmong, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Cache, Check.Shapes, Check.State, Check.Tc, Check.IndAdd]
     effects []
 
@@ -535,6 +535,84 @@ fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, alwa
 
 verify checkHeld
     List.len(checkHeld([], 2, Memory.Fast, false, false).held) => 2
+
+decision SubsetAdmitsUnchecked
+    date = "2026-11-13"
+    reason =
+        "A subset check (--only, PartByIndex in Export.Susz) checks the"
+        "declarations asked for against the environment of everything"
+        "before them in the file, as Lean checks every declaration, but"
+        "without checking that environment the way a full check does. The"
+        "environment is built as for a full check: every name is new and"
+        "every declaration's universe parameters distinct; inductive blocks"
+        "and the quotient package are derived and compared with the file,"
+        "since reduction trusts the recursor rules and quotient rules they"
+        "add; unsafe and partial declarations are skipped. Of the axioms,"
+        "definitions, theorems and opaque constants before the last one"
+        "asked for, only those asked for are checked: the rest are admitted"
+        "as stated, their types and values unchecked, theorems' proofs never"
+        "decoded unless a check unfolds one. So a subset verdict trusts that"
+        "every such declaration before a target is well typed: one that is"
+        "not can make a target pass that a full check would reject, or a"
+        "reduction never end. Checking the types too would cost about what"
+        "checking every definition costs, most of a full check of the"
+        "prefix. A building failure before the last target, an inductive"
+        "block that does not derive or a name declared twice, is a failure"
+        "of the file and rejects as in a full check."
+    chosen = "SubsetAdmitsUnchecked"
+    rejected = ["SubsetChecksTypes", "SubsetChecksDependencies", "SubsetTrustsInductives"]
+    impacts = [checkPart, onlyTargets, skippedAmong]
+
+record Part
+    checking: Checking
+    unchecked: Int
+
+fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory) -> Part
+    ? "A subset check: the environment built from decls, the declarations before the last target and the targets, then of the deferred declarations only the targets, at the positions targets lists in increasing order, checked on workers; unchecked counts the deferred declarations admitted without a check (SubsetAdmitsUnchecked)."
+    a = admit(decls)
+    w = Int.max(workers, 1)
+    unit = unitFor(w)
+    all = due(a)
+    jobs = onlyTargets(all, targets, [])
+    cs = runWorkers(deal(chunks(jobs, a.run.env, Check.State.limitsOf(unit, memory), runSize(costOf(jobs, 0), w), [], 0, []), w, 0, emptyGroups(w, [])))
+    Part(checking = Checking(run = combine(a, cs), held = cs), unchecked = List.len(all) - List.len(jobs))
+
+verify checkPart
+    checkPart([axiomNamed("a", false), axiomNamed("b", false)], [1], 1, Memory.Fast).unchecked => 1
+    Result.withDefault(checkPart([Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "a"), params = [], ty = Core.Exprs.bvar(0)), false), axiomNamed("b", false)], [1], 1, Memory.Fast).checking.run, Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).checked => 1
+    checkPart([Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "a"), params = [], ty = Core.Exprs.bvar(0)), false), axiomNamed("b", false)], [0], 1, Memory.Fast).checking.run => Result.Err(Fail.Reject("a: the type checker met a loose bound variable"))
+
+fn onlyTargets(jobs: List<Job>, targets: List<Int>, acc: List<Job>) -> List<Job>
+    ? "The jobs at the positions targets lists; both in increasing order."
+    match jobs
+        [] -> List.reverse(acc)
+        [j, ..rest] -> match targets
+            [] -> List.reverse(acc)
+            [t, ..more] -> match j.pos == t
+                true -> onlyTargets(rest, more, List.prepend(j, acc))
+                false -> match j.pos < t
+                    true -> onlyTargets(rest, targets, acc)
+                    false -> onlyTargets(jobs, more, acc)
+
+verify onlyTargets
+    onlyTargets([job2("a", 0), job2("b", 1), job2("c", 3)], [1, 2, 3], []) == [job2("b", 1), job2("c", 3)] => true
+    onlyTargets([], [1], []) => []
+
+fn skippedAmong(decls: List<Decl>, targets: List<Int>, i: Int, acc: List<Name>) -> List<Name>
+    ? "The names of the targets Pestka skips, unsafe or partial ones, which a subset check cannot vouch for; decls from position i, targets in increasing order."
+    match targets
+        [] -> List.reverse(acc)
+        [t, ..more] -> match decls
+            [] -> List.reverse(acc)
+            [d, ..rest] -> match i == t
+                false -> skippedAmong(rest, targets, i + 1, acc)
+                true -> match placesOf(d)
+                    [] -> skippedAmong(rest, more, i + 1, List.prepend(Core.Decls.nameOf(d), acc))
+                    _ -> skippedAmong(rest, more, i + 1, acc)
+
+verify skippedAmong
+    skippedAmong([axiomNamed("a", true), axiomNamed("b", false)], [0, 1], 0, []) => [Core.Names.str(Core.Names.anon(), "a")]
+    skippedAmong([axiomNamed("a", true)], [], 0, []) => []
 
 fn runSize(n: Int, workers: Int) -> Int
     ? "What one run costs, n being what all the jobs cost (jobCost): four runs per worker, at least what 16 declarations cost, so that a worker checks long stretches of the same namespaces (WorkersByNamespace, RunsByProofSize)."

@@ -64,7 +64,10 @@ Compiled to Rust, which is the build meant for large inputs:
 bin/build                  # aver compile + cargo build --release into .build/
 bin/build-pgo TRAIN.ndjson # the same, guided by a profile of checking TRAIN
 .build/target/release/main [--low-memory] FILE.susz [WORKERS]   # or FILE.ndjson
+.build/target/release/main --only NAME[,NAME...] FILE.susz [WORKERS]
+                           # check only some declarations, by the file's INDEX
 tests/run.sh               # fixtures in file order and with --reorder-always
+tests/only.sh              # --only on small files, with damaged INDEX sections
 tests/arena.sh DIR         # small Arena tests, in both orders, under bin/capped
 python3 tests/soundness.py corpus DIR --exclude '*/perf/*' --max-bytes 4000000
                                              # compare Pestka with other kernels
@@ -166,6 +169,17 @@ the lines on the workers in rounds and packs them in file order (decision
 `ParsedInRounds` in `export/pack.av`), so there more workers also cost
 parsing work.
 
+### Checking part of a file
+
+`--only NAME[,NAME...]` checks the named declarations of a Susz file, found
+by its INDEX section, instead of the whole file; `Foo.*` names everything
+under `Foo`. The declarations before the last target are admitted to the
+environment, with inductive blocks and quotients still checked and the
+others taken as stated. The result is `checked: ...`, never `accepted`.
+[Susz in Pestka](susz.md#checking-part-of-a-file) says exactly what such a
+result trusts, and [the benchmarks](benchmarks.md#checking-part-of-a-file)
+what it saves.
+
 ### WebAssembly
 
 Compiled to WebAssembly:
@@ -193,7 +207,8 @@ preopens the current directory, so pass a relative path.
 ## Exit codes
 
 The last line printed is the verdict: `accepted`, `rejected: <why>` or
-`declined: <why>`. `main` returns the matching exit status, the one the Lean
+`declined: <why>`. With `--only` it is `checked: <names> (subset; ...)`
+instead of `accepted`, or `index invalid: <why>`. `main` returns the matching exit status, the one the Lean
 Kernel Arena and `lake comparator` read:
 
 | Code | Meaning |
@@ -201,4 +216,5 @@ Kernel Arena and `lake comparator` read:
 | 0 | every declaration accepted |
 | 1 | a declaration rejected |
 | 2 | input uses something Pestka does not support yet (declined) |
+| 2 | `--only` only: the file's INDEX disagrees with its records (`index invalid: <why>`), no verdict |
 | 3 | `bin/run-wasm` only: the host or V8 failed, no verdict |

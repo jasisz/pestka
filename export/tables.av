@@ -8,7 +8,7 @@ module Tables
         "yet defined is an error, which is what keeps every term a finite"
         "DAG. The next fields count the lines read (plus the implicit name"
         "and level 0)."
-    exposes [Tables, Parsed, empty, name, level, expr, names, levels, addName, addLevel, addExpr, addDecl, finish]
+    exposes [Tables, Parsed, empty, name, level, expr, names, levels, addName, addLevel, addExpr, addDecl, declNames, finish]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy]
     effects []
 
@@ -48,10 +48,11 @@ record Parsed
     exprs: Int
     decls: List<Decl>
     allPlaced: Bool
+    targets: List<Int>
 
 fn finish(t: Tables) -> Parsed
-    ? "What checking needs: the declarations in file order and the counts; the index tables are left behind to be freed."
-    Parsed(constants = t.constants, names = t.nextName, levels = t.nextLevel, exprs = t.nextExpr, decls = List.reverse(t.decls), allPlaced = t.allPlaced)
+    ? "What checking needs: the declarations in file order and the counts; the index tables are left behind to be freed. targets, the declarations a subset check asks for (PartByIndex in Export.Susz), is empty for a whole file."
+    Parsed(constants = t.constants, names = t.nextName, levels = t.nextLevel, exprs = t.nextExpr, decls = List.reverse(t.decls), allPlaced = t.allPlaced, targets = [])
 
 verify finish
     finish(empty()).names => 1

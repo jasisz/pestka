@@ -78,6 +78,27 @@ Packed sizes, without INDEX:
 | `cslib` | 2.42 GB | 250 MB |
 | `mathlib` | 6.18 GB | 637 MB |
 
+### Checking part of a file
+
+`--only NAME` on `mathlib.susz` packed with INDEX (623 MB, of which INDEX
+is 15.6 MB), against a full check of the same file. Plain `bin/build`, not
+PGO, four workers, one run each, on AC power with the machine otherwise
+quiet. "Read" is how many of the 702,040 declarations Pestka decodes MAIN
+up to.
+
+| Target | Read | Time | Peak | Instructions |
+|---|---|---|---|---|
+| `Int.neg_ediv` (early) | 14,276 (2%) | 0.28 s | 0.13 GB | 3.2 G |
+| `CategoryTheory.FintypeCat.Action.isConnected_of_transitive` (middle) | 351,044 (50%) | 6.3 s | 2.1 GB | 49.5 G |
+| `HenselianLocalRing.TFAE` (late) | 698,733 (99.5%) | 10.2 s | 3.5 GB | 72.8 G |
+| whole file (`accepted`) | 702,040 | 74 s | 6.3 GB | 1336 G |
+
+A late target still costs reading nearly all of MAIN and building the
+environment before it, inductive blocks derived; what it saves is checking
+the types and values of every other declaration, and decoding their
+proofs: 95% of the instructions of a full check. On one worker the late target takes the same 10.2 s and 72.8 G,
+since only one declaration is left to check.
+
 ### As WebAssembly
 
 The same source compiled by Aver's own wasm-gc backend (not through Rust or
