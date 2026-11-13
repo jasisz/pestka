@@ -99,17 +99,54 @@ verify dropLate
     dropLate([], 0, []) => []
 
 fn chunks(jobs: List<Job>, env: Env, limits: Limits, size: Int, cur: List<Job>, n: Int, acc: List<Chunk>) -> List<Chunk>
-    ? "Consecutive runs of size jobs, in the order checked, each with the whole environment; neighbours share the most, which keeps the per-chunk caches useful."
+    ? "Consecutive runs of jobs in the order checked, each with the whole environment; neighbours share the most, which keeps the per-chunk caches useful. A run ends where the jobs' cost so far (jobCost) reaches the next multiple of size, n being the cost before cur's jobs plus theirs, so the runs cost about size each (RunsByProofSize)."
     match jobs
         [] -> match cur
             [] -> List.reverse(acc)
             _ -> List.reverse(List.prepend(Chunk(env = env, jobs = List.reverse(cur), limits = limits), acc))
-        [j, ..rest] -> match n + 1 >= size
-            true -> chunks(rest, env, limits, size, [], 0, List.prepend(Chunk(env = env, jobs = List.reverse(List.prepend(j, cur)), limits = limits), acc))
-            false -> chunks(rest, env, limits, size, List.prepend(j, cur), n + 1, acc)
+        [j, ..rest] -> match n + jobCost(j) >= size * (List.len(acc) + 1)
+            true -> chunks(rest, env, limits, size, [], n + jobCost(j), List.prepend(Chunk(env = env, jobs = List.reverse(List.prepend(j, cur)), limits = limits), acc))
+            false -> chunks(rest, env, limits, size, List.prepend(j, cur), n + jobCost(j), acc)
 
 verify chunks
     chunks([], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 4, [], 0, []) => []
+    List.len(chunks([job2("a", 0), job2("a", 1), job2("a", 2)], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), perDecl() * 2, [], 0, [])) => 2
+    List.len(chunks([thm2("a", 0, 100), job2("a", 1), job2("a", 2)], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 60, [], 0, [])) => 3
+    List.len(chunks([job2("a", 0), job2("a", 1), thm2("a", 2, 1000), job2("a", 3)], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 500, [], 0, [])) => 2
+
+fn jobCost(j: Job) -> Int
+    ? "What checking a job is reckoned to cost: the expressions of its proof's block, known from the theorem's record before the block is decoded, plus perDecl for the declaration itself (RunsByProofSize)."
+    perDecl() + proofSize(j.value)
+
+verify jobCost
+    jobCost(job2("a", 0)) => perDecl()
+    jobCost(thm2("a", 0, 7)) => perDecl() + 7
+
+fn proofSize(v: Option<Proof>) -> Int
+    ? "The expressions of a packed proof's block; 0 for a value already built or none."
+    match v
+        Option.Some(Proof.Deferred(Source.SuszSpot(_, _, bd))) -> bd.count
+        Option.Some(Proof.Deferred(Source.SuszBlock(_, _, bd))) -> bd.count
+        _ -> 0
+
+verify proofSize
+    proofSize(Option.None) => 0
+    proofSize(Option.Some(Proof.Built(Core.Exprs.bvar(0)))) => 0
+    proofSize(Option.Some(Proof.Deferred(Source.SuszSpot(0, 2, Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 5, at = 0))))) => 5
+
+fn perDecl() -> Int
+    ? "What a declaration is reckoned to cost beyond its proof's expressions, in expressions (RunsByProofSize)."
+    30
+
+verify perDecl
+    perDecl() > 0 => true
+
+fn thm2(ns: String, pos: Int, exprs: Int) -> Job
+    ? "A theorem named ns.x at pos whose block holds exprs expressions, for examples."
+    Job.update(job2(ns, pos), value = Option.Some(Proof.Deferred(Source.SuszSpot(0, 2, Bounds(decl = pos, names = 0, levels = 0, exprs = 0, count = exprs, at = 0)))), isThm = true)
+
+verify thm2
+    thm2("a", 3, 9).isThm => true
 
 decision CheckedByNamespace
     date = "2026-11-06"
@@ -493,21 +530,31 @@ fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, alwa
     w = Int.max(workers, 1)
     unit = unitFor(w)
     jobs = orderFor(due(a), w, unit, placed, always, literalsPlaced(decls, 0, litNames))
-    cs = runWorkers(deal(chunks(jobs, a.run.env, Check.State.limitsOf(unit, memory), runSize(List.len(jobs), w), [], 0, []), w, 0, emptyGroups(w, [])))
+    cs = runWorkers(deal(chunks(jobs, a.run.env, Check.State.limitsOf(unit, memory), runSize(costOf(jobs, 0), w), [], 0, []), w, 0, emptyGroups(w, [])))
     Checking(run = combine(a, cs), held = cs)
 
 verify checkHeld
     List.len(checkHeld([], 2, Memory.Fast, false, false).held) => 2
 
 fn runSize(n: Int, workers: Int) -> Int
-    ? "How many declarations one run holds: four runs per worker, at least 16, so that a worker checks long stretches of the same namespaces (WorkersByNamespace)."
+    ? "What one run costs, n being what all the jobs cost (jobCost): four runs per worker, at least what 16 declarations cost, so that a worker checks long stretches of the same namespaces (WorkersByNamespace, RunsByProofSize)."
     w = Int.max(workers, 1) * 4
-    Int.max(16, Result.withDefault(Int.div(n + w - 1, w), 16))
+    Int.max(16 * perDecl(), Result.withDefault(Int.div(n + w - 1, w), 16))
 
 verify runSize
-    runSize(0, 1) => 16
-    runSize(702040, 8) => 21939
-    runSize(100, 4) => 16
+    runSize(0, 1) => 16 * perDecl()
+    runSize(3200000000, 8) => 100000000
+    runSize(100, 4) => 16 * perDecl()
+
+fn costOf(jobs: List<Job>, acc: Int) -> Int
+    ? "What the jobs cost together (jobCost)."
+    match jobs
+        [] -> acc
+        [j, ..rest] -> costOf(rest, acc + jobCost(j))
+
+verify costOf
+    costOf([], 0) => 0
+    costOf([job2("a", 0), thm2("a", 1, 5)], 0) => 2 * perDecl() + 5
 
 decision WorkersByNamespace
     date = "2026-11-07"
@@ -527,6 +574,37 @@ decision WorkersByNamespace
     chosen = "FourRunsPerWorker"
     rejected = ["RunsOfSixteen", "OneRunPerWorker", "TwoRunsPerWorker", "EightRunsPerWorker"]
     impacts = [runSize, deal, checkHeld]
+
+decision RunsByProofSize
+    date = "2026-11-13"
+    reason =
+        "Runs of equally many declarations cost unequally, and the workers,"
+        "each dealt its runs before it starts, end apart: the last waits for"
+        "the costliest. A theorem's record in a Susz file gives the"
+        "expressions of its proof's block before the block is decoded, so"
+        "runs now end where the jobs' cost so far reaches the next"
+        "multiple of a fourth of a worker's share, a job costing its"
+        "block's expressions and perDecl more. Mathlib, one worker, each"
+        "job's instructions against its block's expressions: Pearson 0.40"
+        "(0.71 on Init), Spearman 0.73 (0.88), about 11 k instructions an"
+        "expression; a declaration with no block, a definition, cost what"
+        "52 expressions do on average but spread widely. Cut by those"
+        "costs, the costliest worker's share over the mean, by the"
+        "instructions each job took on one worker: by count 1.083 on four"
+        "workers and 1.233 on eight; perDecl 20 1.064 and 1.078, 30 1.022"
+        "and 1.092, 50 1.027 and 1.116; perDecl is 30. Mathlib, PGO, three"
+        "runs each, on AC power on a shared machine: four workers, the"
+        "last worker done 60.1 s to 58.0 s after checking began, the first"
+        "and last 10.3 s to 2.9 s apart, wall 73.2 s to 70.9 s,"
+        "instructions 1118.5 G to 1118.2 G, peak 6.14 to 6.18 GB; eight"
+        "workers 40.3 s to 40.1 s, 9.3 s to 10.7 s apart, wall 52.7 s to"
+        "52.6 s, 1140.7 G to 1142.5 G, 6.45 to 6.34 GB. On eight the"
+        "workers' processor times came closer, 31 to 47 s to 32 to 38 s,"
+        "but with the machine's load at 8 to 24 when they ran, when each"
+        "worker was let run decided its end more than its share."
+    chosen = "RunsByProofSize"
+    rejected = ["RunsByCount"]
+    impacts = [runSize, chunks, jobCost, perDecl, costOf]
 
 decision FrugalWorkers
     date = "2026-11-10"
