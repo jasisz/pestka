@@ -99,10 +99,10 @@ the quotient package as it meets them, and then checks the types and
 values of the other declarations on WORKERS threads at once (four by
 default), each against the environment at its own place in the file. The
 verdict is the first failure in file order, as in a strictly sequential
-check. Reading shares out the same way: the lines are parsed on the workers
-in rounds, each worker a range of the chunk being read where the split put
-it, and go into the tables in file order, each round while the next one is
-parsed (decision `RangesInPlace` in `export/reader.av`).
+check. A Susz file is read on one thread. A theorem's proof stays as
+bytes until its declaration is checked, and the worker checking it decodes
+it then. An ndjson file is first packed into Susz in memory, with its
+lines parsed on the workers.
 
 When each worker has more declarations than its caches hold (`mathlib` on
 one worker), the deferred declarations are checked grouped by the first
@@ -124,52 +124,47 @@ The VM is far slower on large files; use it for `verify` and small inputs.
 across declarations stop at smaller limits, and the facts about closed
 terms, kept for the whole run otherwise, are emptied past a limit too. The
 limits were chosen by what a cost model of the caches says each GB kept
-returns, then swept on `mathlib` until the peak reached what reading
-alone takes (decision `LowMemoryMode` in `check/state.av`). PGO build,
-one worker unless said:
+returns, then swept on `mathlib` (decision `LowMemoryMode` in
+`check/state.av`). Susz files, PGO build, one worker unless said:
 
 | Test | Default | `--low-memory` |
 |---|---|---|
-| `mathlib` | 1187 G, 6.6 GB, 187 s | 1243 G (+4.7%), 4.9 GB, 220 s |
-| `mathlib`, 4 workers | 7.1 GB, 73–74 s | 5.0 GB, 71 s |
-| `init` | 47.4 G, 0.90 GB | 51.7 G (+9.1%), 0.52 GB |
-| `etale` | 17.5 G, 0.78 GB | 18.4 G (+4.9%), 0.43 GB |
+| `mathlib` | 1074 G, 5.5 GB, 175 s | 1117 G (+4.0%), 3.9 GB, 171 s |
+| `mathlib`, 4 workers | 1114 G, 6.2 GB, 66 s | 1174 G (+5.4%), 3.9 GB, 67 s |
+| `init` | 42.2 G, 0.86 GB | 45.6 G (+8.0%), 0.45 GB |
+| `etale` | 17.0 G, 0.82 GB | 17.0 G (+0.0%), 0.44 GB |
 
-What the mode cannot shrink is the environment. Pestka holds every
-expression of the export until the process ends; on `mathlib` reading
-alone peaks at 4.7 GB, of which the 105 M expression nodes are 3.4 GB, the
-index table that reading needs 0.8 GB and the names 0.3 GB. Three quarters
-of the nodes are the values of theorems, which nothing reads once the
-theorem is checked, except that Lean's kernel, and so Pestka, unfolds a
-theorem where it reduces a proof: `Init` unfolds `Acc.inv` under
-`WellFounded.fixF_eq`, `etale` `Iff.mpr` and `Localization.mk_eq_mk_iff`
-under `Localization.rec`. A mode that let theorem values go once checked
-was tried and declined both files. Going below the environment would take
-reading and checking a chunk at a time, with a first pass over the file to
-learn where each expression is used last, or a denser representation of
-stored terms.
+What the mode cannot shrink is what reading builds. Pestka keeps the
+tables it reads from MAIN until the process ends, and keeps the PROOFS
+section as bytes. On `mathlib` that is 38 M expressions and 4.2 M names,
+plus 317 MB of proofs, and when reading ends the process holds about
+3.2 GB. The 67 M expressions of the theorems' proofs are not built while
+reading. A proof is decoded when its theorem is checked, and no table
+keeps the term after that. The low-memory peak of 3.9 GB is the 3.2 GB of reading plus
+what checking holds at once. Going lower would take a denser form of the
+stored terms, or reading MAIN a part at a time.
 
 `tests/run.sh` and `tests/arena.sh` take `PESTKA_ARGS`, so
 `PESTKA_ARGS=--low-memory sh tests/run.sh` runs them in this mode.
 
 ### Workers
 
-Workers take more instructions than one worker on the same file: reading in
-rounds parses each line into a value of its own before the tables take it,
-and each worker keeps caches of its own and learns again facts that another
-worker has already found. The workers share caches only an eighth larger
-than one worker's, so the peak stays close to one worker's (decision
-`FrugalWorkers` in `check/decl.av`). `mathlib`, PGO build:
+On a Susz file the workers only check: the file is read on one thread
+whatever their number, so the extra instructions of more workers come
+from checking: each worker keeps caches of its own and finds again facts
+that another worker has already found. The workers share caches only an
+eighth larger than one worker's, so the peak stays close to one worker's
+(decision `FrugalWorkers` in `check/decl.av`). `mathlib.susz`, PGO build:
 
 | Workers | Time | Peak | Instructions |
 |---|---|---|---|
-| 1 | 180 s | 6.6 GB | 1185 G |
-| 4 | 73–74 s | 7.1 GB | 1283 G (+8%) |
+| 1 | 175 s | 5.5 GB | 1074 G |
+| 4 | 66 s | 6.2 GB | 1114 G (+3.7%) |
 
-Of that 8%, reading in rounds takes about 4.5% (55 G) and saves about
-10 s. The rest comes mostly from the smaller caches each worker keeps. Four
-workers each given a whole worker's caches would need about twice the
-memory.
+An ndjson file is first packed into Susz in memory. That packer parses
+the lines on the workers in rounds and packs them in file order (decision
+`ParsedInRounds` in `export/pack.av`), so there more workers also cost
+parsing work.
 
 ### WebAssembly
 
