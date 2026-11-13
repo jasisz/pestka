@@ -3684,17 +3684,175 @@ verify atomBetas
     atomBetas(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.bvar(5))) => Core.Exprs.bvar(5)
     atomBetas(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.app(Core.Exprs.bvar(5), Core.Exprs.bvar(5)))) => Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.app(Core.Exprs.bvar(5), Core.Exprs.bvar(5)))
 
+decision BetasShared
+    date = "2026-11-13"
+    reason =
+        "Reducing the redexes on atoms in a body with a matcher unfolded into"
+        "it walked the body as a tree. A body read from an export is a DAG:"
+        "Std's blastUdiv.go._f has 2.35 million tree nodes over about 850"
+        "distinct ones, mostly a proof shared many times over, and the walk"
+        "took 600 M instructions of the 616 M that checking"
+        "blastUdiv.denote_go_eq_divRec_q costs, against 18.5 M for an NbE"
+        "kernel on the same file. The result for a subterm depends on the"
+        "subterm alone, not on where it stands, so a node of 32 or more"
+        "tree nodes is now reduced once and its result kept for the walk"
+        "under its hash, as substitution keeps its memo; smaller terms go"
+        "the plain way, with no memo to carry."
+    chosen = "BetasShared"
+    rejected = ["BetasAsATree"]
+    impacts = [betasIn, betasMemo, betasNode]
+
 fn betasIn(e: Expr) -> Option<Expr>
-    ? "e with its redexes on atoms reduced, or None when it has none."
-    match e
-        Expr.App(_, _, _) -> appBetas(Core.Apps.fnOf(e), Core.Apps.argsOf(e), betasIn(Core.Apps.fnOf(e)), betasAll(Core.Apps.argsOf(e), [], false))
-        Expr.Lam(_, t, b) -> lamAround(t, betasIn(b))
-        Expr.Let(_, t, v, b) -> letBetas(t, v, b, betasIn(v), betasIn(b))
-        Expr.Proj(_, s, i, x) -> projBetas(s, i, betasIn(x))
-        _ -> Option.None
+    ? "e with its redexes on atoms reduced, or None when it has none; a shared subterm is reduced once (BetasShared)."
+    match Core.Exprs.isSmall(e)
+        true -> betasSmall(e)
+        false -> betasMemo(e, {}).o
 
 verify betasIn
     betasIn(Core.Exprs.app(Core.Exprs.bvar(5), Core.Exprs.bvar(5))) => Option.None
+    betasIn(bigRedex()) => Option.Some(bigReduced())
+
+fn bigRedex() -> Expr
+    ? "A sample of 32 tree nodes or more holding a redex on an atom twice, in one shared subterm."
+    bigPair(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), bigSpine(Core.Exprs.bvar(0), 16), Binder.Default), Core.Exprs.bvar(3)))
+
+fn bigReduced() -> Expr
+    ? "bigRedex with its redexes reduced."
+    bigPair(bigSpine(Core.Exprs.bvar(3), 16))
+
+fn bigPair(x: Expr) -> Expr
+    ? "x applied to itself."
+    Core.Exprs.app(x, x)
+
+fn bigSpine(x: Expr, n: Int) -> Expr
+    ? "x applied to n copies of sort zero."
+    match n <= 0
+        true -> x
+        false -> Core.Exprs.app(bigSpine(x, n - 1), Core.Exprs.sort(Level.Zero))
+
+verify bigSpine
+    Core.Exprs.treeSize(bigSpine(Core.Exprs.bvar(0), 2)) => 5
+
+verify bigPair
+    Core.Exprs.isSmall(bigPair(bigSpine(Core.Exprs.bvar(0), 16))) => false
+
+verify bigRedex
+    Core.Exprs.isSmall(bigRedex()) => false
+
+verify bigReduced
+    Core.Exprs.isSmall(bigReduced()) => false
+
+record BM
+    o: Option<Expr>
+    memo: Map<Core.Exprs.Key, Tuple<Expr, Option<Expr>>>
+
+record BL
+    o: Option<List<Expr>>
+    memo: Map<Core.Exprs.Key, Tuple<Expr, Option<Expr>>>
+
+fn betasMemo(e: Expr, memo: Map<Core.Exprs.Key, Tuple<Expr, Option<Expr>>>) -> BM
+    ? "betasIn with the walk's memo: a small term the plain way, a large one once per walk."
+    match Core.Exprs.isSmall(e)
+        true -> BM(o = betasSmall(e), memo = memo)
+        false -> betasLookup(Map.get(memo, Core.Exprs.hashKey(e)), e, memo)
+
+verify betasMemo
+    betasMemo(Core.Exprs.bvar(0), {}).o => Option.None
+    betasMemo(bigRedex(), {}).o => Option.Some(bigReduced())
+
+fn betasLookup(entry: Option<Tuple<Expr, Option<Expr>>>, e: Expr, memo: Map<Core.Exprs.Key, Tuple<Expr, Option<Expr>>>) -> BM
+    ? "The kept result when the entry is for this very node; otherwise the node is reduced and kept."
+    match entry
+        Option.Some((k, r)) -> match k == e
+            true -> BM(o = r, memo = memo)
+            false -> betasKept(betasNode(e, memo), e)
+        Option.None -> betasKept(betasNode(e, memo), e)
+
+verify betasLookup
+    betasLookup(Option.Some((Core.Exprs.bvar(0), Option.Some(Core.Exprs.bvar(1)))), Core.Exprs.bvar(0), {}).o => Option.Some(Core.Exprs.bvar(1))
+    betasLookup(Option.Some((Core.Exprs.bvar(0), Option.Some(Core.Exprs.bvar(1)))), Core.Exprs.bvar(2), {}).o => Option.None
+
+fn betasKept(r: BM, e: Expr) -> BM
+    ? "Keeps a node's result under its hash."
+    BM(o = r.o, memo = Map.set(r.memo, Core.Exprs.hashKey(e), (e, r.o)))
+
+verify betasKept
+    Map.len(betasKept(BM(o = Option.None, memo = {}), Core.Exprs.bvar(0)).memo) => 1
+
+fn betasNode(e: Expr, memo: Map<Core.Exprs.Key, Tuple<Expr, Option<Expr>>>) -> BM
+    ? "One node, its parts through the memo."
+    match e
+        Expr.App(_, _, _) -> betasApp(Core.Apps.fnOf(e), Core.Apps.argsOf(e), betasMemo(Core.Apps.fnOf(e), memo))
+        Expr.Lam(_, t, b) -> betasLam(t, betasMemo(b, memo))
+        Expr.Let(_, t, v, b) -> betasLet(t, v, b, betasMemo(v, memo))
+        Expr.Proj(_, s, i, x) -> betasProj(s, i, betasMemo(x, memo))
+        _ -> BM(o = Option.None, memo = memo)
+
+verify betasNode
+    betasNode(Core.Exprs.bvar(0), {}).o => Option.None
+    betasNode(Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.bvar(5)), {}).o => Option.Some(Core.Exprs.bvar(5))
+
+fn betasApp(f: Expr, args: List<Expr>, fr: BM) -> BM
+    ? "The head done; the arguments next, then the application as appBetas makes it."
+    ar = betasArgs(args, [], false, fr.memo)
+    BM(o = appBetas(f, args, fr.o, ar.o), memo = ar.memo)
+
+verify betasApp
+    betasApp(Core.Exprs.bvar(0), [Core.Exprs.bvar(1)], BM(o = Option.None, memo = {})).o => Option.None
+
+fn betasArgs(es: List<Expr>, acc: List<Expr>, touched: Bool, memo: Map<Core.Exprs.Key, Tuple<Expr, Option<Expr>>>) -> BL
+    ? "betasMemo of each, in order, or None when none touched."
+    match es
+        [] -> match touched
+            true -> BL(o = Option.Some(List.reverse(acc)), memo = memo)
+            false -> BL(o = Option.None, memo = memo)
+        [x, ..rest] -> betasArg(rest, acc, touched, x, betasMemo(x, memo))
+
+verify betasArgs
+    betasArgs([Core.Exprs.bvar(1)], [], false, {}).o => Option.None
+
+fn betasArg(rest: List<Expr>, acc: List<Expr>, touched: Bool, x: Expr, r: BM) -> BL
+    ? "One more, as it was or touched."
+    match r.o
+        Option.Some(y) -> betasArgs(rest, List.prepend(y, acc), true, r.memo)
+        Option.None -> betasArgs(rest, List.prepend(x, acc), touched, r.memo)
+
+verify betasArg
+    betasArg([], [], false, Core.Exprs.bvar(1), BM(o = Option.Some(Core.Exprs.bvar(2)), memo = {})).o => Option.Some([Core.Exprs.bvar(2)])
+
+fn betasLam(t: Expr, rb: BM) -> BM
+    ? "A lambda around its body done."
+    BM(o = lamAround(t, rb.o), memo = rb.memo)
+
+verify betasLam
+    betasLam(Core.Exprs.sort(Level.Zero), BM(o = Option.None, memo = {})).o => Option.None
+
+fn betasLet(t: Expr, v: Expr, b: Expr, rv: BM) -> BM
+    ? "The value done; the body next."
+    rb = betasMemo(b, rv.memo)
+    BM(o = letBetas(t, v, b, rv.o, rb.o), memo = rb.memo)
+
+verify betasLet
+    betasLet(Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Core.Exprs.bvar(0), BM(o = Option.None, memo = {})).o => Option.None
+
+fn betasProj(s: Name, i: Int, rx: BM) -> BM
+    ? "A projection of its structure done."
+    BM(o = projBetas(s, i, rx.o), memo = rx.memo)
+
+verify betasProj
+    betasProj(Core.Names.anon(), 0, BM(o = Option.None, memo = {})).o => Option.None
+
+fn betasSmall(e: Expr) -> Option<Expr>
+    ? "betasIn of a term of fewer than 32 tree nodes, whose parts are all smaller: plain recursion with no memo."
+    match e
+        Expr.App(_, _, _) -> appBetas(Core.Apps.fnOf(e), Core.Apps.argsOf(e), betasSmall(Core.Apps.fnOf(e)), betasAll(Core.Apps.argsOf(e), [], false))
+        Expr.Lam(_, t, b) -> lamAround(t, betasSmall(b))
+        Expr.Let(_, t, v, b) -> letBetas(t, v, b, betasSmall(v), betasSmall(b))
+        Expr.Proj(_, s, i, x) -> projBetas(s, i, betasSmall(x))
+        _ -> Option.None
+
+verify betasSmall
+    betasSmall(Core.Exprs.app(Core.Exprs.bvar(5), Core.Exprs.bvar(5))) => Option.None
 
 fn betasAll(es: List<Expr>, acc: List<Expr>, touched: Bool) -> Option<List<Expr>>
     ? "betasIn of each, in order, or None when none touched."
@@ -3702,7 +3860,7 @@ fn betasAll(es: List<Expr>, acc: List<Expr>, touched: Bool) -> Option<List<Expr>
         [] -> match touched
             true -> Option.Some(List.reverse(acc))
             false -> Option.None
-        [x, ..rest] -> betasNext(rest, acc, touched, x, betasIn(x))
+        [x, ..rest] -> betasNext(rest, acc, touched, x, betasSmall(x))
 
 verify betasAll
     betasAll([Core.Exprs.bvar(1)], [], false) => Option.None
@@ -5668,9 +5826,33 @@ fn changed(w: RE, e: Expr) -> Result<RO, Fail>
 verify changed
     resultOpt(changed(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0))) => Option.Some(Core.Exprs.fvar(1))
 
+decision ZetaBeforeDelta
+    date = "2026-11-13"
+    reason =
+        "Two projections of the same field compare their structures lazily,"
+        "and the structures come as written: a let variable among them was"
+        "no definition to unfold, so lazy delta unfolded the other side,"
+        "down to a constructor, and compared fields of fully evaluated"
+        "structures. Code written with let, as Std's bitblaster is, meets"
+        "this at every step: in mkFullAdder the type of the result names"
+        "aig_2, a let variable whose value is Entrypoint.aig res_1, against"
+        "Entrypoint.aig (mkFullAdderCarry ...) on the other side, and Pestka"
+        "unfolded mkFullAdderCarry and the gates under it, 19.5 M"
+        "instructions against 0.5 M for an NbE kernel, which never sees the"
+        "variable. A let variable's value is the variable, and replacing it"
+        "is cheaper than any unfolding, as whnfCore puts it first at the"
+        "head; so a structure that is a let variable is now replaced by the"
+        "end of its chain of values before lazy delta looks at the pair, and"
+        "the two sides meet as the same definition applied to arguments that"
+        "are compared first. Checked alone, mkFullAdder 19.5 M to 0.8 M,"
+        "blastDivSubtractShift 61 M to 16 M, goCache._mutual 56 M to 15 M."
+    chosen = "ZetaBeforeDelta"
+    rejected = ["StructuresAsWritten"]
+    impacts = [lazyDeltaProj]
+
 fn lazyDeltaProj(st: St, t: Expr, s: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
-    ? "t.idx =?= s.idx: unfold t and s lazily, and compare the fields once neither unfolds."
-    r = deltaStep(st, t, s)?
+    ? "t.idx =?= s.idx: unfold t and s lazily, and compare the fields once neither unfolds. A structure that is a let variable is replaced by its value first (ZetaBeforeDelta)."
+    r = deltaStep(st, letChain(st.lctx, t), letChain(st.lctx, s))?
     match r.status
         3 -> lazyDeltaProj(r.st, r.t, r.s, sname, idx)
         1 -> yes(r.st)
