@@ -41,7 +41,7 @@ the Susz file. That is the fast way:
 
 ```bash
 cargo install --git https://github.com/jasisz/susz
-susz pack --no-index mathlib.ndjson mathlib.susz   # 5.90 GB to 608 MB, a few seconds
+susz pack --no-index mathlib.ndjson mathlib.susz   # 6.2 GB to 637 MB, about 5 s
 .build/target/release/main mathlib.susz [WORKERS]
 ```
 
