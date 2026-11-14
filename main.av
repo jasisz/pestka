@@ -31,6 +31,26 @@ fn ran(args: List<String>) -> Held
         ["pack", ..rest] -> statusOnly(packArgs(withoutIndexFlag(rest, []), List.contains(rest, "--no-index") == false))
         _ -> checked(args)
 
+decision HeldByMain
+    date = "2026-11-14"
+    reason =
+        "The process ends without freeing only what main itself holds at"
+        "its tail (FactsHeldToExit in Check.Decl). checkedWhole and partOf"
+        "kept the input and the verdict in their own locals and gave back"
+        "the status alone, so the environment and the workers' facts were"
+        "freed term by term on that return: 0.76 s between accepted and"
+        "exit on etale and on Init, four workers. checked now gives back"
+        "both, and main ends with its own local's status. PGO builds, two"
+        "runs each, instructions and wall: Init one worker 42.19 G to"
+        "40.92 G, 6.57 s to 6.21 s; four 49.39 G to 46.80 G, 3.73 s to"
+        "3.03 s; etale one 16.89 G to 15.41 G, 2.37 s to 1.82 s; four"
+        "20.75 G to 16.26 G, 1.56 s to 0.84 s; mathlib four 1114.5 G to"
+        "1102.0 G, 68.1 s to 63.6 s, low memory 1172.1 G to 1166.9 G,"
+        "69.6 s to 65.3 s. Peak memory within 1.5%."
+    chosen = "HeldByMain"
+    rejected = ["StatusFromCheckedWhole"]
+    impacts = [main, ran, checked, checkedWhole, checkedPart, partOf, partHeld]
+
 fn statusOnly(code: Int) -> Held
     ? "An exit status with nothing read or checked to hold."
     Held(verdict = Verdict(code = code, held = Option.None), input = Option.None)
