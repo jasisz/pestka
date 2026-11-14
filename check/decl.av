@@ -519,7 +519,8 @@ decision FactsHeldToExit
         "now come back in its result, and main holds them, with the input"
         "and the run, until the verdict ends the process. Instructions"
         "retired, one worker: etale 62.9 G to 60.4 G, qb9 115.1 G to"
-        "111.3 G, Init 136.2 G to 134.4 G."
+        "111.3 G, Init 136.2 G to 134.4 G. Held means a local of main itself"
+        "when main ends (HeldByMain in Main)."
     chosen = "FactsHeldToExit"
     rejected = ["FreedAtTheEnd"]
     impacts = [checkHeld, groupLoop, Checked]

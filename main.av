@@ -14,13 +14,29 @@ record Verdict
     code: Int
     held: Option<Check.Decl.Checking>
 
+record Held
+    verdict: Verdict
+    input: Option<Outcome>
+
 fn main() -> Int
-    ? "Reads the file, checks it and ends with the exit status. The input and what checking found are still held here when main ends, so the process ends without freeing them (FactsHeldToExit)."
+    ? "Reads the file, checks it and ends with the exit status. The input and what checking found are a local of main when it ends, so the process ends without freeing them (FactsHeldToExit)."
     ! [Args.get, Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
-    args = Args.get()
+    h = ran(Args.get())
+    h.verdict.code
+
+fn ran(args: List<String>) -> Held
+    ? "pestka pack, or the check the arguments ask for, with what main holds to the end (FactsHeldToExit)."
+    ! [Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     match args
-        ["pack", ..rest] -> packArgs(withoutIndexFlag(rest, []), List.contains(rest, "--no-index") == false)
+        ["pack", ..rest] -> statusOnly(packArgs(withoutIndexFlag(rest, []), List.contains(rest, "--no-index") == false))
         _ -> checked(args)
+
+fn statusOnly(code: Int) -> Held
+    ? "An exit status with nothing read or checked to hold."
+    Held(verdict = Verdict(code = code, held = Option.None), input = Option.None)
+
+verify statusOnly
+    statusOnly(2).verdict.code => 2
 
 fn packArgs(args: List<String>, indexOn: Bool) -> Int
     ? "pestka pack [--no-index] FILE.ndjson FILE.susz [WORKERS]: four workers by default."
@@ -41,20 +57,20 @@ fn withoutIndexFlag(args: List<String>, acc: List<String>) -> List<String>
 verify withoutIndexFlag
     withoutIndexFlag(["--no-index", "a", "b"], []) => ["a", "b"]
 
-fn checked(args: List<String>) -> Int
-    ? "Reads and checks the file the arguments name, or with --only NAMES the declarations named; the exit status."
+fn checked(args: List<String>) -> Held
+    ? "Reads and checks the file the arguments name, or with --only NAMES the declarations named; the verdict, with the input."
     ! [Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     match onlyOf(args)
         Option.Some(names) -> checkedPart(withoutOnly(args, []), names)
         Option.None -> checkedWhole(args)
 
-fn checkedWhole(args: List<String>) -> Int
-    ? "Reads and checks the whole file; the exit status."
+fn checkedWhole(args: List<String>) -> Held
+    ? "Reads and checks the whole file; the verdict, with the input, both handed back for main to hold (FactsHeldToExit)."
     ! [Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes]
     plain = withoutFlag(args, [])
     o = input(plain)
     v = report(o, workersIn(plain), memoryIn(args), List.contains(args, "--reorder-always"), List.contains(args, "--show-placed"))
-    v.code
+    Held(verdict = v, input = Option.Some(o))
 
 fn onlyOf(args: List<String>) -> Option<List<String>>
     ? "The names after --only, split at commas; none without the flag, and no names when it ends the arguments."
@@ -92,23 +108,28 @@ verify withoutOnly
     withoutOnly(["--only", "a", "f", "2"], []) => ["f", "2"]
     withoutOnly(["f", "--only"], []) => ["f"]
 
-fn checkedPart(args: List<String>, names: List<String>) -> Int
-    ? "A subset check of a Susz file with INDEX: the declarations named and what they need (SubsetAdmitsUnchecked in Check.Decl); the exit status."
+fn checkedPart(args: List<String>, names: List<String>) -> Held
+    ? "A subset check of a Susz file with INDEX: the declarations named and what they need (SubsetAdmitsUnchecked in Check.Decl); the verdict, with the input."
     ! [Console.print, Disk.readBytesAt, Disk.size]
     plain = withoutFlag(args, [])
     match plain
         [path] -> partOf(path, names, 4, memoryIn(args))
         [path, n] -> partOf(path, names, workersOf(n), memoryIn(args))
-        _ -> declined("usage: pestka --only NAME[,NAME...] FILE.susz [WORKERS]; NAME may be Foo.* for every name under Foo")
+        _ -> statusOnly(declined("usage: pestka --only NAME[,NAME...] FILE.susz [WORKERS]; NAME may be Foo.* for every name under Foo"))
 
-fn partOf(path: String, names: List<String>, workers: Int, memory: Memory) -> Int
+fn partOf(path: String, names: List<String>, workers: Int, memory: Memory) -> Held
     ? "A subset check needs names, and a Susz file: only Susz has INDEX."
     ! [Console.print, Disk.readBytesAt, Disk.size]
     match names
-        [] -> declined("--only needs at least one name")
+        [] -> statusOnly(declined("--only needs at least one name"))
         _ -> match Export.Susz.isSusz(path)
-            false -> declined("--only checks part of a Susz file, by its INDEX: pack the export first (pestka pack FILE.ndjson FILE.susz)")
-            true -> partReport(Export.Susz.readPart(path, Export.Susz.planOf(names)), names, workers, memory).code
+            false -> statusOnly(declined("--only checks part of a Susz file, by its INDEX: pack the export first (pestka pack FILE.ndjson FILE.susz)"))
+            true -> partHeld(Export.Susz.readPart(path, Export.Susz.planOf(names)), names, workers, memory)
+
+fn partHeld(o: Outcome, names: List<String>, workers: Int, memory: Memory) -> Held
+    ? "The subset verdict, with the part read, both handed back for main to hold (FactsHeldToExit)."
+    ! [Console.print]
+    Held(verdict = partReport(o, names, workers, memory), input = Option.Some(o))
 
 fn partReport(o: Outcome, names: List<String>, workers: Int, memory: Memory) -> Verdict
     ? "Prints the subset verdict: a file rejected or declined while reading is so here too; a bad INDEX ends the check as index invalid, status 2, no verdict on the file (Susz 1 spec, section 2)."
