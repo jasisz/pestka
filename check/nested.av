@@ -8,7 +8,7 @@ module Nested
         "any other; then the auxiliary types are turned back into the"
         "occurrences they stand for, their recursors renamed rec_1, rec_2,"
         "..., and everything rewritten is checked again."
-    exposes [NS, hasNested, eliminate, restoreAll]
+    exposes [NS, hasNested, eliminate, restoreAll, paramsAreBinders]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Subst, Core.Apps, Core.Decls, Check.State, Check.Tc, Check.Telescope, Check.Blk]
     effects []
 
@@ -188,6 +188,17 @@ fn eliminate(env: Env, blk: Blk) -> Result<NS, Fail>
 
 verify eliminate
     eliminate(Check.State.envEmpty(), Check.Blk.start([], 0, [], 0)) == Result.Err(Fail.Reject("x")) => false
+
+fn paramsAreBinders(env: Env, blk: Blk) -> Result<Unit, Fail>
+    ? "The first type's parameters are binders as written, not after reduction: the reference kernel opens them this way for every block, nested or not, before it looks for nested occurrences."
+    p = getParams(Check.State.fresh(env, blk.lparams, Safety.Safe), firstType(blk.types), blk.nparams, [])?
+    match List.len(p.xs) == blk.nparams
+        true -> Result.Ok(Unit)
+        false -> Result.Err(reject("invalid inductive datatype declaration, incorrect number of parameters"))
+
+verify paramsAreBinders
+    paramsAreBinders(Check.State.envEmpty(), Check.Blk.start([], 1, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [])], 0)) => Result.Err(Fail.Reject("invalid inductive datatype declaration, incorrect number of parameters"))
+    paramsAreBinders(Check.State.envEmpty(), Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [])], 0)) => Result.Ok(Unit)
 
 fn firstType(ts: List<TypeIn>) -> Expr
     ? "The first type's type."

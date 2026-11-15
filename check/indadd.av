@@ -69,9 +69,16 @@ fn fromFirst(env: Env, first: IndType, types: List<IndType>, ctors: List<Ctor>, 
     blk = Check.Blk.start(first.head.params, first.numParams, tins, 0)
     match anyReserved(tins)
         true -> Result.Err(reject("invalid declaration, it uses the reserved prefix '_nested'"))
-        false -> match nestedTypes(env, blk.names, tins)
-            true -> nestedPath(Check.Induct.checkUniform(blk)?, env, blk, types, ctors, recs)
-            false -> afterUniform(Check.Induct.checkUniform(blk)?, env, blk, types, ctors, recs)
+        false -> withParams(Check.Nested.paramsAreBinders(env, blk)?, env, blk, types, ctors, recs, tins)
+
+fn withParams(u: Unit, env: Env, blk: Blk, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>, tins: List<TypeIn>) -> Result<Map<Name, Const>, Fail>
+    ? "Parameters checked as binders; the nested path or the plain one."
+    match nestedTypes(env, blk.names, tins)
+        true -> nestedPath(Check.Induct.checkUniform(blk)?, env, blk, types, ctors, recs)
+        false -> afterUniform(Check.Induct.checkUniform(blk)?, env, blk, types, ctors, recs)
+
+verify withParams
+    withParams(Unit, Check.State.envEmpty(), Check.Blk.start([], 0, [], 0), [], [], [], []) => Result.Ok({})
 
 verify fromFirst
     fromFirst(Check.State.envEmpty(), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false), [], [], [], []) => Result.Ok({})
