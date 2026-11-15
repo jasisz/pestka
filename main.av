@@ -148,7 +148,7 @@ fn partOf(path: String, names: List<String>, workers: Int, memory: Memory) -> He
 
 fn partHeld(o: Outcome, names: List<String>, workers: Int, memory: Memory) -> Held
     ? "The subset verdict, with the part read, both handed back for main to hold (FactsHeldToExit)."
-    ! [Console.print]
+    ! [Console.print, Disk.readBytesAt]
     Held(verdict = partReport(o, names, workers, memory), input = Option.Some(o))
 
 fn partReport(o: Outcome, names: List<String>, workers: Int, memory: Memory) -> Verdict

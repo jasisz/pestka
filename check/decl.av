@@ -136,12 +136,14 @@ fn proofSize(v: Option<Proof>) -> Int
     match v
         Option.Some(Proof.Deferred(Source.SuszSpot(_, _, bd))) -> bd.count
         Option.Some(Proof.Deferred(Source.SuszBlock(_, _, bd))) -> bd.count
+        Option.Some(Proof.Deferred(Source.SuszFile(_, _, _, bd))) -> bd.count
         _ -> 0
 
 verify proofSize
     proofSize(Option.None) => 0
     proofSize(Option.Some(Proof.Built(Core.Exprs.bvar(0)))) => 0
     proofSize(Option.Some(Proof.Deferred(Source.SuszSpot(0, 2, Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 5, at = 0))))) => 5
+    proofSize(Option.Some(Proof.Deferred(Source.SuszFile("f", Core.Lazy.emptyStore(), 2, Bounds(decl = 0, names = 0, levels = 0, exprs = 0, count = 6, at = 0))))) => 6
 
 fn perDecl() -> Int
     ? "What a declaration is reckoned to cost beyond its proof's expressions, in expressions (RunsByProofSize)."
