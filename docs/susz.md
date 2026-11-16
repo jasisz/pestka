@@ -26,6 +26,15 @@ spec, and a benchmark for Aver. For real use, `susz pack` is faster.
 
 A full check never reads the index or the source section.
 
+Nor does it hold PROOFS. A theorem's proof block is read from the file when
+the worker checking the theorem gets to it, and dropped after its check. A
+declaration that unfolds a theorem whose block its worker does not hold
+stops, the worker reads that block, keeps it for the rest of its work, and
+checks the declaration again; on `mathlib` that is a few hundred blocks. The
+file must stay in place until the check ends. A block that cannot be read
+then declines the declaration that needed it. An ndjson file packed in
+memory keeps its blocks in memory.
+
 ## Checking part of a file
 
 `--only` checks the named declarations of a Susz file instead of the whole

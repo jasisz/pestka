@@ -2613,7 +2613,7 @@ fn unfoldOn(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRe
         Expr.Const(_, _, ls) -> match c
             Option.Some(Const.CDefn(h, v, _, Safety.Safe, true)) -> hotGo(st, f, ls, c, h, v, stack, ms, cheapRec, cheapProj)
             _ -> plainGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
-        _ -> Result.Ok(wholeGo(st, f, stack, ms))
+        _ -> wholeGo(st, f, stack, ms)
 
 verify unfoldOn
     Result.withDefault(unfoldOn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
@@ -2625,7 +2625,7 @@ fn plainGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>,
     ? "The constant unfolded as it always is: at universe levels through its shape and the unfolding cache, without levels its value as written."
     match List.len(ls) > 0
         true -> atGo(st, f, ls, c, stack, ms, cheapRec, cheapProj)
-        false -> Result.Ok(bareGo(st, f, c, stack, ms))
+        false -> bareGo(st, f, c, stack, ms)
 
 verify plainGo
     Result.withDefault(plainGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.natLit(0), env = [], rest = [])).run => false
@@ -2732,23 +2732,26 @@ verify hotGo
 fn deriveGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, h: Head, v: Expr, k: Int, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "The rule of a definition with one to sixteen leading lambdas, at its own number of levels, neither a casesOn nor a Nat operation computed on literals, kept; none is derived inside a derivation."
     ok = Bool.and(Bool.and(Bool.and(k > 0, k <= 16), st.fuel < 0), Bool.and(Bool.not(Bool.or(natComputed(f), casesNamed(h.name))), List.len(h.params) == List.len(ls)))
-    hotGo(St.update(st, rules = Map.set(st.rules, Core.Exprs.hashKey(f), (f, ruleOf(ok, st, f, k)))), f, ls, c, h, v, stack, ms, cheapRec, cheapProj)
+    match ruleOf(ok, st, f, k)
+        Result.Ok(r) -> hotGo(St.update(st, rules = Map.set(st.rules, Core.Exprs.hashKey(f), (f, r))), f, ls, c, h, v, stack, ms, cheapRec, cheapProj)
+        Result.Err(w) -> Result.Err(Fail.Wants(w, st))
 
 verify deriveGo
     Result.withDefault(deriveGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1), 0, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.natLit(0), env = [], rest = [])).run => false
 
-fn ruleOf(ok: Bool, st: St, f: Expr, k: Int) -> Hot
-    ? "When ok, the rule derived on a state of its own (derivingState), if the derivation ends within its bounds and unfolded more than once per form it met; otherwise never one (RulesThatSave)."
+fn ruleOf(ok: Bool, st: St, f: Expr, k: Int) -> Result<Hot, Spot>
+    ? "When ok, the rule derived on a state of its own (derivingState), if the derivation ends within its bounds and unfolded more than once per form it met; otherwise never one (RulesThatSave). A derivation that wants a proof block gives where it lies, so that the declaration is checked again with it rather than left with no rule (WantedBlocksStopTheCheck in Check.State)."
     match ok
-        false -> Hot.Never
+        false -> Result.Ok(Hot.Never)
         true -> match deriveRule(derivingState(st), f, k)
             Result.Ok(d) -> match Bool.and(d.ok, 4096 - d.st.fuel > d.count)
-                true -> Hot.Rule(k, d.node)
-                false -> Hot.Never
-            Result.Err(_) -> Hot.Never
+                true -> Result.Ok(Hot.Rule(k, d.node))
+                false -> Result.Ok(Hot.Never)
+            Result.Err(Fail.Wants(w, _)) -> Result.Err(w)
+            Result.Err(_) -> Result.Ok(Hot.Never)
 
 verify ruleOf
-    ruleOf(false, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), 1) => Hot.Never
+    ruleOf(false, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), 1) => Result.Ok(Hot.Never)
 
 fn reachesRecursor(env: Env, v: Expr) -> Bool
     ? "Whether a definition's value, under its lambdas, is headed, through projections, by a recursor or by a definition that is, applied to one of those lambdas' variables: read once as the definition enters the environment. Only such a definition is counted and gets a rule (DerivedRules); any other unfolds as it did without them."
@@ -3036,16 +3039,17 @@ fn findBranch(bs: List<Branch>, n: Name) -> Option<Branch>
 verify findBranch
     findBranch([], Check.Lits.natZero) => Option.None
 
-fn bareGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS) -> Go
+fn bareGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS) -> Result<Go, Fail>
     ? "A constant without levels: a value takes the waiting arguments; anything else is stuck."
     match c
-        Option.Some(k) -> match unfoldValue(c, [])
-            Option.Some(v) -> bareOnGo(st, f, Check.State.headOf(k), v, lamsUpTo(v, List.len(stack), 0), stack, ms)
-            Option.None -> stuckGo(st, f, stack, ms)
-        Option.None -> stuckGo(st, f, stack, ms)
+        Option.Some(k) -> match unfoldValue(st, c, [])
+            Result.Ok(Option.Some(v)) -> Result.Ok(bareOnGo(st, f, Check.State.headOf(k), v, lamsUpTo(v, List.len(stack), 0), stack, ms))
+            Result.Ok(Option.None) -> Result.Ok(stuckGo(st, f, stack, ms))
+            Result.Err(s) -> Result.Err(Fail.Wants(s, st))
+        Option.None -> Result.Ok(stuckGo(st, f, stack, ms))
 
 verify bareGo
-    bareGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {})).run => false
+    Result.withDefault(bareGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {})), sampleGo()).run => false
 
 fn bareOnGo(st: St, f: Expr, h: Head, v: Expr, k: Int, stack: List<Clo>, ms: MS) -> Go
     ? "With a matcher at the head of the body under the k lambdas met, the body from the unfolding cache with the matcher in it; otherwise the value as written."
@@ -3066,10 +3070,11 @@ verify bodyGo
 fn atGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "A constant at levels: a definition or theorem with a value goes by its shape."
     match c
-        Option.Some(k) -> match Check.State.valueOf(k)
-            Option.Some(v) -> casesGo(st, f, Check.State.headOf(k), v, ls, stack, ms, cheapRec, cheapProj)
-            Option.None -> Result.Ok(wholeGo(st, f, stack, ms))
-        Option.None -> Result.Ok(wholeGo(st, f, stack, ms))
+        Option.Some(k) -> match Check.State.valueIn(st, k)
+            Result.Ok(Option.Some(v)) -> casesGo(st, f, Check.State.headOf(k), v, ls, stack, ms, cheapRec, cheapProj)
+            Result.Ok(Option.None) -> wholeGo(st, f, stack, ms)
+            Result.Err(s) -> Result.Err(Fail.Wants(s, st))
+        Option.None -> wholeGo(st, f, stack, ms)
 
 verify atGo
     Result.withDefault(atGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [Level.Zero], Option.None, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
@@ -3077,7 +3082,7 @@ verify atGo
 fn casesGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "A constant at levels by its shape, found once per run of the machine and kept (ShapesKept): a casesOn whose value is its recursor's goes to its minor premise (CasesOnDirect), a sparse casesOn likewise (RecHeadedDirect), anything else unfolds."
     match casesNamed(h.name)
-        false -> Result.Ok(peeledGo(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms))
+        false -> peeledGo(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms)
         true -> match shapeKept(Map.get(st.shapes, Core.Exprs.hashKey(f)), f)
             Option.Some(sh) -> shapedGo(st, f, h, v, ls, sh, stack, ms, cheapRec, cheapProj)
             Option.None -> newShapeGo(shapeOf(st, f, h, v, ls), f, h, v, ls, stack, ms, cheapRec, cheapProj)
@@ -3097,11 +3102,11 @@ fn shapedGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sh: Shape, stack
     match sh
         Shape.Cases(cs) -> match Bool.and(List.len(stack) >= cs.total, List.len(h.params) == List.len(ls))
             true -> casesOnGo(st, f, h, v, ls, cs, stack, matClo(nthClo(stack, cs.majorAt), ms), cheapRec, cheapProj)
-            false -> Result.Ok(peeledGo(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms))
+            false -> peeledGo(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms)
         Shape.Sparse(sp) -> match List.len(stack) >= sp.n
             true -> sparseGo(st, f, h, v, ls, sp, envOf(stack, sp.n, []), stack, ms, cheapRec, cheapProj)
-            false -> Result.Ok(peeledGo(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms))
-        Shape.Plain -> Result.Ok(peeledGo(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms))
+            false -> peeledGo(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms)
+        Shape.Plain -> peeledGo(st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, ms)
 
 verify shapedGo
     Result.withDefault(shapedGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], Shape.Plain, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
@@ -3111,7 +3116,7 @@ fn casesOnGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, cs: CasesOn, st
     p = casesPick(st, cs, major.e, cheapRec, cheapProj)?
     match p.ok
         true -> Result.Ok(minorGo(p.st, nthClo(stack, cs.minorsAt + p.at), p.fields, p.nf, List.drop(stack, cs.total), major.ms))
-        false -> Result.Ok(peeledGo(p.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms))
+        false -> peeledGo(p.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms)
 
 verify casesOnGo
     Result.withDefault(casesOnGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [Level.Zero]), Head(name = Check.Lits.name1("c"), params = [Core.Names.anon()], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [Level.Zero], CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), total = 1, majorAt = 0, minorsAt = 0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])], MX(e = Core.Exprs.natLit(0), ms = MS(next = 0, forced = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = false, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(7)
@@ -3132,29 +3137,36 @@ fn sparseGo(st: St, f: Expr, h: Head, v: Expr, ls: List<Level>, sp: SparseOn, en
     p = sparsePick(st, sp, major.e, env0, cheapRec, cheapProj)?
     match p.ok
         true -> Result.Ok(Go(st = p.st, ms = major.ms, run = true, t = p.body, env = p.env, rest = List.drop(stack, sp.n)))
-        false -> Result.Ok(peeledGo(p.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms))
+        false -> peeledGo(p.st, f, h, v, lamsUpTo(v, List.len(stack), 0), ls, stack, major.ms)
 
 verify sparseGo
     Result.withDefault(sparseGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), [], SparseOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), n = 1, major = 0, minors = [Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8)))]), [Clo.Clo(-1, Core.Exprs.natLit(0), [])], [Clo.Clo(-1, Core.Exprs.natLit(0), [])], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = false, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(8)
 
-fn peeledGo(st: St, f: Expr, h: Head, v: Expr, k: Int, ls: List<Level>, stack: List<Clo>, ms: MS) -> Go
+fn peeledGo(st: St, f: Expr, h: Head, v: Expr, k: Int, ls: List<Level>, stack: List<Clo>, ms: MS) -> Result<Go, Fail>
     ? "With k lambdas met, the body under them at the levels, run with the first k arguments as its environment; with none, or levels of the wrong count, the whole value as before."
     match Bool.and(k > 0, List.len(h.params) == List.len(ls))
         false -> wholeGo(st, f, stack, ms)
-        true -> bodyGo(peeledBody(st, f, h, v, k, ls), k, stack, ms)
+        true -> Result.Ok(bodyGo(peeledBody(st, f, h, v, k, ls), k, stack, ms))
 
 verify peeledGo
-    peeledGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), 0, [], [], MS(next = 0, forced = {})).run => false
+    Result.withDefault(peeledGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Head(name = Check.Lits.name1("c"), params = [], ty = Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(5), 0, [], [], MS(next = 0, forced = {})), sampleGo()).run => false
 
-fn wholeGo(st: St, f: Expr, stack: List<Clo>, ms: MS) -> Go
+fn wholeGo(st: St, f: Expr, stack: List<Clo>, ms: MS) -> Result<Go, Fail>
     ? "The whole value at its levels takes the waiting arguments; anything else is stuck."
-    u = unfoldConst(st, f)
+    u = unfoldConst(st, f)?
     match u.o
-        Option.Some(v) -> Go(st = u.st, ms = ms, run = true, t = v, env = [], rest = stack)
-        Option.None -> stuckGo(u.st, f, stack, ms)
+        Option.Some(v) -> Result.Ok(Go(st = u.st, ms = ms, run = true, t = v, env = [], rest = stack))
+        Option.None -> Result.Ok(stuckGo(u.st, f, stack, ms))
 
 verify wholeGo
-    wholeGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {})).run => false
+    Result.withDefault(wholeGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], MS(next = 0, forced = {})), sampleGo()).run => false
+
+fn sampleGo() -> Go
+    ? "A machine state for examples: running, on a literal."
+    Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.natLit(0), env = [], rest = [])
+
+verify sampleGo
+    sampleGo().run => true
 
 
 fn matcherHeaded(e: Expr) -> Bool
@@ -4325,36 +4337,49 @@ fn whnfStore(st: St, orig: Expr, r: Expr) -> RE
 verify whnfStore
     Core.Cache.size(whnfStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1)).st.whnfCache) => 1
 
-fn unfoldDefinition(st: St, e: Expr) -> RO
+fn unfoldDefinition(st: St, e: Expr) -> Result<RO, Fail>
     ? "Unfolds the head constant if it is a definition or theorem at the right number of levels."
-    u = unfoldConst(st, Core.Apps.fnOf(e))
+    u = unfoldConst(st, Core.Apps.fnOf(e))?
     match u.o
-        Option.Some(f) -> RO(o = Option.Some(Core.Apps.mkApps(f, Core.Apps.argsOf(e))), st = u.st)
-        Option.None -> u
+        Option.Some(f) -> Result.Ok(RO(o = Option.Some(Core.Apps.mkApps(f, Core.Apps.argsOf(e))), st = u.st))
+        Option.None -> Result.Ok(u)
 
 verify unfoldDefinition
-    unfoldDefinition(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)).o => Option.None
+    roOf(unfoldDefinition(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0))) => Option.None
 
-fn unfoldConst(st: St, f: Expr) -> RO
+fn roOf(r: Result<RO, Fail>) -> Option<Expr>
+    ? "Test helper: what an unfolding found, none on a failure."
+    match r
+        Result.Ok(u) -> u.o
+        Result.Err(_) -> Option.None
+
+verify roOf
+    roOf(Result.Err(Fail.Reject("x"))) => Option.None
+
+fn unfoldConst(st: St, f: Expr) -> Result<RO, Fail>
     ? "The instantiated value of a constant. A value at universe levels is remembered for the rest of the declaration, since instantiating the levels walks the whole value each time."
     match f
         Expr.Const(_, n, ls) -> match ls
-            [] -> RO(o = unfoldValue(Check.State.lookup(st, n), ls), st = st)
+            [] -> match unfoldValue(st, Check.State.lookup(st, n), ls)
+                Result.Ok(o) -> Result.Ok(RO(o = o, st = st))
+                Result.Err(s) -> Result.Err(Fail.Wants(s, st))
             _ -> unfoldCached(st, f, n, ls, Check.State.cacheGet(st.unfoldCache, f))
-        _ -> RO(o = Option.None, st = st)
+        _ -> Result.Ok(RO(o = Option.None, st = st))
 
 verify unfoldConst
-    unfoldConst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [])).o => Option.None
-    unfoldConst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [Level.Zero])).o => Option.None
+    roOf(unfoldConst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), []))) => Option.None
+    roOf(unfoldConst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [Level.Zero]))) => Option.None
 
-fn unfoldCached(st: St, f: Expr, n: Name, ls: List<Level>, hit: Option<Expr>) -> RO
+fn unfoldCached(st: St, f: Expr, n: Name, ls: List<Level>, hit: Option<Expr>) -> Result<RO, Fail>
     ? "A remembered value, or the value instantiated now and remembered."
     match hit
-        Option.Some(v) -> RO(o = Option.Some(v), st = st)
-        Option.None -> unfoldStore(st, f, unfoldValue(Check.State.lookup(st, n), ls))
+        Option.Some(v) -> Result.Ok(RO(o = Option.Some(v), st = st))
+        Option.None -> match unfoldValue(st, Check.State.lookup(st, n), ls)
+            Result.Ok(o) -> Result.Ok(unfoldStore(st, f, o))
+            Result.Err(s) -> Result.Err(Fail.Wants(s, st))
 
 verify unfoldCached
-    unfoldCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [Level.Zero]), Core.Names.anon(), [Level.Zero], Option.Some(Core.Exprs.natLit(1))).o => Option.Some(Core.Exprs.natLit(1))
+    roOf(unfoldCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), [Level.Zero]), Core.Names.anon(), [Level.Zero], Option.Some(Core.Exprs.natLit(1)))) => Option.Some(Core.Exprs.natLit(1))
 
 fn unfoldStore(st: St, f: Expr, v: Option<Expr>) -> RO
     ? "Remembers an unfolded value under its constant."
@@ -4365,16 +4390,17 @@ fn unfoldStore(st: St, f: Expr, v: Option<Expr>) -> RO
 verify unfoldStore
     Core.Cache.size(unfoldStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Core.Names.anon(), []), Option.Some(Core.Exprs.natLit(1))).st.unfoldCache) => 1
 
-fn unfoldValue(c: Option<Const>, ls: List<Level>) -> Option<Expr>
-    ? "Value at the given levels, when the counts agree."
+fn unfoldValue(st: St, c: Option<Const>, ls: List<Level>) -> Result<Option<Expr>, Spot>
+    ? "Value at the given levels, when the counts agree; for a theorem whose block st does not hold, where it lies: the caller wants it with the checker it holds, which this function only reads (WantedBlocksStopTheCheck in Check.State)."
     match c
-        Option.None -> Option.None
-        Option.Some(k) -> match Check.State.valueOf(k)
-            Option.Some(v) -> valueAt(Check.State.headOf(k), v, ls)
-            Option.None -> Option.None
+        Option.None -> Result.Ok(Option.None)
+        Option.Some(k) -> match Check.State.valueIn(st, k)
+            Result.Ok(Option.Some(v)) -> Result.Ok(valueAt(Check.State.headOf(k), v, ls))
+            Result.Ok(Option.None) -> Result.Ok(Option.None)
+            Result.Err(s) -> Result.Err(s)
 
 verify unfoldValue
-    unfoldValue(Option.None, []) => Option.None
+    unfoldValue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.None, []) => Result.Ok(Option.None)
 
 fn valueAt(h: Head, v: Expr, ls: List<Level>) -> Option<Expr>
     ? "Instantiates the universe parameters."
@@ -5515,9 +5541,10 @@ fn unfoldStep(st: St, e: Expr) -> Result<RE, Fail>
 fn stepAt(st: St, e: Expr, f: Expr, ls: List<Level>, c: Option<Const>) -> Result<RE, Fail>
     ? "The step for a head at levels with a value."
     match c
-        Option.Some(k) -> match Check.State.valueOf(k)
-            Option.Some(v) -> stepPeeled(st, e, f, Check.State.headOf(k), v, Core.Apps.argsOf(e), ls)
-            Option.None -> unfoldStepWhole(st, e)
+        Option.Some(k) -> match Check.State.valueIn(st, k)
+            Result.Ok(Option.Some(v)) -> stepPeeled(st, e, f, Check.State.headOf(k), v, Core.Apps.argsOf(e), ls)
+            Result.Ok(Option.None) -> unfoldStepWhole(st, e)
+            Result.Err(s) -> Result.Err(Fail.Wants(s, st))
         Option.None -> unfoldStepWhole(st, e)
 
 verify stepAt
@@ -5542,7 +5569,7 @@ verify stepRun
 
 fn unfoldStepWhole(st: St, e: Expr) -> Result<RE, Fail>
     ? "One unfolding of the whole value and the cheap whnfCore after it."
-    u = unfoldDefinition(st, e)
+    u = unfoldDefinition(st, e)?
     match u.o
         Option.Some(x) -> whnfCoreM(u.st, x, false, true)
         Option.None -> Result.Ok(RE(e = e, st = u.st))
@@ -5639,7 +5666,9 @@ fn tryArgs(st: St, t: Expr, s: Expr, c: Const) -> Result<LD, Fail>
     ? "Equal levels and arguments mean equal terms; otherwise remember the failure and unfold both. Arguments that c never uses are not compared."
     match Core.Univ.isEquivList(headLevels(t), headLevels(s))
         false -> unfoldBothNow(St.update(st, eqFail = Check.State.pairPut(st.eqFail, t, s)), t, s)
-        true -> argsTried(defEqArgs(st, t, s, unusedArgs(c, Core.Apps.numArgs(t)))?, t, s)
+        true -> match unusedArgs(st, c, Core.Apps.numArgs(t))
+            Result.Ok(flags) -> argsTried(defEqArgs(st, t, s, flags)?, t, s)
+            Result.Err(w) -> Result.Err(Fail.Wants(w, st))
 
 verify tryArgs
     resultStatus(tryArgs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), dropFirst())) => 1
@@ -5719,16 +5748,17 @@ verify sortIsZero
     sortIsZero(Option.Some(Core.Exprs.sort(Level.Succ(Level.Zero))), [], []) => false
     sortIsZero(Option.None, [], []) => false
 
-fn unusedArgs(c: Const, k: Int) -> List<Bool>
-    ? "For k arguments of c, last first: whether c's value drops the argument. Only when the arguments cover every leading lambda of the value, so that unfolding both sides leaves the body alone, in which that variable does not occur. No flags means compare everything."
-    match Check.State.valueOf(c)
-        Option.Some(v) -> unusedFrom(lamBody(v), lamCount(v, 0), k)
-        Option.None -> []
+fn unusedArgs(st: St, c: Const, k: Int) -> Result<List<Bool>, Spot>
+    ? "For k arguments of c, last first: whether c's value drops the argument. Only when the arguments cover every leading lambda of the value, so that unfolding both sides leaves the body alone, in which that variable does not occur. No flags means compare everything. A theorem whose block st does not hold gives where it lies (WantedBlocksStopTheCheck in Check.State)."
+    match Check.State.valueIn(st, c)
+        Result.Ok(Option.Some(v)) -> Result.Ok(unusedFrom(lamBody(v), lamCount(v, 0), k))
+        Result.Ok(Option.None) -> Result.Ok([])
+        Result.Err(s) -> Result.Err(s)
 
 verify unusedArgs
-    unusedArgs(dropFirst(), 1) => [true]
-    unusedArgs(dropFirst(), 2) => [false, true]
-    unusedArgs(dropFirst(), 0) => []
+    unusedArgs(sampleSt(), dropFirst(), 1) => Result.Ok([true])
+    unusedArgs(sampleSt(), dropFirst(), 2) => Result.Ok([false, true])
+    unusedArgs(sampleSt(), dropFirst(), 0) => Result.Ok([])
 
 fn lamCount(e: Expr, acc: Int) -> Int
     ? "How many lambdas e starts with, plus acc."

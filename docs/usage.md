@@ -102,9 +102,9 @@ the quotient package as it meets them, and then checks the types and
 values of the other declarations on WORKERS threads at once (four by
 default), each against the environment at its own place in the file. The
 verdict is the first failure in file order, as in a strictly sequential
-check. A Susz file is read on one thread. A theorem's proof stays as
-bytes until its declaration is checked, and the worker checking it decodes
-it then. An ndjson file is first packed into Susz in memory, with its
+check. A Susz file is read on one thread. A theorem's proof stays in
+the file until its declaration is checked: the worker checking it reads
+and decodes it then. An ndjson file is first packed into Susz in memory, with its
 lines parsed on the workers.
 
 When each worker has more declarations than its caches hold (`mathlib` on
@@ -138,13 +138,15 @@ returns, then swept on `mathlib` (decision `LowMemoryMode` in
 | `etale` | 17.0 G, 0.82 GB | 17.0 G (+0.0%), 0.44 GB |
 
 What the mode cannot shrink is what reading builds. Pestka keeps the
-tables it reads from MAIN until the process ends, and keeps the PROOFS
-section as bytes. On `mathlib` that is 38 M expressions and 4.2 M names,
-plus 317 MB of proofs, and when reading ends the process holds about
-3.2 GB. The 67 M expressions of the theorems' proofs are not built while
-reading. A proof is decoded when its theorem is checked, and no table
-keeps the term after that. The low-memory peak of 3.9 GB is the 3.2 GB of reading plus
-what checking holds at once. Going lower would take a denser form of the
+tables it reads from MAIN until the process ends: on `mathlib` 38 M
+expressions and 4.2 M names. The PROOFS section (317 MB) is not held: a
+theorem's block is read from the file when its theorem is checked, and the
+67 M expressions of the proofs are decoded then, no table keeping the term
+after that (decision `BlockReadForItsCheck` in `check/decl.av`). That took
+0.32 GB off every peak below, but on Aver 0.34.1 every read opens the file
+again, which costs 12% more instructions; the tables below are from before
+that change. The low-memory peak is what reading builds plus what checking
+holds at once. Going lower would take a denser form of the
 stored terms, or reading MAIN a part at a time.
 
 `tests/run.sh` and `tests/arena.sh` take `PESTKA_ARGS`, so
