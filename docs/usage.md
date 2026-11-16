@@ -143,9 +143,9 @@ expressions and 4.2 M names. The PROOFS section (317 MB) is not held: a
 theorem's block is read from the file when its theorem is checked, and the
 67 M expressions of the proofs are decoded then, no table keeping the term
 after that (decision `BlockReadForItsCheck` in `check/decl.av`). That took
-0.32 GB off every peak below, but on Aver 0.34.1 every read opens the file
-again, which costs 12% more instructions; the tables below are from before
-that change. The low-memory peak is what reading builds plus what checking
+0.32 GB off every peak below. On Aver 0.34.1 every read opened the file
+again, 12% more instructions; from Aver 0.35.0 a thread keeps the file it
+read last open. The tables below are from before that change. The low-memory peak is what reading builds plus what checking
 holds at once. Going lower would take a denser form of the
 stored terms, or reading MAIN a part at a time.
 
