@@ -1715,7 +1715,7 @@ fn natLine(q: P, ie: Int, digits: String) -> Result<P, String>
 fn natValue(e: Expr) -> Int
     ? "The value of a Nat literal Export.Items.natOf made."
     match e
-        Expr.NatLit(v) -> v
+        Expr.NatLit(_, v) -> v
         _ -> 0
 
 verify natValue

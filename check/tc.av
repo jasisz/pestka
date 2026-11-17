@@ -1657,7 +1657,7 @@ fn majorToCtor(st: St, rv: Rec, major: Expr, cheapRec: Bool, cheapProj: Bool) ->
     ? "K first; a literal is its constructor and a constructor application other than Nat.succ is already what every later step would leave it (CtorMajorAsIs); otherwise structure eta before any reduction of the major, so that a major with no weak head normal form does not stop the recursor (lean4#15351); then whnf, and literal or structure expansion."
     m1 = kMajor(st, rv, major)?
     match m1.e
-        Expr.NatLit(n) -> Result.Ok(RE(e = Check.Lits.natLitToCtor(n), st = m1.st))
+        Expr.NatLit(_, n) -> Result.Ok(RE(e = Check.Lits.natLitToCtor(n), st = m1.st))
         _ -> match Bool.and(ruleHeaded(rv.rules, Core.Apps.fnOf(m1.e)), Bool.not(Core.Apps.isConst(Core.Apps.fnOf(m1.e), Check.Lits.natSucc)))
             true -> Result.Ok(m1)
             false -> majorSlow(m1, rv, cheapRec, cheapProj)
@@ -1685,7 +1685,7 @@ verify majorSlow
 fn majorReduced(m2: RE, rv: Rec) -> Result<RE, Fail>
     ? "After whnf: a literal becomes its constructor, a structure value is eta expanded."
     match m2.e
-        Expr.NatLit(n) -> Result.Ok(RE(e = Check.Lits.natLitToCtor(n), st = m2.st))
+        Expr.NatLit(_, n) -> Result.Ok(RE(e = Check.Lits.natLitToCtor(n), st = m2.st))
         Expr.StrLit(s) -> whnf(m2.st, Check.Lits.strToCtor(s))
         _ -> toCtorWhenStructure(m2.st, rv, m2.e)
 
@@ -2448,7 +2448,7 @@ decision PickedNotStepped
 fn recPick(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, majorIdx: Int, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RPick, Fail>
     ? "The right-hand side to run for the major premise e, with its environment and the arguments left; a literal of Nat goes to its rule at once (LiteralCases)."
     match e
-        Expr.NatLit(n) -> match Bool.and(rv.major == Check.Lits.nat, List.len(rv.rules) == 2)
+        Expr.NatLit(_, n) -> match Bool.and(rv.major == Check.Lits.nat, List.len(rv.rules) == 2)
             true -> Result.Ok(recRuled(st, f, ls, rv, stack, majorIdx, ruleNamed(rv.rules, litCtor(n)), litArgs(n)))
             false -> Result.Ok(recBuilt(f, ls, rv, stack, majorIdx, majorToCtor(st, rv, e, cheapRec, cheapProj)?))
         _ -> Result.Ok(recBuilt(f, ls, rv, stack, majorIdx, majorToCtor(st, rv, e, cheapRec, cheapProj)?))
@@ -3009,7 +3009,7 @@ fn splitPick(st: St, bs: List<Branch>, binds: List<Clo>, x: MX) -> Result<GP, Fa
     ? "The built argument in weak head normal form."
     w = whnf(st, x.e)?
     match w.e
-        Expr.NatLit(n) -> branchPick(w.st, findBranch(bs, litCtor(n)), [], litArgs(n), binds, x.ms)
+        Expr.NatLit(_, n) -> branchPick(w.st, findBranch(bs, litCtor(n)), [], litArgs(n), binds, x.ms)
         _ -> match Core.Apps.fnOf(w.e)
             Expr.Const(_, n, ls) -> branchPick(w.st, findBranch(bs, n), ls, Core.Apps.argsOf(w.e), binds, x.ms)
             _ -> branchPick(w.st, Option.None, [], [], binds, x.ms)
@@ -3368,7 +3368,7 @@ verify minorOn
 fn sparsePick(st: St, sp: SparseOn, e: Expr, env0: List<Clo>, cheapRec: Bool, cheapProj: Bool) -> Result<RPick, Fail>
     ? "The minor premise for the major premise e and the environment it runs in; a literal of Nat goes to its rule at once (LiteralCases)."
     match e
-        Expr.NatLit(n) -> match Bool.and(sp.rv.major == Check.Lits.nat, List.len(sp.rv.rules) == 2)
+        Expr.NatLit(_, n) -> match Bool.and(sp.rv.major == Check.Lits.nat, List.len(sp.rv.rules) == 2)
             true -> Result.Ok(sparseFields(st, nthMinor(sp.minors, ruleNumber(sp.rv.rules, litCtor(n), 0)), litArgs(n), env0))
             false -> Result.Ok(sparseBuilt(sp, majorToCtor(st, sp.rv, e, cheapRec, cheapProj)?, env0))
         _ -> Result.Ok(sparseBuilt(sp, majorToCtor(st, sp.rv, e, cheapRec, cheapProj)?, env0))
@@ -3481,7 +3481,7 @@ decision LiteralCases
 fn casesPick(st: St, cs: CasesOn, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<Pick, Fail>
     ? "The minor premise for the major premise e, by its place among the rules, with the fields it takes."
     match e
-        Expr.NatLit(n) -> match Bool.and(cs.rv.major == Check.Lits.nat, List.len(cs.rv.rules) == 2)
+        Expr.NatLit(_, n) -> match Bool.and(cs.rv.major == Check.Lits.nat, List.len(cs.rv.rules) == 2)
             true -> Result.Ok(litPick(st, cs.rv.rules, n))
             false -> Result.Ok(ruledPick(cs.rv.rules, majorToCtor(st, cs.rv, e, cheapRec, cheapProj)?))
         _ -> Result.Ok(ruledPick(cs.rv.rules, majorToCtor(st, cs.rv, e, cheapRec, cheapProj)?))
@@ -3949,7 +3949,7 @@ fn allAtoms(es: List<Expr>) -> Bool
             Expr.FVar(_, _) -> allAtoms(rest)
             Expr.Const(_, _, _) -> allAtoms(rest)
             Expr.Sort(_, _) -> allAtoms(rest)
-            Expr.NatLit(_) -> allAtoms(rest)
+            Expr.NatLit(_, _) -> allAtoms(rest)
             _ -> false
 
 verify allAtoms
@@ -5024,8 +5024,8 @@ fn quickKinds(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
         Expr.Sort(_, a) -> match s
             Expr.Sort(_, b) -> Result.Ok(RI(i = tri(Core.Univ.isEquiv(a, b)), st = st))
             _ -> Result.Ok(RI(i = 0, st = st))
-        Expr.NatLit(a) -> match s
-            Expr.NatLit(b) -> Result.Ok(RI(i = tri(a == b), st = st))
+        Expr.NatLit(_, a) -> match s
+            Expr.NatLit(_, b) -> Result.Ok(RI(i = tri(a == b), st = st))
             Expr.StrLit -> Result.Ok(RI(i = 2, st = st))
             _ -> Result.Ok(RI(i = 0, st = st))
         Expr.StrLit(a) -> match s
@@ -5370,7 +5370,7 @@ verify isNatZero
 fn natPred(e: Expr) -> Option<Expr>
     ? "n for a literal n+1 or Nat.succ n."
     match e
-        Expr.NatLit(n) -> match n > 0
+        Expr.NatLit(_, n) -> match n > 0
             true -> Option.Some(Core.Exprs.natLit(n - 1))
             false -> Option.None
         Expr.App(_, f, a) -> match Core.Apps.isConst(f, Check.Lits.natSucc)

@@ -94,7 +94,7 @@ verify charList
 fn natValue(e: Expr) -> Option<Int>
     ? "A literal or Nat.zero as a number."
     match e
-        Expr.NatLit(n) -> Option.Some(n)
+        Expr.NatLit(_, n) -> Option.Some(n)
         Expr.Const(_, n, []) -> match n == natZero
             true -> Option.Some(0)
             false -> Option.None
@@ -106,8 +106,23 @@ verify natValue
     natValue(Core.Exprs.bvar(0)) => Option.None
 
 fn isNatOp(op: String) -> Bool
-    ? "The binary Nat functions the kernel computes on literals."
-    List.contains(["add", "sub", "mul", "div", "mod", "gcd", "beq", "ble", "land", "lor", "xor", "shiftLeft", "shiftRight", "pow"], op)
+    ? "The binary Nat functions the kernel computes on literals. A match, not a search of a list: the list was built anew at each call, on every step of the machine over a constant of Nat (on a CFSG computation 13% of the time)."
+    match op
+        "add" -> true
+        "sub" -> true
+        "mul" -> true
+        "div" -> true
+        "mod" -> true
+        "gcd" -> true
+        "beq" -> true
+        "ble" -> true
+        "land" -> true
+        "lor" -> true
+        "xor" -> true
+        "shiftLeft" -> true
+        "shiftRight" -> true
+        "pow" -> true
+        _ -> false
 
 verify isNatOp
     isNatOp("add") => true

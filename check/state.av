@@ -826,7 +826,7 @@ verify valueMatches
 fn headMatches(k: Expr, code: Int, ty: Expr) -> Bool
     ? "valueMatches below the value: the code and the type."
     match k
-        Expr.App(_, Expr.NatLit(c), t1) -> match c == code
+        Expr.App(_, Expr.NatLit(_, c), t1) -> match c == code
             true -> t1 == ty
             false -> false
         _ -> false
