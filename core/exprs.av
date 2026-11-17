@@ -357,7 +357,7 @@ verify withinDepth
     withinDepth(bvar(1), deeper(depthZero())) => false
 
 fn keyAtDepth(e: Expr, d: Depth) -> Key
-    ? "The key of e under d binders, for a memo that compares the node it finds with e: e's whole word with the depth xor-ed in, both machine words below 2^62, so the key never leaves the word (KeyByXor). One node at two depths has two keys; two nodes that meet on a key only make a lookup compare and miss. A literal, which carries no word, is keyed as keyAt keys it."
+    ? "The key of e under d binders, for a memo that compares the node it finds with e: e's whole word with the depth xor-ed in, both machine words below 2^62, so the key never leaves the word (KeyByXor). One node at two depths has two keys; two nodes that meet on a key only make a lookup compare and miss. A string literal, which carries no word, is keyed as keyAt keys it."
     match packedOf(e)
         Option.Some(w) -> match keyOf(Bits.xor(w.value, d.value))
             Result.Ok(k) -> k
@@ -367,7 +367,8 @@ fn keyAtDepth(e: Expr, d: Depth) -> Key
 verify keyAtDepth
     keyAtDepth(bvar(0), deeper(depthZero())) == keyAtDepth(bvar(0), depthZero()) => false
     keyAtDepth(app(bvar(0), bvar(1)), deeper(depthZero())) == keyAtDepth(app(bvar(0), bvar(1)), depthZero()) => false
-    keyAtDepth(natLit(3), deeper(depthZero())) == keyAt(natLit(3), 1) => true
+    keyAtDepth(strLit("a"), deeper(depthZero())) == keyAt(strLit("a"), 1) => true
+    keyAtDepth(natLit(3), deeper(depthZero())) == keyAtDepth(natLit(3), depthZero()) => false
 
 fn key(n: Int) -> Key
     ? "A key from an Int in range; anything else is key 0, which only makes a lookup compare with another node and miss."
