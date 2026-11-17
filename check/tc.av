@@ -2079,7 +2079,9 @@ fn whnfCached(st: St, e: Expr) -> Result<RE, Fail>
     ? "Uses or fills the whnf cache."
     match Check.State.cacheGet(st.whnfCache, e)
         Option.Some(r) -> Result.Ok(RE(e = r, st = st))
-        Option.None -> whnfLoop(st, e, e)
+        Option.None -> match oldGet(st.whnfOld, e)
+            Option.Some(r) -> Result.Ok(whnfStore(st, e, r))
+            Option.None -> whnfLoop(st, e, e)
 
 decision ValuesInTheKey
     date = "2026-10-26"
@@ -2112,9 +2114,11 @@ fn whnfValue(st: St, e: Expr) -> Result<RE, Fail>
     match e
         Expr.App -> match Check.State.cacheGet(st.whnfCache, e)
             Option.Some(r) -> Result.Ok(RE(e = r, st = st))
-            Option.None -> match valueArgs(e)
-                true -> valuesFirst(st, e, Core.Apps.argsOf(e), [], false)
-                false -> whnfLoop(st, e, e)
+            Option.None -> match oldGet(st.whnfOld, e)
+                Option.Some(r) -> Result.Ok(whnfStore(st, e, r))
+                Option.None -> match valueArgs(e)
+                    true -> valuesFirst(st, e, Core.Apps.argsOf(e), [], false)
+                    false -> whnfLoop(st, e, e)
         _ -> whnf(st, e)
 
 verify whnfValue
@@ -2212,7 +2216,9 @@ fn byValues(st: St, e: Expr, v: Expr) -> Result<RE, Fail>
     ? "The application to the arguments' values is definitionally e, by congruence, so its whnf is a whnf of e: found or worked out under v, and kept for e too."
     match Check.State.cacheGet(st.whnfCache, v)
         Option.Some(r) -> Result.Ok(whnfStore(st, e, r))
-        Option.None -> alsoFor(whnfLoop(st, v, v)?, e)
+        Option.None -> match oldGet(st.whnfOld, v)
+            Option.Some(r) -> Result.Ok(whnfStore(whnfStore(st, v, r).st, e, r))
+            Option.None -> alsoFor(whnfLoop(st, v, v)?, e)
 
 verify byValues
     resultExpr(byValues(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(1))) => Core.Exprs.natLit(1)
@@ -4330,9 +4336,65 @@ verify minst
     minst(Core.Exprs.bvar(0), [Core.Exprs.natLit(4)]) => Core.Exprs.natLit(4)
     minst(Core.Exprs.bvar(0), []) => Core.Exprs.bvar(0)
 
+decision GenerationsWithinADeclaration
+    date = "2026-11-17"
+    reason =
+        "Limits applied only to what is carried across declarations: within"
+        "one, the whnf cache kept every result, and CFSG certificates fill it"
+        "past 6 GB (kSol, c0f, totalC; gf3 4.0 GB with 53 KB literals). Most"
+        "results are found again soon after they are last asked for (probe300:"
+        "84% of hits within 4096 stores) but the rest are worth much: a cap of"
+        "1024 results took probe300 from 70 to 274 G, a flush at 8 M from 71.4"
+        "to 86.9 G. Two generations keep what was found or asked for within"
+        "the last generation: past its weight the young map becomes the old"
+        "one, and a result found in the old one is stored in the young one"
+        "again. A result weighs one, or 512 for a literal of 8 KB or more."
+        "Four workers, low-memory mode, against 1da564d: probe300 71.4 G 2.61"
+        "GB to 74.0 G 2.17 GB; gf3 20.4 G 4.01 GB to 19.6 G 1.09 GB; c0f past"
+        "6 GB to 425 G 3.19 GB; lyLet 11.1 G as it was. Init on one worker"
+        "52.41 G to 52.51 G, mathlib on four 1342.9 G to 1345.0 G."
+    chosen = "GenerationsWithinADeclaration"
+    rejected = ["OneCacheWithoutBound", "CapByEntries", "FlushPastALimit", "LiteralSumsNotKept"]
+    impacts = [whnfStore, whnfAged, whnfCost, oldGet, whnfCached, whnfValue, byValues]
+
 fn whnfStore(st: St, orig: Expr, r: Expr) -> RE
     ? "Caches a whnf result."
-    RE(e = r, st = St.update(st, whnfCache = Check.State.cachePut(st.whnfCache, orig, r)))
+    RE(e = r, st = whnfAged(St.update(st, whnfCache = Check.State.cachePut(st.whnfCache, orig, r), whnfWeight = st.whnfWeight + whnfCost(r))))
+
+fn oldGet(old: Map<Core.Exprs.Key, Bucket>, e: Expr) -> Option<Expr>
+    ? "A result kept in the old generation; nothing is hashed while there is none, as in every declaration that never fills a generation (GenerationsWithinADeclaration)."
+    match Map.len(old) == 0
+        true -> Option.None
+        false -> Check.State.cacheGet(old, e)
+
+verify oldGet
+    oldGet(Core.Cache.empty(), Core.Exprs.bvar(0)) => Option.None
+    oldGet(Check.State.cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
+
+fn whnfAged(st: St) -> St
+    ? "Past its generation's weight, the young whnf results become the old ones and the young start empty: what was found or asked for within the last generation lives on (GenerationsWithinADeclaration)."
+    match st.whnfWeight > st.limits.whnfGen
+        true -> St.update(st, whnfOld = st.whnfCache, whnfCache = Core.Cache.empty(), whnfWeight = 0)
+        false -> st
+
+verify whnfAged
+    Core.Cache.size(whnfAged(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), whnfWeight = 9000000, whnfCache = Check.State.cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)))).whnfOld) => 1
+    Core.Cache.size(whnfAged(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), whnfWeight = 9000000)).whnfCache) => 0
+    Core.Cache.size(whnfAged(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), whnfWeight = 5, whnfCache = Check.State.cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)))).whnfCache) => 1
+
+fn whnfCost(r: Expr) -> Int
+    ? "What a whnf result weighs against its generation: one, or 512 for a Nat literal of 2^65536 (8 KB) or more, which its word says (LongLiteralsSized in Core.Exprs), so that results holding long numbers do not keep gigabytes."
+    match r
+        Expr.NatLit(w, _) -> match Core.Exprs.sizeIn(w) == 63
+            true -> 512
+            false -> 1
+        _ -> 1
+
+verify whnfCost
+    whnfCost(Core.Exprs.natLit(5)) => 1
+    whnfCost(Core.Exprs.natLit(Bits.shiftLeft(1, 5000))) => 1
+    whnfCost(Core.Exprs.natLit(Bits.shiftLeft(1, 70000))) => 512
+    whnfCost(Core.Exprs.bvar(0)) => 1
 
 verify whnfStore
     Core.Cache.size(whnfStore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1)).st.whnfCache) => 1

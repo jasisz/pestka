@@ -76,13 +76,14 @@ record Limits
     unfold: Int
     types: Int
     closed: Int
+    whnfGen: Int
 
 fn limitsOf(unit: Int, memory: Memory) -> Limits
-    ? "How many hashes each map carried across declarations keeps before it is emptied, from the unit a worker gets. The fast mode keeps the multiples the reuse distances pay for (LimitsFromReuseDistances), three quarters of them since declarations are checked by namespace (LimitsAfterOrdering), and the facts about closed terms for the whole run. The low-memory mode keeps the checked types at the unit, whose entries are the cheapest to keep and the dearest to lose, a quarter of it for the inferred types, reduction results, equal pairs, constant types at levels and closed terms, and an eighth for the variables, with which the open caches go, the pairs found different and the unfolding cache (LowMemoryMode)."
+    ? "How many hashes each map carried across declarations keeps before it is emptied, from the unit a worker gets. The fast mode keeps the multiples the reuse distances pay for (LimitsFromReuseDistances), three quarters of them since declarations are checked by namespace (LimitsAfterOrdering), and the facts about closed terms for the whole run. The low-memory mode keeps the checked types at the unit, whose entries are the cheapest to keep and the dearest to lose, a quarter of it for the inferred types, reduction results, equal pairs, constant types at levels and closed terms, and an eighth for the variables, with which the open caches go, the pairs found different and the unfolding cache (LowMemoryMode). Within a declaration, a generation of whnf results weighs 8 M in the fast mode and 4 M otherwise (GenerationsWithinADeclaration in Check.Tc)."
     match memory
-        Memory.Fast -> Limits(vars = Int.div(3 * unit, 4), check = 3 * unit, infer = Int.div(3 * unit, 4), whnf = Int.div(3 * unit, 4), core = Int.div(3 * unit, 4), eqOk = Int.div(3 * unit, 2), eqFail = Int.div(3 * unit, 4), eqNo = Int.div(3 * unit, 4), unfold = Int.div(3 * unit, 4), types = Int.div(3 * unit, 4), closed = unbounded())
-        Memory.Bare -> Limits(vars = 0, check = 0, infer = 0, whnf = 0, core = 0, eqOk = 0, eqFail = 0, eqNo = 0, unfold = 0, types = 0, closed = 0)
-        Memory.Low -> Limits(vars = Int.div(unit, 8), check = unit, infer = Int.div(unit, 4), whnf = Int.div(unit, 4), core = Int.div(unit, 4), eqOk = Int.div(unit, 4), eqFail = Int.div(unit, 8), eqNo = Int.div(unit, 8), unfold = Int.div(unit, 8), types = Int.div(unit, 4), closed = Int.div(unit, 4))
+        Memory.Fast -> Limits(vars = Int.div(3 * unit, 4), check = 3 * unit, infer = Int.div(3 * unit, 4), whnf = Int.div(3 * unit, 4), core = Int.div(3 * unit, 4), eqOk = Int.div(3 * unit, 2), eqFail = Int.div(3 * unit, 4), eqNo = Int.div(3 * unit, 4), unfold = Int.div(3 * unit, 4), types = Int.div(3 * unit, 4), closed = unbounded(), whnfGen = 8388608)
+        Memory.Bare -> Limits(vars = 0, check = 0, infer = 0, whnf = 0, core = 0, eqOk = 0, eqFail = 0, eqNo = 0, unfold = 0, types = 0, closed = 0, whnfGen = 4194304)
+        Memory.Low -> Limits(vars = Int.div(unit, 8), check = unit, infer = Int.div(unit, 4), whnf = Int.div(unit, 4), core = Int.div(unit, 4), eqOk = Int.div(unit, 4), eqFail = Int.div(unit, 8), eqNo = Int.div(unit, 8), unfold = Int.div(unit, 8), types = Int.div(unit, 4), closed = Int.div(unit, 4), whnfGen = 4194304)
 
 verify limitsOf
     limitsOf(65536, Memory.Fast).check => 196608
@@ -303,6 +304,8 @@ record St
     inferCache: Map<Core.Exprs.Key, Bucket>
     checkCache: Map<Core.Exprs.Key, Bucket>
     whnfCache: Map<Core.Exprs.Key, Bucket>
+    whnfOld: Map<Core.Exprs.Key, Bucket>
+    whnfWeight: Int
     coreCache: Map<Core.Exprs.Key, Bucket>
     stepCache: Map<Core.Exprs.Key, Bucket>
     eqOk: Map<Core.Exprs.Key, Bucket>
@@ -337,7 +340,7 @@ record RO
 
 fn fresh(env: Env, params: List<Name>, safety: Safety) -> St
     ? "A checker for one declaration: empty context and caches."
-    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), stepCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Option.None, limits = limitsOf(65536, Memory.Fast), kinds = [], kindCounts = {}, kindsOpen = 0, paramsTag = paramsTagOf(params), shapes = {}, hot = {}, rules = {}, fuel = -1)
+    St(env = env, upTo = envSize(env), block = {}, lctx = Locals.NoLocals, next = 0, topLevel = 0, vars = Core.Cache.empty(), params = params, checkParams = true, safety = safety, eager = false, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), whnfOld = Core.Cache.empty(), whnfWeight = 0, coreCache = Core.Cache.empty(), stepCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), unfoldCache = Core.Cache.empty(), levelTypes = Core.Cache.empty(), closed = Core.Cache.empty(), open = 0, opened = Option.None, limits = limitsOf(65536, Memory.Fast), kinds = [], kindCounts = {}, kindsOpen = 0, paramsTag = paramsTagOf(params), shapes = {}, hot = {}, rules = {}, fuel = -1)
 
 verify fresh
     fresh(envEmpty(), [], Safety.Safe).next => 0

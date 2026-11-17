@@ -594,11 +594,39 @@ verify letE
     letE(Core.Names.str(Core.Names.anon(), "x"), bvar(0), bvar(4), bvar(0)) == letE(Core.Names.anon(), bvar(0), bvar(4), bvar(0)) => true
 
 fn natLit(n: Int) -> Expr
-    ? "Natural number literal, carrying its word (LeavesCarryWords): a long one would otherwise be read whole for its hash at every node built over it."
-    Expr.NatLit(leafWord(Core.Hash.mix(8, natHash(n)), 0, 0, 0), n)
+    ? "Natural number literal, carrying its word (LeavesCarryWords): a long one would otherwise be read whole for its hash at every node built over it. A literal of 2^65536 (8 KB) or more says so by the largest size, so that what keeps it can weigh it without reading the number (LongLiteralsSized)."
+    Expr.NatLit(litWord(n), n)
 
 verify natLit
     hashOf(natLit(1)) == hashOf(natLit(2)) => false
+    treeSize(natLit(Bits.shiftLeft(1, 70000))) => 63
+    treeSize(natLit(Bits.shiftLeft(1, 5000))) => 1
+
+decision LongLiteralsSized
+    date = "2026-11-17"
+    reason =
+        "What keeps a result has to weigh a long literal without reading it:"
+        "matching the number out of a literal copies it whole on the stock"
+        "runtime, which cost probe300 2.3 G of 74 G when every result was"
+        "weighed so. A leaf's size is 1 and only steers when work is"
+        "remembered; a literal of 2^65536 or more now has size 63, decided"
+        "where it is made, which already reads the number for its hash."
+    chosen = "LongLiteralsSized"
+    rejected = ["LiteralsWeighedWhenKept"]
+    impacts = [natLit, litWord]
+
+fn litWord(n: Int) -> Word
+    ? "A literal's word: a leaf's, of size 1, or of size 63 from 2^65536 on. Below 2^62 nothing is shifted; above, a shift past the number's length gives zero at once. The number is read for its hash last, so that it is handed over rather than copied."
+    match n < 4611686018427387904
+        true -> leafWord(Core.Hash.mix(8, natHash(n)), 0, 0, 0)
+        false -> match Bits.shiftRight(n, 65536) == 0
+            true -> leafWord(Core.Hash.mix(8, natHash(n)), 0, 0, 0)
+            false -> word(Core.Hash.mix(8, natHash(n)) * 2147483648 + 63 * 33554432)
+
+verify litWord
+    sizeIn(litWord(7)) => 1
+    sizeIn(litWord(Bits.shiftLeft(1, 65536))) => 63
+    litWord(7) == leafWord(Core.Hash.mix(8, 7), 0, 0, 0) => true
 
 fn natHash(n: Int) -> Int
     ? "A literal's hash: below 2^62 the number mod 2^31 - 1; above, its lowest 62 bits mod 2^31 - 1 (LongLiteralsHashedByLowBits)."
