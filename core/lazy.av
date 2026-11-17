@@ -553,7 +553,27 @@ fn leHalves(b: Bytes, i: Int, m: Int, j: Int, acc: Int) -> Int
     ? "Bytes i to j as leValue, from the halves i to m and m + 1 to j."
     match Bits.shiftLeft(leValue(b, m + 1, j, acc), (m + 1 - i) * 8)
         Result.Ok(hi) -> hi + leValue(b, i, m, 0)
-        Result.Err(_) -> leBytes(b, i, j, acc)
+        Result.Err(_) -> leValue(b, m + 1, j, acc) * pow256(m + 1 - i) + leValue(b, i, m, 0)
+
+fn pow256(k: Int) -> Int
+    ? "256 to the k, by squaring: past Aver's shift bound a half is moved by a product, not by a byte at a time over the whole number."
+    match k == 0
+        true -> 1
+        false -> pow256Step(pow256(Bits.shiftRight(k, 1)), Bits.and(k, 1))
+
+verify pow256
+    pow256(0) => 1
+    pow256(3) => 16777216
+
+fn pow256Step(h: Int, odd: Int) -> Int
+    ? "The square of h, times 256 when the exponent was odd."
+    match odd == 1
+        true -> h * h * 256
+        false -> h * h
+
+verify pow256Step
+    pow256Step(256, 1) => 16777216
+    pow256Step(256, 0) => 65536
 
 fn leBytes(b: Bytes, i: Int, j: Int, acc: Int) -> Int
     ? "Bytes i to j as leValue, a byte at a time from the last."
