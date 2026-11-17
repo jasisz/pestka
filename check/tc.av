@@ -828,13 +828,83 @@ decision DomainsNotBuilt
     rejected = ["OneApplicationAtATime", "DomainsBuilt"]
     impacts = [spineChecked, argsChecked, fitsUnder]
 
+decision DeepSpinesResumed
+    date = "2026-11-17"
+    reason =
+        "An application whose argument is an application, and so on, is"
+        "checked by nested spines, two frames each: a CFSG certificate"
+        "(invol) nests more than 50 thousand and overflows the stack. Past"
+        "a depth of 4096 an argument whose type is not known yet is handed"
+        "up to the outermost spine, which infers it there, keeps its type"
+        "and starts again, as Nat arithmetic does (DeepArithmeticResumed)."
+        "4096 nested spines are a few MB. invol, which overflowed, now runs"
+        "past 600 s under 6 GB; the official kernel runs past 900 s."
+    chosen = "DeepSpinesResumed"
+    rejected = ["LargerStacks"]
+    impacts = [spineChecked, argType]
+
 fn spineChecked(st: St, e: Expr) -> Result<RE, Fail>
+    ? "A closed application checked as a whole spine, one spine deeper; the outermost resumes after an argument handed up from too deep (DeepSpinesResumed)."
+    d = st.inferDepth
+    match d
+        0 -> spineOuter(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = 0), e, st.natDepth)
+        _ -> Result.Ok(typeLevel(spineCheckedIn(St.update(st, inferDepth = d + 1), e)?, d))
+
+verify spineChecked
+    spineChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => Result.Err(Fail.Reject("function expected"))
+
+fn spineOuter(st: St, c: NatCtx, e: Expr, nd: Int) -> Result<RE, Fail>
+    ? "The outermost spine, its context c and Nat depth nd read off st already."
+    spineRetry(spineCheckedIn(St.update(st, inferDepth = 1), e), c, e, nd)
+
+verify spineOuter
+    spineOuter(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), 0) => Result.Err(Fail.Reject("function expected"))
+
+fn spineRetry(r: Result<RE, Fail>, c: NatCtx, e: Expr, nd: Int) -> Result<RE, Fail>
+    ? "Done, or the argument handed up inferred here and the spine checked again."
+    match r
+        Result.Ok(re) -> Result.Ok(typeLevel(re, 0))
+        Result.Err(Fail.DeepType(x, st)) -> Result.Ok(typeAgain(spineChecked(infer(restored(st, c, nd), x, false)?.st, e)?))
+        Result.Err(f) -> Result.Err(f)
+
+verify spineRetry
+    resultExpr(spineRetry(Result.Err(Fail.DeepType(Core.Exprs.natLit(1), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.natLit(2), 0)) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
+
+fn typeAgain(r: RE) -> RE
+    ? "The result of checking again, taken as it is: a call that is not the last, so that the spine and its retry do not become one loop."
+    r
+
+verify typeAgain
+    typeAgain(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).e => Core.Exprs.natLit(1)
+
+fn typeLevel(r: RE, d: Int) -> RE
+    ? "The result with the spine depth back at d."
+    RE(e = r.e, st = St.update(r.st, inferDepth = d))
+
+verify typeLevel
+    typeLevel(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 3).st.inferDepth => 3
+
+fn argType(st: St, x: Expr) -> Result<RE, Fail>
+    ? "An argument's type; past spine depth 4096, an application whose type is not known yet is handed up to the outermost spine (DeepSpinesResumed)."
+    match st.inferDepth > 4096
+        false -> infer(st, x, false)
+        true -> match x
+            Expr.App -> match cachedType(st, x, false)
+                Option.Some(t) -> Result.Ok(RE(e = t, st = st))
+                Option.None -> Result.Err(Fail.DeepType(x, st))
+            _ -> infer(st, x, false)
+
+verify argType
+    resultExpr(argType(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), inferDepth = 5000), Core.Exprs.natLit(3))) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
+    argType(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), inferDepth = 5000), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) == Result.Err(Fail.DeepType(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), inferDepth = 5000))) => true
+
+fn spineCheckedIn(st: St, e: Expr) -> Result<RE, Fail>
     ? "A closed application checked as a whole spine: the head, then each argument against its domain."
     ft = infer(st, Core.Apps.fnOf(e), false)?
     argsChecked(ft.st, ft.e, Core.Apps.argsOf(e), [])
 
-verify spineChecked
-    spineChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => Result.Err(Fail.Reject("function expected"))
+verify spineCheckedIn
+    spineCheckedIn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => Result.Err(Fail.Reject("function expected"))
 
 fn argsChecked(st: St, ft: Expr, args: List<Expr>, pending: List<Expr>) -> Result<RE, Fail>
     ? "pending holds the arguments checked and not yet put into ft, newest first. A type that is not syntactically a pi gets them first and is then normalized."
@@ -849,7 +919,7 @@ verify argsChecked
 
 fn argChecked(st: St, x: Expr, d: Expr, b: Expr, rest: List<Expr>, pending: List<Expr>) -> Result<RE, Fail>
     ? "The argument's type must equal the domain with the arguments before it put in."
-    at = infer(st, x, false)?
+    at = argType(st, x)?
     ok = argFits(at.st, at.e, d, pending, x)?
     match ok.b
         true -> argsChecked(ok.st, b, rest, List.prepend(x, pending))
@@ -4505,15 +4575,109 @@ fn deltaConst(c: Option<Const>, ls: List<Level>) -> Option<Const>
 verify deltaConst
     deltaConst(Option.None, []) => Option.None
 
+decision DeepArithmeticResumed
+    date = "2026-11-17"
+    reason =
+        "Nat arithmetic whose argument is more Nat arithmetic, not yet"
+        "worked out, nests whnf, the machine and reduceNat once per"
+        "operation, about 2.3 KB of stack each: CFSG certificates build"
+        "chains of more than 110 thousand, past the 256 MiB a worker has."
+        "Past a depth of 8192 the argument wanted is handed up instead to"
+        "the outermost Nat operation, which works it out there, on a"
+        "shallow stack, keeps it in the whnf cache and starts again; the"
+        "chain is then cut where the argument's value is found. A chain"
+        "is walked about twice; one within the bound as before. 8192 levels"
+        "take about 19 MB of the 256 MiB, room for whatever else nests"
+        "between them; a lower bound only means more starts again. invget,"
+        "which overflowed, now runs until it passes 6 GB, as the official"
+        "kernel does."
+    chosen = "DeepArithmeticResumed"
+    rejected = ["LargerStacks"]
+    impacts = [reduceNat, natArg]
+
 fn reduceNat(st: St, e: Expr) -> Result<RO, Fail>
+    ? "Nat.succ and the binary Nat functions on literal arguments, one level deeper in Nat arithmetic; the outermost operation resumes after an argument handed up from too deep (DeepArithmeticResumed). Its context is read before the state is passed on, so that the state keeps one owner."
+    d = st.natDepth
+    match d
+        0 -> natFirstLevel(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth), e)
+        _ -> Result.Ok(natLevel(reduceNatIn(St.update(st, natDepth = d + 1), e)?, d))
+
+verify reduceNat
+    resultOpt(reduceNat(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 3), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
+
+fn natFirstLevel(st: St, c: NatCtx, e: Expr) -> Result<RO, Fail>
+    ? "The outermost Nat operation, its context c read off st already."
+    natOuter(reduceNatIn(St.update(st, natDepth = 1), e), c, e)
+
+verify natFirstLevel
+    resultOpt(natFirstLevel(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
+
+record NatCtx
+    kinds: List<Int>
+    kindCounts: Map<Core.Exprs.Key, Int>
+    kindsOpen: Int
+    open: Int
+    opened: Option<Expr>
+    eager: Bool
+    fuel: Int
+    inferDepth: Int
+
+fn natOuter(r: Result<RO, Fail>, c: NatCtx, e: Expr) -> Result<RO, Fail>
+    ? "The outermost Nat operation: done, or an argument handed up from too deep worked out and e tried again. The state the argument comes with holds everything found so far; what was opened or switched on below is set back as it was here, as finishing would have set it, and the variables made stay made."
+    match r
+        Result.Ok(ro) -> Result.Ok(natLevel(ro, 0))
+        Result.Err(Fail.Deep(x, st)) -> Result.Ok(natAgain(reduceNat(whnfValue(restored(st, c, 0), x)?.st, e)?))
+        Result.Err(f) -> Result.Err(f)
+
+verify natOuter
+    resultOpt(natOuter(Result.Err(Fail.Deep(Core.Exprs.natLit(1), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
+
+fn restored(st: St, c: NatCtx, natDepth: Int) -> St
+    ? "st with what was opened or switched on since c was read set back, the Nat depth at natDepth: the state finishing would have left, with everything found and every variable made kept."
+    St.update(st, natDepth = natDepth, inferDepth = c.inferDepth, kinds = c.kinds, kindCounts = c.kindCounts, kindsOpen = c.kindsOpen, open = c.open, opened = c.opened, eager = c.eager, fuel = c.fuel)
+
+verify restored
+    restored(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 7, eager = true), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 2), 0).inferDepth => 2
+
+fn natAgain(r: RO) -> RO
+    ? "The result of trying again, taken as it is: a call that is not the last, so that reduceNat and natOuter do not become one loop that every Nat operation would pass through."
+    r
+
+verify natAgain
+    natAgain(RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).o => Option.None
+
+fn natLevel(r: RO, d: Int) -> RO
+    ? "The result with the depth back at d."
+    RO(o = r.o, st = St.update(r.st, natDepth = d))
+
+verify natLevel
+    natLevel(RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 2).st.natDepth => 2
+
+fn natArg(st: St, a: Expr) -> Result<RE, Fail>
+    ? "An argument of Nat arithmetic brought to whnf; past depth 8192, unless a literal or already known, handed up to the outermost operation (DeepArithmeticResumed)."
+    match st.natDepth > 8192
+        false -> whnfValue(st, a)
+        true -> match a
+            Expr.NatLit -> Result.Ok(RE(e = a, st = st))
+            _ -> match Check.State.cacheGet(st.whnfCache, a)
+                Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+                Option.None -> match oldGet(st.whnfOld, a)
+                    Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+                    Option.None -> Result.Err(Fail.Deep(a, st))
+
+verify natArg
+    natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Core.Exprs.fvar(0), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 9000))) => true
+    resultExpr(natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 9000), Core.Exprs.natLit(2))) => Core.Exprs.natLit(2)
+
+fn reduceNatIn(st: St, e: Expr) -> Result<RO, Fail>
     ? "Nat.succ and the binary Nat functions on literal arguments."
     match e
-        Expr.App(_, Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), "succ", _), []), a) -> natSucc(whnfValue(st, a)?)
+        Expr.App(_, Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), "succ", _), []), a) -> natSucc(natArg(st, a)?)
         Expr.App(_, Expr.App(_, Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []), a), b) -> natBin(st, op, a, b)
         _ -> Result.Ok(RO(o = Option.None, st = st))
 
-verify reduceNat
-    resultOpt(reduceNat(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
+verify reduceNatIn
+    resultOpt(reduceNatIn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
 
 fn natSucc(a: RE) -> Result<RO, Fail>
     ? "succ of a literal."
@@ -4528,7 +4692,7 @@ fn natBin(st: St, op: String, a: Expr, b: Expr) -> Result<RO, Fail>
     ? "Both arguments are normalized and must be literals."
     match Check.Lits.isNatOp(op)
         false -> Result.Ok(RO(o = Option.None, st = st))
-        true -> natFirst(whnfValue(st, a)?, op, b)
+        true -> natFirst(natArg(st, a)?, op, b)
 
 verify natBin
     resultOpt(natBin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), "log2", Core.Exprs.natLit(1), Core.Exprs.natLit(1))) => Option.None
@@ -4537,7 +4701,7 @@ fn natFirst(x: RE, op: String, b: Expr) -> Result<RO, Fail>
     ? "The first argument as a literal."
     match Check.Lits.natValue(x.e)
         Option.None -> Result.Ok(RO(o = Option.None, st = x.st))
-        Option.Some(va) -> natSecond(whnfValue(x.st, b)?, op, va)
+        Option.Some(va) -> natSecond(natArg(x.st, b)?, op, va)
 
 verify natFirst
     resultOpt(natFirst(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), "add", Core.Exprs.natLit(1))) => Option.None

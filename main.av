@@ -180,6 +180,8 @@ fn partVerdict(r: Result<Run, Fail>, what: String, n: Int, unchecked: Int) -> In
         Result.Err(Fail.Reject(m)) -> rejected(m)
         Result.Err(Fail.Decline(m)) -> declined(m)
         Result.Err(Fail.Wants(w, _)) -> declined("the proof block at {w.at} was wanted and never read")
+        Result.Err(Fail.Deep(_, _)) -> declined("Nat arithmetic nested too deep")
+        Result.Err(Fail.DeepType(_, _)) -> declined("applications nested too deep")
         Result.Ok(run) -> match run.trusted == 0
             false -> declined("{run.trusted} nested inductive blocks are not checked yet")
             true -> printed("checked: {what} ({targetsSaid(n)}subset; {unchecked} earlier declarations admitted unchecked)", 0)
@@ -346,6 +348,8 @@ fn verdict(r: Result<Run, Fail>) -> Int
         Result.Err(Fail.Reject(m)) -> rejected(m)
         Result.Err(Fail.Decline(m)) -> declined(m)
         Result.Err(Fail.Wants(w, _)) -> declined("the proof block at {w.at} was wanted and never read")
+        Result.Err(Fail.Deep(_, _)) -> declined("Nat arithmetic nested too deep")
+        Result.Err(Fail.DeepType(_, _)) -> declined("applications nested too deep")
         Result.Ok(run) -> counted(run)
 
 fn counted(run: Run) -> Int

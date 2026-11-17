@@ -1161,6 +1161,8 @@ fn failNamed(e: Fail, n: Name) -> Fail
         Fail.Reject(m) -> Fail.Reject("{Core.Names.render(n)}: {m}")
         Fail.Decline(m) -> Fail.Decline("{Core.Names.render(n)}: {m}")
         Fail.Wants(_, _) -> e
+        Fail.Deep(_, _) -> e
+        Fail.DeepType(_, _) -> e
 
 verify failNamed
     failNamed(Fail.Decline("d"), Core.Names.str(Core.Names.anon(), "y")) => Fail.Decline("y: d")
