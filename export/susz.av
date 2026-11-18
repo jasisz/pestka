@@ -1313,8 +1313,9 @@ decision NatAsBytes
         "A Nat literal is its minimal little-endian base-256 digits (Susz 1"
         "spec, section 3):"
         "zero is no bytes, and the last byte of any other is not zero. It"
-        "is read from its last byte down, each step a multiplication by 256,"
-        "linear in the bytes for the literals exports hold."
+        "is decoded at once by Int.fromLittleEndian from a view of the"
+        "chunk: read a byte at a time, every step past 62 bits made a new"
+        "heap number, a fifth of reading CFSG."
     chosen = "NatAsBytes"
     rejected = ["DecimalDigits"]
     impacts = [lit, natAt, leValue]
@@ -1323,61 +1324,22 @@ fn natAt(t: Tables, b: Bytes, i: Int, n: Int) -> Done
     ? "The n bytes at i, the last not zero, as a Nat literal (NatAsBytes)."
     match Bool.and(n > 0, octet(b, i + n - 1) == 0)
         true -> Done.Bad("a Nat literal ends in a zero byte")
-        false -> added(Export.Tables.addExpr(t, t.nextExpr, Core.Exprs.natLit(leValue(b, i, i + n - 1, 0))), orNone(posOf(i + n)))
+        false -> added(Export.Tables.addExpr(t, t.nextExpr, Core.Exprs.natLit(leValue(b, i, n))), orNone(posOf(i + n)))
 
 verify natAt
     natAt(Export.Tables.empty(), Bytes.fromList([0, 1, 0]), 1, 2) => Done.Bad("a Nat literal ends in a zero byte")
     natAt(Export.Tables.empty(), Bytes.fromList([0, 0, 1]), 1, 2) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.natLit(256)), Export.Tables.empty()), Pos(value = 3))
     natAt(Export.Tables.empty(), Bytes.fromList([0]), 1, 0) => Done.Next(Result.withDefault(Export.Tables.addExpr(Export.Tables.empty(), 0, Core.Exprs.natLit(0)), Export.Tables.empty()), Pos(value = 1))
 
-fn leValue(b: Bytes, i: Int, j: Int, acc: Int) -> Int
-    ? "Bytes i to j as a little-endian number, read from the last; acc is the value of those after j (NatAsBytes). Long runs are split in halves joined by one shift, since a byte at a time copies the whole number per byte."
-    match j - i < 32
-        true -> leBytes(b, i, j, acc)
-        false -> leHalves(b, i, Bits.shiftRight(i + j, 1), j, acc)
-
-fn leHalves(b: Bytes, i: Int, m: Int, j: Int, acc: Int) -> Int
-    ? "Bytes i to j as leValue, from the halves i to m and m + 1 to j."
-    match Bits.shiftLeft(leValue(b, m + 1, j, acc), (m + 1 - i) * 8)
-        Result.Ok(hi) -> hi + leValue(b, i, m, 0)
-        Result.Err(_) -> leValue(b, m + 1, j, acc) * pow256(m + 1 - i) + leValue(b, i, m, 0)
-
-fn pow256(k: Int) -> Int
-    ? "256 to the k, by squaring: past Aver's shift bound a half is moved by a product, not by a byte at a time over the whole number."
-    match k == 0
-        true -> 1
-        false -> pow256Step(pow256(Bits.shiftRight(k, 1)), Bits.and(k, 1))
-
-verify pow256
-    pow256(0) => 1
-    pow256(3) => 16777216
-
-fn pow256Step(h: Int, odd: Int) -> Int
-    ? "The square of h, times 256 when the exponent was odd."
-    match odd == 1
-        true -> h * h * 256
-        false -> h * h
-
-verify pow256Step
-    pow256Step(256, 1) => 16777216
-    pow256Step(256, 0) => 65536
-
-fn leBytes(b: Bytes, i: Int, j: Int, acc: Int) -> Int
-    ? "Bytes i to j as leValue, a byte at a time from the last."
-    match j < i
-        true -> acc
-        false -> leBytes(b, i, j - 1, acc * 256 + octet(b, j))
-
-verify leHalves
-    leHalves(Bytes.fromList([1, 2, 3]), 0, 0, 2, 0) => 197121
-
-verify leBytes
-    leBytes(Bytes.fromList([1, 2]), 0, 1, 1) => 66049
+fn leValue(b: Bytes, i: Int, n: Int) -> Int
+    ? "The n bytes at i as a little-endian number (NatAsBytes), decoded at once from a view that shares the chunk's bytes."
+    Int.fromLittleEndian(Bytes.take(Bytes.drop(b, i), n))
 
 verify leValue
-    leValue(Bytes.fromList([1, 2]), 0, 1, 0) => 513
-    leValue(Bytes.fromList([255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255]), 0, 39, 0) + 1 => Bits.shiftLeft(1, 320)
-    leValue(Bytes.fromList([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70]), 3, 69, 2) == leBytes(Bytes.fromList([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70]), 3, 69, 2) => true
+    leValue(Bytes.fromList([1, 2]), 0, 2) => 513
+    leValue(Bytes.fromList([9, 1, 2]), 1, 1) => 1
+    leValue(Bytes.fromList([9]), 1, 0) => 0
+    leValue(Bytes.fromList([255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255]), 0, 40) + 1 => Bits.shiftLeft(1, 320)
 
 fn proj(t: Tables, b: Bytes, n: At) -> Done
     ? "16: a projection, the structure's name, the field and how far back the structure is."
