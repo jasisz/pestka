@@ -847,7 +847,7 @@ fn spineChecked(st: St, e: Expr) -> Result<RE, Fail>
     ? "A closed application checked as a whole spine, one spine deeper; the outermost resumes after an argument handed up from too deep (DeepSpinesResumed)."
     d = st.inferDepth
     match d
-        0 -> spineOuter(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = 0), e, st.natDepth)
+        0 -> spineOuter(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = 0), e, st.evalDepth)
         _ -> Result.Ok(typeLevel(spineCheckedIn(St.update(st, inferDepth = d + 1), e)?, d))
 
 verify spineChecked
@@ -864,8 +864,11 @@ fn spineRetry(r: Result<RE, Fail>, c: NatCtx, e: Expr, nd: Int) -> Result<RE, Fa
     ? "Done, or the argument handed up inferred here and the spine checked again."
     match r
         Result.Ok(re) -> Result.Ok(typeLevel(re, 0))
-        Result.Err(Fail.DeepType(x, st)) -> Result.Ok(typeAgain(spineChecked(infer(restored(st, c, nd), x, false)?.st, e)?))
-        Result.Err(f) -> Result.Err(f)
+        Result.Err(Fail.DeepType(x, st)) -> Result.Ok(typeAgain(spineChecked(heldType(infer(restored(st, c, nd), x, false)?, x), e)?))
+        Result.Err(Fail.Reject(m)) -> Result.Err(Fail.Reject(m))
+        Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline(m))
+        Result.Err(Fail.Wants(w, st)) -> Result.Err(Fail.Wants(w, st))
+        Result.Err(Fail.Deep(x, st)) -> Result.Err(Fail.Deep(x, st))
 
 verify spineRetry
     resultExpr(spineRetry(Result.Err(Fail.DeepType(Core.Exprs.natLit(1), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.natLit(2), 0)) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
@@ -889,9 +892,11 @@ fn argType(st: St, x: Expr) -> Result<RE, Fail>
     match st.inferDepth > 4096
         false -> infer(st, x, false)
         true -> match x
-            Expr.App -> match cachedType(st, x, false)
+            Expr.App -> match Check.State.cacheGet(st.resumedTypes, x)
                 Option.Some(t) -> Result.Ok(RE(e = t, st = st))
-                Option.None -> Result.Err(Fail.DeepType(x, st))
+                Option.None -> match cachedType(st, x, false)
+                    Option.Some(t) -> Result.Ok(RE(e = t, st = st))
+                    Option.None -> Result.Err(Fail.DeepType(x, st))
             _ -> infer(st, x, false)
 
 verify argType
@@ -1747,10 +1752,150 @@ fn majorSlow(m1: RE, rv: Rec, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fai
     m0 = etaBeforeWhnf(m1.st, rv, m1.e)?
     match m0.e == m1.e
         false -> Result.Ok(m0)
-        true -> majorReduced(whnfMaybe(m0.st, m1.e, cheapRec, cheapProj, cheapRec)?, rv)
+        true -> majorReduced(majorWhnf(m0.st, m1.e, cheapRec, cheapProj)?, rv)
 
 verify majorSlow
     resultExpr(majorSlow(RE(e = Core.Exprs.natLit(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), false, false)) => Check.Lits.natLitToCtor(2)
+
+decision DeepMajorsResumed
+    date = "2026-11-17"
+    reason =
+        "A recursor or casesOn brings its major premise to whnf inside the"
+        "whnf that met it, about 4 KB of stack a level. A lazy accumulator"
+        "(go n (xor b true) for n down to 0, a fold whose state no step"
+        "looks at) is a major whose whnf needs the whnf of the major below"
+        "it, as deep as the loop: 100 thousand overflowed the 256 MiB"
+        "worker stack, the way CFSG's whole-file check ended. Such a whnf"
+        "now counts in the same depth as Nat arithmetic (evalDepth,"
+        "DeepArithmeticResumed): past 8192 levels of either, a major not"
+        "already known is handed up to the outermost of them, which works"
+        "it out on a shallow stack, keeps it in the whnf cache and starts"
+        "again. A derived rule's split (splitPick) brings its argument to"
+        "whnf the same way. The cheap whnfCore of lazy delta is not counted:"
+        "it does not unfold, and the outermost keeps only full whnfs."
+        "With DeepClosuresBuiltFromTheBottom, one worker: the accumulator"
+        "of 100 thousand overflowed (3.2 G, 0.3 s), now 7.8 G, 0.9 s,"
+        "0.22 GB; a million 78 G, 9.4 s, 1.9 GB; a list accumulator of 100"
+        "thousand overflowed, now 5.6 G. Shared bound 2048, 8192 and 32768:"
+        "7.81, 7.79, 7.72 G and 78.1, 78.0, 78.7 G, peak 0.20, 0.22, 0.31"
+        "GB on 100 thousand. With the closures, Init on one worker 52.6 G"
+        "to 52.8 G (+0.3%), mathlib on four 1344.3 G to 1347.3 G (+0.2%),"
+        "wall and peak unchanged."
+    chosen = "DeepMajorsResumed"
+    rejected = ["LargerStacks", "MajorDepthOfItsOwn"]
+    impacts = [majorWhnf, majorDeeper, majorOuter, evalKnown, natArg, splitPick]
+
+fn majorWhnf(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "The major premise brought to whnf: whnfCore with the flags when cheap, else full whnf counted in the evaluation depth (DeepMajorsResumed)."
+    match cheapRec
+        true -> whnfCoreM(st, e, cheapRec, cheapProj)
+        false -> majorDeeper(st, e)
+
+verify majorWhnf
+    resultExpr(majorWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), false, false)) => Core.Exprs.fvar(0)
+
+fn majorDeeper(st: St, e: Expr) -> Result<RE, Fail>
+    ? "Full whnf of a major one evaluation level deeper; the outermost resumes after a major handed up from too deep, and past 8192 a major not already known is handed up (DeepMajorsResumed). The context is read before the state is passed on, so that the state keeps one owner."
+    d = st.evalDepth
+    match d
+        0 -> majorFirst(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth), e)
+        _ -> match d > 8192
+            false -> Result.Ok(evalLevel(whnf(St.update(st, evalDepth = d + 1), e)?, d))
+            true -> evalKnown(st, e)
+
+verify majorDeeper
+    resultExpr(majorDeeper(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 3), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Core.Exprs.natLit(5)
+    majorDeeper(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Core.Exprs.fvar(0), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000))) => true
+
+fn majorFirst(st: St, c: NatCtx, e: Expr) -> Result<RE, Fail>
+    ? "The outermost evaluation level, a major's whnf, its context c read off st already."
+    majorOuter(whnf(St.update(st, evalDepth = 1), e), c, e)
+
+verify majorFirst
+    resultExpr(majorFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+
+fn majorOuter(r: Result<RE, Fail>, c: NatCtx, e: Expr) -> Result<RE, Fail>
+    ? "The outermost level: done, or a term handed up from too deep worked out and e tried again, the state set back as natOuter sets it (DeepMajorsResumed)."
+    match r
+        Result.Ok(re) -> Result.Ok(evalLevel(re, 0))
+        Result.Err(Fail.Deep(x, st)) -> Result.Ok(majorAgain(majorDeeper(heldWhnf(whnf(restored(st, c, 0), x)?, x), e)?))
+        Result.Err(Fail.Reject(m)) -> Result.Err(Fail.Reject(m))
+        Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline(m))
+        Result.Err(Fail.Wants(w, st)) -> Result.Err(Fail.Wants(w, st))
+        Result.Err(Fail.DeepType(x, st)) -> Result.Err(Fail.DeepType(x, st))
+
+verify majorOuter
+    resultExpr(majorOuter(Result.Err(Fail.Deep(Core.Exprs.natLit(1), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+
+decision HandedUpHeld
+    date = "2026-11-17"
+    reason =
+        "What an outermost level works out for a term handed up from too"
+        "deep (DeepArithmeticResumed, DeepMajorsResumed, DeepSpinesResumed)"
+        "was kept only in the whnf or inference cache, which is emptied past"
+        "its limit: a chain that fills it between the keeping and the next"
+        "try finds it gone and hands it up again, with no end. It is now"
+        "also kept in a map of its own for the rest of the declaration,"
+        "never emptied, one entry per 8192 (or 4096) levels of a chain. The"
+        "outermost level also takes the state out of the failure that"
+        "carries it rather than reading it in place: read in place, the"
+        "state was a copy sharing every map with the failure, which lives to"
+        "the end of the arm, so every cache update below copied the whole"
+        "map. Neither changed the tests measured here (the lazy accumulators"
+        "of DeepMajorsResumed); both close a way the resumption could not"
+        "end or could cost as much as the cache. Still open: a for loop over"
+        "a range of 56 thousand steps or more (for _ in [0:n] do b := !b)"
+        "takes 355 G where 54 thousand take 14.9 G; without resumption 60"
+        "thousand took 9.9 G, and 100 thousand overflowed. The whnf cache"
+        "meets equal accumulators built"
+        "apart and compares them whole, 13 to 50 ms each, Aver joining the"
+        "equality classes of no pair past its first 1024."
+    chosen = "HandedUpHeld"
+    rejected = ["CachesOnly"]
+    impacts = [heldWhnf, heldType, evalKnown, argType, natOuter, majorOuter, spineRetry]
+
+fn heldWhnf(r: RE, x: Expr) -> St
+    ? "The state with x's whnf kept for the rest of the declaration (HandedUpHeld)."
+    St.update(r.st, resumed = Check.State.cachePut(r.st.resumed, x, r.e))
+
+verify heldWhnf
+    Check.State.cacheGet(heldWhnf(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0)).resumed, Core.Exprs.fvar(0)) => Option.Some(Core.Exprs.natLit(1))
+
+fn heldType(r: RE, x: Expr) -> St
+    ? "The state with x's type kept for the rest of the declaration (HandedUpHeld)."
+    St.update(r.st, resumedTypes = Check.State.cachePut(r.st.resumedTypes, x, r.e))
+
+verify heldType
+    Check.State.cacheGet(heldType(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0)).resumedTypes, Core.Exprs.fvar(0)) => Option.Some(Core.Exprs.natLit(1))
+
+fn majorAgain(r: RE) -> RE
+    ? "The result of trying again, taken as it is: a call that is not the last, so that majorDeeper and majorOuter do not become one loop."
+    r
+
+verify majorAgain
+    majorAgain(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).e => Core.Exprs.natLit(1)
+
+fn evalLevel(r: RE, d: Int) -> RE
+    ? "The result with the evaluation depth back at d."
+    RE(e = r.e, st = St.update(r.st, evalDepth = d))
+
+verify evalLevel
+    evalLevel(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 2).st.evalDepth => 2
+
+fn evalKnown(st: St, a: Expr) -> Result<RE, Fail>
+    ? "Past the depth bound: a literal or a whnf already known, otherwise a, handed up to the outermost level (DeepArithmeticResumed, DeepMajorsResumed)."
+    match a
+        Expr.NatLit -> Result.Ok(RE(e = a, st = st))
+        _ -> match Check.State.cacheGet(st.resumed, a)
+            Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+            Option.None -> match Check.State.cacheGet(st.whnfCache, a)
+                Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+                Option.None -> match oldGet(st.whnfOld, a)
+                    Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+                    Option.None -> Result.Err(Fail.Deep(a, st))
+
+verify evalKnown
+    resultExpr(evalKnown(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2))) => Core.Exprs.natLit(2)
 
 fn majorReduced(m2: RE, rv: Rec) -> Result<RE, Fail>
     ? "After whnf: a literal becomes its constructor, a structure value is eta expanded."
@@ -3082,8 +3227,8 @@ verify guardPick
     Result.withDefault(guardPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Guard.Leaf(Core.Exprs.bvar(0)), [], MS(next = 0, forced = {})), GP(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), ok = false, body = Core.Exprs.natLit(0), env = [])).ok => true
 
 fn splitPick(st: St, bs: List<Branch>, binds: List<Clo>, x: MX) -> Result<GP, Fail>
-    ? "The built argument in weak head normal form."
-    w = whnf(st, x.e)?
+    ? "The built argument in weak head normal form, counted as a major premise is (DeepMajorsResumed)."
+    w = majorDeeper(st, x.e)?
     match w.e
         Expr.NatLit(_, n) -> branchPick(w.st, findBranch(bs, litCtor(n)), [], litArgs(n), binds, x.ms)
         _ -> match Core.Apps.fnOf(w.e)
@@ -4131,9 +4276,16 @@ verify nthClo
 
 fn matTerm(t: Expr, env: List<Clo>, ms: MS) -> MX
     ? "t with its loose bound variables replaced by their closures, built; a closure is built when its variable is met, so those t never uses stay closures."
+    matTermAt(t, env, ms, 0)
+
+fn matTermAt(t: Expr, env: List<Clo>, ms: MS, depth: Int) -> MX
+    ? "matTerm inside depth closures being built one inside another (DeepClosuresBuiltFromTheBottom)."
     match Core.Exprs.isClosed(t)
         true -> MX(e = t, ms = ms)
-        false -> fromLS(lgo(t, 0, env, ms, Memo(map = {}, met = 0)))
+        false -> fromLS(lgo(t, 0, depth, env, ms, Memo(map = {}, met = 0)))
+
+verify matTermAt
+    matTermAt(Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(3), [])], MS(next = 0, forced = {}), 7).e => Core.Exprs.natLit(3)
 
 verify matTerm
     matTerm(Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(3), [])], MS(next = 0, forced = {})).e => Core.Exprs.natLit(3)
@@ -4175,30 +4327,30 @@ fn fromLS(r: LS) -> MX
 verify fromLS
     fromLS(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = Memo(map = {}, met = 0))).e => Core.Exprs.natLit(1)
 
-fn lgo(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
+fn lgo(e: Expr, off: Int, depth: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
     ? "As Core.Subst.go for instantiation: what has no loose bound variable at or above off is left alone."
     match Core.Exprs.within(e, off)
         true -> LS(e = e, ms = ms, memo = memo)
-        false -> lvisit(e, off, env, ms, memo)
+        false -> lvisit(e, off, depth, env, ms, memo)
 
 verify lgo
-    lgo(Core.Exprs.natLit(1), 0, [], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.natLit(1)
+    lgo(Core.Exprs.natLit(1), 0, 0, [], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.natLit(1)
 
-fn lvisit(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
+fn lvisit(e: Expr, off: Int, depth: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
     ? "A variable takes its closure's value; a large compound node is counted, and goes through the memo once the walk has met four of them (MemoAfterAPrefix)."
     match e
         Expr.BVar(_, i) -> match List.drop(env, Core.Exprs.indexValue(i) - off)
-            [c, .._] -> lvalue(matClo(c, ms), memo)
+            [c, .._] -> lvalue(matCloAt(c, ms, depth), memo)
             [] -> LS(e = Core.Exprs.bvar(Core.Exprs.indexValue(i) - List.len(env)), ms = ms, memo = memo)
         _ -> match Core.Exprs.isSmall(e)
-            true -> lbuild(e, off, env, ms, memo)
+            true -> lbuild(e, off, depth, env, ms, memo)
             false -> match memo.met < 4
-                true -> lbuild(e, off, env, ms, Memo.update(memo, met = memo.met + 1))
-                false -> lmemoed(e, off, env, ms, memo, Core.Exprs.keyAt(e, off))
+                true -> lbuild(e, off, depth, env, ms, Memo.update(memo, met = memo.met + 1))
+                false -> lmemoed(e, off, depth, env, ms, memo, Core.Exprs.keyAt(e, off))
 
 verify lvisit
-    lvisit(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.natLit(2)
-    lvisit(Core.Exprs.bvar(3), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.bvar(2)
+    lvisit(Core.Exprs.bvar(0), 0, 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.natLit(2)
+    lvisit(Core.Exprs.bvar(3), 0, 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.bvar(2)
 
 fn lvalue(x: MX, memo: Memo) -> LS
     ? "A built value with the walk's memo."
@@ -4207,14 +4359,14 @@ fn lvalue(x: MX, memo: Memo) -> LS
 verify lvalue
     lvalue(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {})), Memo(map = {}, met = 0)).e => Core.Exprs.natLit(1)
 
-fn lmemoed(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Memo, key: Core.Exprs.Key) -> LS
+fn lmemoed(e: Expr, off: Int, depth: Int, env: List<Clo>, ms: MS, memo: Memo, key: Core.Exprs.Key) -> LS
     ? "A node already rebuilt at this depth is reused."
     match lhit(Map.get(memo.map, key), e)
         Option.Some(r) -> LS(e = r, ms = ms, memo = memo)
-        Option.None -> lremember(lbuild(e, off, env, ms, memo), e, key)
+        Option.None -> lremember(lbuild(e, off, depth, env, ms, memo), e, key)
 
 verify lmemoed
-    lmemoed(Core.Exprs.bvar(0), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0), Core.Exprs.hashKey(Core.Exprs.bvar(7))).e => Core.Exprs.bvar(0)
+    lmemoed(Core.Exprs.bvar(0), 0, 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0), Core.Exprs.hashKey(Core.Exprs.bvar(7))).e => Core.Exprs.bvar(0)
 
 fn lremember(r: LS, e: Expr, key: Core.Exprs.Key) -> LS
     ? "Records a rebuilt node."
@@ -4234,45 +4386,45 @@ fn lhit(entry: Option<Tuple<Expr, Expr>>, e: Expr) -> Option<Expr>
 verify lhit
     lhit(Option.None, Core.Exprs.natLit(1)) => Option.None
 
-fn lbuild(e: Expr, off: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
+fn lbuild(e: Expr, off: Int, depth: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
     ? "Rebuilds one node, one binder deeper in binding positions."
     match e
-        Expr.App(_, f, a) -> lapp2(lgo(f, off, env, ms, memo), a, off, env)
-        Expr.Lam(_, t, b) -> lbinder(lgo(t, off, env, ms, memo), Core.Names.anon(), b, Binder.Default, off, env, true)
-        Expr.Pi(_, t, b) -> lbinder(lgo(t, off, env, ms, memo), Core.Names.anon(), b, Binder.Default, off, env, false)
-        Expr.Let(_, t, v, b) -> llet(lgo(t, off, env, ms, memo), Core.Names.anon(), v, b, off, env)
-        Expr.Proj(_, s, i, x) -> lproj2(lgo(x, off, env, ms, memo), s, i)
+        Expr.App(_, f, a) -> lapp2(lgo(f, off, depth, env, ms, memo), a, off, depth, env)
+        Expr.Lam(_, t, b) -> lbinder(lgo(t, off, depth, env, ms, memo), Core.Names.anon(), b, Binder.Default, off, depth, env, true)
+        Expr.Pi(_, t, b) -> lbinder(lgo(t, off, depth, env, ms, memo), Core.Names.anon(), b, Binder.Default, off, depth, env, false)
+        Expr.Let(_, t, v, b) -> llet(lgo(t, off, depth, env, ms, memo), Core.Names.anon(), v, b, off, depth, env)
+        Expr.Proj(_, s, i, x) -> lproj2(lgo(x, off, depth, env, ms, memo), s, i)
         _ -> LS(e = e, ms = ms, memo = memo)
 
 verify lbuild
-    lbuild(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.app(Core.Exprs.natLit(2), Core.Exprs.natLit(2))
+    lbuild(Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.bvar(0)), 0, 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.app(Core.Exprs.natLit(2), Core.Exprs.natLit(2))
 
-fn lapp2(rf: LS, a: Expr, off: Int, env: List<Clo>) -> LS
+fn lapp2(rf: LS, a: Expr, off: Int, depth: Int, env: List<Clo>) -> LS
     ? "The argument after the function."
-    ra = lgo(a, off, env, rf.ms, rf.memo)
+    ra = lgo(a, off, depth, env, rf.ms, rf.memo)
     LS(e = Core.Exprs.app(rf.e, ra.e), ms = ra.ms, memo = ra.memo)
 
 verify lapp2
-    lapp2(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = Memo(map = {}, met = 0)), Core.Exprs.natLit(2), 0, []).e => Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))
+    lapp2(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = Memo(map = {}, met = 0)), Core.Exprs.natLit(2), 0, 0, []).e => Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))
 
-fn lbinder(rt: LS, n: Name, b: Expr, bi: Binder, off: Int, env: List<Clo>, isLam: Bool) -> LS
+fn lbinder(rt: LS, n: Name, b: Expr, bi: Binder, off: Int, depth: Int, env: List<Clo>, isLam: Bool) -> LS
     ? "The body one deeper, after the domain."
-    rb = lgo(b, off + 1, env, rt.ms, rt.memo)
+    rb = lgo(b, off + 1, depth, env, rt.ms, rt.memo)
     match isLam
         true -> LS(e = Core.Exprs.lam(n, rt.e, rb.e, bi), ms = rb.ms, memo = rb.memo)
         false -> LS(e = Core.Exprs.pi(n, rt.e, rb.e, bi), ms = rb.ms, memo = rb.memo)
 
 verify lbinder
-    lbinder(LS(e = Core.Exprs.sort(Level.Zero), ms = MS(next = 0, forced = {}), memo = Memo(map = {}, met = 0)), Core.Names.anon(), Core.Exprs.bvar(0), Binder.Default, 0, [], true).e => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
+    lbinder(LS(e = Core.Exprs.sort(Level.Zero), ms = MS(next = 0, forced = {}), memo = Memo(map = {}, met = 0)), Core.Names.anon(), Core.Exprs.bvar(0), Binder.Default, 0, 0, [], true).e => Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default)
 
-fn llet(rt: LS, n: Name, v: Expr, b: Expr, off: Int, env: List<Clo>) -> LS
+fn llet(rt: LS, n: Name, v: Expr, b: Expr, off: Int, depth: Int, env: List<Clo>) -> LS
     ? "The value at this depth, then the body one deeper."
-    rv = lgo(v, off, env, rt.ms, rt.memo)
-    rb = lgo(b, off + 1, env, rv.ms, rv.memo)
+    rv = lgo(v, off, depth, env, rt.ms, rt.memo)
+    rb = lgo(b, off + 1, depth, env, rv.ms, rv.memo)
     LS(e = Core.Exprs.letE(n, rt.e, rv.e, rb.e), ms = rb.ms, memo = rb.memo)
 
 verify llet
-    llet(LS(e = Core.Exprs.sort(Level.Zero), ms = MS(next = 0, forced = {}), memo = Memo(map = {}, met = 0)), Core.Names.anon(), Core.Exprs.natLit(1), Core.Exprs.bvar(0), 0, []).e => Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), Core.Exprs.bvar(0))
+    llet(LS(e = Core.Exprs.sort(Level.Zero), ms = MS(next = 0, forced = {}), memo = Memo(map = {}, met = 0)), Core.Names.anon(), Core.Exprs.natLit(1), Core.Exprs.bvar(0), 0, 0, []).e => Core.Exprs.letE(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.natLit(1), Core.Exprs.bvar(0))
 
 fn lproj2(r: LS, s: Name, i: Int) -> LS
     ? "The projected structure rebuilt."
@@ -4281,14 +4433,130 @@ fn lproj2(r: LS, s: Name, i: Int) -> LS
 verify lproj2
     lproj2(LS(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {}), memo = Memo(map = {}, met = 0)), Check.Lits.name1("P"), 0).e => Core.Exprs.proj(Check.Lits.name1("P"), 0, Core.Exprs.fvar(0))
 
+decision DeepClosuresBuiltFromTheBottom
+    date = "2026-11-17"
+    reason =
+        "A closure whose term uses another closure is built by building that"
+        "one inside it, about 1.1 KB of stack a closure. A lazy accumulator"
+        "(go n (xor b true) for n down to 0, a fold whose state no step"
+        "looks at) leaves a chain of closures as long as the loop: 100"
+        "thousand overflowed the 256 MiB worker stack in a quarter of a"
+        "second, the way CFSG's whole-file check ended. Past 4096 closures"
+        "built one inside another, the closures the next one needs, and"
+        "those they need, are found by a walk with a list of its own and"
+        "built from the last found, each finding what it uses already"
+        "built: the same terms, with the stack no deeper. The depth is a"
+        "parameter of the walk, not a field of what it carries, which cost"
+        "Init 0.4%. Below the bound nothing changes; a lower bound only"
+        "means more chains built so. Bound 1024, 4096 and 16384, one"
+        "worker: an accumulator of 100 thousand 7.81, 7.79, 7.76 G; of a"
+        "million 78.0 G each; a list of 100 thousand 5.65, 5.64, 5.59 G."
+    chosen = "DeepClosuresBuiltFromTheBottom"
+    rejected = ["LargerStacks"]
+    impacts = [matCloAt, matTermAt, lgo, lvisit, lbuild, matNew, matChainOf, matChain, matHere, matOrder]
+
 fn matClo(c: Clo, ms: MS) -> MX
     ? "A closure built, at most once: a numbered closure is remembered once built."
+    matCloAt(c, ms, 0)
+
+fn matCloAt(c: Clo, ms: MS, depth: Int) -> MX
+    ? "matClo inside depth closures being built one inside another (DeepClosuresBuiltFromTheBottom)."
     match c
         Clo.Clo(id, e, cenv) -> match id < 0
             true -> MX(e = e, ms = ms)
             false -> match Map.get(ms.forced, id)
                 Option.Some(x) -> MX(e = x, ms = ms)
-                Option.None -> remembered1(matTerm(e, cenv, ms), id)
+                Option.None -> matNew(id, e, cenv, ms, depth)
+
+verify matCloAt
+    matCloAt(Clo.Clo(3, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])]), MS(next = 0, forced = {}), 5000).ms.forced => {3 => Core.Exprs.natLit(7)}
+
+fn matNew(id: Int, e: Expr, cenv: List<Clo>, ms: MS, depth: Int) -> MX
+    ? "A closure not built yet, one closure deeper; past 4096 closures built one inside another, with the closures it needs built first, from the bottom (DeepClosuresBuiltFromTheBottom). The closure is taken apart by the caller and made again only past the bound, so that its parts are moved, not shared."
+    match depth < 4096
+        true -> remembered1(matTermAt(e, cenv, ms, depth + 1), id)
+        false -> matChainOf(Clo.Clo(id, e, cenv), ms, depth)
+
+verify matNew
+    matNew(3, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])], MS(next = 0, forced = {}), 5000).e => Core.Exprs.natLit(7)
+
+fn matChainOf(c: Clo, ms: MS, depth: Int) -> MX
+    ? "c built after the closures it needs, from the bottom (DeepClosuresBuiltFromTheBottom)."
+    matChain(matOrder([(c, false)], {}, ms.forced, []), ms, c, depth)
+
+verify matChainOf
+    matChainOf(Clo.Clo(3, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])]), MS(next = 0, forced = {}), 5000).e => Core.Exprs.natLit(7)
+
+fn matChain(order: List<Clo>, ms: MS, c: Clo, depth: Int) -> MX
+    ? "The closures of order built one after another, each after those it uses, then c, now built (DeepClosuresBuiltFromTheBottom)."
+    match order
+        [] -> matHere(c, ms, depth)
+        [d, ..rest] -> matChainNext(matHere(d, ms, depth), rest, c, depth)
+
+verify matChain
+    matChain([], MS(next = 0, forced = {3 => Core.Exprs.natLit(2)}), Clo.Clo(3, Core.Exprs.bvar(0), []), 5000).e => Core.Exprs.natLit(2)
+
+fn matHere(c: Clo, ms: MS, depth: Int) -> MX
+    ? "A closure built at the depth reached, not one deeper: what it uses was built before it (DeepClosuresBuiltFromTheBottom)."
+    match c
+        Clo.Clo(id, e, cenv) -> match id < 0
+            true -> MX(e = e, ms = ms)
+            false -> match Map.get(ms.forced, id)
+                Option.Some(x) -> MX(e = x, ms = ms)
+                Option.None -> remembered1(matTermAt(e, cenv, ms, depth), id)
+
+verify matHere
+    matHere(Clo.Clo(3, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])]), MS(next = 0, forced = {}), 5000).ms.forced => {3 => Core.Exprs.natLit(7)}
+
+fn matChainNext(x: MX, rest: List<Clo>, c: Clo, depth: Int) -> MX
+    ? "One more closure built."
+    matChain(rest, x.ms, c, depth)
+
+verify matChainNext
+    matChainNext(MX(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {3 => Core.Exprs.natLit(2)})), [], Clo.Clo(3, Core.Exprs.bvar(0), []), 5000).e => Core.Exprs.natLit(2)
+
+fn matOrder(todo: List<Tuple<Clo, Bool>>, seen: Map<Int, Bool>, forced: Map<Int, Expr>, out: List<Clo>) -> List<Clo>
+    ? "The numbered closures not built yet that the first of todo needs, itself last, each after the closures its term uses: a walk with a list of its own, so as deep as the chain is. A pair marked true is a closure whose needs are already listed before it."
+    match todo
+        [] -> List.reverse(out)
+        [(d, after), ..rest] -> match after
+            true -> matOrder(rest, seen, forced, List.prepend(d, out))
+            false -> match d
+                Clo.Clo(id, e, cenv) -> match Bool.or(id < 0, Bool.or(Map.has(seen, id), Map.has(forced, id)))
+                    true -> matOrder(rest, seen, forced, out)
+                    false -> matOrder(needsOnto(looseIndices(e, 0, []), cenv, List.prepend((d, true), rest)), Map.set(seen, id, true), forced, out)
+
+verify matOrder
+    matOrder([(Clo.Clo(2, Core.Exprs.bvar(0), [Clo.Clo(1, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])])]), false)], {}, {}, []) == [Clo.Clo(1, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])]), Clo.Clo(2, Core.Exprs.bvar(0), [Clo.Clo(1, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])])])] => true
+    matOrder([(Clo.Clo(-1, Core.Exprs.natLit(1), []), false)], {}, {}, []) => []
+
+fn needsOnto(ixs: List<Int>, cenv: List<Clo>, todo: List<Tuple<Clo, Bool>>) -> List<Tuple<Clo, Bool>>
+    ? "The closures of cenv at the indices ixs put in front of todo, to be listed."
+    match ixs
+        [] -> todo
+        [i, ..rest] -> match List.drop(cenv, i)
+            [d, .._] -> needsOnto(rest, cenv, List.prepend((d, false), todo))
+            [] -> needsOnto(rest, cenv, todo)
+
+verify needsOnto
+    needsOnto([0, 5], [Clo.Clo(-1, Core.Exprs.natLit(1), [])], []) == [(Clo.Clo(-1, Core.Exprs.natLit(1), []), false)] => true
+
+fn looseIndices(e: Expr, off: Int, acc: List<Int>) -> List<Int>
+    ? "The loose bound variables of e below off binders, as indices into the environment, onto acc; a part with none is not walked."
+    match Core.Exprs.within(e, off)
+        true -> acc
+        false -> match e
+            Expr.BVar(_, i) -> List.prepend(Core.Exprs.indexValue(i) - off, acc)
+            Expr.App(_, f, a) -> looseIndices(a, off, looseIndices(f, off, acc))
+            Expr.Lam(_, t, b) -> looseIndices(b, off + 1, looseIndices(t, off, acc))
+            Expr.Pi(_, t, b) -> looseIndices(b, off + 1, looseIndices(t, off, acc))
+            Expr.Let(_, t, v, b) -> looseIndices(b, off + 1, looseIndices(v, off, looseIndices(t, off, acc)))
+            Expr.Proj(_, _, _, x) -> looseIndices(x, off, acc)
+            _ -> acc
+
+verify looseIndices
+    looseIndices(Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Binder.Default)), 0, []) => [0, 0, 2]
+    looseIndices(Core.Exprs.natLit(1), 0, []) => []
 
 verify matClo
     matClo(Clo.Clo(-1, Core.Exprs.natLit(1), []), MS(next = 0, forced = {})).e => Core.Exprs.natLit(1)
@@ -4597,17 +4865,17 @@ decision DeepArithmeticResumed
 
 fn reduceNat(st: St, e: Expr) -> Result<RO, Fail>
     ? "Nat.succ and the binary Nat functions on literal arguments, one level deeper in Nat arithmetic; the outermost operation resumes after an argument handed up from too deep (DeepArithmeticResumed). Its context is read before the state is passed on, so that the state keeps one owner."
-    d = st.natDepth
+    d = st.evalDepth
     match d
         0 -> natFirstLevel(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth), e)
-        _ -> Result.Ok(natLevel(reduceNatIn(St.update(st, natDepth = d + 1), e)?, d))
+        _ -> Result.Ok(natLevel(reduceNatIn(St.update(st, evalDepth = d + 1), e)?, d))
 
 verify reduceNat
-    resultOpt(reduceNat(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 3), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
+    resultOpt(reduceNat(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 3), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
 
 fn natFirstLevel(st: St, c: NatCtx, e: Expr) -> Result<RO, Fail>
     ? "The outermost Nat operation, its context c read off st already."
-    natOuter(reduceNatIn(St.update(st, natDepth = 1), e), c, e)
+    natOuter(reduceNatIn(St.update(st, evalDepth = 1), e), c, e)
 
 verify natFirstLevel
     resultOpt(natFirstLevel(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
@@ -4626,18 +4894,21 @@ fn natOuter(r: Result<RO, Fail>, c: NatCtx, e: Expr) -> Result<RO, Fail>
     ? "The outermost Nat operation: done, or an argument handed up from too deep worked out and e tried again. The state the argument comes with holds everything found so far; what was opened or switched on below is set back as it was here, as finishing would have set it, and the variables made stay made."
     match r
         Result.Ok(ro) -> Result.Ok(natLevel(ro, 0))
-        Result.Err(Fail.Deep(x, st)) -> Result.Ok(natAgain(reduceNat(whnfValue(restored(st, c, 0), x)?.st, e)?))
-        Result.Err(f) -> Result.Err(f)
+        Result.Err(Fail.Deep(x, st)) -> Result.Ok(natAgain(reduceNat(heldWhnf(whnfValue(restored(st, c, 0), x)?, x), e)?))
+        Result.Err(Fail.Reject(m)) -> Result.Err(Fail.Reject(m))
+        Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline(m))
+        Result.Err(Fail.Wants(w, st)) -> Result.Err(Fail.Wants(w, st))
+        Result.Err(Fail.DeepType(x, st)) -> Result.Err(Fail.DeepType(x, st))
 
 verify natOuter
-    resultOpt(natOuter(Result.Err(Fail.Deep(Core.Exprs.natLit(1), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
+    resultOpt(natOuter(Result.Err(Fail.Deep(Core.Exprs.natLit(1), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
 
-fn restored(st: St, c: NatCtx, natDepth: Int) -> St
-    ? "st with what was opened or switched on since c was read set back, the Nat depth at natDepth: the state finishing would have left, with everything found and every variable made kept."
-    St.update(st, natDepth = natDepth, inferDepth = c.inferDepth, kinds = c.kinds, kindCounts = c.kindCounts, kindsOpen = c.kindsOpen, open = c.open, opened = c.opened, eager = c.eager, fuel = c.fuel)
+fn restored(st: St, c: NatCtx, evalDepth: Int) -> St
+    ? "st with what was opened or switched on since c was read set back, the Nat depth at evalDepth: the state finishing would have left, with everything found and every variable made kept."
+    St.update(st, evalDepth = evalDepth, inferDepth = c.inferDepth, kinds = c.kinds, kindCounts = c.kindCounts, kindsOpen = c.kindsOpen, open = c.open, opened = c.opened, eager = c.eager, fuel = c.fuel)
 
 verify restored
-    restored(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 7, eager = true), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 2), 0).inferDepth => 2
+    restored(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 7, eager = true), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 2), 0).inferDepth => 2
 
 fn natAgain(r: RO) -> RO
     ? "The result of trying again, taken as it is: a call that is not the last, so that reduceNat and natOuter do not become one loop that every Nat operation would pass through."
@@ -4648,26 +4919,20 @@ verify natAgain
 
 fn natLevel(r: RO, d: Int) -> RO
     ? "The result with the depth back at d."
-    RO(o = r.o, st = St.update(r.st, natDepth = d))
+    RO(o = r.o, st = St.update(r.st, evalDepth = d))
 
 verify natLevel
-    natLevel(RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 2).st.natDepth => 2
+    natLevel(RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 2).st.evalDepth => 2
 
 fn natArg(st: St, a: Expr) -> Result<RE, Fail>
     ? "An argument of Nat arithmetic brought to whnf; past depth 8192, unless a literal or already known, handed up to the outermost operation (DeepArithmeticResumed)."
-    match st.natDepth > 8192
+    match st.evalDepth > 8192
         false -> whnfValue(st, a)
-        true -> match a
-            Expr.NatLit -> Result.Ok(RE(e = a, st = st))
-            _ -> match Check.State.cacheGet(st.whnfCache, a)
-                Option.Some(r) -> Result.Ok(RE(e = r, st = st))
-                Option.None -> match oldGet(st.whnfOld, a)
-                    Option.Some(r) -> Result.Ok(RE(e = r, st = st))
-                    Option.None -> Result.Err(Fail.Deep(a, st))
+        true -> evalKnown(st, a)
 
 verify natArg
-    natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Core.Exprs.fvar(0), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 9000))) => true
-    resultExpr(natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), natDepth = 9000), Core.Exprs.natLit(2))) => Core.Exprs.natLit(2)
+    natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Core.Exprs.fvar(0), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000))) => true
+    resultExpr(natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000), Core.Exprs.natLit(2))) => Core.Exprs.natLit(2)
 
 fn reduceNatIn(st: St, e: Expr) -> Result<RO, Fail>
     ? "Nat.succ and the binary Nat functions on literal arguments."
