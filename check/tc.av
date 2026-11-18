@@ -4781,6 +4781,11 @@ decision GenerationsThatPay
         "result of 63 nodes or more at 8 left lev_size past 6 GB: its"
         "memory is not in the caches (2 thousand results each, the"
         "footprint still growing 40 MB a second)."
+        "The quarter swept at a sixteenth and at one (no shrinking, the"
+        "rule before this one), two workers, low-memory: totalC at 190 s"
+        "1.91 GB at a sixteenth against 1.88 GB at a quarter (past 6 GB at"
+        "one); c0f 328.4 against 326.4 G, rowOK49 25.50 against 25.26 G,"
+        "probe300, hD, p6 and gf3 within 0.5%."
     chosen = "GenerationsThatPay"
     rejected = ["GenerationsOfOneWeight", "GrowWhenLetGoComeBack", "WideResultsWeighed"]
     impacts = [whnfAged, genOf, genNext, genPays, hitCounted, dearAged, whnfCached, whnfValue, byValues]

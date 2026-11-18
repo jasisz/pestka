@@ -169,6 +169,13 @@ decision LiteralsHashedApart
         "p6, ggA4, m6c, lyLet within 1%. Init on one worker 52.8 G to"
         "52.6 G; mathlib on four 1349.0 G to 1347.8 G, low-memory 1425.3 G"
         "to 1425.4 G, peaks as they were."
+        "The constants of scrambled swept, two workers, low-memory: the"
+        "xor-shifts 15 and 13 against 8 and 7 and against 30 and 26, the"
+        "multiplier 1597334677 against 374761393. c0f 326.4 G against"
+        "326.3, 330.2 and 326.4 G; probe300, rowOK49, hD, p6 and gf3"
+        "within 0.5% throughout: any multiply between two xor-shifts"
+        "keeps the literals apart, shifts of half the width or more"
+        "mix least."
     chosen = "LiteralsHashedApart"
     rejected = ["LiteralRemainderOfTheWhole", "OnesOfTheWhole", "LowBitsOnly"]
     impacts = [natHash, scrambled]
