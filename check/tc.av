@@ -2293,9 +2293,9 @@ verify whnf
 fn whnfCached(st: St, e: Expr) -> Result<RE, Fail>
     ? "Uses or fills the whnf cache."
     match Check.State.cacheGet(st.whnfCache, e)
-        Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+        Option.Some(r) -> Result.Ok(RE(e = r, st = hitCounted(st)))
         Option.None -> match farGet(st, e)
-            Option.Some(r) -> Result.Ok(whnfStore(st, e, r))
+            Option.Some(r) -> Result.Ok(whnfStore(hitCounted(st), e, r))
             Option.None -> whnfLoop(st, e, e)
 
 decision ValuesInTheKey
@@ -2328,9 +2328,9 @@ fn whnfValue(st: St, e: Expr) -> Result<RE, Fail>
     ? "whnf of an operand of Nat arithmetic, which has to come to a literal: on a cache miss, its closed arithmetic arguments come to their values first and the operand is looked up under them (ValuesInTheKey)."
     match e
         Expr.App -> match Check.State.cacheGet(st.whnfCache, e)
-            Option.Some(r) -> Result.Ok(RE(e = r, st = st))
+            Option.Some(r) -> Result.Ok(RE(e = r, st = hitCounted(st)))
             Option.None -> match farGet(st, e)
-                Option.Some(r) -> Result.Ok(whnfStore(st, e, r))
+                Option.Some(r) -> Result.Ok(whnfStore(hitCounted(st), e, r))
                 Option.None -> match valueArgs(e)
                     true -> valuesFirst(st, e, Core.Apps.argsOf(e), [], false)
                     false -> whnfLoop(st, e, e)
@@ -2430,9 +2430,9 @@ verify headOf
 fn byValues(st: St, e: Expr, v: Expr) -> Result<RE, Fail>
     ? "The application to the arguments' values is definitionally e, by congruence, so its whnf is a whnf of e: found or worked out under v, and kept for e too."
     match Check.State.cacheGet(st.whnfCache, v)
-        Option.Some(r) -> Result.Ok(whnfStore(st, e, r))
+        Option.Some(r) -> Result.Ok(whnfStore(hitCounted(st), e, r))
         Option.None -> match farGet(st, v)
-            Option.Some(r) -> Result.Ok(whnfStore(whnfStore(st, v, r).st, e, r))
+            Option.Some(r) -> Result.Ok(whnfStore(whnfStore(hitCounted(st), v, r).st, e, r))
             Option.None -> alsoFor(whnfLoop(st, v, v)?, e)
 
 verify byValues
@@ -2642,6 +2642,9 @@ fn natStuck(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRe
     match st.fuel >= 0
         true -> Result.Ok(stuckGo(st, f, stack, ms))
         false -> unfoldGo(st, f, c, stack, ms, cheapRec, cheapProj)
+
+verify natStuck
+    Result.withDefault(natStuck(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), fuel = 3), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("d"), []), env = [], rest = [])).run => false
 
 verify natTryGo
     Result.withDefault(natTryGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Option.None, [], MXs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], ms = MS(next = 0, forced = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(3)
@@ -4746,6 +4749,42 @@ decision DearResultsKept
     rejected = ["TwoGenerationsOnly", "AskedAgainKept", "LiteralStepsNotKept", "ValuesOnlyKept", "ArithmeticOnClosures"]
     impacts = [farGet, dearStore, dearCost, dearAged, whnfRun, whnfStore]
 
+decision GenerationsThatPay
+    date = "2026-11-18"
+    reason =
+        "A generation of whnf results within a declaration holds a million"
+        "of them in the low-memory mode, whatever they are worth. Most"
+        "declarations find seven results in ten again (c0f, probe300, hD,"
+        "p6; rowOK more than one per store), but some ask for almost none:"
+        "in invol's lev_size 176 of a million stores in a generation, and"
+        "totalC kept generations of large results it never asked for again"
+        "until four workers passed 6 GB. A generation whose results were"
+        "asked for again fewer than once in genPays() stores did not pay"
+        "for what it held: the next weighs a quarter, down to a 64th of the"
+        "limits'; one that paid weighs the limits' again. The hits are"
+        "counted where a result is found, young or far. Four workers,"
+        "low-memory, against e3f4992: totalC killed past 6 GB at 424 s, now"
+        "2.0 GB at 200 s and 2.25 GB at 600 s (still not done); genPays()"
+        "16 / 64 / 256: 1.99 / 1.99 / 3.20 GB at 200 s, the floor a 16th /"
+        "64th / 256th: 1.81 / 1.99 / 1.96 GB. Counting the hits costs about"
+        "1%: rowOK49 24.8 to 25.4 G, p6 29.4 to 29.6 G, hD 31.9 to 32.2 G,"
+        "c0f 324.4 to 325.8 G; at genPays() 16 no slice that finds its"
+        "results again shrinks (within 0.5% of 64). top100 3738 G to 3755 G"
+        "at the same 6.05 GB; Init on one worker 52.6 G to 52.7 G; mathlib"
+        "on four 1347.8 G to 1348.7 G, low-memory 1425.4 G to 1426.1 G,"
+        "peaks within 1%."
+        "Growing a generation when results let go were worked out again"
+        "(a sample of one hash in 16 kept past its generation) did not"
+        "help hD, whose second pass begins only after the first generation"
+        "is let go (330 thousand results worked out again in its last"
+        "generation, 3.1 G), and took top100 past 6 GB at 106 s. Weighing a"
+        "result of 63 nodes or more at 8 left lev_size past 6 GB: its"
+        "memory is not in the caches (2 thousand results each, the"
+        "footprint still growing 40 MB a second)."
+    chosen = "GenerationsThatPay"
+    rejected = ["GenerationsOfOneWeight", "GrowWhenLetGoComeBack", "WideResultsWeighed"]
+    impacts = [whnfAged, genOf, genNext, genPays, hitCounted, dearAged, whnfCached, whnfValue, byValues]
+
 fn farGet(st: St, e: Expr) -> Option<Expr>
     ? "A result outside the young generation: dear, dear before, or old (DearResultsKept)."
     match oldGet(st.whnfDear, e)
@@ -4775,8 +4814,8 @@ verify dearCost
     dearCost() > 0 => true
 
 fn dearAged(st: St) -> St
-    ? "Past its weight, the dear results become the dear before and the dear start empty."
-    match st.dearWeight > st.limits.whnfGen
+    ? "Past the generation's weight, the dear results become the dear before and the dear start empty."
+    match st.dearWeight > genOf(st)
         true -> St.update(st, whnfDearOld = st.whnfDear, whnfDear = Core.Cache.empty(), dearWeight = 0)
         false -> st
 
@@ -4794,10 +4833,45 @@ verify oldGet
     oldGet(Check.State.cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)), Core.Exprs.bvar(0)) => Option.Some(Core.Exprs.bvar(1))
 
 fn whnfAged(st: St) -> St
-    ? "Past its generation's weight, the young whnf results become the old ones and the young start empty: what was found or asked for within the last generation lives on (GenerationsWithinADeclaration)."
-    match st.whnfWeight > st.limits.whnfGen
-        true -> St.update(st, whnfOld = st.whnfCache, whnfCache = Core.Cache.empty(), whnfWeight = 0)
+    ? "Past its generation's weight, the young whnf results become the old ones and the young start empty: what was found or asked for within the last generation lives on (GenerationsWithinADeclaration). The next generation's weight follows what this one paid (GenerationsThatPay)."
+    match st.whnfWeight > genOf(st)
+        true -> St.update(st, whnfOld = st.whnfCache, whnfCache = Core.Cache.empty(), whnfWeight = 0, genSize = genNext(genOf(st), st.genHits, st.whnfStores - st.genStart, st.limits.whnfGen), genHits = 0, genStart = st.whnfStores)
         false -> st
+
+fn genOf(st: St) -> Int
+    ? "The weight of a generation of whnf results now: the limits' until a generation has been weighed (GenerationsThatPay)."
+    match st.genSize == 0
+        true -> st.limits.whnfGen
+        false -> st.genSize
+
+verify genOf
+    genOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => Check.State.limitsOf(65536, Memory.Fast).whnfGen
+    genOf(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), genSize = 5)) => 5
+
+fn genNext(gen: Int, hits: Int, stores: Int, base: Int) -> Int
+    ? "The next generation's weight: a generation whose results were asked for again fewer than once in genPays() stores did not pay for what it held, and the next weighs a quarter, down to a 64th of the limits' (GenerationsThatPay); one that paid weighs the limits' again."
+    match hits * genPays() < stores
+        true -> Int.max(Int.div(gen, 4), Int.max(Int.div(base, 64), 1))
+        false -> base
+
+verify genNext
+    genNext(1048576, 10, 1000000, 1048576) => 262144
+    genNext(16384, 10, 1000000, 1048576) => 16384
+    genNext(16384, 900000, 1000000, 1048576) => 1048576
+
+fn genPays() -> Int
+    ? "One result asked for again in this many stores pays for a generation (GenerationsThatPay)."
+    64
+
+verify genPays
+    genPays() > 1 => true
+
+fn hitCounted(st: St) -> St
+    ? "One more whnf result found rather than worked out, counted for the generation (GenerationsThatPay)."
+    St.update(st, genHits = st.genHits + 1)
+
+verify hitCounted
+    hitCounted(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).genHits => 1
 
 verify whnfAged
     Core.Cache.size(whnfAged(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), whnfWeight = 9000000, whnfCache = Check.State.cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)))).whnfOld) => 1
