@@ -1890,7 +1890,7 @@ fn evalKnown(st: St, a: Expr) -> Result<RE, Fail>
             Option.Some(r) -> Result.Ok(RE(e = r, st = st))
             Option.None -> match Check.State.cacheGet(st.whnfCache, a)
                 Option.Some(r) -> Result.Ok(RE(e = r, st = st))
-                Option.None -> match oldGet(st.whnfOld, a)
+                Option.None -> match farGet(st, a)
                     Option.Some(r) -> Result.Ok(RE(e = r, st = st))
                     Option.None -> Result.Err(Fail.Deep(a, st))
 
@@ -2294,7 +2294,7 @@ fn whnfCached(st: St, e: Expr) -> Result<RE, Fail>
     ? "Uses or fills the whnf cache."
     match Check.State.cacheGet(st.whnfCache, e)
         Option.Some(r) -> Result.Ok(RE(e = r, st = st))
-        Option.None -> match oldGet(st.whnfOld, e)
+        Option.None -> match farGet(st, e)
             Option.Some(r) -> Result.Ok(whnfStore(st, e, r))
             Option.None -> whnfLoop(st, e, e)
 
@@ -2329,7 +2329,7 @@ fn whnfValue(st: St, e: Expr) -> Result<RE, Fail>
     match e
         Expr.App -> match Check.State.cacheGet(st.whnfCache, e)
             Option.Some(r) -> Result.Ok(RE(e = r, st = st))
-            Option.None -> match oldGet(st.whnfOld, e)
+            Option.None -> match farGet(st, e)
                 Option.Some(r) -> Result.Ok(whnfStore(st, e, r))
                 Option.None -> match valueArgs(e)
                     true -> valuesFirst(st, e, Core.Apps.argsOf(e), [], false)
@@ -2431,7 +2431,7 @@ fn byValues(st: St, e: Expr, v: Expr) -> Result<RE, Fail>
     ? "The application to the arguments' values is definitionally e, by congruence, so its whnf is a whnf of e: found or worked out under v, and kept for e too."
     match Check.State.cacheGet(st.whnfCache, v)
         Option.Some(r) -> Result.Ok(whnfStore(st, e, r))
-        Option.None -> match oldGet(st.whnfOld, v)
+        Option.None -> match farGet(st, v)
             Option.Some(r) -> Result.Ok(whnfStore(whnfStore(st, v, r).st, e, r))
             Option.None -> alsoFor(whnfLoop(st, v, v)?, e)
 
@@ -2458,8 +2458,10 @@ fn whnfLoop(st: St, orig: Expr, t: Expr) -> Result<RE, Fail>
 
 fn whnfRun(st: St, orig: Expr, t: Expr) -> Result<RE, Fail>
     ? "Runs the machine with unfolding and stores its result."
+    before = st.whnfStores
     r = lcore(st, t, [], [], MS(next = 0, forced = {}), true, false, false)?
-    Result.Ok(whnfStore(r.st, orig, r.e))
+    cost = r.st.whnfStores - before
+    Result.Ok(dearStore(whnfStore(r.st, orig, r.e), orig, cost))
 
 verify whnfRun
     resultExpr(whnfRun(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "mul"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)))) => Core.Exprs.natLit(6)
@@ -2633,9 +2635,13 @@ fn natTryGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, args: MXs, chea
     n = reduceNat(st, Core.Apps.mkApps(f, args.es))?
     match n.o
         Option.Some(v) -> Result.Ok(Go(st = n.st, ms = args.ms, run = false, t = v, env = [], rest = []))
-        Option.None -> match n.st.fuel >= 0
-            true -> Result.Ok(stuckGo(n.st, f, stack, args.ms))
-            false -> unfoldGo(n.st, f, c, stack, args.ms, cheapRec, cheapProj)
+        Option.None -> natStuck(n.st, f, c, stack, args.ms, cheapRec, cheapProj)
+
+fn natStuck(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
+    ? "Arithmetic that did not come to a literal: the head unfolds, or in a derivation it is stuck. The state is a parameter here, not a field of the result read twice, so that it keeps one owner and its caches are not copied on the next write."
+    match st.fuel >= 0
+        true -> Result.Ok(stuckGo(st, f, stack, ms))
+        false -> unfoldGo(st, f, c, stack, ms, cheapRec, cheapProj)
 
 verify natTryGo
     Result.withDefault(natTryGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Option.None, [], MXs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], ms = MS(next = 0, forced = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(3)
@@ -4709,7 +4715,73 @@ decision GenerationsWithinADeclaration
 
 fn whnfStore(st: St, orig: Expr, r: Expr) -> RE
     ? "Caches a whnf result."
-    RE(e = r, st = whnfAged(St.update(st, whnfCache = Check.State.cachePut(st.whnfCache, orig, r), whnfWeight = st.whnfWeight + whnfCost(r))))
+    RE(e = r, st = whnfAged(St.update(st, whnfCache = Check.State.cachePut(st.whnfCache, orig, r), whnfWeight = st.whnfWeight + whnfCost(r), whnfStores = st.whnfStores + 1)))
+
+decision DearResultsKept
+    date = "2026-11-18"
+    reason =
+        "Two generations of whnf results keep what was asked for within"
+        "the last generation, but a CFSG certificate asks for most results"
+        "once and for a few again much later: on a smaller copy of kSol"
+        "(probe300's loop at 200), 6.3 M results were worked out a second"
+        "time 1 M to 4 M results after the first, a second pass over the"
+        "whole loop, so a generation below that pass thrashed (4096"
+        "results: past 300 s against 59 G) and one above it held 2 GB on"
+        "one worker and 6 GB on kSol itself. The results worth keeping are"
+        "few and dear: a result whose working out stored dearCost()"
+        "results or more is kept apart as well, in two generations of"
+        "their own that the young flood does not push out, and found"
+        "there, or among the old, before it is worked out again. The"
+        "threshold, four workers, low-memory, generation 16 units:"
+        "at 16 / 64 / 256 / 1024 / 4096, probe300 72.5 / 71.8 / 71.6 /"
+        "71.4 / 71.8 G at 1.38 / 0.89 / 0.80 / 0.73 / 0.72 GB, c0f 408.4 /"
+        "399.0 / 397.5 / 397.3 / 397.5 G at 2.77 / 1.77 / 1.36 / 1.22 /"
+        "1.15 GB, kSol at 400 108.6 / 107.5 / 107.1 / 106.8 / 107.1 G,"
+        "rowOK49 24.5 G throughout, gf3 10.1-10.4 G; at 4, probe300 85.6 G"
+        "and c0f 451.6 G. Counting stores weighed by literal bytes instead"
+        "changed nothing. With the dear results kept, the young generation"
+        "only has to hold a working set, not a pass (GenerationsWithin"
+        "ADeclaration in Check.State's limits)."
+    chosen = "DearResultsKept"
+    rejected = ["TwoGenerationsOnly", "AskedAgainKept", "LiteralStepsNotKept", "ValuesOnlyKept", "ArithmeticOnClosures"]
+    impacts = [farGet, dearStore, dearCost, dearAged, whnfRun, whnfStore]
+
+fn farGet(st: St, e: Expr) -> Option<Expr>
+    ? "A result outside the young generation: dear, dear before, or old (DearResultsKept)."
+    match oldGet(st.whnfDear, e)
+        Option.Some(r) -> Option.Some(r)
+        Option.None -> match oldGet(st.whnfDearOld, e)
+            Option.Some(r) -> Option.Some(r)
+            Option.None -> oldGet(st.whnfOld, e)
+
+verify farGet
+    farGet(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0)) => Option.None
+
+fn dearStore(r: RE, orig: Expr, cost: Int) -> RE
+    ? "A result whose working out stored dearCost() results or more is kept apart as well, in two generations of their own that the cheap results do not push out (DearResultsKept)."
+    match cost >= dearCost()
+        false -> r
+        true -> RE(e = r.e, st = dearAged(St.update(r.st, whnfDear = Check.State.cachePut(r.st.whnfDear, orig, r.e), dearWeight = r.st.dearWeight + whnfCost(r.e))))
+
+verify dearStore
+    Core.Cache.size(dearStore(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), 1000000).st.whnfDear) => 1
+    Core.Cache.size(dearStore(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), 0).st.whnfDear) => 0
+
+fn dearCost() -> Int
+    ? "How many results stored while working one out make it dear (DearResultsKept): swept from 16 to 4096, flat from 256 to 4096."
+    1024
+
+verify dearCost
+    dearCost() > 0 => true
+
+fn dearAged(st: St) -> St
+    ? "Past its weight, the dear results become the dear before and the dear start empty."
+    match st.dearWeight > st.limits.whnfGen
+        true -> St.update(st, whnfDearOld = st.whnfDear, whnfDear = Core.Cache.empty(), dearWeight = 0)
+        false -> st
+
+verify dearAged
+    Core.Cache.size(dearAged(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), dearWeight = 9000000)).whnfDear) => 0
 
 fn oldGet(old: Map<Core.Exprs.Key, Bucket>, e: Expr) -> Option<Expr>
     ? "A result kept in the old generation; nothing is hashed while there is none, as in every declaration that never fills a generation (GenerationsWithinADeclaration)."
@@ -4733,17 +4805,29 @@ verify whnfAged
     Core.Cache.size(whnfAged(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), whnfWeight = 5, whnfCache = Check.State.cachePut(Core.Cache.empty(), Core.Exprs.bvar(0), Core.Exprs.bvar(1)))).whnfCache) => 1
 
 fn whnfCost(r: Expr) -> Int
-    ? "What a whnf result weighs against its generation: one, or 512 for a Nat literal of 2^65536 (8 KB) or more, which its word says (LongLiteralsSized in Core.Exprs), so that results holding long numbers do not keep gigabytes."
+    ? "What a whnf result weighs against its generation: one, about 300 bytes, or for a Nat literal of 2^65536 (8 KB) or more about its bytes over 256, 32 to 512, which its word says (LongLiteralsSized in Core.Exprs), so that results holding long numbers do not keep gigabytes."
     match r
-        Expr.NatLit(w, _) -> match Core.Exprs.sizeIn(w) == 63
-            true -> 512
-            false -> 1
+        Expr.NatLit(w, _) -> longWeight(Core.Exprs.sizeIn(w), 32)
         _ -> 1
+
+fn longWeight(size: Int, w: Int) -> Int
+    ? "A literal's weight from its size: one below 2^65536; from size 59 on (8 KB to 16 KB) 32, about its bytes over 256, doubling with each size (LongLiteralsSized in Core.Exprs)."
+    match size < 59
+        true -> 1
+        false -> match size == 59
+            true -> w
+            false -> longWeight(size - 1, w * 2)
+
+verify longWeight
+    longWeight(1, 32) => 1
+    longWeight(59, 32) => 32
+    longWeight(63, 32) => 512
 
 verify whnfCost
     whnfCost(Core.Exprs.natLit(5)) => 1
     whnfCost(Core.Exprs.natLit(Bits.shiftLeft(1, 5000))) => 1
-    whnfCost(Core.Exprs.natLit(Bits.shiftLeft(1, 70000))) => 512
+    whnfCost(Core.Exprs.natLit(Bits.shiftLeft(1, 70000))) => 32
+    whnfCost(Core.Exprs.natLit(Bits.shiftLeft(1, 1100000))) => 512
     whnfCost(Core.Exprs.bvar(0)) => 1
 
 verify whnfStore
