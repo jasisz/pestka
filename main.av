@@ -220,28 +220,31 @@ fn printed(m: String, code: Int) -> Int
     code
 
 fn memoryIn(args: List<String>) -> Memory
-    ? "The low-memory mode when --low-memory is among the arguments (LowMemoryMode)."
-    match List.contains(args, "--low-memory")
-        true -> Memory.Low
+    ? "The low-memory mode unless --high-memory is among the arguments; --low-memory is still accepted and changes nothing (LowMemoryMode)."
+    match List.contains(args, "--high-memory")
+        true -> Memory.Fast
         false -> match List.contains(args, "--no-carry")
             true -> Memory.Bare
-            false -> Memory.Fast
+            false -> Memory.Low
 
 verify memoryIn
     memoryIn(["--low-memory", "f"]) => Memory.Low
-    memoryIn(["f", "2"]) => Memory.Fast
+    memoryIn(["f", "2"]) => Memory.Low
+    memoryIn(["--high-memory", "f", "2"]) => Memory.Fast
+    memoryIn(["--no-carry", "f"]) => Memory.Bare
 
 fn withoutFlag(args: List<String>, acc: List<String>) -> List<String>
-    ? "The arguments without the flags --low-memory, --no-carry, --reorder-always and --show-placed, in their order."
+    ? "The arguments without the flags --low-memory, --high-memory, --no-carry, --reorder-always and --show-placed, in their order."
     match args
         [] -> List.reverse(acc)
-        [a, ..rest] -> match Bool.or(Bool.or(a == "--low-memory", a == "--no-carry"), Bool.or(a == "--reorder-always", a == "--show-placed"))
+        [a, ..rest] -> match Bool.or(Bool.or(Bool.or(a == "--low-memory", a == "--high-memory"), a == "--no-carry"), Bool.or(a == "--reorder-always", a == "--show-placed"))
             true -> withoutFlag(rest, acc)
             false -> withoutFlag(rest, List.prepend(a, acc))
 
 verify withoutFlag
     withoutFlag(["f", "--low-memory", "2"], []) => ["f", "2"]
     withoutFlag(["--reorder-always", "f", "--low-memory"], []) => ["f"]
+    withoutFlag(["--high-memory", "f", "4"], []) => ["f", "4"]
     withoutFlag([], []) => []
 
 fn input(args: List<String>) -> Outcome
@@ -250,7 +253,7 @@ fn input(args: List<String>) -> Outcome
     match args
         [path] -> fileOf(path, 4)
         [path, n] -> fileOf(path, workersOf(n))
-        _ -> Outcome.Declined("usage: pestka [--low-memory] [--reorder-always] [--show-placed] FILE [WORKERS] | pestka --only NAME[,NAME...] FILE.susz [WORKERS] | pestka pack [--no-index] FILE.ndjson FILE.susz [WORKERS]")
+        _ -> Outcome.Declined("usage: pestka [--high-memory] [--reorder-always] [--show-placed] FILE [WORKERS] | pestka --only NAME[,NAME...] FILE.susz [WORKERS] | pestka pack [--no-index] FILE.ndjson FILE.susz [WORKERS]")
 
 fn fileOf(path: String, workers: Int) -> Outcome
     ? "A Susz file by its signature, otherwise lean4export's ndjson, packed into Susz 1 in memory and read as Susz (NdjsonThroughSusz)."

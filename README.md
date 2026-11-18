@@ -94,7 +94,8 @@ argument, for example `MyModule.ndjson 1`. Each declaration sees only the
 environment available at its position in the file; the verdict reports the
 first failure in file order.
 
-For a smaller memory footprint, pass `--low-memory` before the file name.
+Pestka runs in its low-memory mode by default; pass `--high-memory` before
+the file name for the fast mode, which uses more memory.
 See [low-memory mode](docs/usage.md#low-memory-mode) for the tradeoff.
 
 Need an export first? See [producing input](docs/usage.md#producing-input).

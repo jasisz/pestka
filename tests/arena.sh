@@ -17,7 +17,7 @@ mb=${2:-2000}
 secs=${3:-20}
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin="${PESTKA_BIN:-$root/.build/target/release/main}"
-# PESTKA_ARGS adds arguments before the file, for example --low-memory.
+# PESTKA_ARGS adds arguments before the file, for example --high-memory.
 ok=0; declined=0; wrong=0; crashed=0
 for mode in "" --reorder-always; do
 for kind in good bad; do

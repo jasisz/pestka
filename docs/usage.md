@@ -63,7 +63,7 @@ Compiled to Rust, which is the build meant for large inputs:
 ```bash
 bin/build                  # aver compile + cargo build --release into .build/
 bin/build-pgo TRAIN.ndjson # the same, guided by a profile of checking TRAIN
-.build/target/release/main [--low-memory] FILE.susz [WORKERS]   # or FILE.ndjson
+.build/target/release/main [--high-memory] FILE.susz [WORKERS]  # or FILE.ndjson
 .build/target/release/main --only NAME[,NAME...] FILE.susz [WORKERS]
                            # check only some declarations, by the file's INDEX
 tests/run.sh               # fixtures in file order and with --reorder-always
@@ -123,14 +123,16 @@ The VM is far slower on large files; use it for `verify` and small inputs.
 
 ### Low-memory mode
 
-`--low-memory` trades instructions for memory: the caches a worker carries
+The low-memory mode is the default; `--high-memory` asks for the fast
+mode, and `--low-memory` is still accepted and changes nothing. The
+low-memory mode trades instructions for memory: the caches a worker carries
 across declarations stop at smaller limits, and the facts about closed
 terms, kept for the whole run otherwise, are emptied past a limit too. The
 limits were chosen by what a cost model of the caches says each GB kept
 returns, then swept on `mathlib` (decision `LowMemoryMode` in
 `check/state.av`). Susz files, PGO build, one worker unless said:
 
-| Test | Default | `--low-memory` |
+| Test | `--high-memory` | Default (low-memory) |
 |---|---|---|
 | `mathlib` | 1074 G, 5.5 GB, 175 s | 1117 G (+4.0%), 3.9 GB, 171 s |
 | `mathlib`, 4 workers | 1114 G, 6.2 GB, 66 s | 1174 G (+5.4%), 3.9 GB, 67 s |
@@ -150,7 +152,7 @@ holds at once. Going lower would take a denser form of the
 stored terms, or reading MAIN a part at a time.
 
 `tests/run.sh` and `tests/arena.sh` take `PESTKA_ARGS`, so
-`PESTKA_ARGS=--low-memory sh tests/run.sh` runs them in this mode.
+`PESTKA_ARGS=--high-memory sh tests/run.sh` runs them in the fast mode.
 
 ### Workers
 

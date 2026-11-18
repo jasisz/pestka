@@ -14,7 +14,7 @@
 # must be the same.
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin="${PESTKA_BIN:-$root/.build/target/release/main}"
-# PESTKA_ARGS adds arguments before the file, for example --low-memory.
+# PESTKA_ARGS adds arguments before the file, for example --high-memory.
 fail=0
 for mode in "" --reorder-always; do
   tag=${mode:+" [$mode]"}

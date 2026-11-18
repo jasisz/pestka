@@ -60,8 +60,14 @@ decision LowMemoryMode
         "reduces a proof (Acc.inv under WellFounded.fixF_eq, Iff.mpr and"
         "Localization.mk_eq_mk_iff under Localization.rec), small values"
         "kept or not; a value let go cannot be had back without reading the"
-        "file again. The default stays the fast mode: the Arena ranks by"
-        "instructions, and the memory it allows is not the limit."
+        "file again. The default stayed the fast mode while the Arena's"
+        "instruction count came first."
+        "From 2026-11-18 the low-memory mode is the default (the owner's"
+        "call: real runs are bounded by memory, CFSG's slices pass 6 GB in"
+        "the fast mode); the fast mode is asked for with --high-memory, and"
+        "--low-memory is still accepted and changes nothing. Four workers"
+        "against the fast mode: mathlib 1348.7 G and 5.83 GB against"
+        "1426.1 G (+5.7%) and 3.60 GB, the wall within 5%."
     chosen = "LowMemoryMode"
     rejected = ["OneModeWithSmallerLimits", "TheoremValuesFreed"]
     impacts = [limitsOf]
