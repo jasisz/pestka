@@ -142,6 +142,37 @@ decision LongLiteralsHashedByLowBits
     rejected = ["LiteralHashMadeWhenRead", "WholeLiteralHashed"]
     impacts = [natLit, natHash, packedOf, leafWordOf, metaOf]
 
+decision LiteralsHashedApart
+    date = "2026-11-18"
+    reason =
+        "A literal's hash was the number modulo 2^31 - 1, linear as the"
+        "hash of every node over it is: 2 and 2^32 met, and two terms whose"
+        "literals one grows by what another shrinks met as well, a shift by"
+        "31 and a mask of 2066 against a shift by 23 and a mask of 2074."
+        "Past 2^62 only the lowest 62 bits counted, and bit sets alike in"
+        "them (Nat.succ of one against Nat.succ 0) met too. Such keys share"
+        "a bucket of the whnf cache and every lookup compares them in full:"
+        "on c0f 84 million comparisons of different keys took 7 s of a"
+        "minute, on invget 323 million. The halves of the number are now"
+        "put through a multiply and two xor-shifts, which the modular sums"
+        "do not commute with, and past 2^62 the count of one bits among"
+        "the lowest 4096 is mixed in. A remainder of the whole number"
+        "(one pass) cost gf3 10.1 G to 22.0 G and rowOK49 24.5 G to 43.8 G;"
+        "the count over all bits 11.3 G and 26.6 G; over the lowest 1024,"
+        "4096 and 16384 bits rowOK49 24.6, 24.8 and 25.8 G, gf3 10.12,"
+        "10.15 and 10.25 G, and 1024 bits leaves numbers alike there."
+        "Four workers, low-memory, against 54653b9: c0f 392.8 G 54.5 s to"
+        "324.4 G 47.0 s at 1.15 GB; kSol 2508 G 348 s, accepted (past 300 s"
+        "before); comparisons of different keys on invget's first minute"
+        "323 million to 0.17 million, on totalC's 71 million to 0.38"
+        "million; rowOK49 24.5 to 24.8 G, probe300 71.5 to 72.8 G, gf3, hD,"
+        "p6, ggA4, m6c, lyLet within 1%. Init on one worker 52.8 G to"
+        "52.6 G; mathlib on four 1349.0 G to 1347.8 G, low-memory 1425.3 G"
+        "to 1425.4 G, peaks as they were."
+    chosen = "LiteralsHashedApart"
+    rejected = ["LiteralRemainderOfTheWhole", "OnesOfTheWhole", "LowBitsOnly"]
+    impacts = [natHash, scrambled]
+
 decision KeysAsMachineWords
     date = "2026-10-25"
     reason =
@@ -632,7 +663,7 @@ fn litWord(n: Int) -> Word
 verify litWord
     sizeIn(litWord(7)) => 1
     sizeIn(litWord(Bits.shiftLeft(1, 65536))) => 59
-    litWord(7) == leafWord(Core.Hash.mix(8, 7), 0, 0, 0) => true
+    litWord(7) == leafWord(Core.Hash.mix(8, natHash(7)), 0, 0, 0) => true
 
 fn longSize(n: Int) -> Int
     ? "The size of a literal of 2^65536 or more: 59 below 2^131072 (16 KB), one more for every doubling of its length, 63 from 2^1048576 (128 KB) on, so that what keeps it can weigh it by its bytes (LongLiteralsSized). A shift past the number's length gives zero at once, so the bounds are tried from the smallest."
@@ -652,15 +683,26 @@ verify longSize
     longSize(Bits.shiftLeft(1, 2000000)) => 63
 
 fn natHash(n: Int) -> Int
-    ? "A literal's hash: below 2^62 the number mod 2^31 - 1; above, its lowest 62 bits mod 2^31 - 1 (LongLiteralsHashedByLowBits)."
+    ? "A literal's hash: below 2^62 its two 31-bit halves, scrambled; above, its lowest 62 bits so, taken first so that nothing long is shifted, and the count of the one bits among its lowest 4096 (64 machine words, a bounded pass), so that bit sets alike in their low bits no longer share a bucket (LiteralsHashedApart)."
     match n < 4611686018427387904
-        true -> Int.mod(n, 2147483647)
-        false -> Int.mod(Bits.and(n, 4611686018427387903), 2147483647)
+        true -> scrambled(Bits.and(n, 2147483647), Bits.shiftRight(n, 31))
+        false -> Core.Hash.mix(natHash(Bits.and(n, 4611686018427387903)), Bits.popCount(n, 4096))
 
 verify natHash
-    natHash(5) => 5
-    natHash(2147483647) => 0
-    natHash(Bits.and(4611686018427387904 * 3 + 7, -1)) => 7
+    natHash(2) == natHash(4294967296) => false
+    natHash(31) + natHash(2066) == natHash(23) + natHash(2074) => false
+    natHash(Bits.shiftLeft(1, 3000)) == natHash(Bits.shiftLeft(3, 3000)) => false
+
+fn scrambled(lo: Int, hi: Int) -> Int
+    ? "The halves of a number below 2^62 mixed, then put through a multiply and two xor-shifts, which the arithmetic modulo 2^31 - 1 that builds a node's hash from its parts' does not commute with: a sum of literal hashes no longer stays the same when one literal grows by what another shrinks (LiteralsHashedApart). Every step stays below 2^62."
+    a = Core.Hash.mix(lo, hi)
+    b = Bits.and(Bits.xor(a, Bits.shiftRight(a, 15)) * 1597334677, 2147483647)
+    Bits.xor(b, Bits.shiftRight(b, 13))
+
+verify scrambled
+    scrambled(0, 0) => 0
+    scrambled(5, 0) == scrambled(0, 5) => false
+    scrambled(2147483647, 2147483647) < 2147483648 => true
 
 fn strLit(s: String) -> Expr
     ? "String literal."
