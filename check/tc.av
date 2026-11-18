@@ -5507,7 +5507,94 @@ fn eqBoolTrueWhnf(w: RE, t: Expr, s: Expr) -> Result<RB, Fail>
 verify eqBoolTrueWhnf
     resultBool(eqBoolTrueWhnf(RE(e = Check.Lits.boolExpr(true), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => true
 
+decision ProofsComparedBeforeReduced
+    date = "2026-11-18"
+    reason =
+        "The reference is_def_eq_core brings both sides to whnfCore before it"
+        "asks whether they are proofs. A proof headed by a recursor is then"
+        "reduced first: Eq.rec on a K-like major checks the major's type"
+        "against its constructor's, and CFSG's lev_size compares two casts"
+        "whose majors are List.length_map of a list the certificate computes:"
+        "the check length (map f L) = length L brought a Schreier-Sims run"
+        "to normal form (killed at 1800 s, 9.7 GB) for an answer proof"
+        "irrelevance gives from the types alone. When a side is a recursor"
+        "applied up to its major premise and its motive ends in a sort that"
+        "is zero at the recursor's levels, that side is a proof (its type is"
+        "the motive applied, a proposition) and the two sides are equal"
+        "exactly when their types are (is_def_eq_proof_irrel, which the"
+        "reference asks next anyway); whnfCore keeps the type up to"
+        "definitional equality, so asking before it gives the same answer."
+        "Read from the recursor's type and levels, never by inference, so a"
+        "recursor into Type costs nothing more."
+    chosen = "ProofsComparedBeforeReduced"
+    rejected = ["ReferenceOrder", "ProofIrrelevanceFirstForAll"]
+    impacts = [eqCoreWhnf, proofByRec, proofFirst]
+
 fn eqCoreWhnf(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "A side that is a proof by its recursor's motive decides by its type first (ProofsComparedBeforeReduced); otherwise cheap whnfCore on both sides (projections without whnf), and the easy cases again if anything changed."
+    match proofByRec(st, t)
+        true -> proofFirst(st, t, s)
+        false -> match proofByRec(st, s)
+            true -> proofFirst(st, s, t)
+            false -> eqCoreReduced(st, t, s)
+
+verify eqCoreWhnf
+    resultBool(eqCoreWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.sort(Level.Zero)), Core.Exprs.sort(Level.Zero))) => true
+
+fn proofFirst(st: St, p: Expr, q: Expr) -> Result<RB, Fail>
+    ? "p is a proof: p and q are equal exactly when their types are (ProofsComparedBeforeReduced)."
+    pt = inferType(st, p)?
+    r = proofTypes(pt.st, pt.e, q)?
+    Result.Ok(RB(b = r.i == 1, st = r.st))
+
+verify proofFirst
+    resultBool(proofFirst(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("p"), []), Core.Exprs.cnst(Check.Lits.name1("p"), []))) => true
+
+fn proofByRec(st: St, t: Expr) -> Bool
+    ? "t is a recursor applied at least up to its major premise, whose motive ends in a sort that is zero at the recursor's levels: its type is a proposition, so t is a proof (ProofsComparedBeforeReduced)."
+    match Core.Apps.fnOf(t)
+        Expr.Const(_, n, ls) -> match Check.State.lookup(st, n)
+            Option.Some(Const.CRec(rv)) -> recIsProof(rv, ls, Core.Apps.numArgs(t))
+            _ -> false
+        _ -> false
+
+verify proofByRec
+    proofByRec(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.fvar(0)) => false
+    proofByRec(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("p"), [])) => false
+
+fn recIsProof(rv: Rec, ls: List<Level>, k: Int) -> Bool
+    ? "The recursor's type past its major premise is a motive applied; the motive's binder ends in a sort, zero at ls."
+    majorIdx = rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices
+    match Bool.and(k > majorIdx, List.len(ls) == List.len(rv.head.params))
+        false -> false
+        true -> match peelPis(rv.head.ty, majorIdx + 1)
+            Option.Some(e) -> motiveZero(rv, ls, majorIdx + 1, Core.Apps.fnOf(e), Core.Apps.numArgs(e))
+            Option.None -> false
+
+verify recIsProof
+    recIsProof(sampleRec(), [Level.Zero], 0) => false
+
+fn motiveZero(rv: Rec, ls: List<Level>, k: Int, d: Expr, m: Int) -> Bool
+    ? "d, applied to m arguments under k pis of the recursor's type, is a variable bound by one of them whose type past m pis is a sort zero at ls."
+    match d
+        Expr.BVar(_, j) -> sortZero(peelAfter(piDomain(rv.head.ty, k - 1 - Core.Exprs.indexValue(j)), m), rv.head.params, ls)
+        _ -> false
+
+verify motiveZero
+    motiveZero(sampleRec(), [Level.Zero], 0, Core.Exprs.natLit(1), 0) => false
+
+fn sortZero(e: Option<Expr>, ps: List<Name>, ls: List<Level>) -> Bool
+    ? "A sort whose level is zero once the parameters ps are ls."
+    match e
+        Option.Some(Expr.Sort(_, v)) -> Core.Univ.zeroUnder(v, ps, ls)
+        _ -> false
+
+verify sortZero
+    sortZero(Option.Some(Core.Exprs.sort(Level.Zero)), [], []) => true
+    sortZero(Option.Some(Core.Exprs.sort(Level.Succ(Level.Zero))), [], []) => false
+    sortZero(Option.None, [], []) => false
+
+fn eqCoreReduced(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
     ? "Cheap whnfCore on both sides (projections without whnf), and the easy cases again if anything changed."
     tn = whnfCoreM(st, t, false, true)?
     sn = whnfCoreM(tn.st, s, false, true)?
@@ -5515,8 +5602,8 @@ fn eqCoreWhnf(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
         true -> eqAfterQuick(quickParts(sn.st, tn.e, sn.e)?, tn.e, sn.e)
         false -> eqProofIrrel(sn.st, tn.e, sn.e)
 
-verify eqCoreWhnf
-    resultBool(eqCoreWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.sort(Level.Zero)), Core.Exprs.sort(Level.Zero))) => true
+verify eqCoreReduced
+    resultBool(eqCoreReduced(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.sort(Level.Zero)), Core.Exprs.sort(Level.Zero))) => true
 
 fn eqAfterQuick(q: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Stops on a known answer."
