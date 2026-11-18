@@ -220,24 +220,39 @@ fn printed(m: String, code: Int) -> Int
     code
 
 fn memoryIn(args: List<String>) -> Memory
-    ? "The low-memory mode unless --high-memory is among the arguments; --low-memory is still accepted and changes nothing (LowMemoryMode)."
+    ? "The low-memory mode unless --high-memory is among the arguments; --low-memory is still accepted and changes nothing (LowMemoryMode). --ground lets the ground machine work out closed data where a literal or a Bool is wanted (GroundOptIn in Check.Tc)."
     match List.contains(args, "--high-memory")
-        true -> Memory.Fast
+        true -> withGround(Memory.Fast, List.contains(args, "--ground"))
         false -> match List.contains(args, "--no-carry")
             true -> Memory.Bare
-            false -> Memory.Low
+            false -> withGround(Memory.Low, List.contains(args, "--ground"))
+
+fn withGround(m: Memory, on: Bool) -> Memory
+    ? "The mode with the ground machine on when asked."
+    match on
+        false -> m
+        true -> match m
+            Memory.Fast -> Memory.FastGround
+            Memory.Low -> Memory.LowGround
+            _ -> m
+
+verify withGround
+    withGround(Memory.Low, true) => Memory.LowGround
+    withGround(Memory.Fast, false) => Memory.Fast
+    withGround(Memory.Bare, true) => Memory.Bare
 
 verify memoryIn
     memoryIn(["--low-memory", "f"]) => Memory.Low
     memoryIn(["f", "2"]) => Memory.Low
     memoryIn(["--high-memory", "f", "2"]) => Memory.Fast
     memoryIn(["--no-carry", "f"]) => Memory.Bare
+    memoryIn(["--ground", "f"]) => Memory.LowGround
 
 fn withoutFlag(args: List<String>, acc: List<String>) -> List<String>
-    ? "The arguments without the flags --low-memory, --high-memory, --no-carry, --reorder-always and --show-placed, in their order."
+    ? "The arguments without the flags --low-memory, --high-memory, --no-carry, --ground, --reorder-always and --show-placed, in their order."
     match args
         [] -> List.reverse(acc)
-        [a, ..rest] -> match Bool.or(Bool.or(Bool.or(a == "--low-memory", a == "--high-memory"), a == "--no-carry"), Bool.or(a == "--reorder-always", a == "--show-placed"))
+        [a, ..rest] -> match Bool.or(Bool.or(Bool.or(a == "--low-memory", a == "--high-memory"), Bool.or(a == "--no-carry", a == "--ground")), Bool.or(a == "--reorder-always", a == "--show-placed"))
             true -> withoutFlag(rest, acc)
             false -> withoutFlag(rest, List.prepend(a, acc))
 
@@ -246,6 +261,7 @@ verify withoutFlag
     withoutFlag(["--reorder-always", "f", "--low-memory"], []) => ["f"]
     withoutFlag(["--high-memory", "f", "4"], []) => ["f", "4"]
     withoutFlag([], []) => []
+    withoutFlag(["--ground", "f"], []) => ["f"]
 
 fn input(args: List<String>) -> Outcome
     ? "The file read on as many workers as asked for, or the usage as a decline."

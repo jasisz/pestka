@@ -6,7 +6,7 @@ module Tc
         "structures, equality normalizes, inference checks equality), so"
         "they live in one module. Every function threads the checker state."
     exposes [RI, LD, reachesRecursor, inferType, check, valueFits, ensureSort, isProp, whnf, whnfCore, isDefEq, sortLevel, withFacts, recFacts, majorInduct]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Lazy, Core.Cache, Check.State, Check.Lits, Core.Hash, Check.Shapes]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Lazy, Core.Cache, Check.State, Check.Lits, Core.Hash, Check.Shapes, Check.Ground]
     effects []
 
 decision CongruenceAfterSteps
@@ -2331,13 +2331,96 @@ fn whnfValue(st: St, e: Expr) -> Result<RE, Fail>
             Option.Some(r) -> Result.Ok(RE(e = r, st = hitCounted(st)))
             Option.None -> match farGet(st, e)
                 Option.Some(r) -> Result.Ok(whnfStore(hitCounted(st), e, r))
-                Option.None -> match valueArgs(e)
-                    true -> valuesFirst(st, e, Core.Apps.argsOf(e), [], false)
-                    false -> whnfLoop(st, e, e)
+                Option.None -> valueMiss(st, e)
         _ -> whnf(st, e)
 
 verify whnfValue
     resultExpr(whnfValue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1))) => Core.Exprs.natLit(1)
+
+decision GroundWhereLiteralsAreWanted
+    date = "2026-11-18"
+    reason =
+        "The ground machine (Check.Ground, GroundByNeed) is asked only where"
+        "the checker wants a whole closed term as a literal or a Bool and"
+        "would otherwise reduce it to one by rewriting: a closed term"
+        "against Bool.true, either way round (eqBoolTrue, the reference"
+        "kernel's own shortcut for proofs by decide), and a closed"
+        "application against a Nat literal in lazy delta, where closed"
+        "terms get Nat arithmetic first (lazyNat). The answer is a literal"
+        "that goes back into the term world as it is, kept in the whnf cache"
+        "as any whnf result: no value is ever read back into a term, and"
+        "inference, whnf on open terms and the order of the checks stay as"
+        "they were. A term the machine does not bring to a literal or a"
+        "Bool goes on the lazy way from where it was. Not asked in a"
+        "derivation (fuel set, DerivedRules), which works on open terms."
+        "Asking it for every operand of Nat arithmetic (whnfValue) was"
+        "tried and dropped: the lazy machine computing a loop called it"
+        "once per element, and the machine, which keeps nothing of a run"
+        "but closed literals, worked out again what the whnf cache held"
+        "(p6 30 G to 48 G, rowOK17 past 6 GB). Unlike con-leche's engine"
+        "(draft PR #18), which compiles each definition once per"
+        "declaration over erased code and memoises applications in flat"
+        "arrays, this machine interprets the terms the checker holds, as the"
+        "lazy machine does, and shares by cells; unlike an NbE kernel it"
+        "never stands in for defEq: it is a reduction strategy for closed"
+        "data behind two existing doors."
+    chosen = "GroundWhereLiteralsAreWanted"
+    rejected = ["GroundEveryOperand", "GroundEveryClosedWhnf", "GroundInDefEq", "GroundMajors"]
+    impacts = [groundable, keptAll, eqBoolTrue, trueGrounded, lazyNat]
+
+decision GroundOptIn
+    date = "2026-11-18"
+    reason =
+        "Measured with the machine on wherever its doors open, four"
+        "workers (instructions, wall, peak), lazily then by the machine:"
+        "p6 30.0 G 2.9 s 0.52 GB, 183 G 14.5 s 0.10 GB; hD 32.5 G 3.1 s"
+        "0.77 GB, 101 G 6.3 s 0.36 GB; rowOK17 29.6 G 3.7 s 2.13 GB, 99.8 G"
+        "8.1 s 0.43 GB; probe300 75.8 G 9.7 s 0.69 GB, 576 G 36.6 s"
+        "0.03 GB; Fi24P7-a0 355 G 34.4 s 0.82 GB, 284 G 30.0 s 0.36 GB;"
+        "AlphaMc_F3 12.9 G 1.1 s, 1887 G 122 s; AlphaMc_F2 and kSol killed"
+        "(600 s, 900 s); gf3, ggA4, m6c as they were; totalC and lev_size"
+        "killed at 1800 s either way, lev_size at 3.9 GB instead of 9.7 GB."
+        "The machine holds a fraction of the memory but, with no sharing of"
+        "applications repeated across its cells and none of the lazy"
+        "machine's shortcuts (derived rules, casesOn and matchers taken"
+        "directly, results cached by term across the declaration), it takes"
+        "three to a hundred and fifty times the instructions. So it runs"
+        "only when asked, with --ground; by default the doors stay shut and"
+        "the checker is as it was (Init one worker 58.1 G to 58.2 G,"
+        "mathlib four workers 1429.5 G to 1429.4 G low memory, 1350.1 G to"
+        "1351.4 G with --high-memory)."
+    chosen = "GroundOptIn"
+    rejected = ["GroundByDefault"]
+    impacts = [groundable]
+
+fn groundable(st: St, e: Expr) -> Bool
+    ? "A term the ground machine may work out: asked for (GroundOptIn), closed, with no free variable, outside a derivation (GroundWhereLiteralsAreWanted)."
+    match Bool.or(st.fuel >= 0, Bool.not(st.limits.ground))
+        true -> false
+        false -> Bool.and(Core.Exprs.isClosed(e), Bool.not(Core.Exprs.hasFVar(e)))
+
+verify groundable
+    groundable(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), limits = Check.State.limitsOf(65536, Memory.LowGround)), Core.Exprs.natLit(1)) => true
+    groundable(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1)) => false
+    groundable(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), limits = Check.State.limitsOf(65536, Memory.LowGround)), Core.Exprs.fvar(0)) => false
+
+fn keptAll(st: St, kept: List<Tuple<Expr, Expr>>) -> St
+    ? "Each closed term the ground machine brought to a literal or a Bool kept as its whnf (ClosedLiteralsShared)."
+    match kept
+        [] -> st
+        [(e, v), ..rest] -> keptAll(whnfStore(st, e, v).st, rest)
+
+verify keptAll
+    Core.Cache.size(keptAll(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [(Core.Exprs.fvar(0), Core.Exprs.natLit(1))]).whnfCache) => 1
+
+fn valueMiss(st: St, e: Expr) -> Result<RE, Fail>
+    ? "An operand missed by both caches, worked out the lazy way (ValuesInTheKey)."
+    match valueArgs(e)
+        true -> valuesFirst(st, e, Core.Apps.argsOf(e), [], false)
+        false -> whnfLoop(st, e, e)
+
+verify valueMiss
+    resultExpr(valueMiss(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
 
 fn valueArgs(e: Expr) -> Bool
     ? "An application of a constant with a closed arithmetic argument, whose value would make a better key (ValuesInTheKey)."
@@ -5378,10 +5461,39 @@ verify defEqCore
     resultBool(defEqCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero))) => true
 
 fn eqBoolTrue(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
-    ? "Proof by reflection: a closed term against Bool.true is evaluated."
+    ? "Proof by reflection: a closed term against Bool.true is evaluated; Bool.true against a closed application goes to the ground machine as well (GroundWhereLiteralsAreWanted)."
     match Bool.and(Bool.or(Bool.not(Core.Exprs.hasFVar(t)), st.eager), Core.Apps.isConst(s, Check.Lits.boolTrue))
-        true -> eqBoolTrueWhnf(whnf(st, t)?, t, s)
-        false -> eqCoreWhnf(st, t, s)
+        true -> eqBoolGround(st, t, s)
+        false -> match Bool.and(Core.Apps.isConst(t, Check.Lits.boolTrue), Bool.and(Core.Apps.isApp(s), groundable(st, s)))
+            true -> trueGrounded(st, t, s, Check.Ground.ground(st, s))
+            false -> eqCoreWhnf(st, t, s)
+
+fn trueGrounded(st: St, t: Expr, s: Expr, g: Check.Ground.GV) -> Result<RB, Fail>
+    ? "Bool.true against a closed term, the other way round: equal when the ground machine brings the term to Bool.true; otherwise the general path as before (GroundWhereLiteralsAreWanted)."
+    match Check.Ground.boolOf(g.v)
+        Option.Some(true) -> yes(keptAll(st, g.kept))
+        _ -> eqCoreWhnf(keptAll(st, g.kept), t, s)
+
+verify trueGrounded
+    resultBool(trueGrounded(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.boolTrue, []), Core.Exprs.fvar(0), Check.Ground.GV(v = Option.Some(Core.Exprs.cnst(Check.Lits.boolTrue, [])), kept = []))) => true
+
+fn eqBoolGround(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "A closed term the ground machine brings to Bool.true is equal to it; otherwise whnf as before (GroundWhereLiteralsAreWanted)."
+    match groundable(st, t)
+        true -> boolGrounded(st, t, s, Check.Ground.ground(st, t))
+        false -> eqBoolTrueWhnf(whnf(st, t)?, t, s)
+
+fn boolGrounded(st: St, t: Expr, s: Expr, g: Check.Ground.GV) -> Result<RB, Fail>
+    ? "Bool.true found: equal; otherwise whnf as before, with what the machine found kept."
+    match Check.Ground.boolOf(g.v)
+        Option.Some(true) -> yes(keptAll(st, g.kept))
+        _ -> eqBoolTrueWhnf(whnf(keptAll(st, g.kept), t)?, t, s)
+
+verify boolGrounded
+    resultBool(boolGrounded(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.cnst(Check.Lits.boolTrue, []), Check.Ground.GV(v = Option.Some(Core.Exprs.cnst(Check.Lits.boolTrue, [])), kept = []))) => true
+
+verify eqBoolGround
+    resultBool(eqBoolGround(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "beq"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(2)), Core.Exprs.cnst(Check.Lits.boolTrue, []))) => true
 
 verify eqBoolTrue
     resultBool(eqBoolTrue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "beq"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(2)), Check.Lits.boolExpr(true))) => true
@@ -6088,8 +6200,37 @@ verify lazyDelta
 fn lazyNat(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
     ? "Closed terms get Nat arithmetic first."
     match Bool.or(Bool.and(Bool.not(Core.Exprs.hasFVar(t)), Bool.not(Core.Exprs.hasFVar(s))), st.eager)
-        true -> lazyNatLeft(reduceNat(st, t)?, t, s)
+        true -> lazyNatGround(st, t, s)
         false -> lazyStep(st, t, s)
+
+fn lazyNatGround(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "A closed application against a Nat literal is worked out by the ground machine first (GroundWhereLiteralsAreWanted); then Nat arithmetic as before."
+    match Bool.and(isLit(s), Bool.and(Core.Apps.isApp(t), groundable(st, t)))
+        true -> groundLd(st, t, s, t, Check.Ground.ground(st, t))
+        false -> match Bool.and(isLit(t), Bool.and(Core.Apps.isApp(s), groundable(st, s)))
+            true -> groundLd(st, t, s, s, Check.Ground.ground(st, s))
+            false -> lazyNatLeft(reduceNat(st, t)?, t, s)
+
+verify lazyNatGround
+    Result.withDefault(lazyNatGround(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), Core.Exprs.natLit(5)), LD(status = 0, t = Core.Exprs.natLit(0), s = Core.Exprs.natLit(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).status => 1
+
+fn groundLd(st: St, t: Expr, s: Expr, x: Expr, g: Check.Ground.GV) -> Result<LD, Fail>
+    ? "x, one of the sides, as the literal the ground machine found, kept as its whnf with what it found on the way, and the sides compared again; without one, Nat arithmetic as before."
+    match Check.Ground.natOf(g.v)
+        Option.Some(n) -> groundCompared(whnfStore(keptAll(st, g.kept), x, Core.Exprs.natLit(n)), t, s, x)
+        Option.None -> lazyNatLeft(reduceNat(keptAll(st, g.kept), t)?, t, s)
+
+verify groundLd
+    Result.withDefault(groundLd(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.natLit(2), Core.Exprs.fvar(0), Check.Ground.GV(v = Option.Some(Core.Exprs.natLit(2)), kept = [])), LD(status = 0, t = Core.Exprs.natLit(0), s = Core.Exprs.natLit(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).status => 1
+
+fn groundCompared(r: RE, t: Expr, s: Expr, x: Expr) -> Result<LD, Fail>
+    ? "The side x replaced by its literal r.e, compared with the other."
+    match x == t
+        true -> ldOf(defEqCore(r.st, r.e, s)?, t, s)
+        false -> ldOf(defEqCore(r.st, t, r.e)?, t, s)
+
+verify groundCompared
+    Result.withDefault(groundCompared(RE(e = Core.Exprs.natLit(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), Core.Exprs.natLit(2), Core.Exprs.fvar(0)), LD(status = 0, t = Core.Exprs.natLit(0), s = Core.Exprs.natLit(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).status => 1
 
 verify lazyNat
     resultStatus(lazyNat(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 0

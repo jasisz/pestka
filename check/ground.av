@@ -1,0 +1,998 @@
+module Ground
+    intent =
+        "Closed data worked out by need: a term with no free and no loose"
+        "variable, whose value the checker wants as a Nat literal or a Bool,"
+        "is evaluated by a small machine over values (literals, constructors"
+        "with their arguments, closures) kept in a heap of cells, instead of"
+        "by rewriting terms. Every argument is a cell evaluated at most once,"
+        "when something needs it, and then shared; a cell nothing reaches"
+        "any more is collected. The machine keeps its own stack, so a"
+        "computation as deep as its data takes no native stack. It knows"
+        "nothing of types: whatever needs one (a stuck recursor, a"
+        "quotient, a free variable) stops it, and the caller goes the lazy"
+        "way it went before (GroundByNeed)."
+    exposes [GV, ground, natOf, boolOf]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Apps, Core.Decls, Check.State, Check.Lits]
+    effects []
+
+decision GroundByNeed
+    date = "2026-11-18"
+    reason =
+        "CFSG certificates compute in the kernel: a breadth-first search"
+        "over 4060 points whose arrays grow by Array.push, bitwise"
+        "arithmetic on big literals, lists of millions of cells. The lazy"
+        "machine reduces such a computation by rewriting terms: n pushes"
+        "become n nested List.rec terms walked again for every cell read,"
+        "O(n^2) steps and tens of millions of nodes held by the whnf cache"
+        "and thousands of nested whnf frames; invol, totalC and invget never"
+        "finished. Here the same reduction runs over values. Soundness:"
+        "every step is a step the reference kernel takes (beta, zeta,"
+        "delta of a definition at its own number of levels, iota of a"
+        "recursor on a constructor or on a Nat or String literal turned into"
+        "one, a projection of a constructor, the Nat operations the kernel"
+        "computes on literals with the same function, Check.Lits.natOp);"
+        "a cell stands for its term in its environment, and a value written"
+        "into a cell is a reduct of that term, so sharing it changes only"
+        "how often a reduction is done. Theorems, axioms, opaque constants,"
+        "inductive types, sorts and pis are neutral: never unfolded, which"
+        "can only make the machine stop, never answer otherwise. An answer"
+        "is given only when the whole term came to a literal or a"
+        "constructor of Bool; anything else gives no answer and the caller"
+        "reduces the term as before. Strict evaluation was rejected: ite,"
+        "cond and Bool.rec take both branches as arguments, and a structural"
+        "loop that recurses in both would be evaluated in both, 2^32 times"
+        "for the 32-bit loops of totalC. By need, a cell is evaluated only"
+        "when the reference kernel's whnf would need it too (the head, a"
+        "major premise, a projected structure, the operands of Nat"
+        "arithmetic), so the machine diverges only where lazy reduction"
+        "does: it needs no fuel. Its one bound is the heap, Aver's largest"
+        "vector of cells, met only when that many cells are alive at once."
+        "Nothing is kept between calls: the caller keeps the literal it gets"
+        "in the whnf cache as any whnf result."
+    chosen = "GroundByNeed"
+    rejected = ["GroundStrict", "GroundWithFuel", "ValuesEverywhere"]
+    impacts = [ground, run, stepOf, evalStep, retStep, iota]
+
+record LSub
+    ps: List<Name>
+    us: List<Level>
+
+type Cell
+    Thunk(Expr, Int, LSub)
+    Busy
+    Env(Int, Int)
+    Free(Int)
+    VLit(Int)
+    VStr(String)
+    VCtor(Name, List<Level>, Int, List<Int>)
+    VClo(Expr, Int, LSub)
+    VPap(Expr, List<Int>)
+    VNeu(Expr, List<Int>)
+    VType(Expr, Int, LSub)
+
+type Frame
+    FArg(Int)
+    FUpd(Int)
+    FRec(Rec, List<Level>, List<Int>)
+    FProj(Int)
+    FNat(String, Int)
+    FNat2(String, Int)
+    FSucc
+    FKeep(Expr)
+
+type Ctl
+    Eval(Expr, Int, LSub)
+    Ret(Int)
+    Stop(String)
+
+record GM
+    cells: Vector<Cell>
+    top: Int
+    free: Int
+    nfree: Int
+    stack: List<Frame>
+    steps: Int
+    kept: List<Tuple<Expr, Expr>>
+    closed: Map<Core.Exprs.Key, List<Tuple<Expr, Int>>>
+    pinned: List<Int>
+
+record MC
+    m: GM
+    c: Ctl
+
+record GA
+    m: GM
+    i: Int
+
+record PA
+    args: List<Int>
+    rest: List<Frame>
+    got: Int
+
+record Out
+    v: Option<Cell>
+    why: String
+    kept: List<Tuple<Expr, Expr>>
+
+record GV
+    v: Option<Expr>
+    kept: List<Tuple<Expr, Expr>>
+
+decision ClosedLiteralsShared
+    date = "2026-11-18"
+    reason =
+        "The checker asks the machine many times about terms that share"
+        "closed parts: a breadth-first search the lazy way calls P.mul 28"
+        "s (S.code 28 pa) once per element, and S.code 28 pa costs the"
+        "machine the evaluation of a permutation at 28 points each time,"
+        "where the lazy machine found its literal in the whnf cache (p6"
+        "never finished). A cell of a closed term with no universe"
+        "parameter to put in is that very term, so the machine looks it up"
+        "in the whnf cache before evaluating it, and a literal or a Bool it"
+        "comes to is handed back to the caller, which keeps it there as any"
+        "whnf result. The cache is read, never written, while the machine"
+        "runs, and the state keeps one owner."
+    chosen = "ClosedLiteralsShared"
+    rejected = ["NothingKeptBetweenCalls", "ValuesKeptBetweenCalls"]
+    impacts = [ground, forceCell, kept]
+
+fn ground(st: St, e: Expr) -> GV
+    ? "The value of a closed term as a Nat literal or a Bool constructor, when the machine brings it to one, with the closed terms it brought to one on the way (GroundByNeed, ClosedLiteralsShared)."
+    o = run(st, MC(m = fresh(), c = Ctl.Eval(e, -1, noSub())))
+    GV(v = litOf(o.v), kept = o.kept)
+
+verify ground
+    ground(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3))).v => Option.Some(Core.Exprs.natLit(5))
+    ground(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "mul"), []), Core.Exprs.bvar(0)), Core.Exprs.bvar(0)), Binder.Default), Core.Exprs.natLit(7))).v => Option.Some(Core.Exprs.natLit(49))
+    ground(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "beq"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(2))).v => Option.Some(Core.Exprs.cnst(Check.Lits.boolTrue, []))
+    ground(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)).v => Option.None
+    ground(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), [])).v => Option.None
+
+fn litOf(c: Option<Cell>) -> Option<Expr>
+    ? "A literal or a Bool constructor as a term; nothing for any other value."
+    match c
+        Option.Some(Cell.VLit(n)) -> Option.Some(Core.Exprs.natLit(n))
+        Option.Some(Cell.VCtor(n, _, _, [])) -> match isBool(n)
+            true -> Option.Some(Core.Exprs.cnst(n, []))
+            false -> Option.None
+        _ -> Option.None
+
+verify litOf
+    litOf(Option.Some(Cell.VLit(3))) => Option.Some(Core.Exprs.natLit(3))
+    litOf(Option.Some(Cell.VCtor(Check.Lits.nat, [], 0, []))) => Option.None
+
+fn isBool(n: Name) -> Bool
+    ? "Bool.true or Bool.false."
+    Bool.or(n == Check.Lits.boolTrue, n == Check.Lits.boolFalse)
+
+verify isBool
+    isBool(Check.Lits.boolTrue) => true
+    isBool(Check.Lits.nat) => false
+
+fn natOf(v: Option<Expr>) -> Option<Int>
+    ? "The literal's value."
+    match v
+        Option.Some(Expr.NatLit(_, n)) -> Option.Some(n)
+        _ -> Option.None
+
+verify natOf
+    natOf(Option.Some(Core.Exprs.natLit(2))) => Option.Some(2)
+    natOf(Option.None) => Option.None
+
+fn boolOf(v: Option<Expr>) -> Option<Bool>
+    ? "Which Bool a constructor is."
+    match v
+        Option.Some(Expr.Const(_, n, _)) -> match n == Check.Lits.boolTrue
+            true -> Option.Some(true)
+            false -> match n == Check.Lits.boolFalse
+                true -> Option.Some(false)
+                false -> Option.None
+        _ -> Option.None
+
+verify boolOf
+    boolOf(Option.Some(Core.Exprs.cnst(Check.Lits.boolTrue, []))) => Option.Some(true)
+    boolOf(Option.Some(Core.Exprs.natLit(1))) => Option.None
+
+fn fresh() -> GM
+    ? "An empty heap of 256 cells (it doubles when collecting leaves less than three quarters of it free; see GroundHeap) and an empty stack."
+    GM(cells = Vector.new(256, Cell.Free(-1)), top = 0, free = -1, nfree = 0, stack = [], steps = 0, kept = [], closed = {}, pinned = [])
+
+verify fresh
+    Vector.len(fresh().cells) => 256
+
+fn noSub() -> LSub
+    ? "No universe parameters to put in."
+    LSub(ps = [], us = [])
+
+verify noSub
+    List.len(noSub().ps) => 0
+
+fn run(st: St, mc: MC) -> Out
+    ? "Steps until the stack is empty with a value, or the machine stops; room for a step is made first."
+    match mc.c
+        Ctl.Stop(why) -> Out(v = Option.None, why = why, kept = mc.m.kept)
+        Ctl.Ret(x) -> match mc.m.stack
+            [] -> Out(v = Option.Some(cellAt(mc.m.cells, x)), why = "", kept = mc.m.kept)
+            _ -> run(st, stepOf(st, roomFor(mc)))
+        Ctl.Eval(_, _, _) -> run(st, stepOf(st, roomFor(mc)))
+
+verify run
+    run(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), MC(m = fresh(), c = Ctl.Stop("x"))).why => "x"
+
+fn stepOf(st: St, mc: MC) -> MC
+    ? "One step: a term evaluated in its environment, or a value handed to the frame on top of the stack."
+    match mc.c
+        Ctl.Eval(e, env, ls) -> evalStep(st, mc.m, e, env, ls)
+        Ctl.Ret(x) -> retTop(st, mc.m, x)
+        Ctl.Stop(_) -> mc
+
+verify stepOf
+    stepOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), MC(m = fresh(), c = Ctl.Eval(Core.Exprs.natLit(1), -1, noSub()))).c => Ctl.Ret(0)
+
+fn retTop(st: St, m: GM, x: Int) -> MC
+    ? "The value in cell x to the frame on top."
+    v = cellAt(m.cells, x)
+    match m.stack
+        [f, ..rest] -> retStep(st, GM.update(m, stack = rest), x, v, f)
+        [] -> MC(m = m, c = Ctl.Ret(x))
+
+verify retTop
+    retTop(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), fresh(), 0).c => Ctl.Ret(0)
+
+fn evalStep(st: St, m: GM, e: Expr, env: Int, ls: LSub) -> MC
+    ? "A term in an environment of cells: an application pushes its argument as a cell, a lambda takes the argument on top, a variable is forced, a constant is looked up. Environment -2 marks a closed cell's term, looked up among the checker's whnf results first (ClosedLiteralsShared)."
+    match env == -2
+        true -> knownOr(st, m, e, ls, Check.State.cacheGet(st.whnfCache, e))
+        false -> evalIn(st, m, e, env, ls)
+
+verify evalStep
+    evalStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), fresh(), Core.Exprs.natLit(2), -2, noSub()).c => Ctl.Ret(0)
+
+fn knownOr(st: St, m: GM, e: Expr, ls: LSub, hit: Option<Expr>) -> MC
+    ? "A whnf result the checker holds for a closed term, when it is a literal or a Bool; otherwise the term is evaluated."
+    match hit
+        Option.Some(Expr.NatLit(_, n)) -> retNew(alloc(dropKeep(m), Cell.VLit(n)))
+        Option.Some(Expr.Const(_, n, [])) -> match isBool(n)
+            true -> retNew(alloc(dropKeep(m), Cell.VCtor(n, [], 0, [])))
+            false -> evalIn(st, m, e, -1, ls)
+        _ -> evalIn(st, m, e, -1, ls)
+
+verify knownOr
+    knownOr(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), fresh(), Core.Exprs.fvar(0), noSub(), Option.Some(Core.Exprs.natLit(3))).c => Ctl.Ret(0)
+
+fn dropKeep(m: GM) -> GM
+    ? "The keep frame on top dropped: a value found in the cache needs no keeping."
+    match m.stack
+        [Frame.FKeep(_), ..rest] -> GM.update(m, stack = rest)
+        _ -> m
+
+verify dropKeep
+    dropKeep(pushFrame(fresh(), Frame.FKeep(Core.Exprs.natLit(1)))).stack => []
+
+fn evalIn(st: St, m: GM, e: Expr, env: Int, ls: LSub) -> MC
+    ? "evalStep in an environment of cells."
+    match e
+        Expr.App(_, f, a) -> argThen(argCell(m, a, env, ls), f, env, ls)
+        Expr.Lam(_, _, body) -> match m.stack
+            [Frame.FArg(a), ..rest] -> bindIn(alloc(GM.update(m, stack = rest), Cell.Env(a, env)), body, ls)
+            _ -> retNew(alloc(m, Cell.VClo(e, env, ls)))
+        Expr.BVar(_, i) -> forceAt(lookupEnv(m.cells, env, Core.Exprs.indexValue(i)), m)
+        Expr.Let(_, _, v, b) -> letThen(argCell(m, v, env, ls), b, env, ls)
+        Expr.Const(_, n, cls) -> constStep(st, m, n, levelsOf(cls, ls))
+        Expr.NatLit(_, n) -> retNew(alloc(m, Cell.VLit(n)))
+        Expr.StrLit(s) -> retNew(alloc(m, Cell.VStr(s)))
+        Expr.Proj(_, _, i, x) -> MC(m = pushFrame(m, Frame.FProj(i)), c = Ctl.Eval(x, env, ls))
+        Expr.Sort(_, _) -> typeVal(m, e, env, ls)
+        Expr.Pi(_, _, _) -> typeVal(m, e, env, ls)
+        Expr.FVar(_, _) -> stop(m, "free variable")
+
+verify evalIn
+    evalIn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), fresh(), Core.Exprs.fvar(0), -1, noSub()).c => Ctl.Stop("free variable")
+
+fn argThen(g: GA, f: Expr, env: Int, ls: LSub) -> MC
+    ? "The argument's cell pushed, then the function."
+    MC(m = pushFrame(g.m, Frame.FArg(g.i)), c = Ctl.Eval(f, env, ls))
+
+verify argThen
+    argThen(GA(m = fresh(), i = 3), Core.Exprs.natLit(1), -1, noSub()).m.stack => [Frame.FArg(3)]
+
+fn letThen(g: GA, b: Expr, env: Int, ls: LSub) -> MC
+    ? "The let value's cell bound, then the body."
+    bindIn(alloc(g.m, Cell.Env(g.i, env)), b, ls)
+
+verify letThen
+    letThen(GA(m = fresh(), i = 3), Core.Exprs.natLit(1), -1, noSub()).c => Ctl.Eval(Core.Exprs.natLit(1), 0, noSub())
+
+fn bindIn(g: GA, body: Expr, ls: LSub) -> MC
+    ? "A body evaluated in the environment cell g.i."
+    MC(m = g.m, c = Ctl.Eval(body, g.i, ls))
+
+verify bindIn
+    bindIn(GA(m = fresh(), i = 2), Core.Exprs.natLit(1), noSub()).c => Ctl.Eval(Core.Exprs.natLit(1), 2, noSub())
+
+fn retNew(g: GA) -> MC
+    ? "Hands on the value just put in cell g.i."
+    MC(m = g.m, c = Ctl.Ret(g.i))
+
+verify retNew
+    retNew(GA(m = fresh(), i = 2)).c => Ctl.Ret(2)
+
+fn stop(m: GM, why: String) -> MC
+    ? "The machine stops: no answer, the caller goes the lazy way."
+    MC(m = m, c = Ctl.Stop(why))
+
+verify stop
+    stop(fresh(), "x").c => Ctl.Stop("x")
+
+fn typeVal(m: GM, e: Expr, env: Int, ls: LSub) -> MC
+    ? "A sort or a pi is a neutral value; applied to something it stops."
+    match m.stack
+        [Frame.FArg(_), .._] -> stop(m, "type applied")
+        _ -> retNew(alloc(m, Cell.VType(e, env, ls)))
+
+verify typeVal
+    typeVal(fresh(), Core.Exprs.sort(Level.Zero), -1, noSub()).c => Ctl.Ret(0)
+
+fn argCell(m: GM, a: Expr, env: Int, ls: LSub) -> GA
+    ? "The cell an argument stands for: a variable is its own cell, a literal or a lambda a value at once, anything else a cell to evaluate when needed; a closed term keeps no environment."
+    match a
+        Expr.BVar(_, i) -> gaOf(lookupEnv(m.cells, env, Core.Exprs.indexValue(i)), m)
+        Expr.NatLit(_, n) -> alloc(m, Cell.VLit(n))
+        Expr.Lam(_, _, _) -> alloc(m, Cell.VClo(a, envFor(a, env), ls))
+        _ -> match Bool.and(envFor(a, env) < 0, List.len(ls.ps) == 0)
+            true -> closedCell(m, a, Core.Exprs.hashKey(a))
+            false -> alloc(m, Cell.Thunk(a, envFor(a, env), ls))
+
+verify argCell
+    argCell(fresh(), Core.Exprs.natLit(5), -1, noSub()).i => 0
+
+decision ClosedTermsOneCell
+    date = "2026-11-18"
+    reason =
+        "A closed term is often a DAG of shared closed subterms (a"
+        "certificate's formula, a table written out), which the lazy"
+        "machine computes once each, its whnf cache keyed by the term. As"
+        "a fresh cell per occurrence the machine computed a shared subterm"
+        "once per path to it: rowOK17 ran out of memory. Within one run"
+        "every occurrence of a closed term with no parameter to put in now"
+        "gets the same cell, found by the term's hash and equality, so it is"
+        "evaluated once. Such cells stay alive to the end of the run (they"
+        "are roots of collection): their number is that of distinct closed"
+        "subterms met, which the terms themselves already hold. Rebuilding"
+        "the closed term an argument stands for when all its variables"
+        "stand for closed terms, to share it as the lazy machine does once"
+        "it has instantiated it, was tried: p6 181 G against 202 G, but"
+        "rowOK17 ran past 6 GB, every accumulator of a loop a new closed"
+        "term kept to the end."
+    chosen = "ClosedTermsOneCell"
+    rejected = ["CellPerOccurrence", "MemoClearedOnCollection", "ClosedTermsRebuilt"]
+    impacts = [argCell, closedCell, collect]
+
+fn closedCell(m: GM, a: Expr, k: Core.Exprs.Key) -> GA
+    ? "The one cell of the closed term a in this run, made the first time it is met (ClosedTermsOneCell)."
+    match findClosed(Option.withDefault(Map.get(m.closed, k), []), a)
+        Option.Some(c) -> GA(m = m, i = c)
+        Option.None -> remembered(alloc(m, Cell.Thunk(a, -1, noSub())), a, k)
+
+verify closedCell
+    closedCell(fresh(), Core.Exprs.natLit(1), Core.Exprs.hashKey(Core.Exprs.natLit(1))).i => 0
+
+fn findClosed(xs: List<Tuple<Expr, Int>>, a: Expr) -> Option<Int>
+    ? "The cell of a among the terms of its hash."
+    match xs
+        [] -> Option.None
+        [(b, c), ..rest] -> match b == a
+            true -> Option.Some(c)
+            false -> findClosed(rest, a)
+
+verify findClosed
+    findClosed([(Core.Exprs.natLit(1), 4)], Core.Exprs.natLit(1)) => Option.Some(4)
+    findClosed([(Core.Exprs.natLit(1), 4)], Core.Exprs.natLit(2)) => Option.None
+
+fn remembered(g: GA, a: Expr, k: Core.Exprs.Key) -> GA
+    ? "The new cell of a remembered under its hash and kept alive."
+    bucketSet(List.prepend((a, g.i), Option.withDefault(Map.get(g.m.closed, k), [])), k, g)
+
+fn bucketSet(b: List<Tuple<Expr, Int>>, k: Core.Exprs.Key, g: GA) -> GA
+    ? "The bucket of hash k replaced by b, read before the machine is handed on, so that the map keeps one owner."
+    GA(m = GM.update(g.m, closed = Map.set(g.m.closed, k, b), pinned = List.prepend(g.i, g.m.pinned)), i = g.i)
+
+fn gaOf(i: Int, m: GM) -> GA
+    ? "The cell i with the machine; i comes first, so that it is read before the machine is handed on whole."
+    GA(m = m, i = i)
+
+verify gaOf
+    gaOf(3, fresh()).i => 3
+
+fn forceAt(c: Int, m: GM) -> MC
+    ? "forceCell with the cell first, read before the machine is handed on whole."
+    forceCell(m, c)
+
+verify forceAt
+    forceAt(-1, fresh()).c => Ctl.Stop("loose variable")
+
+fn envFor(a: Expr, env: Int) -> Int
+    ? "No environment for a closed term, so that it holds nothing alive."
+    match Core.Exprs.isClosed(a)
+        true -> -1
+        false -> env
+
+verify envFor
+    envFor(Core.Exprs.natLit(1), 7) => -1
+    envFor(Core.Exprs.bvar(0), 7) => 7
+
+fn lookupEnv(cells: Vector<Cell>, env: Int, i: Int) -> Int
+    ? "The cell of variable i in the environment env; -1 past its end."
+    match env < 0
+        true -> -1
+        false -> match cellAt(cells, env)
+            Cell.Env(v, next) -> match i == 0
+                true -> v
+                false -> lookupEnv(cells, next, i - 1)
+            _ -> -1
+
+verify lookupEnv
+    lookupEnv(fresh().cells, -1, 0) => -1
+
+fn forceCell(m: GM, c: Int) -> MC
+    ? "A cell's value: a value is handed on, a thunk is evaluated with an update frame so that it is evaluated once; a closed one with no parameter to put in is first looked up among the whnf results the checker holds, and what it comes to is handed back to be kept there (ClosedLiteralsShared)."
+    match c < 0
+        true -> stop(m, "loose variable")
+        false -> match cellAt(m.cells, c)
+            Cell.Thunk(e, env, ls) -> match Bool.and(env < 0, List.len(ls.ps) == 0)
+                true -> MC(m = GM.update(m, cells = put(m.cells, c, Cell.Busy), stack = List.prepend(Frame.FKeep(e), List.prepend(Frame.FUpd(c), m.stack))), c = Ctl.Eval(e, -2, ls))
+                false -> MC(m = GM.update(m, cells = put(m.cells, c, Cell.Busy), stack = List.prepend(Frame.FUpd(c), m.stack)), c = Ctl.Eval(e, env, ls))
+            Cell.Busy -> stop(m, "cycle")
+            Cell.Env(_, _) -> stop(m, "environment as a value")
+            Cell.Free(_) -> stop(m, "free cell")
+            _ -> MC(m = m, c = Ctl.Ret(c))
+
+verify forceCell
+    forceCell(fresh(), -1).c => Ctl.Stop("loose variable")
+
+fn levelsOf(cls: List<Level>, ls: LSub) -> List<Level>
+    ? "A constant's levels with the universe parameters of the value it was met in put in."
+    match ls.ps
+        [] -> cls
+        _ -> match cls
+            [] -> cls
+            _ -> levelsIn(cls, ls, [])
+
+verify levelsOf
+    levelsOf([Level.Zero], noSub()) => [Level.Zero]
+    levelsOf([Level.Param(Check.Lits.name1("u"))], LSub(ps = [Check.Lits.name1("u")], us = [Level.Succ(Level.Zero)])) => [Level.Succ(Level.Zero)]
+
+fn levelsIn(cls: List<Level>, ls: LSub, acc: List<Level>) -> List<Level>
+    ? "Each level instantiated, in order."
+    match cls
+        [] -> List.reverse(acc)
+        [l, ..rest] -> levelsIn(rest, ls, List.prepend(Core.Univ.instantiate(l, ls.ps, ls.us), acc))
+
+verify levelsIn
+    levelsIn([], noSub(), []) => []
+
+fn natOpOf(n: Name) -> Option<String>
+    ? "The operation of a binary Nat function the kernel computes on literals."
+    match n
+        Name.Str(Name.Str(Name.Anon, "Nat", _), op, _) -> match Check.Lits.isNatOp(op)
+            true -> Option.Some(op)
+            false -> Option.None
+        _ -> Option.None
+
+verify natOpOf
+    natOpOf(Check.Lits.name2("Nat", "add")) => Option.Some("add")
+    natOpOf(Check.Lits.name2("Nat", "log2")) => Option.None
+
+fn constStep(st: St, m: GM, n: Name, lv: List<Level>) -> MC
+    ? "A constant at the head: Nat arithmetic with both operands waiting goes to them first, as the reference kernel does, and with fewer waits for them; otherwise what the constant is decides."
+    match natOpOf(n)
+        Option.Some(op) -> match m.stack
+            [Frame.FArg(a), Frame.FArg(b), ..rest] -> forceCell(GM.update(m, stack = List.prepend(Frame.FNat(op, b), rest)), a)
+            _ -> partial(m, Core.Exprs.cnst(n, lv))
+        Option.None -> constFound(st, m, n, lv, Check.State.lookup(st, n))
+
+verify constStep
+    constStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), fresh(), Check.Lits.name1("c"), []).c => Ctl.Stop("unknown constant")
+
+fn constFound(st: St, m: GM, n: Name, lv: List<Level>, c: Option<Const>) -> MC
+    ? "A definition unfolds at its own number of levels, a constructor or a recursor takes its arguments, a quotient stops; a theorem, an axiom, an opaque constant or an inductive type is neutral, never unfolded (GroundByNeed)."
+    match c
+        Option.Some(Const.CDefn(h, v, _, _, _)) -> match List.len(h.params) == List.len(lv)
+            true -> MC(m = m, c = Ctl.Eval(v, -1, LSub(ps = h.params, us = lv)))
+            false -> stop(m, "levels")
+        Option.Some(Const.CCtor(k)) -> ctorStep(m, n, lv, k)
+        Option.Some(Const.CRec(rv)) -> recStep(m, n, lv, rv)
+        Option.Some(Const.CQuot(_, _)) -> stop(m, "quotient")
+        Option.Some(_) -> neutral(m, Core.Exprs.cnst(n, lv))
+        Option.None -> stop(m, "unknown constant")
+
+verify constFound
+    constFound(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), fresh(), Check.Lits.name1("c"), [], Option.None).c => Ctl.Stop("unknown constant")
+
+fn partial(m: GM, h: Expr) -> MC
+    ? "A Nat operation with fewer than two operands waits for them as a partial application, so that it is computed on literals, not unfolded, once they come."
+    p = popArgs(m.stack, -1, [], 0)
+    retNew(alloc(GM.update(m, stack = p.rest), Cell.VPap(h, p.args)))
+
+verify partial
+    partial(fresh(), Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), [])).c => Ctl.Ret(0)
+
+fn neutral(m: GM, h: Expr) -> MC
+    ? "A head nothing unfolds, applied to every argument waiting."
+    p = popArgs(m.stack, -1, [], 0)
+    retNew(alloc(GM.update(m, stack = p.rest), Cell.VNeu(h, p.args)))
+
+verify neutral
+    neutral(fresh(), Core.Exprs.natLit(1)).c => Ctl.Ret(0)
+
+fn popArgs(stack: List<Frame>, k: Int, acc: List<Int>, got: Int) -> PA
+    ? "Up to k argument frames off the top (all of them for k < 0), first argument first."
+    match got == k
+        true -> PA(args = List.reverse(acc), rest = stack, got = got)
+        false -> match stack
+            [Frame.FArg(a), ..rest] -> popArgs(rest, k, List.prepend(a, acc), got + 1)
+            _ -> PA(args = List.reverse(acc), rest = stack, got = got)
+
+verify popArgs
+    popArgs([Frame.FArg(1), Frame.FArg(2), Frame.FSucc], -1, [], 0).args => [1, 2]
+    popArgs([Frame.FArg(1), Frame.FArg(2), Frame.FSucc], 1, [], 0).rest => [Frame.FArg(2), Frame.FSucc]
+
+fn pushArgs(args: List<Int>, stack: List<Frame>) -> List<Frame>
+    ? "The arguments pushed back, the first on top."
+    pushRev(List.reverse(args), stack)
+
+verify pushArgs
+    pushArgs([1, 2], []) => [Frame.FArg(1), Frame.FArg(2)]
+
+fn pushRev(rev: List<Int>, stack: List<Frame>) -> List<Frame>
+    ? "Pushes the last argument first."
+    match rev
+        [] -> stack
+        [a, ..rest] -> pushRev(rest, List.prepend(Frame.FArg(a), stack))
+
+verify pushRev
+    pushRev([], []) => []
+
+fn ctorStep(m: GM, n: Name, lv: List<Level>, k: Ctor) -> MC
+    ? "Nat.zero is the literal 0 and Nat.succ of a literal the next one; another constructor with all its arguments is a value of them, with fewer a partial application."
+    match n == Check.Lits.natZero
+        true -> retNew(alloc(m, Cell.VLit(0)))
+        false -> match n == Check.Lits.natSucc
+            true -> succStep(m, n, lv)
+            false -> ctorArgs(m, n, lv, k, popArgs(m.stack, k.numParams + k.numFields, [], 0))
+
+verify ctorStep
+    ctorStep(fresh(), Check.Lits.natZero, [], Ctor(head = Head(name = Check.Lits.natZero, params = [], ty = Core.Exprs.bvar(0)), induct = Check.Lits.nat, cidx = 0, numParams = 0, numFields = 0, isUnsafe = false)).c => Ctl.Ret(0)
+
+fn succStep(m: GM, n: Name, lv: List<Level>) -> MC
+    ? "Nat.succ forces its argument, which must come to a literal."
+    match m.stack
+        [Frame.FArg(a), ..rest] -> forceCell(GM.update(m, stack = List.prepend(Frame.FSucc, rest)), a)
+        _ -> retNew(alloc(m, Cell.VPap(Core.Exprs.cnst(n, lv), [])))
+
+verify succStep
+    succStep(fresh(), Check.Lits.natSucc, []).c => Ctl.Ret(0)
+
+fn ctorArgs(m: GM, n: Name, lv: List<Level>, k: Ctor, p: PA) -> MC
+    ? "The constructor's value, or a partial application."
+    match p.got == k.numParams + k.numFields
+        true -> retNew(alloc(GM.update(m, stack = p.rest), Cell.VCtor(n, lv, k.numParams, p.args)))
+        false -> retNew(alloc(GM.update(m, stack = p.rest), Cell.VPap(Core.Exprs.cnst(n, lv), p.args)))
+
+verify ctorArgs
+    ctorArgs(fresh(), Check.Lits.boolTrue, [], Ctor(head = Head(name = Check.Lits.boolTrue, params = [], ty = Core.Exprs.bvar(0)), induct = Check.Lits.name1("Bool"), cidx = 1, numParams = 0, numFields = 0, isUnsafe = false), PA(args = [], rest = [], got = 0)).c => Ctl.Ret(0)
+
+fn recStep(m: GM, n: Name, lv: List<Level>, rv: Rec) -> MC
+    ? "A recursor with its major premise waiting forces it, the arguments before it kept in the frame and those after left on the stack; with fewer arguments it is a partial application."
+    majorIdx = rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices
+    p = popArgs(m.stack, majorIdx + 1, [], 0)
+    match p.got == majorIdx + 1
+        false -> retNew(alloc(GM.update(m, stack = p.rest), Cell.VPap(Core.Exprs.cnst(n, lv), p.args)))
+        true -> match List.len(lv) == List.len(rv.head.params)
+            true -> forceCell(GM.update(m, stack = List.prepend(Frame.FRec(rv, lv, List.take(p.args, majorIdx)), p.rest)), nthCell(p.args, majorIdx))
+            false -> stop(m, "levels")
+
+verify recStep
+    recStep(fresh(), Check.Lits.name2("Nat", "rec"), [Level.Zero], sampleRec()).c => Ctl.Ret(0)
+    recStep(pushFrame(pushFrame(pushFrame(pushFrame(fresh(), Frame.FArg(-1)), Frame.FArg(3)), Frame.FArg(2)), Frame.FArg(1)), Check.Lits.name2("Nat", "rec"), [Level.Zero], sampleRec()).c => Ctl.Stop("loose variable")
+
+fn nthCell(xs: List<Int>, k: Int) -> Int
+    ? "The k-th cell of a list, -1 past its end."
+    match List.drop(xs, k)
+        [x, .._] -> x
+        [] -> -1
+
+verify nthCell
+    nthCell([4, 5], 1) => 5
+    nthCell([4, 5], 2) => -1
+
+fn retStep(st: St, m: GM, x: Int, v: Cell, f: Frame) -> MC
+    ? "The value v of cell x to the frame f, already popped."
+    match f
+        Frame.FUpd(u) -> MC(m = GM.update(m, cells = put(m.cells, u, v)), c = Ctl.Ret(x))
+        Frame.FArg(a) -> applyVal(m, v, a)
+        Frame.FRec(rv, lv, pre) -> iota(m, v, rv, lv, pre)
+        Frame.FProj(i) -> projVal(m, v, i)
+        Frame.FNat(op, b) -> match v
+            Cell.VLit(n) -> forceCell(pushFrame(m, Frame.FNat2(op, n)), b)
+            _ -> stop(m, "Nat operand not a literal")
+        Frame.FNat2(op, a) -> match v
+            Cell.VLit(b) -> natDone(m, Check.Lits.natOp(op, a, b))
+            _ -> stop(m, "Nat operand not a literal")
+        Frame.FSucc -> match v
+            Cell.VLit(n) -> retNew(alloc(m, Cell.VLit(n + 1)))
+            _ -> stop(m, "succ of a non-literal")
+        Frame.FKeep(e) -> MC(m = kept(m, e, litOf(Option.Some(v))), c = Ctl.Ret(x))
+
+verify retStep
+    retStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), fresh(), 0, Cell.VLit(1), Frame.FSucc).c => Ctl.Ret(0)
+
+fn kept(m: GM, e: Expr, v: Option<Expr>) -> GM
+    ? "A closed term that came to a literal or a Bool, handed back to be kept (ClosedLiteralsShared)."
+    match v
+        Option.Some(l) -> GM.update(m, kept = List.prepend((e, l), m.kept))
+        Option.None -> m
+
+verify kept
+    List.len(kept(fresh(), Core.Exprs.natLit(1), Option.None).kept) => 0
+
+fn natDone(m: GM, r: Result<Expr, Fail>) -> MC
+    ? "The result of a Nat operation: a literal, or a Bool for beq and ble; an operation the kernel refuses stops."
+    match r
+        Result.Ok(Expr.NatLit(_, n)) -> retNew(alloc(m, Cell.VLit(n)))
+        Result.Ok(Expr.Const(_, n, _)) -> retNew(alloc(m, Cell.VCtor(n, [], 0, [])))
+        _ -> stop(m, "Nat operation refused")
+
+verify natDone
+    natDone(fresh(), Result.Ok(Core.Exprs.natLit(3))).c => Ctl.Ret(0)
+
+fn applyVal(m: GM, v: Cell, a: Int) -> MC
+    ? "A value applied to the argument cell a: a closure binds it, a partial application takes it and is looked at again, a neutral keeps it."
+    match v
+        Cell.VClo(lam, env, ls) -> match lam
+            Expr.Lam(_, _, body) -> bindIn(alloc(m, Cell.Env(a, env)), body, ls)
+            _ -> stop(m, "closure without a lambda")
+        Cell.VPap(h, args) -> MC(m = GM.update(m, stack = pushArgs(args, List.prepend(Frame.FArg(a), m.stack))), c = Ctl.Eval(h, -1, noSub()))
+        Cell.VNeu(h, args) -> retNew(alloc(m, Cell.VNeu(h, List.concat(args, [a]))))
+        _ -> stop(m, "applied a non-function")
+
+verify applyVal
+    applyVal(fresh(), Cell.VLit(1), 0).c => Ctl.Stop("applied a non-function")
+
+fn projVal(m: GM, v: Cell, i: Int) -> MC
+    ? "A projection takes field i of a constructor; a string literal is turned into its constructor first."
+    match v
+        Cell.VCtor(_, _, np, args) -> forceCell(m, nthCell(args, np + i))
+        Cell.VStr(s) -> strThen(alloc(m, Cell.Thunk(Check.Lits.strToCtor(s), -1, noSub())), Frame.FProj(i))
+        _ -> stop(m, "projection of a non-constructor")
+
+verify projVal
+    projVal(fresh(), Cell.VLit(1), 0).c => Ctl.Stop("projection of a non-constructor")
+
+fn strThen(g: GA, f: Frame) -> MC
+    ? "The frame back on the stack, then the string literal's constructor form forced."
+    forceCell(pushFrame(g.m, f), g.i)
+
+verify strThen
+    strThen(GA(m = fresh(), i = -1), Frame.FSucc).c => Ctl.Stop("loose variable")
+
+fn iota(m: GM, v: Cell, rv: Rec, lv: List<Level>, pre: List<Int>) -> MC
+    ? "The major premise's value picks the rule: a constructor by name, a Nat literal as Nat.zero or Nat.succ of the literal below, a string literal as its constructor form. Anything else (a neutral, as a proof under K or a structure to expand by eta would be) stops: those need types."
+    match v
+        Cell.VCtor(cn, _, _, args) -> fire(m, rv, lv, pre, ruleOf(rv.rules, cn), args)
+        Cell.VLit(k) -> match Bool.and(rv.major == Check.Lits.nat, List.len(rv.rules) == 2)
+            true -> litIota(m, rv, lv, pre, k)
+            false -> stop(m, "literal major of another type")
+        Cell.VStr(s) -> strThen(alloc(m, Cell.Thunk(Check.Lits.strToCtor(s), -1, noSub())), Frame.FRec(rv, lv, pre))
+        _ -> stop(m, "major premise not a constructor")
+
+verify iota
+    iota(fresh(), Cell.VLit(0), sampleRec(), [Level.Zero], [1, 2, 3]).c => Ctl.Eval(Core.Exprs.bvar(1), -1, LSub(ps = [Check.Lits.name1("u")], us = [Level.Zero]))
+    iota(fresh(), Cell.VClo(Core.Exprs.bvar(0), -1, noSub()), sampleRec(), [Level.Zero], [1, 2, 3]).c => Ctl.Stop("major premise not a constructor")
+
+fn litIota(m: GM, rv: Rec, lv: List<Level>, pre: List<Int>, k: Int) -> MC
+    ? "0 fires Nat.zero's rule; n+1 fires Nat.succ's with the literal n as its field."
+    match k == 0
+        true -> fire(m, rv, lv, pre, ruleOf(rv.rules, Check.Lits.natZero), [])
+        false -> litSucc(alloc(m, Cell.VLit(k - 1)), rv, lv, pre)
+
+verify litIota
+    litIota(fresh(), sampleRec(), [Level.Zero], [1, 2, 3], 5).m.stack => [Frame.FArg(1), Frame.FArg(2), Frame.FArg(3), Frame.FArg(0)]
+
+fn litSucc(g: GA, rv: Rec, lv: List<Level>, pre: List<Int>) -> MC
+    ? "Nat.succ's rule with the cell of the literal below."
+    fire(g.m, rv, lv, pre, ruleOf(rv.rules, Check.Lits.natSucc), [g.i])
+
+verify litSucc
+    litSucc(GA(m = fresh(), i = 4), sampleRec(), [Level.Zero], [1, 2, 3]).m.stack => [Frame.FArg(1), Frame.FArg(2), Frame.FArg(3), Frame.FArg(4)]
+
+fn ruleOf(rules: List<RecRule>, ctor: Name) -> Option<RecRule>
+    ? "The rule of the constructor named ctor."
+    match rules
+        [] -> Option.None
+        [r, ..rest] -> match r.ctor == ctor
+            true -> Option.Some(r)
+            false -> ruleOf(rest, ctor)
+
+verify ruleOf
+    ruleOf([], Check.Lits.natZero) => Option.None
+
+fn fire(m: GM, rv: Rec, lv: List<Level>, pre: List<Int>, r: Option<RecRule>, cargs: List<Int>) -> MC
+    ? "The rule's right-hand side at the recursor's levels, applied to the parameters, motives and minor premises, then the constructor's fields (its last nfields arguments); the arguments after the major premise are still on the stack."
+    match r
+        Option.None -> stop(m, "no rule")
+        Option.Some(rule) -> match rule.nfields > List.len(cargs)
+            true -> stop(m, "fields")
+            false -> MC(m = GM.update(m, stack = pushArgs(List.concat(List.take(pre, rv.numParams + rv.numMotives + rv.numMinors), List.drop(cargs, List.len(cargs) - rule.nfields)), m.stack)), c = Ctl.Eval(rule.rhs, -1, LSub(ps = rv.head.params, us = lv)))
+
+verify fire
+    fire(fresh(), sampleRec(), [], [], Option.None, []).c => Ctl.Stop("no rule")
+    fire(fresh(), sampleRec(), [], [7, 8, 9], ruleOf(sampleRec().rules, Check.Lits.natSucc), [4]).m.stack => [Frame.FArg(7), Frame.FArg(8), Frame.FArg(9), Frame.FArg(4)]
+
+fn sampleRec() -> Rec
+    ? "Test fixture: Nat.rec with one motive, rules for zero (the minor premise z) and succ (s n (rec n))."
+    Rec(head = Head(name = Check.Lits.name2("Nat", "rec"), params = [Check.Lits.name1("u")], ty = Core.Exprs.sort(Level.Zero)), all = [Check.Lits.nat], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 2, rules = [RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(1)), RecRule(ctor = Check.Lits.natSucc, nfields = 1, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Check.Lits.nat, majorIsStruct = false, elimAnySort = true)
+
+verify sampleRec
+    sampleRec().numMinors => 2
+
+decision GroundHeap
+    date = "2026-11-18"
+    reason =
+        "Aver has no mutable cell, so the machine's cells live in one"
+        "vector threaded through it, written in place while it alone holds"
+        "it. A computation by need makes cells as fast as it steps, and"
+        "invol makes billions of them, so cells nothing reaches are"
+        "collected: when fewer cells are free than one step may take (at"
+        "most three; the reserve is 16), the cells reachable from the term"
+        "or value under evaluation and from the stack are marked and every"
+        "other one goes on the free list. When that leaves less than three"
+        "quarters of the heap free, the heap doubles, so that collecting"
+        "costs at most a constant per cell made, as for any marking"
+        "collector; with half instead of three quarters, collecting took"
+        "half of lev_size's time (p6 192 G to 183 G, rowOK17 103 G to"
+        "100 G with three quarters). It starts at 256 cells, as large as a"
+        "small computation needs, and grows to Aver's largest vector, 2^24"
+        "cells. A computation that holds more cells alive at once stops,"
+        "and the caller goes the lazy way."
+    chosen = "MarkAndSweepInOneVector"
+    rejected = ["NoCollection", "CopyingCollector", "AverLazyCells"]
+    impacts = [roomFor, collect, alloc]
+
+fn roomFor(mc: MC) -> MC
+    ? "Makes room for one step: collects when fewer than 16 cells are free (GroundHeap)."
+    match mc.m.nfree + (Vector.len(mc.m.cells) - mc.m.top) >= 16
+        true -> mc
+        false -> collect(mc)
+
+verify roomFor
+    roomFor(MC(m = fresh(), c = Ctl.Ret(0))).m.top => 0
+
+fn collect(mc: MC) -> MC
+    ? "Marks what the control and the stack reach, frees the rest, and doubles the heap when less than three quarters of it are free; stops when the heap is at its largest and still full (GroundHeap)."
+    match Vector.new(Vector.len(mc.m.cells), false)
+        Result.Err(_) -> stop(mc.m, "heap")
+        Result.Ok(none) -> match Vector.new(Vector.len(mc.m.cells), 0)
+            Result.Err(_) -> stop(mc.m, "heap")
+            Result.Ok(work) -> sweptIn(drain(mc.m.cells, rootsIn(mc.c, mc.m.stack, pushAll(MK(marks = none, work = work, sp = 0), mc.m.pinned))).marks, mc.c, mc.m)
+
+verify collect
+    collect(MC(m = fresh(), c = Ctl.Ret(-1))).m.nfree => 0
+
+fn sweptIn(marks: Vector<Bool>, c: Ctl, m: GM) -> MC
+    ? "The heap swept by the marks, doubled when less than three quarters of it are free."
+    swept(c, sweep(GM.update(m, free = -1, nfree = 0), marks, 0))
+
+verify sweptIn
+    sweptIn(Vector.new(256, false), Ctl.Ret(0), fresh()).m.nfree => 0
+
+fn swept(c: Ctl, m: GM) -> MC
+    ? "Doubles the heap when less than three quarters of it are free (GroundHeap)."
+    n = Vector.len(m.cells)
+    match (m.nfree + (n - m.top)) * 4 >= n * 3
+        true -> MC(m = m, c = c)
+        false -> grown(c, m, n)
+
+verify swept
+    swept(Ctl.Ret(0), fresh()).m.nfree => 0
+
+fn grown(c: Ctl, m: GM, n: Int) -> MC
+    ? "The heap at twice its size, up to 2^24 cells; at that size, a heap with no room left stops the machine."
+    k = Int.min(n * 2, 16777216)
+    match k > n
+        false -> match m.nfree + (n - m.top) >= 16
+            true -> MC(m = m, c = c)
+            false -> stop(m, "heap")
+        true -> match Vector.new(k - n, Cell.Free(-1))
+            Result.Ok(more) -> MC(m = GM.update(m, cells = Vector.fromList(List.concat(List.fromVector(m.cells), List.fromVector(more)))), c = c)
+            Result.Err(_) -> stop(m, "heap")
+
+verify grown
+    Vector.len(grown(Ctl.Ret(0), fresh(), 256).m.cells) => 512
+
+record MK
+    marks: Vector<Bool>
+    work: Vector<Int>
+    sp: Int
+
+fn rootsIn(c: Ctl, stack: List<Frame>, k: MK) -> MK
+    ? "The cells the frames and the control hold, marked and pushed."
+    match stack
+        [] -> ctlRoots(c, k)
+        [f, ..rest] -> rootsIn(c, rest, frameRoots(f, k))
+
+verify rootsIn
+    rootsIn(Ctl.Ret(3), [Frame.FArg(1), Frame.FSucc], MK(marks = Vector.new(4, false), work = Vector.new(4, 0), sp = 0)).sp => 2
+
+fn ctlRoots(c: Ctl, k: MK) -> MK
+    ? "The environment of a term under evaluation, or the value handed on."
+    match c
+        Ctl.Eval(_, env, _) -> push(k, env)
+        Ctl.Ret(x) -> push(k, x)
+        Ctl.Stop(_) -> k
+
+verify ctlRoots
+    ctlRoots(Ctl.Stop("x"), MK(marks = Vector.new(1, false), work = Vector.new(1, 0), sp = 0)).sp => 0
+
+fn frameRoots(f: Frame, k: MK) -> MK
+    ? "The cells a frame holds."
+    match f
+        Frame.FArg(a) -> push(k, a)
+        Frame.FUpd(u) -> push(k, u)
+        Frame.FRec(_, _, pre) -> pushAll(k, pre)
+        Frame.FNat(_, b) -> push(k, b)
+        _ -> k
+
+verify frameRoots
+    frameRoots(Frame.FSucc, MK(marks = Vector.new(1, false), work = Vector.new(1, 0), sp = 0)).sp => 0
+
+decision MarkStackInAVector
+    date = "2026-11-18"
+    reason =
+        "Marking kept its work in a list and added a cell's children with"
+        "List.concat, which copies the list it adds to: with many cells"
+        "waiting, and with the cells of closed terms all roots, marking"
+        "grew with the square of the heap (lev_size spent most of its time"
+        "copying integer lists). A cell is now marked when it is pushed,"
+        "so each is pushed at most once, and the pushed cells wait in a"
+        "vector as large as the heap, written in place."
+    chosen = "MarkStackInAVector"
+    rejected = ["MarkWorkList"]
+    impacts = [collect, push, drain]
+
+fn push(k: MK, i: Int) -> MK
+    ? "Marks cell i and pushes it, unless it is marked already or no cell."
+    match i < 0
+        true -> k
+        false -> match Option.withDefault(Vector.get(k.marks, i), true)
+            true -> k
+            false -> pushed(i, k.sp, k)
+
+verify push
+    push(MK(marks = Vector.new(2, false), work = Vector.new(2, 0), sp = 0), 1).sp => 1
+    push(MK(marks = Vector.new(2, false), work = Vector.new(2, 0), sp = 0), -1).sp => 0
+
+fn pushed(i: Int, sp: Int, k: MK) -> MK
+    ? "Cell i marked and put at sp."
+    MK(marks = putMark(k.marks, i), work = putInt(k.work, sp, i), sp = sp + 1)
+
+verify pushed
+    pushed(0, 0, MK(marks = Vector.new(1, false), work = Vector.new(1, 0), sp = 0)).sp => 1
+
+fn pushAll(k: MK, xs: List<Int>) -> MK
+    ? "Each cell of xs pushed."
+    match xs
+        [] -> k
+        [i, ..rest] -> pushAll(push(k, i), rest)
+
+verify pushAll
+    pushAll(MK(marks = Vector.new(3, false), work = Vector.new(3, 0), sp = 0), [0, 2, 0]).sp => 2
+
+fn drain(cells: Vector<Cell>, k: MK) -> MK
+    ? "Pops cells until none waits, pushing the children of each."
+    match k.sp <= 0
+        true -> k
+        false -> drain(cells, kidsOf(cellAt(cells, Option.withDefault(Vector.get(k.work, k.sp - 1), -1)), MK.update(k, sp = k.sp - 1)))
+
+verify drain
+    drain(fresh().cells, MK(marks = Vector.new(256, false), work = Vector.new(256, 0), sp = 0)).sp => 0
+
+fn kidsOf(c: Cell, k: MK) -> MK
+    ? "The cells a cell holds, pushed."
+    match c
+        Cell.Thunk(_, env, _) -> push(k, env)
+        Cell.Env(v, next) -> push(push(k, v), next)
+        Cell.VCtor(_, _, _, args) -> pushAll(k, args)
+        Cell.VClo(_, env, _) -> push(k, env)
+        Cell.VPap(_, args) -> pushAll(k, args)
+        Cell.VNeu(_, args) -> pushAll(k, args)
+        Cell.VType(_, env, _) -> push(k, env)
+        _ -> k
+
+verify kidsOf
+    kidsOf(Cell.Env(0, 1), MK(marks = Vector.new(2, false), work = Vector.new(2, 0), sp = 0)).sp => 2
+
+fn putInt(v: Vector<Int>, i: Int, x: Int) -> Vector<Int>
+    ? "v with x at i; callers keep i in range."
+    Option.withDefault(Vector.set(v, i, x), v)
+
+verify putInt
+    Vector.get(putInt(Vector.new(2, 0), 1, 7), 1) => Option.Some(7)
+
+fn sweep(m: GM, marks: Vector<Bool>, i: Int) -> GM
+    ? "Every cell below top not marked goes on the free list."
+    match i >= m.top
+        true -> m
+        false -> match Option.withDefault(Vector.get(marks, i), true)
+            true -> sweep(m, marks, i + 1)
+            false -> sweep(freed(i, m.free, m), marks, i + 1)
+
+verify sweep
+    sweep(GM.update(fresh(), top = 2), Vector.new(256, false), 0).nfree => 2
+
+fn freed(i: Int, next: Int, m: GM) -> GM
+    ? "Cell i put on the free list."
+    GM.update(m, cells = put(m.cells, i, Cell.Free(next)), free = i, nfree = m.nfree + 1)
+
+verify freed
+    freed(0, -1, fresh()).free => 0
+
+fn alloc(m: GM, x: Cell) -> GA
+    ? "A new cell holding x: the first free one, or the next never used (roomFor made sure there is one). What is read of the machine is read before it is handed on whole, so that its cells keep one owner and are written in place."
+    match m.free >= 0
+        true -> allocFree(m.free, nextFree(m.cells, m.free), m, x)
+        false -> allocTop(m.top, m, x)
+
+fn allocTop(i: Int, m: GM, x: Cell) -> GA
+    ? "The never used cell i taken."
+    GA(m = GM.update(m, cells = put(m.cells, i, x), top = i + 1), i = i)
+
+verify allocTop
+    allocTop(0, fresh(), Cell.VLit(1)).m.top => 1
+
+verify alloc
+    alloc(fresh(), Cell.VLit(1)).i => 0
+
+fn allocFree(i: Int, next: Int, m: GM, x: Cell) -> GA
+    ? "The free cell i taken, next the new head of the free list."
+    GA(m = GM.update(m, cells = put(m.cells, i, x), free = next, nfree = m.nfree - 1), i = i)
+
+verify allocFree
+    allocFree(0, -1, fresh(), Cell.VLit(1)).i => 0
+
+fn nextFree(cells: Vector<Cell>, i: Int) -> Int
+    ? "The free cell after i on the free list."
+    match cellAt(cells, i)
+        Cell.Free(n) -> n
+        _ -> -1
+
+verify nextFree
+    nextFree(fresh().cells, 0) => -1
+
+fn cellAt(cells: Vector<Cell>, i: Int) -> Cell
+    ? "Cell i; callers keep i in range."
+    Option.withDefault(Vector.get(cells, i), Cell.Free(-1))
+
+verify cellAt
+    cellAt(fresh().cells, 0) => Cell.Free(-1)
+
+fn put(v: Vector<Cell>, i: Int, x: Cell) -> Vector<Cell>
+    ? "v with x at i; callers keep i in range."
+    Option.withDefault(Vector.set(v, i, x), v)
+
+verify put
+    Vector.get(put(fresh().cells, 1, Cell.VLit(5)), 1) => Option.Some(Cell.VLit(5))
+
+fn putMark(v: Vector<Bool>, i: Int) -> Vector<Bool>
+    ? "v with cell i marked; callers keep i in range."
+    Option.withDefault(Vector.set(v, i, true), v)
+
+verify putMark
+    Vector.get(putMark(Vector.new(2, false), 1), 1) => Option.Some(true)
+
+fn pushFrame(m: GM, f: Frame) -> GM
+    ? "A frame on top of the stack."
+    GM.update(m, stack = List.prepend(f, m.stack))
+
+verify pushFrame
+    pushFrame(fresh(), Frame.FSucc).stack => [Frame.FSucc]
