@@ -3,7 +3,7 @@ module Lits
         "Names the kernel knows by heart, the expansion of Nat and String"
         "literals into constructor applications, and the Nat operations the"
         "reference kernel computes on literals instead of unfolding."
-    exposes [nat, string, natZero, natSucc, boolTrue, boolFalse, stringOfList, quot, quotMk, eagerReduce, dontcare, name1, name2, natLitToCtor, strToCtor, natValue, natOp, isNatOp, boolExpr]
+    exposes [nat, string, natZero, natSucc, boolTrue, boolFalse, stringOfList, quot, quotMk, eagerReduce, dontcare, name1, name2, natLitToCtor, strToCtor, natValue, natOp, isNatOp, boolExpr, natTooBig]
     depends [Core.Names, Core.Levels, Core.Exprs, Check.State]
     effects []
 
@@ -138,11 +138,11 @@ verify boolExpr
     boolExpr(true) => Core.Exprs.cnst(name2("Bool", "true"), [])
 
 fn natOp(op: String, a: Int, b: Int) -> Result<Expr, Fail>
-    ? "One operation on two literals, with Lean's conventions: truncated subtraction, x / 0 = 0, x % 0 = x."
+    ? "One operation on two literals, with Lean's conventions: truncated subtraction, x / 0 = 0, x % 0 = x. As the reference, a result past natMaxBits is refused: add, sub and mul compute and then look, shiftLeft and pow look first."
     match op
-        "add" -> Result.Ok(Core.Exprs.natLit(a + b))
-        "sub" -> Result.Ok(Core.Exprs.natLit(Int.max(a - b, 0)))
-        "mul" -> Result.Ok(Core.Exprs.natLit(a * b))
+        "add" -> sized(a + b)
+        "sub" -> sized(Int.max(a - b, 0))
+        "mul" -> sized(a * b)
         "div" -> Result.Ok(Core.Exprs.natLit(divNat(a, b)))
         "mod" -> Result.Ok(Core.Exprs.natLit(modNat(a, b)))
         "gcd" -> Result.Ok(Core.Exprs.natLit(gcd(a, b)))
@@ -201,32 +201,107 @@ fn shifted(r: Result<Int, String>) -> Result<Expr, Fail>
 verify shifted
     shifted(Result.Ok(4)) => Result.Ok(Core.Exprs.natLit(4))
 
+decision NatSizeAsReference
+    date = "2026-11-19"
+    reason =
+        "A CFSG proof shifts literals by up to 36.5 million bits, past the"
+        "count one Bits.shiftLeft took (2^24 bits; 2^29 from Aver 0.36.1);"
+        "Pestka declined it. The reference computes a count up to 32 bits"
+        "and bounds the result"
+        "instead: 128 MiB (LEAN_NAT_MAX_SIZE), checked before shiftLeft"
+        "and pow compute, after add, sub and mul, and on the literals it"
+        "infers. Past it the reference throws, so the declaration is"
+        "rejected; it never unfolds the definition instead. natMaxBits is"
+        "that bound in bits; the reference counts whole words, so the two"
+        "may part within a word of it. A count Bits.shiftLeft refuses"
+        "still declines. A result of 256 MiB (1 <<< 2^31) is refused at"
+        "once; before, 2 ^ 2^31 was computed (1.5 GB) and accepted."
+    chosen = "NatSizeAsReference"
+    rejected = ["ShiftCountBound"]
+    impacts = ["natOp", "shiftLeft", "pow", "sized"]
+
+natMaxBits: Int = 1073741824
+
+fn natTooBig(n: Int) -> Bool
+    ? "Whether n has more than natMaxBits bits. A literal count: on an inline n one machine shift, and a long n below the bound is answered from its length without a copy."
+    Bits.shiftRight(n, 1073741824) != 0
+
+verify natTooBig
+    natTooBig(5) => false
+    natTooBig(Bits.shiftLeft(1, 16777216)) => false
+
+fn sized(n: Int) -> Result<Expr, Fail>
+    ? "A computed literal, or the refusal of one past natMaxBits."
+    match natTooBig(n)
+        true -> Result.Err(Fail.Reject("Nat literal exceeds the 128 MiB size limit"))
+        false -> Result.Ok(Core.Exprs.natLit(n))
+
+verify sized
+    sized(7) => Result.Ok(Core.Exprs.natLit(7))
+
+fn fitsBits(n: Int, k: Int) -> Bool
+    ? "Whether 0 <= n < 2^k, for k >= 0."
+    match Bits.shiftRight(n, k)
+        Result.Ok(r) -> r == 0
+        Result.Err(_) -> false
+
+verify fitsBits
+    fitsBits(7, 3) => true
+    fitsBits(8, 3) => false
+    fitsBits(1, 0) => false
+
 fn shiftLeft(a: Int, b: Int) -> Result<Expr, Fail>
-    ? "The reference refuses a shift count beyond 32 bits."
+    ? "The reference refuses a shift count beyond 32 bits, and a result past natMaxBits before computing it: a <<< b has bits(a) + b bits. A count Bits.shiftLeft refuses is a decline, as before."
     match b > 4294967295
         true -> Result.Err(Fail.Reject("Nat.shiftLeft count does not fit in 32 bits"))
-        false -> shifted(Bits.shiftLeft(a, b))
+        false -> match a == 0
+            true -> Result.Ok(Core.Exprs.natLit(0))
+            false -> match Bool.and(b < natMaxBits, fitsBits(a, natMaxBits - b))
+                true -> shifted(Bits.shiftLeft(a, b))
+                false -> Result.Err(Fail.Reject("Nat.shiftLeft result exceeds the 128 MiB size limit"))
 
 verify shiftLeft
     shiftLeft(1, 4) => Result.Ok(Core.Exprs.natLit(16))
+    shiftLeft(0, 4294967295) => Result.Ok(Core.Exprs.natLit(0))
+    shiftLeft(1, 2147483648) => Result.Err(Fail.Reject("Nat.shiftLeft result exceeds the 128 MiB size limit"))
+    shiftLeft(1, 1073741824) => Result.Err(Fail.Reject("Nat.shiftLeft result exceeds the 128 MiB size limit"))
+    shiftLeft(3, 4294967296) => Result.Err(Fail.Reject("Nat.shiftLeft count does not fit in 32 bits"))
 
 fn pow(a: Int, b: Int) -> Result<Expr, Fail>
-    ? "The reference refuses an exponent beyond 32 bits."
+    ? "The reference refuses an exponent beyond 32 bits, and, for a base above 1, a result past natMaxBits before computing it: a ^ b has at most bits(a) * b bits."
     match b > 4294967295
         true -> Result.Err(Fail.Reject("Nat.pow exponent does not fit in 32 bits"))
-        false -> Result.Ok(Core.Exprs.natLit(powLoop(a, b, 1)))
+        false -> match Bool.or(a <= 1, b == 0)
+            true -> Result.Ok(Core.Exprs.natLit(powLoop(a, b, 1)))
+            false -> match fitsBits(a, Result.withDefault(Int.div(natMaxBits, b), 0))
+                true -> Result.Ok(Core.Exprs.natLit(powLoop(a, b, 1)))
+                false -> Result.Err(Fail.Reject("Nat.pow result exceeds the 128 MiB size limit"))
 
 verify pow
     pow(3, 0) => Result.Ok(Core.Exprs.natLit(1))
+    pow(1, 4294967295) => Result.Ok(Core.Exprs.natLit(1))
+    pow(0, 4294967295) => Result.Ok(Core.Exprs.natLit(0))
+    pow(2, 4294967295) => Result.Err(Fail.Reject("Nat.pow result exceeds the 128 MiB size limit"))
+    pow(2, 4294967296) => Result.Err(Fail.Reject("Nat.pow exponent does not fit in 32 bits"))
 
 fn powLoop(base: Int, e: Int, acc: Int) -> Int
-    ? "Square and multiply."
+    ? "Square and multiply. The base is not squared past the last bit, where the square would be the largest number of the loop and unused."
     match e == 0
         true -> acc
-        false -> powLoop(base * base, Int.div(e, 2), powAcc(acc, base, Int.mod(e, 2)))
+        false -> powNext(base, Int.div(e, 2), powAcc(acc, base, Int.mod(e, 2)))
 
 verify powLoop
     powLoop(2, 5, 1) => 32
+    powLoop(0, 0, 1) => 1
+
+fn powNext(base: Int, e: Int, acc: Int) -> Int
+    ? "The next round, if any bit is left."
+    match e == 0
+        true -> acc
+        false -> powLoop(base * base, e, acc)
+
+verify powNext
+    powNext(3, 0, 5) => 5
 
 fn powAcc(acc: Int, base: Int, bit: Int) -> Int
     ? "Multiplies in the base when the exponent bit is set."

@@ -177,6 +177,15 @@ decision VariablesReadInPlace
     rejected = ["DropThenHelper"]
     impacts = [inferCore, varClosure, lvisit]
 
+fn inferNatLit(st: St, n: Int) -> Result<RE, Fail>
+    ? "Nat, for a literal within the size the kernel computes to; the reference bounds the literals it is given as those it computes."
+    match Check.Lits.natTooBig(n)
+        true -> Result.Err(Fail.Reject("Nat literal exceeds the 128 MiB size limit"))
+        false -> Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.nat, []), st = st))
+
+verify inferNatLit
+    inferNatLit(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 3) => Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.nat, []), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
 fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
     ? "One inference step by the shape of e, whose loose bound variables stand for the free variables in env, the innermost first."
     match e
@@ -190,7 +199,7 @@ fn inferCore(st: St, e: Expr, env: List<Expr>, only: Bool) -> Result<RE, Fail>
         Expr.Lam -> lamLoop(st, e, env, [], only)
         Expr.Pi -> piLoop(st, e, env, [], [], only)
         Expr.Let -> letLoop(st, e, env, [], only)
-        Expr.NatLit -> Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.nat, []), st = st))
+        Expr.NatLit(_, n) -> inferNatLit(st, n)
         Expr.StrLit -> Result.Ok(RE(e = Core.Exprs.cnst(Check.Lits.string, []), st = st))
         Expr.Proj(_, s, i, x) -> inferProj(st, s, i, x, env, only)
 
