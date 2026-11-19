@@ -869,6 +869,7 @@ fn spineRetry(r: Result<RE, Fail>, c: NatCtx, e: Expr, nd: Int) -> Result<RE, Fa
         Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline(m))
         Result.Err(Fail.Wants(w, st)) -> Result.Err(Fail.Wants(w, st))
         Result.Err(Fail.Deep(x, st)) -> Result.Err(Fail.Deep(x, st))
+        Result.Err(Fail.Stopped(n, st)) -> Result.Err(Fail.Stopped(n, st))
 
 verify spineRetry
     resultExpr(spineRetry(Result.Err(Fail.DeepType(Core.Exprs.natLit(1), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.natLit(2), 0)) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
@@ -1823,6 +1824,7 @@ fn majorOuter(r: Result<RE, Fail>, c: NatCtx, e: Expr) -> Result<RE, Fail>
         Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline(m))
         Result.Err(Fail.Wants(w, st)) -> Result.Err(Fail.Wants(w, st))
         Result.Err(Fail.DeepType(x, st)) -> Result.Err(Fail.DeepType(x, st))
+        Result.Err(Fail.Stopped(n, st)) -> Result.Err(Fail.Stopped(n, st))
 
 verify majorOuter
     resultExpr(majorOuter(Result.Err(Fail.Deep(Core.Exprs.natLit(1), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
@@ -2540,11 +2542,63 @@ fn whnfLoop(st: St, orig: Expr, t: Expr) -> Result<RE, Fail>
         _ -> whnfRun(st, orig, t)
 
 fn whnfRun(st: St, orig: Expr, t: Expr) -> Result<RE, Fail>
-    ? "Runs the machine with unfolding and stores its result."
+    ? "Runs the machine with unfolding and stores its result; past the stop of an attempt it declines instead (SidesMeet)."
+    match Bool.and(st.probeAt >= 0, st.whnfStores > st.probeAt)
+        true -> Result.Err(Fail.Stopped(-2, st))
+        false -> whnfTicked(st, orig, t)
+
+fn whnfTicked(st: St, orig: Expr, t: Expr) -> Result<RE, Fail>
+    ? "whnfRun as a tick of an attempt."
+    u = tick(st)?
+    whnfGo(u, orig, t)
+
+verify whnfTicked
+    resultExpr(whnfTicked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+
+fn tick(st: St) -> Result<St, Fail>
+    ? "One unit of work (an unfolding, a recursor step, a whnf run, a comparison, a lazy delta step) counted while an attempt runs; past its stop the attempt ends (SidesMeet). Without a stop nothing is counted."
+    match st.stop < 0
+        true -> Result.Ok(st)
+        false -> match st.ticks >= st.stop
+            true -> Result.Err(Fail.Stopped(st.stop, st))
+            false -> Result.Ok(St.update(st, ticks = st.ticks + 1))
+
+verify tick
+    Result.withDefault(tick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).ticks => 0
+    Result.withDefault(tick(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).ticks => 1
+
+fn attemptEnd(f: Fail, outer: Int, c: NatCtx, d: Int) -> Result<St, Fail>
+    ? "The state an attempt ends with when it fails: past its own stop, or on anything that carries a state, the state it got to, with what was opened or switched on below set back as natOuter sets it and the enclosing stop outer in force again; what it found on the way (whnf results, steps, rules) is kept, being reductions. The stop of an enclosing attempt, and a rejection or a decline, go on up."
+    match f
+        Fail.Stopped(n, s) -> match Bool.or(n == -2, Bool.and(outer >= 0, n == outer))
+            true -> Result.Err(Fail.Stopped(n, s))
+            false -> Result.Ok(St.update(restored(s, c, d), stop = outer))
+        Fail.Wants(_, s) -> Result.Ok(St.update(restored(s, c, d), stop = outer))
+        Fail.Deep(_, s) -> Result.Ok(St.update(restored(s, c, d), stop = outer))
+        Fail.DeepType(_, s) -> Result.Ok(St.update(restored(s, c, d), stop = outer))
+        Fail.Reject(m) -> Result.Err(Fail.Reject(m))
+        Fail.Decline(m) -> Result.Err(Fail.Decline(m))
+
+verify attemptEnd
+    Result.withDefault(attemptEnd(Fail.Stopped(5, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5, ticks = 5)), -1, NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), 0), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).ticks => 5
+    attemptEnd(Fail.Reject("r"), -1, NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), 0) == Result.Err(Fail.Reject("r")) => true
+
+fn ctxOf(st: St) -> NatCtx
+    ? "What an attempt sets back when it fails (attemptEnd), read before it starts."
+    NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth)
+
+verify ctxOf
+    ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).fuel => -1
+
+fn whnfGo(st: St, orig: Expr, t: Expr) -> Result<RE, Fail>
+    ? "whnfRun once within its stop."
     before = st.whnfStores
     r = lcore(st, t, [], [], MS(next = 0, forced = {}), true, false, false)?
     cost = r.st.whnfStores - before
     Result.Ok(dearStore(whnfStore(r.st, orig, r.e), orig, cost))
+
+verify whnfGo
+    resultExpr(whnfGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
 
 verify whnfRun
     resultExpr(whnfRun(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "mul"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)))) => Core.Exprs.natLit(6)
@@ -2677,7 +2731,7 @@ fn recGo(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, ms: MS, ch
     majorIdx = rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices
     match majorIdx >= List.len(stack)
         true -> Result.Ok(stuckGo(st, f, stack, ms))
-        false -> majorGo(st, f, ls, rv, stack, majorIdx, matClo(nthClo(stack, majorIdx), ms), cheapRec, cheapProj)
+        false -> majorGo(tick(st)?, f, ls, rv, stack, majorIdx, matClo(nthClo(stack, majorIdx), ms), cheapRec, cheapProj)
 
 verify recGo
     Result.withDefault(recGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), [], MS(next = 0, forced = {}), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
@@ -2915,7 +2969,7 @@ verify stuckGo
 fn unfoldGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "The constant f, found as c: at universe levels through its shape and the unfolding cache; without levels its value as written, through the cache only when a matcher heads its body (MatchersInlined). A safe definition goes by its rule once it has one (DerivedRules). A definition's value takes the waiting arguments as they are; anything else is stuck. At universe levels, the lambdas the arguments meet come off the value as written, and only what is under them gets the levels (DomainsDropped)."
     match st.fuel < 0
-        true -> unfoldOn(st, f, c, stack, ms, cheapRec, cheapProj)
+        true -> unfoldOn(tick(st)?, f, c, stack, ms, cheapRec, cheapProj)
         false -> match st.fuel == 0
             true -> Result.Err(Fail.Decline("derivation out of fuel"))
             false -> unfoldOn(St.update(st, fuel = st.fuel - 1), f, c, stack, ms, cheapRec, cheapProj)
@@ -5145,6 +5199,7 @@ fn natOuter(r: Result<RO, Fail>, c: NatCtx, e: Expr) -> Result<RO, Fail>
         Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline(m))
         Result.Err(Fail.Wants(w, st)) -> Result.Err(Fail.Wants(w, st))
         Result.Err(Fail.DeepType(x, st)) -> Result.Err(Fail.DeepType(x, st))
+        Result.Err(Fail.Stopped(n, st)) -> Result.Err(Fail.Stopped(n, st))
 
 verify natOuter
     resultOpt(natOuter(Result.Err(Fail.Deep(Core.Exprs.natLit(1), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
@@ -5382,8 +5437,8 @@ verify tri
     tri(false) => 2
 
 fn isDefEq(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
-    ? "Definitional equality; successes that took real work are cached, those the quick check finds are not."
-    q = quick(st, t, s)?
+    ? "Definitional equality; successes that took real work are cached, those the quick check finds are not. Within an attempt each comparison is a tick (SidesMeet)."
+    q = quick(tick(st)?, t, s)?
     match decided(q.i)
         true -> Result.Ok(RB(b = q.i == 1, st = q.st))
         false -> remembered(eqBoolTrue(q.st, t, s)?, t, s)
@@ -5619,7 +5674,192 @@ fn eqProofIrrel(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
     p = proofIrrel(st, tn, sn)?
     match decided(p.i)
         true -> Result.Ok(RB(b = p.i == 1, st = p.st))
-        false -> eqLazy(lazyDelta(p.st, tn, sn)?)
+        false -> lazyFrom(p.st, tn, sn)
+
+decision HeadsMetFromBelow
+    date = "2026-11-18"
+    reason =
+        "Lazy delta unfolds the higher of two definitions first. In CFSG's"
+        "inv_get the pair was co1GenInv[0]! against invCand 1365"
+        "twoBStrong[0]!: invCand is higher than Array.get!Internal, so the"
+        "right side ran into its loop and the computation of twoBStrong (the"
+        "reference kernel too: deep recursion at its default depth), while"
+        "the left side, an element of a two-element literal array, comes to"
+        "invCand 1365 twoBStrong[0]! in eleven steps. Now the outermost lazy"
+        "delta of a comparison runs under a probe: when it stores more than"
+        "meetFirst whnf results, read in whnfRun without writing the state,"
+        "it stops, keeping what it found. Then each side in turn steps toward"
+        "the other side's head constant (an unfolding, or a projection at its"
+        "head reduced as lazy delta reduces one) while its own head stays"
+        "below it (an abbreviation, or a regular definition of smaller"
+        "height), within meetFirst ticks; where it gets there and is found"
+        "equal to the other side within meetFirst ticks, the pair is equal."
+        "Otherwise lazy delta runs again as the reference has it, with no"
+        "probe. Only a pair of two definitions of different names is probed:"
+        "a computation against a literal (the trap tests' slow = 524288) was"
+        "cut and done again, 1.5 times its cost. Every step is a reduction"
+        "and every answer of the attempt is"
+        "an equality, so the pair keeps its answer. Trying the lower side"
+        "before each unfolding of the higher one, as a first version did,"
+        "cost Init 11%: it ran in every lazy delta, most of which end within"
+        "a few steps. Counting the probe in a field written at every step"
+        "made Init 50% slower, as a state shared by a caller is copied at"
+        "every write."
+    chosen = "HeadsMetFromBelow"
+    rejected = ["HigherAlwaysFirst", "LowerSideBeforeEachUnfolding", "ProbeByTicks"]
+    impacts = [lazyFrom, lazyProbe, headsFirst, lowerReaches, whnfRun]
+
+fn lazyFrom(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Lazy delta; the outermost one, outside any attempt, between two definitions of different names, under a probe of meetFirst whnf results (HeadsMetFromBelow)."
+    match Bool.and(Bool.and(st.probeAt < 0, st.stop < 0), twoHeads(st, tn, sn))
+        true -> probed(lazyProbe(st, tn, sn)?, tn, sn)
+        false -> eqLazy(lazyDelta(st, tn, sn)?)
+
+fn twoHeads(st: St, tn: Expr, sn: Expr) -> Bool
+    ? "Both sides headed by definitions delta can unfold, of different names: only then can one side step toward the other's head. A computation against a literal or a constructor is never probed, so it is never cut and done again."
+    match isDelta(st, tn)
+        Option.Some(ct) -> match isDelta(st, sn)
+            Option.Some(cs) -> Check.State.headOf(ct).name != Check.State.headOf(cs).name
+            Option.None -> false
+        Option.None -> false
+
+verify twoHeads
+    twoHeads(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2)) => false
+
+verify lazyFrom
+    resultBool(lazyFrom(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
+
+fn lazyProbe(st: St, tn: Expr, sn: Expr) -> Result<LD, Fail>
+    ? "Lazy delta within meetFirst whnf results, read in whnfRun without writing the state; status -1 when it ran past them, with the state it got to, what it opened set back (DeepArithmeticResumed's restored)."
+    d = st.evalDepth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth)
+    w0 = st.whnfStores
+    ldEnded(lazyDelta(St.update(st, probeAt = w0 + meetFirst()), tn, sn), c, d, tn, sn)
+
+verify lazyProbe
+    resultStatus(lazyProbe(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 0
+
+fn ldEnded(r: Result<LD, Fail>, c: NatCtx, d: Int, tn: Expr, sn: Expr) -> Result<LD, Fail>
+    ? "The probe's lazy delta with no probe in force, or status -1 and the state it got to when it ran past the probe; any other failure goes on."
+    match r
+        Result.Ok(x) -> Result.Ok(LD(status = x.status, t = x.t, s = x.s, st = St.update(x.st, probeAt = -1)))
+        Result.Err(Fail.Stopped(n, s)) -> match n == -2
+            true -> Result.Ok(LD(status = -1, t = tn, s = sn, st = St.update(restored(s, c, d), probeAt = -1)))
+            false -> Result.Err(Fail.Stopped(n, s))
+        Result.Err(f) -> Result.Err(f)
+
+verify ldEnded
+    resultStatus(ldEnded(Result.Ok(LD(status = 2, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 2
+
+fn probed(ld: LD, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "The probe's answer, or, past it, the heads met from below and then lazy delta again without a probe."
+    match ld.status == -1
+        true -> headsFirst(ld.st, tn, sn)
+        false -> eqLazy(ld)
+
+verify probed
+    resultBool(probed(LD(status = 1, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+
+fn headsFirst(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Each side in turn steps toward the other side's head constant while its own head stays below it (lowerReaches), within meetFirst ticks; where it gets there and is then found equal to the other side within meetFirst ticks, the pair is equal. Otherwise lazy delta as the reference has it, with no probe: it was asked for as the pair was, and the work done so far is kept."
+    match isDelta(st, sn)
+        Option.Some(cs) -> headsMet(towardHead(st, tn, sn, cs)?, tn, sn)
+        Option.None -> headsMet(RB(b = false, st = st), tn, sn)
+
+verify headsFirst
+    resultBool(headsFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
+
+fn headsMet(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Equal, or the other side's turn, or lazy delta."
+    match r.b
+        true -> yes(r.st)
+        false -> match isDelta(r.st, tn)
+            Option.Some(ct) -> headsAgain(towardHead(r.st, sn, tn, ct)?, tn, sn)
+            Option.None -> eqLazy(lazyDelta(r.st, tn, sn)?)
+
+verify headsMet
+    resultBool(headsMet(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+
+fn headsAgain(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Equal, or lazy delta."
+    match r.b
+        true -> yes(r.st)
+        false -> eqLazy(lazyDelta(r.st, tn, sn)?)
+
+verify headsAgain
+    resultBool(headsAgain(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+
+fn towardHead(st: St, lo: Expr, hi: Expr, chi: Const) -> Result<RB, Fail>
+    ? "lo stepped toward chi, hi's head, and compared with hi when it gets there, each within meetFirst ticks."
+    r = reachWithin(st, lo, chi)?
+    match r.o
+        Option.Some(lo2) -> loCompared(r.st, hi, lo2)
+        Option.None -> Result.Ok(RB(b = false, st = r.st))
+
+verify towardHead
+    resultBool(towardHead(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), dropFirst())) => false
+
+fn loCompared(st: St, hi: Expr, lo2: Expr) -> Result<RB, Fail>
+    ? "lo2 against hi within meetFirst ticks, the tick read first so that the state keeps one owner."
+    t0 = st.ticks
+    eqWithin(st, hi, lo2, t0 + meetFirst())
+
+verify loCompared
+    resultBool(loCompared(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
+
+fn reachWithin(st: St, lo: Expr, chi: Const) -> Result<RO, Fail>
+    ? "lowerReaches within meetFirst ticks; none past the stop (attemptEnd)."
+    outer = st.stop
+    d = st.evalDepth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth)
+    t0 = st.ticks
+    roEnded(lowerReaches(St.update(st, stop = within(outer, t0 + meetFirst())), lo, chi), outer, c, d)
+
+verify reachWithin
+    resultOpt(reachWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), dropFirst())) => Option.None
+
+fn lowerReaches(st: St, lo: Expr, chi: Const) -> Result<RO, Fail>
+    ? "lo unfolded one step at a time while its head stays below chi, the head of the other side, until that head is chi's constant (HeadsMetFromBelow)."
+    u = unfoldWhnf(st, lo)?
+    lowerOn(projReduced(u.st, u.e)?, chi)
+
+verify lowerReaches
+    resultOpt(lowerReaches(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), dropFirst())) => Option.None
+
+fn projReduced(st: St, e: Expr) -> Result<RE, Fail>
+    ? "e with a projection at its head reduced, as lazy delta reduces one on the side it does not unfold (tryUnfoldProjApp)."
+    pa = tryUnfoldProjApp(st, e)?
+    match pa.o
+        Option.Some(x) -> Result.Ok(RE(e = x, st = pa.st))
+        Option.None -> Result.Ok(RE(e = e, st = pa.st))
+
+verify projReduced
+    resultExpr(projReduced(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
+
+fn lowerOn(u: RE, chi: Const) -> Result<RO, Fail>
+    ? "The lower side after a step: at chi's constant, still below it, or neither."
+    match Core.Apps.isConst(Core.Apps.fnOf(u.e), Check.State.headOf(chi).name)
+        true -> Result.Ok(RO(o = Option.Some(u.e), st = u.st))
+        false -> match isDelta(u.st, u.e)
+            Option.Some(c2) -> match stillBelow(Check.State.hintsOf(chi), Check.State.hintsOf(c2))
+                true -> lowerReaches(u.st, u.e, chi)
+                false -> Result.Ok(RO(o = Option.None, st = u.st))
+            Option.None -> Result.Ok(RO(o = Option.None, st = u.st))
+
+verify lowerOn
+    resultOpt(lowerOn(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), dropFirst())) => Option.None
+
+fn stillBelow(hi: Hints, h: Hints) -> Bool
+    ? "A head with hints h is still below a head with hints hi: an abbreviation, or a regular definition lower than hi."
+    match h
+        Hints.Abbrev -> true
+        Hints.Regular -> hintOrder(hi, h) < 0
+        Hints.Opaque -> false
+
+verify stillBelow
+    stillBelow(Hints.Regular(3), Hints.Abbrev) => true
+    stillBelow(Hints.Regular(3), Hints.Regular(2)) => true
+    stillBelow(Hints.Regular(3), Hints.Regular(3)) => false
 
 verify eqProofIrrel
     resultBool(eqProofIrrel(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Succ(Level.Zero)))) => false
@@ -5699,8 +5939,275 @@ decision ProjectionAppsCompared
 fn eqProjApp(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Applications of the same projection, as projections themselves are compared: equal heads and equal arguments settle it before the projections are reduced."
     match Bool.and(sameProjHead(Core.Apps.fnOf(tn), Core.Apps.fnOf(sn)), Core.Apps.numArgs(tn) == Core.Apps.numArgs(sn))
-        true -> eqProjAppHeads(isDefEq(st, Core.Apps.fnOf(tn), Core.Apps.fnOf(sn))?, tn, sn)
+        true -> partsFirst(st, tn, sn)
         false -> eqRewhnf(st, tn, sn)
+
+fn partsFirst(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Heads and arguments within meetFirst ticks, the tick they start at read first so that the state keeps one owner."
+    t0 = st.ticks
+    eqProjParts(t0, partsWithin(st, tn, sn, meetFirst())?, tn, sn)
+
+verify partsFirst
+    resultBool(partsFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
+
+fn partsWithin(st: St, tn: Expr, sn: Expr, fuel: Int) -> Result<RB, Fail>
+    ? "Equal heads and equal arguments, found within fuel ticks; false past the stop (attemptEnd)."
+    outer = st.stop
+    d = st.evalDepth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth)
+    rbEnded(partsOf(St.update(st, stop = within(outer, st.ticks + fuel)), tn, sn), outer, c, d)
+
+fn rbEnded(r: Result<RB, Fail>, outer: Int, c: NatCtx, d: Int) -> Result<RB, Fail>
+    ? "An attempt's answer with the enclosing stop back; when it failed, no answer and the state it got to (attemptEnd)."
+    match r
+        Result.Ok(x) -> Result.Ok(RB(b = x.b, st = St.update(x.st, stop = outer)))
+        Result.Err(f) -> Result.Ok(RB(b = false, st = attemptEnd(f, outer, c, d)?))
+
+verify rbEnded
+    resultBool(rbEnded(Result.Ok(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), -1, ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0)) => true
+
+fn roEnded(r: Result<RO, Fail>, outer: Int, c: NatCtx, d: Int) -> Result<RO, Fail>
+    ? "rbEnded for an attempt that finds a term."
+    match r
+        Result.Ok(x) -> Result.Ok(RO(o = x.o, st = St.update(x.st, stop = outer)))
+        Result.Err(f) -> Result.Ok(RO(o = Option.None, st = attemptEnd(f, outer, c, d)?))
+
+verify roEnded
+    resultOpt(roEnded(Result.Ok(RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), -1, ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0)) => Option.None
+
+verify partsWithin
+    resultBool(partsWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), 8)) => true
+    resultBool(partsWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), 8)) => false
+
+fn partsOf(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Equal heads, then equal arguments."
+    h = isDefEq(st, Core.Apps.fnOf(tn), Core.Apps.fnOf(sn))?
+    match h.b
+        true -> defEqArgs(h.st, tn, sn, [])
+        false -> no(h.st)
+
+verify partsOf
+    resultBool(partsOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(1), Core.Exprs.natLit(1)))) => false
+
+fn eqProjParts(t0: Int, r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Equal parts settle it; otherwise the sides step toward each other, each side allowed as much work as the parts took since tick t0, and then the comparison goes on as before."
+    match r.b
+        true -> yes(r.st)
+        false -> eqProjMet(sidesMeet(r.st, [tn], [sn], tn, sn, r.st.ticks - t0, r.st.ticks - t0)?, tn, sn)
+
+verify eqProjParts
+    resultBool(eqProjParts(0, RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+
+fn eqProjMet(m: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Sides that met are equal; otherwise heads and arguments are compared without a stop, and then the projections reduced, as before (ProjectionAppsCompared)."
+    match m.i == 1
+        true -> yes(m.st)
+        false -> eqPartsAfter(partsOf(m.st, tn, sn)?, tn, sn)
+
+fn eqPartsAfter(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Equal parts settle it; otherwise the projections are reduced."
+    match r.b
+        true -> yes(r.st)
+        false -> eqRewhnf(r.st, tn, sn)
+
+verify eqPartsAfter
+    resultBool(eqPartsAfter(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+
+verify eqProjMet
+    resultBool(eqProjMet(RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+    resultBool(eqProjMet(RI(i = 0, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => false
+
+decision SidesMeet
+    date = "2026-11-18"
+    reason =
+        "In CFSG's invol_eq two sides were (gC c * gC c).toFun 1 and"
+        "(gC c).toFun ((gC c).toFun 1) behind instance projections, c a free"
+        "variable. Comparing the projections' arguments (ProjectionAppsCompared)"
+        "asked whether gC c 1 is 1, false for a free c; reducing either side"
+        "fully went through gC c into a permutation built from an array, whose"
+        "bound check made the kernel compute a whole Schreier-Sims level (8"
+        "million list cells) only to get stuck on c. The right side, one"
+        "projection at a time, comes to the left side as it stood in a few"
+        "cheap steps. Now heads and arguments are compared first within an"
+        "attempt of meetFirst ticks (an unfolding, a recursor step, a whnf run,"
+        "a comparison, a lazy delta step each); when that finds no answer the"
+        "two sides take steps by turns, a projection of a whnf structure or"
+        "one unfolding each, each side allowed as much work as the comparison"
+        "took, and when one side comes to a form the other had (the same term,"
+        "or one of the same head found equal within half of what is left),"
+        "they are equal; otherwise heads and arguments are compared without a"
+        "stop and the projections reduced, as before. Every step is a"
+        "reduction the reference kernel takes and definitional equality is"
+        "transitive and symmetric, so an answer is one the reference could"
+        "give; an attempt never answers no. An attempt that runs past its stop"
+        "ends with the state it got to: its whnf results and steps are"
+        "reductions and are kept, what it opened is set back as natOuter sets"
+        "it, and the stop of an enclosing attempt goes on up to that attempt"
+        "(when inner attempts swallowed it, s2bad of the trap tests ran"
+        "forever). Rolling the state back instead made the old state a second"
+        "owner of the caches, and every write copied them: Init took 18 times"
+        "its instructions."
+    chosen = "SidesMeet"
+    rejected = ["ArgumentsFirst", "WholeWhnfCore", "SyntacticMeetOnly", "StateRolledBack"]
+    impacts = [sidesMeet, tick, attemptEnd, eqProjApp, partsWithin, metAny]
+
+fn meetFirst() -> Int
+    ? "The work an attempt may do before it ends with no answer, in ticks: unfoldings, recursor steps, whnf runs, comparisons, lazy delta steps and the steps of sides meeting (SidesMeet). Swept at a quarter and four times (see the decision)."
+    4096
+
+verify meetFirst
+    meetFirst() => 4096
+
+fn sidesMeet(st: St, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
+    ? "Steps on t and s by turns, the left first, each side within its own allowance of work (bt, bs ticks): 1 when one side comes to a form the other had, 0 when both are spent or stuck. A side whose step runs past its allowance or cannot step takes no more steps, and the other goes on alone."
+    t0 = st.ticks
+    match Bool.and(bt <= 0, bs <= 0)
+        true -> Result.Ok(RI(i = 0, st = st))
+        false -> match bt > 0
+            true -> meetLeft(t0, stepWithin(st, t, t0 + bt)?, ht, hs, t, s, bt, bs)
+            false -> meetRight(t0, stepWithin(st, s, t0 + bs)?, ht, hs, t, s, bt, bs)
+
+verify sidesMeet
+    resultInt(sidesMeet(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 8)) => 0
+    resultInt(sidesMeet(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 0)) => 0
+
+fn meetLeft(t0: Int, r: RO, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
+    ? "After a step on the left, begun at tick t0: met, or the right side's turn, the left's allowance less what the step and the comparisons took; a left side that did not step is done."
+    match r.o
+        Option.Some(t2) -> leftCompared(t0, metAny(r.st, t2, hs, t0 + bt)?, ht, hs, t2, s, bt, bs)
+        Option.None -> meetRightTurn(r.st, ht, hs, t, s, 0, bs)
+
+verify meetLeft
+    resultInt(meetLeft(0, RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 0)) => 0
+    resultInt(meetLeft(0, RO(o = Option.Some(Core.Exprs.fvar(2)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [Core.Exprs.fvar(2)], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 0)) => 1
+
+fn leftCompared(t0: Int, m: RI, ht: List<Expr>, hs: List<Expr>, t2: Expr, s: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
+    ? "The new left form met the right side's forms, or the right side's turn."
+    match m.i == 1
+        true -> Result.Ok(m)
+        false -> meetRightTurn(m.st, List.prepend(t2, ht), hs, t2, s, bt - (m.st.ticks - t0), bs)
+
+verify leftCompared
+    resultInt(leftCompared(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 8)) => 1
+
+fn meetRightTurn(st: St, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
+    ? "The right side steps when it has an allowance left; otherwise the left goes on."
+    t0 = st.ticks
+    match bs > 0
+        true -> meetRight(t0, stepWithin(st, s, t0 + bs)?, ht, hs, t, s, bt, bs)
+        false -> sidesMeet(st, ht, hs, t, s, bt, bs)
+
+verify meetRightTurn
+    resultInt(meetRightTurn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 0)) => 0
+
+fn meetRight(t0: Int, r: RO, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
+    ? "After a step on the right, begun at tick t0: met, or round again; a right side that did not step is done."
+    match r.o
+        Option.Some(s2) -> rightCompared(t0, metAny(r.st, s2, ht, t0 + bs)?, ht, hs, t, s2, bt, bs)
+        Option.None -> sidesMeet(r.st, ht, hs, t, s, bt, 0)
+
+verify meetRight
+    resultInt(meetRight(0, RO(o = Option.Some(Core.Exprs.fvar(1)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [Core.Exprs.fvar(1)], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 8)) => 1
+    resultInt(meetRight(0, RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 8)) => 0
+
+fn rightCompared(t0: Int, m: RI, ht: List<Expr>, hs: List<Expr>, t: Expr, s2: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
+    ? "The new right form met the left side's forms, or round again."
+    match m.i == 1
+        true -> Result.Ok(m)
+        false -> sidesMeet(m.st, ht, List.prepend(s2, hs), t, s2, bt, bs - (m.st.ticks - t0))
+
+verify rightCompared
+    resultInt(rightCompared(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 8)) => 1
+
+fn metAny(st: St, x: Expr, ys: List<Expr>, stop: Int) -> Result<RI, Fail>
+    ? "1 when x is one of ys, or has the head of one of them and is found equal to it; each form compared is a tick, and a comparison may take half of what is left before the stop, so that one that runs long leaves the side room to step on."
+    match ys
+        [] -> Result.Ok(RI(i = 0, st = st))
+        [y, ..rest] -> match st.ticks >= stop
+            true -> Result.Ok(RI(i = 0, st = st))
+            false -> match x == y
+                true -> Result.Ok(RI(i = 1, st = st))
+                false -> match sameHeadOf(x, y)
+                    true -> metNext(eqWithin(St.update(st, ticks = st.ticks + 1), x, y, st.ticks + 1 + Int.div(stop - st.ticks, 2))?, x, rest, stop)
+                    false -> metAny(St.update(st, ticks = st.ticks + 1), x, rest, stop)
+
+verify metAny
+    resultInt(metAny(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), [Core.Exprs.fvar(2), Core.Exprs.fvar(1)], 8)) => 1
+    resultInt(metAny(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), [Core.Exprs.fvar(2)], 8)) => 0
+
+fn metNext(r: RB, x: Expr, rest: List<Expr>, stop: Int) -> Result<RI, Fail>
+    ? "Met, or the next form."
+    match r.b
+        true -> Result.Ok(RI(i = 1, st = r.st))
+        false -> metAny(r.st, x, rest, stop)
+
+verify metNext
+    resultInt(metNext(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), [], 8)) => 1
+
+fn sameHeadOf(x: Expr, y: Expr) -> Bool
+    ? "Applications with the same constant or the same projection at the head."
+    match Core.Apps.fnOf(x)
+        Expr.Const(_, a, _) -> Core.Apps.isConst(Core.Apps.fnOf(y), a)
+        Expr.Proj(_, sa, ia, _) -> match Core.Apps.fnOf(y)
+            Expr.Proj(_, sb, ib, _) -> Bool.and(sa == sb, ia == ib)
+            _ -> false
+        _ -> false
+
+verify sameHeadOf
+    sameHeadOf(Core.Exprs.fvar(1), Core.Exprs.fvar(1)) => false
+
+fn eqWithin(st: St, x: Expr, y: Expr, stop: Int) -> Result<RB, Fail>
+    ? "x =?= y within the stop; false past it (attemptEnd)."
+    outer = st.stop
+    d = st.evalDepth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth)
+    rbEnded(isDefEq(St.update(st, stop = within(outer, stop)), x, y), outer, c, d)
+
+verify eqWithin
+    resultBool(eqWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(1), 8)) => true
+    resultBool(eqWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(2), 8)) => false
+
+fn stepWithin(st: St, e: Expr, stop: Int) -> Result<RO, Fail>
+    ? "One step of e within the stop, itself a tick; none when it cannot step or ran past the stop (attemptEnd)."
+    outer = st.stop
+    d = st.evalDepth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth)
+    roEnded(oneStep(St.update(st, stop = within(outer, stop), ticks = st.ticks + 1), e), outer, c, d)
+
+verify stepWithin
+    resultOpt(stepWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), 8)) => Option.None
+
+fn within(outer: Int, inner: Int) -> Int
+    ? "The nearer of two stops; -1 is none."
+    match outer < 0
+        true -> inner
+        false -> match inner < outer
+            true -> inner
+            false -> outer
+
+verify within
+    within(-1, 5) => 5
+    within(3, 5) => 3
+
+fn oneStep(st: St, e: Expr) -> Result<RO, Fail>
+    ? "A projection at the head of whnf structure taken, or the head unfolded, and the cheap whnfCore after it."
+    match Core.Apps.fnOf(e)
+        Expr.Proj(_, sn, i, x) -> projStepped(reduceProj(st, sn, i, x, false, false)?, Core.Apps.argsOf(e))
+        _ -> match isDelta(st, e)
+            Option.Some(_) -> someOf(unfoldWhnf(st, e)?)
+            Option.None -> Result.Ok(RO(o = Option.None, st = st))
+
+verify oneStep
+    resultOpt(oneStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1))) => Option.None
+
+fn projStepped(r: RO, args: List<Expr>) -> Result<RO, Fail>
+    ? "The field applied to the arguments, through the cheap whnfCore."
+    match r.o
+        Option.Some(f) -> someOf(whnfCoreM(r.st, Core.Apps.mkApps(f, args), false, true)?)
+        Option.None -> Result.Ok(RO(o = Option.None, st = r.st))
+
+verify projStepped
+    resultOpt(projStepped(RO(o = Option.Some(Core.Exprs.fvar(1)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [])) => Option.Some(Core.Exprs.fvar(1))
 
 verify eqProjApp
     resultBool(eqProjApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.natLit(2)), Core.Exprs.app(Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.natLit(2)))) => true
@@ -5717,24 +6224,6 @@ fn sameProjHead(a: Expr, b: Expr) -> Bool
 verify sameProjHead
     sameProjHead(Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(2))) => true
     sameProjHead(Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 1, Core.Exprs.fvar(1))) => false
-
-fn eqProjAppHeads(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "Equal heads: the arguments next."
-    match r.b
-        true -> eqProjAppArgs(defEqArgs(r.st, tn, sn, [])?, tn, sn)
-        false -> eqRewhnf(r.st, tn, sn)
-
-verify eqProjAppHeads
-    resultBool(eqProjAppHeads(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => false
-
-fn eqProjAppArgs(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "Equal arguments settle it; otherwise go on."
-    match r.b
-        true -> yes(r.st)
-        false -> eqRewhnf(r.st, tn, sn)
-
-verify eqProjAppArgs
-    resultBool(eqProjAppArgs(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => true
 
 fn eqProjAfter(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Equal structures settle it; otherwise go on."
@@ -6296,10 +6785,160 @@ fn lazyNatGround(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
         true -> groundLd(st, t, s, t, Check.Ground.ground(st, t))
         false -> match Bool.and(isLit(t), Bool.and(Core.Apps.isApp(s), groundable(st, s)))
             true -> groundLd(st, t, s, s, Check.Ground.ground(st, s))
-            false -> lazyNatLeft(reduceNat(st, t)?, t, s)
+            false -> natDeferred(st, t, s)
 
 verify lazyNatGround
     Result.withDefault(lazyNatGround(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), Core.Exprs.natLit(5)), LD(status = 0, t = Core.Exprs.natLit(0), s = Core.Exprs.natLit(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).status => 1
+
+decision ArithmeticWhenWanted
+    date = "2026-11-18"
+    reason =
+        "On closed sides lazy delta did Nat arithmetic first, bringing every"
+        "argument of Nat.add or Nat.mul to a literal. In CFSG's totalC simp"
+        "had stated List.sum [X0, X1] = X0 + (X1 + 0) by definition, X0 the"
+        "count of a whole enumeration of J2's classes: the right side"
+        "unfolded to Nat.add X0 _ and X0 was computed (the reference kernel"
+        "ran past 100 GB), where the left side unfolds to X0 + _ in a few"
+        "steps and X0 is the same term on both sides. Now an operation whose"
+        "arguments are not all literals waits while the other side, not a"
+        "literal, still takes a step (an unfolding or a projection at its"
+        "head); two applications of one operation compare their arguments"
+        "first, within an attempt of meetFirst ticks (SidesMeet), and only"
+        "when that finds no answer, or the other side cannot move, is the"
+        "arithmetic done as before. Unfolding and comparing arguments are"
+        "steps of definitional equality, so only their order changed; an"
+        "operation on literals is still computed at once. Without the stop,"
+        "arguments that differ only deep inside (g 19 0 against g 19 1 of the"
+        "trap tests, each 2^19 steps) were compared node by node, without end."
+    chosen = "ArithmeticWhenWanted"
+    rejected = ["ArithmeticFirst", "ArgumentsWithoutStop"]
+    impacts = [lazyNatGround, natDeferred, natWaits, argsWithin]
+
+fn natDeferred(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "Nat arithmetic on closed sides, worked out only when it is wanted (ArithmeticWhenWanted): two applications of one Nat operation compare their arguments first; an operation on arguments that are not all literals waits while the other side, not a literal, still unfolds; otherwise both are worked out as before."
+    match sameNatOp(t, s)
+        true -> natArgsFirst(argsWithin(st, Core.Apps.argsOf(t), Core.Apps.argsOf(s), st.ticks + meetFirst())?, t, s)
+        false -> match natPending(t)
+            true -> natWaits(otherStep(st, s)?, t, s, true)
+            false -> match natPending(s)
+                true -> natWaits(otherStep(st, t)?, s, t, false)
+                false -> lazyNatLeft(reduceNat(st, t)?, t, s)
+
+fn otherStep(st: St, e: Expr) -> Result<RO, Fail>
+    ? "One step of the side facing a waiting Nat operation: its head unfolded, or a projection at its head reduced; none when it is a Nat operation itself or stuck."
+    match natOpName(e)
+        Option.Some(_) -> Result.Ok(RO(o = Option.None, st = st))
+        Option.None -> match isDelta(st, e)
+            Option.Some(_) -> someOf(unfoldWhnf(st, e)?)
+            Option.None -> tryUnfoldProjApp(st, e)
+
+verify otherStep
+    resultOpt(otherStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1))) => Option.None
+
+fn someOf(r: RE) -> Result<RO, Fail>
+    ? "A step's result."
+    Result.Ok(RO(o = Option.Some(r.e), st = r.st))
+
+fn natWaits(r: RO, n: Expr, other: Expr, nLeft: Bool) -> Result<LD, Fail>
+    ? "The Nat operation n, the left side when nLeft, waits while the other side moved; when it could not, the arithmetic is done as before."
+    match r.o
+        Option.Some(x) -> match nLeft
+            true -> lazyAgain(afterStep(r.st, n, x)?)
+            false -> lazyAgain(afterStep(r.st, x, n)?)
+        Option.None -> match nLeft
+            true -> lazyNatLeft(reduceNat(r.st, n)?, n, other)
+            false -> lazyNatLeft(reduceNat(r.st, other)?, other, n)
+
+verify natWaits
+    resultStatus(natWaits(RO(o = Option.Some(Core.Exprs.natLit(5)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), Core.Exprs.fvar(1), true)) => 1
+
+verify natDeferred
+    resultStatus(natDeferred(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), Core.Exprs.natLit(5))) => 1
+    resultStatus(natDeferred(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.fvar(1)), Core.Exprs.natLit(3)), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.fvar(1)), Core.Exprs.natLit(3)))) => 1
+
+fn lazyAgain(r: LD) -> Result<LD, Fail>
+    ? "After a step: decided, or lazy delta goes round again."
+    match r.status
+        3 -> lazyDelta(r.st, r.t, r.s)
+        _ -> Result.Ok(r)
+
+verify lazyAgain
+    resultStatus(lazyAgain(LD(status = 1, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))) => 1
+
+fn argsWithin(st: St, as: List<Expr>, bs: List<Expr>, stop: Int) -> Result<RB, Fail>
+    ? "Pairwise equal arguments found within the stop; false past it (attemptEnd)."
+    outer = st.stop
+    d = st.evalDepth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth)
+    rbEnded(argsAll(St.update(st, stop = within(outer, stop)), as, bs), outer, c, d)
+
+verify argsWithin
+    resultBool(argsWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [Core.Exprs.natLit(1)], [Core.Exprs.natLit(1)], 8)) => true
+    resultBool(argsWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [Core.Exprs.natLit(1)], [Core.Exprs.natLit(2)], 8)) => false
+
+fn natArgsFirst(r: RB, t: Expr, s: Expr) -> Result<LD, Fail>
+    ? "Equal arguments settle two applications of one Nat operation; otherwise both are worked out."
+    match r.b
+        true -> Result.Ok(LD(status = 1, t = t, s = s, st = r.st))
+        false -> lazyNatLeft(reduceNat(r.st, t)?, t, s)
+
+verify natArgsFirst
+    resultStatus(natArgsFirst(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 1
+
+fn natOpName(e: Expr) -> Option<String>
+    ? "The Nat operation the kernel computes on literals at the head of e applied to two arguments, or succ to one."
+    match e
+        Expr.App(_, Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), "succ", _), []), _) -> Option.Some("succ")
+        Expr.App(_, Expr.App(_, Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []), _), _) -> match Check.Lits.isNatOp(op)
+            true -> Option.Some(op)
+            false -> Option.None
+        _ -> Option.None
+
+verify natOpName
+    natOpName(Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3))) => Option.Some("add")
+    natOpName(Core.Exprs.natLit(2)) => Option.None
+
+fn sameNatOp(t: Expr, s: Expr) -> Bool
+    ? "Both sides applications of the same Nat operation."
+    match natOpName(t)
+        Option.Some(a) -> natOpName(s) == Option.Some(a)
+        Option.None -> false
+
+verify sameNatOp
+    sameNatOp(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(2)), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.fvar(2))) => true
+
+fn natPending(e: Expr) -> Bool
+    ? "A Nat operation with an argument that is not a literal yet."
+    match natOpName(e)
+        Option.Some(_) -> Bool.not(allLits(Core.Apps.argsOf(e)))
+        Option.None -> false
+
+verify natPending
+    natPending(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(2))) => false
+    natPending(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.fvar(2))) => true
+
+fn allLits(xs: List<Expr>) -> Bool
+    ? "Every term a Nat literal."
+    match xs
+        [] -> true
+        [x, ..rest] -> match x
+            Expr.NatLit -> allLits(rest)
+            _ -> false
+
+verify allLits
+    allLits([Core.Exprs.natLit(1)]) => true
+    allLits([Core.Exprs.fvar(1)]) => false
+
+fn unfoldsOn(st: St, e: Expr) -> Bool
+    ? "e is not a literal and its head is a definition delta can unfold, other than a Nat operation the kernel computes."
+    match natOpName(e)
+        Option.Some(_) -> false
+        Option.None -> match isDelta(st, e)
+            Option.Some(_) -> true
+            Option.None -> false
+
+verify unfoldsOn
+    unfoldsOn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1)) => false
 
 fn groundLd(st: St, t: Expr, s: Expr, x: Expr, g: Check.Ground.GV) -> Result<LD, Fail>
     ? "x, one of the sides, as the literal the ground machine found, kept as its whnf with what it found on the way, and the sides compared again; without one, Nat arithmetic as before."
@@ -6348,8 +6987,8 @@ verify ldOf
     resultStatus(ldOf(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.bvar(0), Core.Exprs.bvar(0))) => 2
 
 fn lazyStep(st: St, t: Expr, s: Expr) -> Result<LD, Fail>
-    ? "One unfolding step; status 3 means go round again."
-    r = deltaStep(st, t, s)?
+    ? "One unfolding step, within an attempt a tick; status 3 means go round again."
+    r = deltaStep(tick(st)?, t, s)?
     match r.status
         3 -> lazyDelta(r.st, r.t, r.s)
         _ -> Result.Ok(r)

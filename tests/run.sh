@@ -4,7 +4,11 @@
 #   wellformed/   0 (accepted)
 #   malformed/    1 (rejected while reading)
 #   illtyped/     1 (rejected by the checker: made from tests/export/PestkaBad.lean
-#                    by mkbad.py, each a declaration the checker must not accept)
+#                    by mkbad.py, each a declaration the checker must not accept;
+#                    walls_*Bad from tests/export/Walls.lean)
+# The walls_*Good exports (tests/export/Walls.lean) hold only when definitional
+# equality is tried in the right order: the wrong one computes 2^23 steps and
+# runs past the 20 s cap.
 #   unsupported/  2 (declined: format version)
 # and every export tests/soundness.py kept under tests/soundness-findings, each
 # invalid, against 1 (rejected).
