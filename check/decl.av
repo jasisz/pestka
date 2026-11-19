@@ -653,15 +653,15 @@ fn runSize(n: Int, workers: Int) -> Int
     Int.max(16 * perDecl(), Result.withDefault(Int.div(n + w - 1, w), 16))
 
 fn runsPerWorker() -> Int
-    ? "How many runs each worker is dealt (WorkersByNamespace)."
-    4
+    ? "How many runs each worker is dealt (WorkersByNamespace, RunsForTheTail)."
+    16
 
 verify runsPerWorker
     runsPerWorker() > 0 => true
 
 verify runSize
     runSize(0, 1) => 16 * perDecl()
-    runSize(3200000000, 8) => 100000000
+    runSize(3200000000, 8) => 25000000
     runSize(100, 4) => 16 * perDecl()
 
 fn costOf(jobs: List<Job>, acc: Int) -> Int
@@ -692,6 +692,33 @@ decision WorkersByNamespace
     chosen = "FourRunsPerWorker"
     rejected = ["RunsOfSixteen", "OneRunPerWorker", "TwoRunsPerWorker", "EightRunsPerWorker"]
     impacts = [runSize, deal, checkHeld]
+
+decision RunsForTheTail
+    date = "2026-11-19"
+    reason =
+        "Runs are cut by estimated cost (RunsByProofSize), so they cost the"
+        "same by that estimate, and dealing them greedily by it, the dearest"
+        "first to the least loaded worker, deals them as they are dealt now."
+        "The estimate, the expressions of a proof's block, misses work that"
+        "is computation: on CFSG's totalC slice, four workers, one worker"
+        "checked 10546 declarations of a few tens of milliseconds each for"
+        "218 s while two were done within 41 s. Sixteen runs a worker"
+        "instead of four spread that work: the workers end at 146 to 170 s."
+        "PGO, four workers, four runs against sixteen: totalC 2181.7 G,"
+        "218.7 s, 0.75 GB against 2183.2 G, 169.9 s, 0.84 GB; FLT 11030 G,"
+        "546 s, 15.7 GB, workers ending at 400 to 474 s, against 11046 G,"
+        "520 s, 17.4 GB, 411 to 449 s; mathlib 1240.9 G, 62.0 s, 3.59 GB"
+        "against 1246.1 G, 63.7 s, 3.71 GB; Init 54.91 G against 55.27 G;"
+        "one worker unchanged (49.41 G). Slices whose work is one"
+        "declaration (CosetW, McertP_HN, kSol) end with it either way."
+        "Facts kept across declarations matter little for CFSG's"
+        "certificates (totalC on one worker, each run from no facts: 0 to"
+        "-0.2% instructions at 4 to 512 runs) and much for mathlib-like"
+        "files (Init on one worker: +4.6%, +17%, +41%, +60% at 4, 16, 128,"
+        "512 runs), so a worker still carries its facts from run to run."
+    chosen = "SixteenRunsPerWorker"
+    rejected = ["FourRunsPerWorker", "DealtByEstimatedCost"]
+    impacts = [runsPerWorker, runSize]
 
 decision RunsByProofSize
     date = "2026-11-13"
