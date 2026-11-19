@@ -50,4 +50,20 @@ else
   echo "FAIL generated/deep-binder-16382: status $got, expected 0"
   fail=1
 fi
+# Two lists of 200000 cells, equal only cell by cell, each tail one
+# comparison deeper (DeepArgumentsResumed): equal, and with the last cell
+# changed, unequal; before, a stack overflow. Generated, as each is 17 MB.
+for kind in good bad; do
+  python3 "$root/tests/gen_deep_list_export.py" 200000 "$deep" $([ $kind = bad ] && echo bad)
+  "$root/bin/capped" 2000 20 "$bin" $PESTKA_ARGS "$deep" >/dev/null 2>&1
+  got=$?
+  want=0; [ $kind = bad ] && want=1
+  if [ "$got" -eq "$want" ]; then
+    echo "ok   generated/deep-list-200000-$kind"
+  else
+    echo "FAIL generated/deep-list-200000-$kind: status $got, expected $want"
+    fail=1
+  fi
+done
+rm -f "$deep"
 exit $fail

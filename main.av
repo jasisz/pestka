@@ -182,6 +182,7 @@ fn partVerdict(r: Result<Run, Fail>, what: String, n: Int, unchecked: Int) -> In
         Result.Err(Fail.Wants(w, _)) -> declined("the proof block at {w.at} was wanted and never read")
         Result.Err(Fail.Deep(_, _)) -> declined("Nat arithmetic nested too deep")
         Result.Err(Fail.DeepType(_, _)) -> declined("applications nested too deep")
+        Result.Err(Fail.DeepEq(_, _, _)) -> declined("definitional equality nested too deep")
         Result.Err(Fail.Stopped(_, _)) -> declined("an attempt ran past its stop")
         Result.Ok(run) -> match run.trusted == 0
             false -> declined("{run.trusted} nested inductive blocks are not checked yet")
@@ -370,6 +371,7 @@ fn verdict(r: Result<Run, Fail>) -> Int
         Result.Err(Fail.Wants(w, _)) -> declined("the proof block at {w.at} was wanted and never read")
         Result.Err(Fail.Deep(_, _)) -> declined("Nat arithmetic nested too deep")
         Result.Err(Fail.DeepType(_, _)) -> declined("applications nested too deep")
+        Result.Err(Fail.DeepEq(_, _, _)) -> declined("definitional equality nested too deep")
         Result.Err(Fail.Stopped(_, _)) -> declined("an attempt ran past its stop")
         Result.Ok(run) -> counted(run)
 
