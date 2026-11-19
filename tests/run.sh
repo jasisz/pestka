@@ -5,13 +5,17 @@
 #   malformed/    1 (rejected while reading)
 #   illtyped/     1 (rejected by the checker: made from tests/export/PestkaBad.lean
 #                    by mkbad.py, each a declaration the checker must not accept;
-#                    walls_*Bad from tests/export/Walls.lean, nat_* from
+#                    walls_*Bad from tests/export/Walls.lean, origin_sumBad
+#                    from tests/export/Origin.lean, nat_* from
 #                    tests/export/NatSize.lean: a result past 128 MiB is
 #                    refused before it is computed, as the reference does)
 # The walls_*Good exports (tests/export/Walls.lean) hold only when definitional
 # equality is tried in the right order: the wrong one computes 2^23 steps and
 # runs past the 20 s cap. nat_shiftGood (NatSize.lean) shifts by 2^24 + 1
 # bits, one past what Bits.shiftLeft took before Aver 0.36.1.
+# origin_sumGood (tests/export/Origin.lean) holds only when a side of lazy
+# delta that comes to the form the other side began at meets it: otherwise a
+# loop of 300000 rounds runs past the 20 s cap.
 #   unsupported/  2 (declined: format version)
 # and every export tests/soundness.py kept under tests/soundness-findings, each
 # invalid, against 1 (rejected).
