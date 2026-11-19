@@ -5734,22 +5734,50 @@ fn lazyProbe(st: St, tn: Expr, sn: Expr) -> Result<LD, Fail>
     d = st.evalDepth
     c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth)
     w0 = st.whnfStores
-    ldEnded(lazyDelta(St.update(st, probeAt = w0 + meetFirst()), tn, sn), c, d, tn, sn)
+    o = st.stop
+    ldEnded(lazyDelta(St.update(st, probeAt = w0 + meetFirst()), tn, sn), c, d, o, tn, sn)
 
 verify lazyProbe
     resultStatus(lazyProbe(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 0
 
-fn ldEnded(r: Result<LD, Fail>, c: NatCtx, d: Int, tn: Expr, sn: Expr) -> Result<LD, Fail>
-    ? "The probe's lazy delta with no probe in force, or status -1 and the state it got to when it ran past the probe; any other failure goes on."
+fn ldEnded(r: Result<LD, Fail>, c: NatCtx, d: Int, o: Int, tn: Expr, sn: Expr) -> Result<LD, Fail>
+    ? "The probe's lazy delta with no probe in force and the stop o it began with, or status -1 and the state it got to when it ran past the probe, what it opened set back; any other failure goes on, a state it carries likewise with no probe and stop o in force, as whoever takes it up is outside the probe (ProbeEndsWhereItBegan)."
     match r
-        Result.Ok(x) -> Result.Ok(LD(status = x.status, t = x.t, s = x.s, st = St.update(x.st, probeAt = -1)))
+        Result.Ok(x) -> Result.Ok(LD(status = x.status, t = x.t, s = x.s, st = St.update(x.st, probeAt = -1, stop = o)))
         Result.Err(Fail.Stopped(n, s)) -> match n == -2
-            true -> Result.Ok(LD(status = -1, t = tn, s = sn, st = St.update(restored(s, c, d), probeAt = -1)))
-            false -> Result.Err(Fail.Stopped(n, s))
+            true -> Result.Ok(LD(status = -1, t = tn, s = sn, st = St.update(restored(s, c, d), probeAt = -1, stop = o)))
+            false -> Result.Err(Fail.Stopped(n, St.update(s, probeAt = -1, stop = o)))
+        Result.Err(Fail.Wants(w, s)) -> Result.Err(Fail.Wants(w, St.update(s, probeAt = -1, stop = o)))
+        Result.Err(Fail.Deep(x, s)) -> Result.Err(Fail.Deep(x, St.update(s, probeAt = -1, stop = o)))
+        Result.Err(Fail.DeepType(x, s)) -> Result.Err(Fail.DeepType(x, St.update(s, probeAt = -1, stop = o)))
         Result.Err(f) -> Result.Err(f)
 
 verify ldEnded
-    resultStatus(ldEnded(Result.Ok(LD(status = 2, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 2
+    resultStatus(ldEnded(Result.Ok(LD(status = 2, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, -1, Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 2
+    resultStatus(ldEnded(Result.Err(Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 9, ticks = 7, probeAt = 3))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, -1, Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => -1
+    ldEnded(Result.Err(Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 9, ticks = 7, probeAt = 3))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, -1, Core.Exprs.fvar(1), Core.Exprs.fvar(2)) == Result.Ok(LD(status = -1, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(2), st = St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ticks = 7))) => true
+
+decision ProbeEndsWhereItBegan
+    date = "2026-11-19"
+    reason =
+        "FLT's HomZar.CRUX_LA was declined with an attempt that ran past its"
+        "stop, with no attempt left to take it. The probe of"
+        "HeadsMetFromBelow ends where whnfRun finds it past its whnf results"
+        "(Stopped -2), wherever that is: often inside an attempt the probe"
+        "started (an argument compared within meetFirst ticks), and the state"
+        "-2 brings up is that attempt's, its stop in force. The probe went on"
+        "with that state: past it, headsFirst, lazy delta and everything after"
+        "in the declaration counted ticks against the stop of an attempt that"
+        "had ended, and the next tick past it failed with nothing to catch it."
+        "Every boundary that takes a failure up and goes on now sets back what"
+        "it began with: an attempt its enclosing stop (attemptEnd), the probe"
+        "the stop it began with and no probe (ldEnded), on every way out, so"
+        "no stop outlives its attempt and a Stopped only reaches the attempt"
+        "whose stop it is. Resetting only the probe on Wants and Deep left the"
+        "stop behind and did not help."
+    chosen = "ProbeEndsWhereItBegan"
+    rejected = ["ProbeResetOnly"]
+    impacts = [ldEnded, lazyProbe]
 
 fn probed(ld: LD, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "The probe's answer, or, past it, the heads met from below and then lazy delta again without a probe."

@@ -1163,7 +1163,7 @@ fn failNamed(e: Fail, n: Name) -> Fail
         Fail.Wants(_, _) -> e
         Fail.Deep(_, _) -> e
         Fail.DeepType(_, _) -> e
-        Fail.Stopped(_, _) -> e
+        Fail.Stopped(_, _) -> Fail.Decline("{Core.Names.render(n)}: an attempt ran past its stop")
 
 verify failNamed
     failNamed(Fail.Decline("d"), Core.Names.str(Core.Names.anon(), "y")) => Fail.Decline("y: d")
