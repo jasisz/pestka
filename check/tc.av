@@ -1896,10 +1896,39 @@ fn evalKnown(st: St, a: Expr) -> Result<RE, Fail>
                 Option.Some(r) -> Result.Ok(RE(e = r, st = st))
                 Option.None -> match farGet(st, a)
                     Option.Some(r) -> Result.Ok(RE(e = r, st = st))
-                    Option.None -> Result.Err(Fail.Deep(a, st))
+                    Option.None -> handedUp(st, a)
 
 verify evalKnown
     resultExpr(evalKnown(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2))) => Core.Exprs.natLit(2)
+
+fn handedUp(st: St, a: Expr) -> Result<RE, Fail>
+    ? "a handed up to the outermost level; under the probe of HeadsMetFromBelow the probe ends here instead (ProbeEndsAtDepth)."
+    match st.probeAt >= 0
+        true -> Result.Err(Fail.Stopped(-2, st))
+        false -> Result.Err(Fail.Deep(a, st))
+
+verify handedUp
+    handedUp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Core.Exprs.fvar(0), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => true
+    handedUp(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), probeAt = 5), Core.Exprs.fvar(0)) == Result.Err(Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), probeAt = 5))) => true
+
+decision ProbeEndsAtDepth
+    date = "2026-11-19"
+    reason =
+        "The probe of HeadsMetFromBelow ends past meetFirst whnf results,"
+        "counted as they are stored. A chain of Nat arithmetic stores"
+        "nothing until its bottom is reached: on the Arena's"
+        "unfold-before-literal-fallback each of 1.57 M values was worked out"
+        "three times, once in the probe, which walked the whole chain of"
+        "2^19 levels (handing arguments up past depth 8192, 753 times)"
+        "before its stores ran past the probe and all it had in progress was"
+        "dropped, and twice by DeepArithmeticResumed after it. A computation"
+        "nested past 8192 levels is past the 4096 results a probe allows, so"
+        "a probe now ends where an argument would be handed up. Ending a"
+        "probe earlier changes only the order of the reference's steps: past"
+        "it come the heads and lazy delta, as before."
+    chosen = "ProbeEndsAtDepth"
+    rejected = ["ProbeByTicks"]
+    impacts = [handedUp, evalKnown]
 
 fn majorReduced(m2: RE, rv: Rec) -> Result<RE, Fail>
     ? "After whnf: a literal becomes its constructor, a structure value is eta expanded."
