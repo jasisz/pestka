@@ -5999,19 +5999,10 @@ verify eqProjParts
     resultBool(eqProjParts(0, RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
 
 fn eqProjMet(m: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "Sides that met are equal; otherwise heads and arguments are compared without a stop, and then the projections reduced, as before (ProjectionAppsCompared)."
+    ? "Sides that met are equal; otherwise the projections are reduced (SidesMeet): the parts were already tried within their attempt, and comparing them again without a stop is the shortcut that can run into a computation."
     match m.i == 1
         true -> yes(m.st)
-        false -> eqPartsAfter(partsOf(m.st, tn, sn)?, tn, sn)
-
-fn eqPartsAfter(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "Equal parts settle it; otherwise the projections are reduced."
-    match r.b
-        true -> yes(r.st)
-        false -> eqRewhnf(r.st, tn, sn)
-
-verify eqPartsAfter
-    resultBool(eqPartsAfter(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+        false -> eqRewhnf(m.st, tn, sn)
 
 verify eqProjMet
     resultBool(eqProjMet(RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
@@ -6035,8 +6026,13 @@ decision SidesMeet
         "one unfolding each, each side allowed as much work as the comparison"
         "took, and when one side comes to a form the other had (the same term,"
         "or one of the same head found equal within half of what is left),"
-        "they are equal; otherwise heads and arguments are compared without a"
-        "stop and the projections reduced, as before. Every step is a"
+        "they are equal; otherwise the projections are reduced, as before."
+        "Comparing heads and arguments once more without a stop before that,"
+        "as the reference does, ran CFSG's Ru2250.zwK_sound past 8 GB (the"
+        "kernel before these rules too): coe T (Z (T^-1 p)) against"
+        "coe (TZ x) p, the last arguments first, asked whether Z (T^-1 p) is"
+        "p, false for a free p, through a decide over 4060 points; with the"
+        "projections reduced it is 7 G and a second. Every step is a"
         "reduction the reference kernel takes and definitional equality is"
         "transitive and symmetric, so an answer is one the reference could"
         "give; an attempt never answers no. An attempt that runs past its stop"
@@ -6048,8 +6044,8 @@ decision SidesMeet
         "owner of the caches, and every write copied them: Init took 18 times"
         "its instructions."
     chosen = "SidesMeet"
-    rejected = ["ArgumentsFirst", "WholeWhnfCore", "SyntacticMeetOnly", "StateRolledBack"]
-    impacts = [sidesMeet, tick, attemptEnd, eqProjApp, partsWithin, metAny]
+    rejected = ["ArgumentsFirst", "WholeWhnfCore", "SyntacticMeetOnly", "StateRolledBack", "PartsAgainWithoutStop"]
+    impacts = [sidesMeet, tick, attemptEnd, eqProjApp, partsWithin, metAny, eqProjMet]
 
 fn meetFirst() -> Int
     ? "The work an attempt may do before it ends with no answer, in ticks: unfoldings, recursor steps, whnf runs, comparisons, lazy delta steps and the steps of sides meeting (SidesMeet). Swept at a quarter and four times (see the decision)."
