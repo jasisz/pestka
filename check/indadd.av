@@ -157,15 +157,40 @@ verify ctorsReserved
     ctorsReserved([]) => false
 
 fn reservedIn(e: Expr) -> Bool
-    ? "A constant or projection whose name starts with _nested."
+    ? "A constant or projection whose name starts with _nested; each shared node of the type walked once, as a type is a DAG."
+    reservedSeen(e, {}).hit
+
+record RS
+    hit: Bool
+    seen: Map<Int, List<Expr>>
+
+fn reservedSeen(e: Expr, seen: Map<Int, List<Expr>>) -> RS
+    ? "The walk, skipping a node already walked (no hit there, or the walk would have ended)."
+    h = Core.Exprs.hashOf(e)
+    match Map.get(seen, h)
+        Option.Some(xs) -> match List.contains(xs, e)
+            true -> RS(hit = false, seen = seen)
+            false -> reservedNew(e, Map.set(seen, h, List.prepend(e, xs)))
+        Option.None -> reservedNew(e, Map.set(seen, h, [e]))
+
+fn reservedNew(e: Expr, seen: Map<Int, List<Expr>>) -> RS
+    ? "One node not walked before."
     match e
-        Expr.Const(_, n, _) -> rootIs(n, "_nested")
-        Expr.Proj(_, s, _, x) -> Bool.or(rootIs(s, "_nested"), reservedIn(x))
-        Expr.App(_, f, a) -> Bool.or(reservedIn(f), reservedIn(a))
-        Expr.Lam(_, t, b) -> Bool.or(reservedIn(t), reservedIn(b))
-        Expr.Pi(_, t, b) -> Bool.or(reservedIn(t), reservedIn(b))
-        Expr.Let(_, t, v, b) -> Bool.or(reservedIn(t), Bool.or(reservedIn(v), reservedIn(b)))
-        _ -> false
+        Expr.Const(_, n, _) -> RS(hit = rootIs(n, "_nested"), seen = seen)
+        Expr.Proj(_, s, _, x) -> match rootIs(s, "_nested")
+            true -> RS(hit = true, seen = seen)
+            false -> reservedSeen(x, seen)
+        Expr.App(_, f, a) -> reservedThen(reservedSeen(f, seen), a)
+        Expr.Lam(_, t, b) -> reservedThen(reservedSeen(t, seen), b)
+        Expr.Pi(_, t, b) -> reservedThen(reservedSeen(t, seen), b)
+        Expr.Let(_, t, v, b) -> reservedThen(reservedThen(reservedSeen(t, seen), v), b)
+        _ -> RS(hit = false, seen = seen)
+
+fn reservedThen(r: RS, b: Expr) -> RS
+    ? "The next child, unless a hit was found."
+    match r.hit
+        true -> r
+        false -> reservedSeen(b, r.seen)
 
 verify reservedIn
     reservedIn(Core.Exprs.cnst(Core.Names.str(Core.Names.str(Core.Names.anon(), "_nested"), "X"), [])) => true
