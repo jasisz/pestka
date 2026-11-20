@@ -1922,14 +1922,14 @@ verify evalKnown
     resultExpr(evalKnown(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2))) => Core.Exprs.natLit(2)
 
 fn handedUp(st: St, a: Expr) -> Result<RE, Fail>
-    ? "a handed up to the outermost level; under the probe of HeadsMetFromBelow the probe ends here instead (ProbeEndsAtDepth)."
-    match st.probeAt >= 0
+    ? "a handed up to the outermost level; within an attempt the outermost attempt ends here instead, with no answer (ProbeEndsAtDepth, OneAttemptCounter)."
+    match st.stop >= 0
         true -> Result.Err(Fail.Stopped(-2, st))
         false -> Result.Err(Fail.Deep(a, st))
 
 verify handedUp
     handedUp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Core.Exprs.fvar(0), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => true
-    handedUp(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), probeAt = 5), Core.Exprs.fvar(0)) == Result.Err(Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), probeAt = 5))) => true
+    handedUp(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5), Core.Exprs.fvar(0)) == Result.Err(Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5))) => true
 
 decision ProbeEndsAtDepth
     date = "2026-11-19"
@@ -2617,9 +2617,9 @@ verify tick
     Result.withDefault(tick(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).ticks => 1
 
 fn attemptEnd(f: Fail, outer: Int, c: NatCtx, d: Int) -> Result<St, Fail>
-    ? "The state an attempt ends with when it fails: past its own stop, or on anything that carries a state, the state it got to, with what was opened or switched on below set back as natOuter sets it and the enclosing stop outer in force again; what it found on the way (whnf results, steps, rules) is kept, being reductions. The stop of an enclosing attempt, and a rejection or a decline, go on up."
+    ? "The state an attempt ends with when it fails: past its own stop, or on anything that carries a state, the state it got to, with what was opened or switched on below set back as natOuter sets it and the enclosing stop outer in force again; what it found on the way (whnf results, steps, rules) is kept, being reductions. The stop of an enclosing attempt, a hand-up (-2) below an enclosing attempt, and a rejection or a decline, go on up."
     match f
-        Fail.Stopped(n, s) -> match Bool.or(n == -2, Bool.and(outer >= 0, n == outer))
+        Fail.Stopped(n, s) -> match Bool.and(outer >= 0, Bool.or(n == -2, n == outer))
             true -> Result.Err(Fail.Stopped(n, s))
             false -> Result.Ok(St.update(restored(s, c, d), stop = outer))
         Fail.Wants(_, s) -> Result.Ok(St.update(restored(s, c, d), stop = outer))
@@ -5763,7 +5763,7 @@ decision HeadsMetFromBelow
 
 fn lazyFrom(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Lazy delta; the outermost one, outside any attempt, between two definitions of different names, under a probe of meetFirst whnf results (HeadsMetFromBelow)."
-    match Bool.and(Bool.and(st.probeAt < 0, st.stop < 0), twoHeads(st, tn, sn))
+    match Bool.and(st.stop < 0, twoHeads(st, tn, sn))
         true -> probed(lazyProbe(st, tn, sn)?, tn, sn)
         false -> eqLazy(lazyDelta(st, tn, sn)?)
 
@@ -5782,12 +5782,11 @@ verify lazyFrom
     resultBool(lazyFrom(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
 
 fn lazyProbe(st: St, tn: Expr, sn: Expr) -> Result<LD, Fail>
-    ? "Lazy delta as an attempt of meetFirst ticks, its stop also kept in probeAt to mark the probe (ProbeByTicks); status -1 when it ran past them, with the state it got to, what it opened set back (DeepArithmeticResumed's restored)."
+    ? "Lazy delta as an attempt of meetFirst ticks (ProbeByTicks); status -1 when it ended with no answer, with the state it got to, what it opened set back (attemptEnd)."
     d = st.evalDepth
     c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth)
-    p = within(st.stop, st.ticks + meetFirst())
     o = st.stop
-    ldEnded(lazyDelta(St.update(st, probeAt = p, stop = p), tn, sn), c, d, o, p, tn, sn)
+    ldEnded(lazyDelta(St.update(st, stop = within(o, st.ticks + meetFirst())), tn, sn), o, c, d, tn, sn)
 
 verify lazyProbe
     resultStatus(lazyProbe(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 0
@@ -5802,9 +5801,8 @@ decision ProbeByTicks
         "steps) against cond (popc8T 4056) ... stored 341 results in 3"
         "million ticks of attempts within it and was still short of its 4096"
         "after 60 s. The probe is now an attempt like the others: its stop is"
-        "meetFirst ticks on (within any stop in force), every whnf run,"
-        "unfolding, recursor step and comparison in it counts, and its stop"
-        "is also kept in probeAt, which marks the probe for ProbeEndsAtDepth."
+        "meetFirst ticks on (within any stop in force), and every whnf run,"
+        "unfolding, recursor step and comparison in it counts."
         "Counting ticks in the probe was once rejected as it made Init 50%"
         "slower, when each count wrote a state shared by a caller; ticks are"
         "now counted in every attempt, and Init is within 0.1%."
@@ -5812,24 +5810,35 @@ decision ProbeByTicks
     rejected = ["ProbeByWhnfResults"]
     impacts = [lazyProbe, ldEnded, whnfRun]
 
-fn ldEnded(r: Result<LD, Fail>, c: NatCtx, d: Int, o: Int, p: Int, tn: Expr, sn: Expr) -> Result<LD, Fail>
-    ? "The probe's lazy delta with no probe in force and the stop o it began with, or status -1 and the state it got to when it ran past the probe (its stop p, or a hand-up), what it opened set back; any other failure goes on, a state it carries likewise with no probe and stop o in force, as whoever takes it up is outside the probe (ProbeEndsWhereItBegan)."
+decision OneAttemptCounter
+    date = "2026-11-20"
+    reason =
+        "The probe of HeadsMetFromBelow had its own counter (whnf results,"
+        "then its stop kept in probeAt), its own end (ldEnded) and its own"
+        "rule at a hand-up (ProbeEndsAtDepth); every other attempt counted"
+        "ticks and ended in attemptEnd. The probe is now an attempt like the"
+        "others and probeAt is gone: it ends in attemptEnd, and a hand-up"
+        "within any attempt ends the outermost attempt with no answer, as it"
+        "ended the probe (Stopped -2 goes up through every attempt below"
+        "the outermost, which takes it). A wrapped hand-up (Deep, DeepType,"
+        "DeepEq) or a want inside the probe ends the probe with no answer"
+        "too, where it went on up before; the reference's route past the"
+        "probe meets it again and takes it up as before."
+    chosen = "OneAttemptCounter"
+    rejected = ["ProbeCountedApart"]
+    impacts = [lazyProbe, ldEnded, handedUp, attemptEnd, lazyFrom]
+
+fn ldEnded(r: Result<LD, Fail>, o: Int, c: NatCtx, d: Int, tn: Expr, sn: Expr) -> Result<LD, Fail>
+    ? "The probe's lazy delta with the stop o it began with in force, or status -1 and the state it got to when it ended with no answer (attemptEnd: past its stop, a hand-up, or anything that carries a state), as any attempt ends (ProbeEndsWhereItBegan, OneAttemptCounter)."
     match r
-        Result.Ok(x) -> Result.Ok(LD(status = x.status, t = x.t, s = x.s, st = St.update(x.st, probeAt = -1, stop = o)))
-        Result.Err(Fail.Stopped(n, s)) -> match Bool.or(n == -2, n == p)
-            true -> Result.Ok(LD(status = -1, t = tn, s = sn, st = St.update(restored(s, c, d), probeAt = -1, stop = o)))
-            false -> Result.Err(Fail.Stopped(n, St.update(s, probeAt = -1, stop = o)))
-        Result.Err(Fail.Wants(w, s)) -> Result.Err(Fail.Wants(w, St.update(s, probeAt = -1, stop = o)))
-        Result.Err(Fail.Deep(x, s)) -> Result.Err(Fail.Deep(x, St.update(s, probeAt = -1, stop = o)))
-        Result.Err(Fail.DeepType(x, s)) -> Result.Err(Fail.DeepType(x, St.update(s, probeAt = -1, stop = o)))
-        Result.Err(Fail.DeepEq(x, y, s)) -> Result.Err(Fail.DeepEq(x, y, St.update(s, probeAt = -1, stop = o)))
-        Result.Err(f) -> Result.Err(f)
+        Result.Ok(x) -> Result.Ok(LD(status = x.status, t = x.t, s = x.s, st = St.update(x.st, stop = o)))
+        Result.Err(f) -> Result.Ok(LD(status = -1, t = tn, s = sn, st = attemptEnd(f, o, c, d)?))
 
 verify ldEnded
-    resultStatus(ldEnded(Result.Ok(LD(status = 2, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, -1, 9, Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 2
-    resultStatus(ldEnded(Result.Err(Fail.Stopped(9, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 9, ticks = 9, probeAt = 9))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, -1, 9, Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => -1
-    resultStatus(ldEnded(Result.Err(Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 9, ticks = 7, probeAt = 3))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, -1, 9, Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => -1
-    ldEnded(Result.Err(Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 9, ticks = 7, probeAt = 3))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, -1, 9, Core.Exprs.fvar(1), Core.Exprs.fvar(2)) == Result.Ok(LD(status = -1, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(2), st = St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ticks = 7))) => true
+    resultStatus(ldEnded(Result.Ok(LD(status = 2, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), -1, ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => 2
+    resultStatus(ldEnded(Result.Err(Fail.Stopped(9, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 9, ticks = 9))), -1, ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => -1
+    resultStatus(ldEnded(Result.Err(Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 9, ticks = 7))), -1, ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => -1
+    ldEnded(Result.Err(Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 9, ticks = 7))), -1, ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.fvar(1), Core.Exprs.fvar(2)) == Result.Ok(LD(status = -1, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(2), st = St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ticks = 7))) => true
 
 decision ProbeEndsWhereItBegan
     date = "2026-11-19"
