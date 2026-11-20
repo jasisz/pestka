@@ -2995,14 +2995,11 @@ fn closedNeed(r: RE, d: Int, ms: MS) -> MR
     MR(e = r.e, st = St.update(r.st, evalDepth = d), ms = ms)
 
 fn needRun(st: St, id: Int, e: Expr, cenv: List<Clo>, ms: MS) -> Result<MR, Fail>
-    ? "The closure run by the machine one level deeper on the run's own memory, its whnf remembered as its value (ArgumentsByNeed); a run is a tick of an attempt and ends a probe already past its stop, but is not counted as a stored result, as it keeps none: counted so, generations of the whnf cache judged by results found per store shrank and neg_a3 took 327 G instead of 116 G; past depth 8192 it is built and handed to Nat arithmetic's argument path (DeepArithmeticResumed)."
+    ? "The closure run by the machine one level deeper on the run's own memory, its whnf remembered as its value (ArgumentsByNeed); a run is a tick of an attempt, so an attempt past its stop ends there (OneAttemptCounter), but is not counted as a stored result, as it keeps none: counted so, generations of the whnf cache judged by results found per store shrank and neg_a3 took 327 G instead of 116 G; past depth 8192 it is built and handed to Nat arithmetic's argument path (DeepArithmeticResumed)."
     d = st.evalDepth
-    w = st.whnfStores
-    match Bool.and(st.probeAt >= 0, w > st.probeAt)
-        true -> Result.Err(Fail.Stopped(-2, st))
-        false -> match d > 8192
-            true -> needDeep(st, id, matClo(Clo.Clo(id, e, cenv), ms))
-            false -> Result.Ok(needDone(lcore(St.update(tick(st)?, evalDepth = d + 1), e, cenv, [], ms, true, false, false)?, id, d))
+    match d > 8192
+        true -> needDeep(st, id, matClo(Clo.Clo(id, e, cenv), ms))
+        false -> Result.Ok(needDone(lcore(St.update(tick(st)?, evalDepth = d + 1), e, cenv, [], ms, true, false, false)?, id, d))
 
 verify needRun
     resultExpr(asRE(needRun(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 1), 0, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {})))) => Core.Exprs.natLit(4)
