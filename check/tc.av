@@ -6393,37 +6393,88 @@ verify quickParts
     quickParts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2))) => Result.Ok(RI(i = 0, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
     resultInt(quickParts(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), eqOk = Check.State.pairPut(Core.Cache.empty(), Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2)))) => 1
 
-fn congruent(st: St, t: Expr, s: Expr) -> Bool
-    ? "Identical, already found equal, or made of such parts."
-    match sameTerm(t, s)
-        true -> true
-        false -> match known(st, t, s)
-            true -> true
-            false -> congruentParts(st, t, s)
-
-verify congruent
-    congruent(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1)) => true
-    congruent(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2)) => false
-
 fn congruentParts(st: St, t: Expr, s: Expr) -> Bool
-    ? "Two applications with congruent functions and arguments, or two projections of the same field of congruent structures."
-    match t
-        Expr.App(_, f, a) -> match s
-            Expr.App(_, g, b) -> match congruent(st, f, g)
-                true -> congruent(st, a, b)
-                false -> false
-            _ -> false
-        Expr.Proj(_, n, i, x) -> match s
-            Expr.Proj(_, m, j, y) -> match Bool.and(n == m, i == j)
-                true -> congruent(st, x, y)
-                false -> false
-            _ -> false
-        _ -> false
+    ? "Two applications with congruent functions and arguments, or two projections of the same field of congruent structures, each pair of arguments walked once (CongruenceWalkedOnce)."
+    match partsSeen(st, t, s, Core.Cache.empty(), false)
+        Option.Some -> true
+        Option.None -> false
 
 verify congruentParts
     congruentParts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1))) => true
     congruentParts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 1, Core.Exprs.fvar(1))) => false
     congruentParts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1)) => false
+    congruentParts(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), eqOk = Check.State.pairPut(Core.Cache.empty(), Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2)), Core.Exprs.fvar(2))) => true
+
+fn congruentSeen(st: St, t: Expr, s: Expr, seen: Map<Core.Exprs.Key, Bucket>, arg: Bool) -> Option<Map<Core.Exprs.Key, Bucket>>
+    ? "Identical, already found equal, a pair of arguments this walk has taken already, or made of such parts: seen with the pairs taken, or none."
+    match sameTerm(t, s)
+        true -> Option.Some(seen)
+        false -> match known(st, t, s)
+            true -> Option.Some(seen)
+            false -> match Check.State.pairGet(seen, t, s)
+                true -> Option.Some(seen)
+                false -> partsSeen(st, t, s, seen, arg)
+
+verify congruentSeen
+    congruentSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Cache.empty(), true) == Option.None => false
+    congruentSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Cache.empty(), true) == Option.None => true
+    congruentSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Check.State.pairPut(Core.Cache.empty(), Core.Exprs.fvar(1), Core.Exprs.fvar(2)), true) == Option.None => false
+
+fn partsSeen(st: St, t: Expr, s: Expr, seen: Map<Core.Exprs.Key, Bucket>, arg: Bool) -> Option<Map<Core.Exprs.Key, Bucket>>
+    ? "The parts of t and s, a pair of arguments recorded as taken before its parts are walked: the walk ends at its first failure, so a pair taken is congruent whenever the walk answers yes."
+    match t
+        Expr.App(_, f, a) -> match s
+            Expr.App(_, g, b) -> headThen(congruentSeen(st, f, g, takenIf(seen, t, s, arg), false), st, a, b)
+            _ -> Option.None
+        Expr.Proj(_, n, i, x) -> match s
+            Expr.Proj(_, m, j, y) -> match Bool.and(n == m, i == j)
+                true -> congruentSeen(st, x, y, takenIf(seen, t, s, arg), true)
+                false -> Option.None
+            _ -> Option.None
+        _ -> Option.None
+
+verify partsSeen
+    partsSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Cache.empty(), true) == Option.None => false
+    partsSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2)), Core.Cache.empty(), true) == Option.None => true
+
+fn takenIf(seen: Map<Core.Exprs.Key, Bucket>, t: Expr, s: Expr, arg: Bool) -> Map<Core.Exprs.Key, Bucket>
+    ? "seen with an argument pair recorded; a function part is reached once per application and is not."
+    match arg
+        true -> Check.State.pairPut(seen, t, s)
+        false -> seen
+
+verify takenIf
+    Core.Cache.size(takenIf(Core.Cache.empty(), Core.Exprs.fvar(1), Core.Exprs.fvar(2), false)) => 0
+    Core.Cache.size(takenIf(Core.Cache.empty(), Core.Exprs.fvar(1), Core.Exprs.fvar(2), true)) => 1
+
+fn headThen(h: Option<Map<Core.Exprs.Key, Bucket>>, st: St, a: Expr, b: Expr) -> Option<Map<Core.Exprs.Key, Bucket>>
+    ? "Congruent functions, then the arguments."
+    match h
+        Option.Some(seen) -> congruentSeen(st, a, b, seen, true)
+        Option.None -> Option.None
+
+verify headThen
+    headThen(Option.None, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1)) => Option.None
+
+decision CongruenceWalkedOnce
+    date = "2026-11-20"
+    reason =
+        "quickParts finds two terms congruent when their parts are identical"
+        "or already found equal, walking both as trees. CFSG's"
+        "E6TwoMat.wordElt_toVec compares two xor accumulators built over 78"
+        "steps in lockstep, each step using the step before twice"
+        "(x ^^^ (1 <<< log2 x)): every pair at the bottom was found equal,"
+        "but the walk took every path to it, doubling with each step (55"
+        "million pairs in one walk, and growing, after 60 s). The reference"
+        "kernel's equivalence check merges the classes of the pairs it finds"
+        "equal, so it meets each pair once. A walk now records each pair of"
+        "arguments it takes and takes it once: as the walk ends at its first"
+        "failure, a pair it has begun is congruent whenever it answers yes."
+        "Only argument pairs are recorded, since a function part is reached"
+        "once from its application; the record lives for one walk."
+    chosen = "CongruenceWalkedOnce"
+    rejected = ["CongruenceAsTree", "CongruenceWithFuel"]
+    impacts = [congruentParts, congruentSeen, partsSeen]
 
 fn known(st: St, t: Expr, s: Expr) -> Bool
     ? "A success recorded in this declaration, or one an earlier declaration kept for closed terms."
