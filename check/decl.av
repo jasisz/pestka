@@ -1285,9 +1285,7 @@ fn failNamed(e: Fail, n: Name) -> Fail
         Fail.Reject(m) -> Fail.Reject("{Core.Names.render(n)}: {m}")
         Fail.Decline(m) -> Fail.Decline("{Core.Names.render(n)}: {m}")
         Fail.Wants(_, _) -> e
-        Fail.Deep(_, _) -> e
-        Fail.DeepType(_, _) -> e
-        Fail.DeepEq(_, _, _) -> Fail.Decline("{Core.Names.render(n)}: definitional equality nested too deep")
+        Fail.Deep(_, _) -> Fail.Decline("{Core.Names.render(n)}: nested too deep")
         Fail.Stopped(_, _) -> Fail.Decline("{Core.Names.render(n)}: an attempt ran past its stop")
 
 verify failNamed

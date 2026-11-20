@@ -868,36 +868,30 @@ decision DeepSpinesResumed
     impacts = [spineChecked, argType]
 
 fn spineChecked(st: St, e: Expr) -> Result<RE, Fail>
-    ? "A closed application checked as a whole spine, one spine deeper; the outermost resumes after an argument handed up from too deep (DeepSpinesResumed)."
-    d = st.inferDepth
+    ? "A closed application checked as a whole spine, one level deeper; the outermost level resumes after a job handed up from too deep (DeepSpinesResumed, OneDeepJob)."
+    d = st.depth
     match d
-        0 -> spineOuter(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = 0, eqDepth = 0), e, st.evalDepth)
-        _ -> Result.Ok(typeLevel(spineCheckedIn(St.update(st, inferDepth = d + 1), e)?, d))
+        0 -> spineOuter(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel), e)
+        _ -> Result.Ok(typeLevel(spineCheckedIn(St.update(st, depth = d + 1), e)?, d))
 
 verify spineChecked
     spineChecked(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => Result.Err(Fail.Reject("function expected"))
 
-fn spineOuter(st: St, c: NatCtx, e: Expr, nd: Int) -> Result<RE, Fail>
-    ? "The outermost spine, its context c and Nat depth nd read off st already."
-    spineRetry(spineCheckedIn(St.update(st, inferDepth = 1), e), c, e, nd)
+fn spineOuter(st: St, c: NatCtx, e: Expr) -> Result<RE, Fail>
+    ? "The outermost level, a spine, its context c read off st already."
+    spineRetry(spineCheckedIn(St.update(st, depth = 1), e), c, e)
 
 verify spineOuter
-    spineOuter(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0, eqDepth = 0), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), 0) => Result.Err(Fail.Reject("function expected"))
+    spineOuter(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => Result.Err(Fail.Reject("function expected"))
 
-fn spineRetry(r: Result<RE, Fail>, c: NatCtx, e: Expr, nd: Int) -> Result<RE, Fail>
-    ? "Done, or the argument handed up inferred here and the spine checked again."
+fn spineRetry(r: Result<RE, Fail>, c: NatCtx, e: Expr) -> Result<RE, Fail>
+    ? "Done, or a job handed up worked out here and the spine checked again (OneDeepJob)."
     match r
         Result.Ok(re) -> Result.Ok(typeLevel(re, 0))
-        Result.Err(Fail.DeepType(x, st)) -> Result.Ok(typeAgain(spineChecked(heldType(infer(restored(st, c, nd), x, false)?, x), e)?))
-        Result.Err(Fail.DeepEq(x, y, st)) -> Result.Err(Fail.DeepEq(x, y, st))
-        Result.Err(Fail.Reject(m)) -> Result.Err(Fail.Reject(m))
-        Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline(m))
-        Result.Err(Fail.Wants(w, st)) -> Result.Err(Fail.Wants(w, st))
-        Result.Err(Fail.Deep(x, st)) -> Result.Err(Fail.Deep(x, st))
-        Result.Err(Fail.Stopped(n, st)) -> Result.Err(Fail.Stopped(n, st))
+        Result.Err(f) -> Result.Ok(typeAgain(spineChecked(jobResumed(f, c)?, e)?))
 
 verify spineRetry
-    resultExpr(spineRetry(Result.Err(Fail.DeepType(Core.Exprs.natLit(1), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0, eqDepth = 0), Core.Exprs.natLit(2), 0)) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
+    resultExpr(spineRetry(Result.Err(Fail.Deep(Job.Infer(Core.Exprs.natLit(1)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1), Core.Exprs.natLit(2))) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
 
 fn typeAgain(r: RE) -> RE
     ? "The result of checking again, taken as it is: a call that is not the last, so that the spine and its retry do not become one loop."
@@ -907,27 +901,27 @@ verify typeAgain
     typeAgain(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).e => Core.Exprs.natLit(1)
 
 fn typeLevel(r: RE, d: Int) -> RE
-    ? "The result with the spine depth back at d."
-    RE(e = r.e, st = St.update(r.st, inferDepth = d))
+    ? "The result with the depth back at d."
+    RE(e = r.e, st = St.update(r.st, depth = d))
 
 verify typeLevel
-    typeLevel(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 3).st.inferDepth => 3
+    typeLevel(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 3).st.depth => 3
 
 fn argType(st: St, x: Expr) -> Result<RE, Fail>
-    ? "An argument's type; past spine depth 4096, an application whose type is not known yet is handed up to the outermost spine (DeepSpinesResumed)."
-    match st.inferDepth > 4096
+    ? "An argument's type; past deepAt levels, an application whose type is not known yet is handed up to the outermost level (DeepSpinesResumed, OneDeepJob)."
+    match st.depth > deepAt()
         false -> infer(st, x, false)
         true -> match x
-            Expr.App -> match Check.State.cacheGet(st.resumedTypes, x)
+            Expr.App -> match heldOf(st, 1, x)
                 Option.Some(t) -> Result.Ok(RE(e = t, st = st))
                 Option.None -> match cachedType(st, x, false)
                     Option.Some(t) -> Result.Ok(RE(e = t, st = st))
-                    Option.None -> Result.Err(Fail.DeepType(x, st))
+                    Option.None -> Result.Err(handedUp(st, Job.Infer(x)))
             _ -> infer(st, x, false)
 
 verify argType
-    resultExpr(argType(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), inferDepth = 5000), Core.Exprs.natLit(3))) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
-    argType(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), inferDepth = 5000), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) == Result.Err(Fail.DeepType(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), inferDepth = 5000))) => true
+    resultExpr(argType(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.natLit(3))) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
+    argType(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) == Result.Err(Fail.Deep(Job.Infer(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
 
 fn spineCheckedIn(st: St, e: Expr) -> Result<RE, Fail>
     ? "A closed application checked as a whole spine: the head, then each argument against its domain."
@@ -1821,39 +1815,89 @@ verify majorWhnf
     resultExpr(majorWhnf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), false, false)) => Core.Exprs.fvar(0)
 
 fn majorDeeper(st: St, e: Expr) -> Result<RE, Fail>
-    ? "Full whnf of a major one evaluation level deeper; the outermost resumes after a major handed up from too deep, and past 8192 a major not already known is handed up (DeepMajorsResumed). The context is read before the state is passed on, so that the state keeps one owner."
-    d = st.evalDepth
+    ? "Full whnf of a major one level deeper; the outermost level resumes after a job handed up from too deep, and past deepAt a major not already known is handed up (DeepMajorsResumed, OneDeepJob). The context is read before the state is passed on, so that the state keeps one owner."
+    d = st.depth
     match d
-        0 -> majorFirst(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth), e)
-        _ -> match d > 8192
-            false -> Result.Ok(evalLevel(whnf(St.update(st, evalDepth = d + 1), e)?, d))
+        0 -> majorFirst(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel), e)
+        _ -> match d > deepAt()
+            false -> Result.Ok(evalLevel(whnf(St.update(st, depth = d + 1), e)?, d))
             true -> evalKnown(st, e)
 
 verify majorDeeper
-    resultExpr(majorDeeper(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 3), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Core.Exprs.natLit(5)
-    majorDeeper(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Core.Exprs.fvar(0), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000))) => true
+    resultExpr(majorDeeper(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 3), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Core.Exprs.natLit(5)
+    majorDeeper(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Job.Whnf(Core.Exprs.fvar(0)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
 
 fn majorFirst(st: St, c: NatCtx, e: Expr) -> Result<RE, Fail>
-    ? "The outermost evaluation level, a major's whnf, its context c read off st already."
-    majorOuter(whnf(St.update(st, evalDepth = 1), e), c, e)
+    ? "The outermost level, a major's whnf, its context c read off st already."
+    majorOuter(whnf(St.update(st, depth = 1), e), c, e)
 
 verify majorFirst
-    resultExpr(majorFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0, eqDepth = 0), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+    resultExpr(majorFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
 
 fn majorOuter(r: Result<RE, Fail>, c: NatCtx, e: Expr) -> Result<RE, Fail>
-    ? "The outermost level: done, or a term handed up from too deep worked out and e tried again, the state set back as natOuter sets it (DeepMajorsResumed)."
+    ? "The outermost level: done, or a job handed up from too deep worked out here and e tried again (DeepMajorsResumed, OneDeepJob)."
     match r
         Result.Ok(re) -> Result.Ok(evalLevel(re, 0))
-        Result.Err(Fail.Deep(x, st)) -> Result.Ok(majorAgain(majorDeeper(heldWhnf(whnf(restored(st, c, 0), x)?, x), e)?))
-        Result.Err(Fail.Reject(m)) -> Result.Err(Fail.Reject(m))
-        Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline(m))
-        Result.Err(Fail.Wants(w, st)) -> Result.Err(Fail.Wants(w, st))
-        Result.Err(Fail.DeepType(x, st)) -> Result.Err(Fail.DeepType(x, st))
-        Result.Err(Fail.DeepEq(x, y, st)) -> Result.Err(Fail.DeepEq(x, y, st))
-        Result.Err(Fail.Stopped(n, st)) -> Result.Err(Fail.Stopped(n, st))
+        Result.Err(f) -> Result.Ok(majorAgain(majorDeeper(jobResumed(f, c)?, e)?))
 
 verify majorOuter
-    resultExpr(majorOuter(Result.Err(Fail.Deep(Core.Exprs.natLit(1), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0, eqDepth = 0), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+    resultExpr(majorOuter(Result.Err(Fail.Deep(Job.Whnf(Core.Exprs.natLit(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+
+decision OneDeepJob
+    date = "2026-11-20"
+    reason =
+        "Four ways of handing work up from too deep had grown one by one:"
+        "Nat arithmetic and majors counted evalDepth (8192), spines"
+        "inferDepth (4096), comparisons of arguments eqDepth (8192), each"
+        "with its own failure (Deep, DeepType, DeepEq), its own outermost"
+        "level that caught only its own kind and its own map of kept"
+        "results. Now one depth counts every level of any of them, one"
+        "failure Deep carries the job (a whnf, a type or a pair to compare)"
+        "with the state it was met in, local context and all, and whichever"
+        "level began at depth 0 works out any job (jobResumed), keeps its"
+        "result in one held map with the kind in the key (HandedUpHeld) and"
+        "does its own work again. Stack a level, measured from the stack"
+        "pointer between depth 1 and 1000 to 8000, PGO build: Nat"
+        "arithmetic 2.5 to 4.1 kB, majors 2.6 to 3.7 kB, comparisons of"
+        "arguments 1.7 kB, spines 1.2 kB (plain build 2.5 to 4.7, 2.5 to"
+        "4.3, 1.6, 0.6). One bound of 8192 keeps the deepest kind where it"
+        "was (34 MB of the 256 MiB a worker has), lets spines go 8192 deep"
+        "(10 MB), and bounds a mixed chain by 34 MB where the three bounds"
+        "allowed 53 MB. Within an attempt a hand-up of any kind ends the"
+        "outermost attempt with no answer (OneAttemptCounter), where the"
+        "innermost one took a type or a pair before."
+    chosen = "OneDeepJob"
+    rejected = ["DepthPerKind"]
+    impacts = [jobResumed, handedUp, deepAt, spineRetry, majorOuter, natOuter, eqOuter, argType, argEq, natArg, evalKnown, needRun]
+
+fn deepAt() -> Int
+    ? "How deep work may nest before what it needs is handed up to the outermost level (OneDeepJob)."
+    8192
+
+verify deepAt
+    deepAt() => 8192
+
+fn jobResumed(f: Fail, c: NatCtx) -> Result<St, Fail>
+    ? "The outermost level after a failure (OneDeepJob): a job handed up from too deep worked out here, on a shallow stack, from the state it came with set back as finishing would leave it (what was opened or switched on below, the depth at 0), its result held for the rest of the declaration (HandedUpHeld); any other failure goes on up."
+    match f
+        Fail.Deep(j, st) -> jobDone(j, restored(st, c, 0))
+        Fail.Reject(m) -> Result.Err(Fail.Reject(m))
+        Fail.Decline(m) -> Result.Err(Fail.Decline(m))
+        Fail.Wants(w, st) -> Result.Err(Fail.Wants(w, st))
+        Fail.Stopped(n, st) -> Result.Err(Fail.Stopped(n, st))
+
+verify jobResumed
+    jobResumed(Fail.Reject("r"), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1)) == Result.Err(Fail.Reject("r")) => true
+
+fn jobDone(j: Job, st: St) -> Result<St, Fail>
+    ? "A job worked out and its result held: a whnf, a type, or the answer for a pair."
+    match j
+        Job.Whnf(x) -> Result.Ok(heldWhnf(whnfValue(st, x)?, x))
+        Job.Infer(x) -> Result.Ok(heldType(infer(st, x, false)?, x))
+        Job.Eq(x, y) -> Result.Ok(heldEq(isDefEq(st, x, y)?, x, y))
+
+verify jobDone
+    heldOf(Result.withDefault(jobDone(Job.Whnf(Core.Exprs.natLit(1)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.natLit(1)) => Option.Some(Core.Exprs.natLit(1))
 
 decision HandedUpHeld
     date = "2026-11-17"
@@ -1883,18 +1927,40 @@ decision HandedUpHeld
     impacts = [heldWhnf, heldType, evalKnown, argType, natOuter, majorOuter, spineRetry]
 
 fn heldWhnf(r: RE, x: Expr) -> St
-    ? "The state with x's whnf kept for the rest of the declaration (HandedUpHeld)."
-    St.update(r.st, resumed = Check.State.cachePut(r.st.resumed, x, r.e))
+    ? "The state with x's whnf held for the rest of the declaration (HandedUpHeld)."
+    St.update(r.st, held = Check.State.cachePutAt(r.st.held, Core.Exprs.keyAt(x, 0), x, r.e))
 
 verify heldWhnf
-    Check.State.cacheGet(heldWhnf(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0)).resumed, Core.Exprs.fvar(0)) => Option.Some(Core.Exprs.natLit(1))
+    heldOf(heldWhnf(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0)), 0, Core.Exprs.fvar(0)) => Option.Some(Core.Exprs.natLit(1))
 
 fn heldType(r: RE, x: Expr) -> St
-    ? "The state with x's type kept for the rest of the declaration (HandedUpHeld)."
-    St.update(r.st, resumedTypes = Check.State.cachePut(r.st.resumedTypes, x, r.e))
+    ? "The state with x's type held for the rest of the declaration (HandedUpHeld)."
+    St.update(r.st, held = Check.State.cachePutAt(r.st.held, Core.Exprs.keyAt(x, 1), x, r.e))
 
 verify heldType
-    Check.State.cacheGet(heldType(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0)).resumedTypes, Core.Exprs.fvar(0)) => Option.Some(Core.Exprs.natLit(1))
+    heldOf(heldType(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0)), 1, Core.Exprs.fvar(0)) => Option.Some(Core.Exprs.natLit(1))
+    heldOf(heldType(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0)), 0, Core.Exprs.fvar(0)) => Option.None
+
+fn heldOf(st: St, kind: Int, x: Expr) -> Option<Expr>
+    ? "x's held whnf (kind 0) or type (kind 1): the kind sits above the hash in the key, so one map holds every kind (OneDeepJob)."
+    Check.State.cacheGetAt(st.held, Core.Exprs.keyAt(x, kind), x)
+
+verify heldOf
+    heldOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, Core.Exprs.fvar(0)) => Option.None
+
+fn heldPairKey(kind: Int, x: Expr, y: Expr) -> Core.Exprs.Key
+    ? "The key of a held pair, found equal (kind 2) or different (kind 3), the kind above the pair's hash."
+    Core.Exprs.key(kind * 2147483648 + Core.Exprs.pairHash(x, y))
+
+verify heldPairKey
+    heldPairKey(2, Core.Exprs.fvar(0), Core.Exprs.fvar(1)) == heldPairKey(3, Core.Exprs.fvar(0), Core.Exprs.fvar(1)) => false
+
+fn heldPair(st: St, kind: Int, x: Expr, y: Expr) -> Bool
+    ? "Whether the pair is held as equal (kind 2) or different (kind 3)."
+    Check.State.pairIn(Map.get(st.held, heldPairKey(kind, x, y)), x, y)
+
+verify heldPair
+    heldPair(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 2, Core.Exprs.fvar(0), Core.Exprs.fvar(1)) => false
 
 fn majorAgain(r: RE) -> RE
     ? "The result of trying again, taken as it is: a call that is not the last, so that majorDeeper and majorOuter do not become one loop."
@@ -1904,36 +1970,36 @@ verify majorAgain
     majorAgain(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).e => Core.Exprs.natLit(1)
 
 fn evalLevel(r: RE, d: Int) -> RE
-    ? "The result with the evaluation depth back at d."
-    RE(e = r.e, st = St.update(r.st, evalDepth = d))
+    ? "The result with the depth back at d."
+    RE(e = r.e, st = St.update(r.st, depth = d))
 
 verify evalLevel
-    evalLevel(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 2).st.evalDepth => 2
+    evalLevel(RE(e = Core.Exprs.natLit(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 2).st.depth => 2
 
 fn evalKnown(st: St, a: Expr) -> Result<RE, Fail>
     ? "Past the depth bound: a literal or a whnf already known, otherwise a, handed up to the outermost level (DeepArithmeticResumed, DeepMajorsResumed)."
     match a
         Expr.NatLit -> Result.Ok(RE(e = a, st = st))
-        _ -> match Check.State.cacheGet(st.resumed, a)
+        _ -> match heldOf(st, 0, a)
             Option.Some(r) -> Result.Ok(RE(e = r, st = st))
             Option.None -> match Check.State.cacheGet(st.whnfCache, a)
                 Option.Some(r) -> Result.Ok(RE(e = r, st = st))
                 Option.None -> match farGet(st, a)
                     Option.Some(r) -> Result.Ok(RE(e = r, st = st))
-                    Option.None -> handedUp(st, a)
+                    Option.None -> Result.Err(handedUp(st, Job.Whnf(a)))
 
 verify evalKnown
     resultExpr(evalKnown(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2))) => Core.Exprs.natLit(2)
 
-fn handedUp(st: St, a: Expr) -> Result<RE, Fail>
-    ? "a handed up to the outermost level; within an attempt the outermost attempt ends here instead, with no answer (ProbeEndsAtDepth, OneAttemptCounter)."
+fn handedUp(st: St, j: Job) -> Fail
+    ? "j handed up to the outermost level (OneDeepJob); within an attempt the outermost attempt ends here instead, with no answer (ProbeEndsAtDepth, OneAttemptCounter)."
     match st.stop >= 0
-        true -> Result.Err(Fail.Stopped(-2, st))
-        false -> Result.Err(Fail.Deep(a, st))
+        true -> Fail.Stopped(-2, st)
+        false -> Fail.Deep(j, st)
 
 verify handedUp
-    handedUp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Core.Exprs.fvar(0), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => true
-    handedUp(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5), Core.Exprs.fvar(0)) == Result.Err(Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5))) => true
+    handedUp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Job.Whnf(Core.Exprs.fvar(0))) == Fail.Deep(Job.Whnf(Core.Exprs.fvar(0)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => true
+    handedUp(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5), Job.Whnf(Core.Exprs.fvar(0))) == Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5)) => true
 
 decision ProbeEndsAtDepth
     date = "2026-11-19"
@@ -2628,18 +2694,16 @@ fn attemptEnd(f: Fail, outer: Int, c: NatCtx, d: Int) -> Result<St, Fail>
             false -> Result.Ok(St.update(restored(s, c, d), stop = outer))
         Fail.Wants(_, s) -> Result.Ok(St.update(restored(s, c, d), stop = outer))
         Fail.Deep(_, s) -> Result.Ok(St.update(restored(s, c, d), stop = outer))
-        Fail.DeepType(_, s) -> Result.Ok(St.update(restored(s, c, d), stop = outer))
-        Fail.DeepEq(_, _, s) -> Result.Ok(St.update(restored(s, c, d), stop = outer))
         Fail.Reject(m) -> Result.Err(Fail.Reject(m))
         Fail.Decline(m) -> Result.Err(Fail.Decline(m))
 
 verify attemptEnd
-    Result.withDefault(attemptEnd(Fail.Stopped(5, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5, ticks = 5)), -1, NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0, eqDepth = 0), 0), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).ticks => 5
-    attemptEnd(Fail.Reject("r"), -1, NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0, eqDepth = 0), 0) == Result.Err(Fail.Reject("r")) => true
+    Result.withDefault(attemptEnd(Fail.Stopped(5, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5, ticks = 5)), -1, NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1), 0), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).ticks => 5
+    attemptEnd(Fail.Reject("r"), -1, NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1), 0) == Result.Err(Fail.Reject("r")) => true
 
 fn ctxOf(st: St) -> NatCtx
     ? "What an attempt sets back when it fails (attemptEnd), read before it starts."
-    NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth)
+    NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel)
 
 verify ctxOf
     ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).fuel => -1
@@ -2855,7 +2919,7 @@ fn natGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Boo
         false -> Result.Ok(stuckGo(st, f, stack, ms))
         true -> match natArity(f, stack)
             0 -> unfoldGo(st, f, c, stack, ms, cheapRec, cheapProj)
-            k -> match st.evalDepth == 0
+            k -> match st.depth == 0
                 true -> natTryGo(st, f, c, stack, matStack(List.take(stack, k), ms, []), cheapRec, cheapProj)
                 false -> natNeedGo(f, c, stack, needAll(st, List.take(stack, k), ms, [])?, cheapRec, cheapProj)
 
@@ -2950,10 +3014,10 @@ verify needNext
 
 fn needOne(st: St, c: Clo, ms: MS) -> Result<MR, Fail>
     ? "A closure's whnf (ArgumentsByNeed): a closed term through the whnf cache; a numbered closure already a literal as it is; one already built, which other terms may hold, through the cache; any other by its term."
-    d = st.evalDepth
+    d = st.depth
     match c
         Clo.Clo(id, e, cenv) -> match id < 0
-            true -> Result.Ok(closedNeed(natArg(St.update(st, evalDepth = d + 1), e)?, d, ms))
+            true -> Result.Ok(closedNeed(natArg(St.update(st, depth = d + 1), e)?, d, ms))
             false -> match Map.get(ms.forced, id)
                 Option.Some(x) -> match x
                     Expr.NatLit -> Result.Ok(MR(e = x, st = st, ms = ms))
@@ -2967,13 +3031,13 @@ fn needBy(st: St, id: Int, e: Expr, cenv: List<Clo>, ms: MS) -> Result<MR, Fail>
         false -> needCached(st, id, matClo(Clo.Clo(id, e, cenv), ms))
 
 verify needBy
-    resultExpr(asRE(needBy(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 1), 0, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {})))) => Core.Exprs.natLit(4)
+    resultExpr(asRE(needBy(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 1), 0, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {})))) => Core.Exprs.natLit(4)
 
 fn needCached(st: St, id: Int, x: MX) -> Result<MR, Fail>
     ? "The built closure as an argument of Nat arithmetic, one level deeper, remembered as its value."
-    d = st.evalDepth
-    r = natArg(St.update(st, evalDepth = d + 1), x.e)?
-    Result.Ok(MR(e = r.e, st = St.update(r.st, evalDepth = d), ms = MS.update(x.ms, forced = Map.set(x.ms.forced, id, r.e))))
+    d = st.depth
+    r = natArg(St.update(st, depth = d + 1), x.e)?
+    Result.Ok(MR(e = r.e, st = St.update(r.st, depth = d), ms = MS.update(x.ms, forced = Map.set(x.ms.forced, id, r.e))))
 
 verify needCached
     resultExpr(asRE(needCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, MX(e = Core.Exprs.natLit(2), ms = MS(next = 0, forced = {}))))) => Core.Exprs.natLit(2)
@@ -2991,22 +3055,22 @@ verify arithHead
     arithHead(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("P", "img"), []), Core.Exprs.natLit(1))) => false
 
 verify needOne
-    resultExpr(asRE(needOne(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 1), Clo.Clo(0, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(4), [])]), MS(next = 0, forced = {})))) => Core.Exprs.natLit(4)
-    resultExpr(asRE(needOne(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 1), Clo.Clo(0, Core.Exprs.bvar(0), []), MS(next = 1, forced = {0 => Core.Exprs.natLit(6)})))) => Core.Exprs.natLit(6)
+    resultExpr(asRE(needOne(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 1), Clo.Clo(0, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(4), [])]), MS(next = 0, forced = {})))) => Core.Exprs.natLit(4)
+    resultExpr(asRE(needOne(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 1), Clo.Clo(0, Core.Exprs.bvar(0), []), MS(next = 1, forced = {0 => Core.Exprs.natLit(6)})))) => Core.Exprs.natLit(6)
 
 fn closedNeed(r: RE, d: Int, ms: MS) -> MR
     ? "A closed term's whnf, the depth back at d."
-    MR(e = r.e, st = St.update(r.st, evalDepth = d), ms = ms)
+    MR(e = r.e, st = St.update(r.st, depth = d), ms = ms)
 
 fn needRun(st: St, id: Int, e: Expr, cenv: List<Clo>, ms: MS) -> Result<MR, Fail>
-    ? "The closure run by the machine one level deeper on the run's own memory, its whnf remembered as its value (ArgumentsByNeed); a run is a tick of an attempt, so an attempt past its stop ends there (OneAttemptCounter), but is not counted as a stored result, as it keeps none: counted so, generations of the whnf cache judged by results found per store shrank and neg_a3 took 327 G instead of 116 G; past depth 8192 it is built and handed to Nat arithmetic's argument path (DeepArithmeticResumed)."
-    d = st.evalDepth
-    match d > 8192
+    ? "The closure run by the machine one level deeper on the run's own memory, its whnf remembered as its value (ArgumentsByNeed); a run is a tick of an attempt, so an attempt past its stop ends there (OneAttemptCounter), but is not counted as a stored result, as it keeps none: counted so, generations of the whnf cache judged by results found per store shrank and neg_a3 took 327 G instead of 116 G; past deepAt levels it is built and handed to Nat arithmetic's argument path (DeepArithmeticResumed, OneDeepJob)."
+    d = st.depth
+    match d > deepAt()
         true -> needDeep(st, id, matClo(Clo.Clo(id, e, cenv), ms))
-        false -> Result.Ok(needDone(lcore(St.update(tick(st)?, evalDepth = d + 1), e, cenv, [], ms, true, false, false)?, id, d))
+        false -> Result.Ok(needDone(lcore(St.update(tick(st)?, depth = d + 1), e, cenv, [], ms, true, false, false)?, id, d))
 
 verify needRun
-    resultExpr(asRE(needRun(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 1), 0, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {})))) => Core.Exprs.natLit(4)
+    resultExpr(asRE(needRun(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 1), 0, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {})))) => Core.Exprs.natLit(4)
 
 fn needDeep(st: St, id: Int, x: MX) -> Result<MR, Fail>
     ? "Past the depth bound: the built closure as an argument of Nat arithmetic."
@@ -3018,7 +3082,7 @@ verify needDeep
 
 fn needDone(r: MR, id: Int, d: Int) -> MR
     ? "The run's whnf kept as the closure's value, the depth back at d."
-    MR(e = r.e, st = St.update(r.st, evalDepth = d), ms = MS.update(r.ms, forced = Map.set(r.ms.forced, id, r.e)))
+    MR(e = r.e, st = St.update(r.st, depth = d), ms = MS.update(r.ms, forced = Map.set(r.ms.forced, id, r.e)))
 
 verify natGo
     Result.withDefault(natGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}), false, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
@@ -4898,8 +4962,8 @@ verify matCloAt
     matCloAt(Clo.Clo(3, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(7), [])]), MS(next = 0, forced = {}), 5000).ms.forced => {3 => Core.Exprs.natLit(7)}
 
 fn matNew(id: Int, e: Expr, cenv: List<Clo>, ms: MS, depth: Int) -> MX
-    ? "A closure not built yet, one closure deeper; past 4096 closures built one inside another, with the closures it needs built first, from the bottom (DeepClosuresBuiltFromTheBottom). The closure is taken apart by the caller and made again only past the bound, so that its parts are moved, not shared."
-    match depth < 4096
+    ? "A closure not built yet, one closure deeper; past deepAt closures built one inside another, with the closures it needs built first, from the bottom (DeepClosuresBuiltFromTheBottom). The closure is taken apart by the caller and made again only past the bound, so that its parts are moved, not shared."
+    match depth < deepAt()
         true -> remembered1(matTermAt(e, cenv, ms, depth + 1), id)
         false -> matChainOf(Clo.Clo(id, e, cenv), ms, depth)
 
@@ -5445,20 +5509,20 @@ decision DeepArithmeticResumed
 
 fn reduceNat(st: St, e: Expr) -> Result<RO, Fail>
     ? "Nat.succ and the binary Nat functions on literal arguments, one level deeper in Nat arithmetic; the outermost operation resumes after an argument handed up from too deep (DeepArithmeticResumed). Its context is read before the state is passed on, so that the state keeps one owner."
-    d = st.evalDepth
+    d = st.depth
     match d
-        0 -> natFirstLevel(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth), e)
-        _ -> Result.Ok(natLevel(reduceNatIn(St.update(st, evalDepth = d + 1), e)?, d))
+        0 -> natFirstLevel(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel), e)
+        _ -> Result.Ok(natLevel(reduceNatIn(St.update(st, depth = d + 1), e)?, d))
 
 verify reduceNat
-    resultOpt(reduceNat(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 3), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
+    resultOpt(reduceNat(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 3), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
 
 fn natFirstLevel(st: St, c: NatCtx, e: Expr) -> Result<RO, Fail>
     ? "The outermost Nat operation, its context c read off st already."
-    natOuter(reduceNatIn(St.update(st, evalDepth = 1), e), c, e)
+    natOuter(reduceNatIn(St.update(st, depth = 1), e), c, e)
 
 verify natFirstLevel
-    resultOpt(natFirstLevel(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0, eqDepth = 0), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
+    resultOpt(natFirstLevel(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
 
 record NatCtx
     kinds: List<Int>
@@ -5468,30 +5532,22 @@ record NatCtx
     opened: Option<Expr>
     eager: Bool
     fuel: Int
-    inferDepth: Int
-    eqDepth: Int
 
 fn natOuter(r: Result<RO, Fail>, c: NatCtx, e: Expr) -> Result<RO, Fail>
-    ? "The outermost Nat operation: done, or an argument handed up from too deep worked out and e tried again. The state the argument comes with holds everything found so far; what was opened or switched on below is set back as it was here, as finishing would have set it, and the variables made stay made."
+    ? "The outermost level, a Nat operation: done, or a job handed up from too deep worked out here and e tried again (DeepArithmeticResumed, OneDeepJob). The state the job comes with holds everything found so far; what was opened or switched on below is set back as it was here, as finishing would have set it, and the variables made stay made."
     match r
         Result.Ok(ro) -> Result.Ok(natLevel(ro, 0))
-        Result.Err(Fail.Deep(x, st)) -> Result.Ok(natAgain(reduceNat(heldWhnf(whnfValue(restored(st, c, 0), x)?, x), e)?))
-        Result.Err(Fail.Reject(m)) -> Result.Err(Fail.Reject(m))
-        Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline(m))
-        Result.Err(Fail.Wants(w, st)) -> Result.Err(Fail.Wants(w, st))
-        Result.Err(Fail.DeepType(x, st)) -> Result.Err(Fail.DeepType(x, st))
-        Result.Err(Fail.DeepEq(x, y, st)) -> Result.Err(Fail.DeepEq(x, y, st))
-        Result.Err(Fail.Stopped(n, st)) -> Result.Err(Fail.Stopped(n, st))
+        Result.Err(f) -> Result.Ok(natAgain(reduceNat(jobResumed(f, c)?, e)?))
 
 verify natOuter
-    resultOpt(natOuter(Result.Err(Fail.Deep(Core.Exprs.natLit(1), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 0, eqDepth = 0), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
+    resultOpt(natOuter(Result.Err(Fail.Deep(Job.Whnf(Core.Exprs.natLit(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
 
-fn restored(st: St, c: NatCtx, evalDepth: Int) -> St
-    ? "st with what was opened or switched on since c was read set back, the Nat depth at evalDepth: the state finishing would have left, with everything found and every variable made kept."
-    St.update(st, evalDepth = evalDepth, inferDepth = c.inferDepth, kinds = c.kinds, kindCounts = c.kindCounts, kindsOpen = c.kindsOpen, open = c.open, opened = c.opened, eager = c.eager, fuel = c.fuel, eqDepth = c.eqDepth)
+fn restored(st: St, c: NatCtx, depth: Int) -> St
+    ? "st with what was opened or switched on since c was read set back, the depth at depth: the state finishing would have left, with everything found and every variable made kept."
+    St.update(st, depth = depth, kinds = c.kinds, kindCounts = c.kindCounts, kindsOpen = c.kindsOpen, open = c.open, opened = c.opened, eager = c.eager, fuel = c.fuel)
 
 verify restored
-    restored(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 7, eager = true), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, inferDepth = 2, eqDepth = 0), 0).inferDepth => 2
+    restored(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 7, eager = true), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1), 2).depth => 2
 
 fn natAgain(r: RO) -> RO
     ? "The result of trying again, taken as it is: a call that is not the last, so that reduceNat and natOuter do not become one loop that every Nat operation would pass through."
@@ -5502,20 +5558,20 @@ verify natAgain
 
 fn natLevel(r: RO, d: Int) -> RO
     ? "The result with the depth back at d."
-    RO(o = r.o, st = St.update(r.st, evalDepth = d))
+    RO(o = r.o, st = St.update(r.st, depth = d))
 
 verify natLevel
-    natLevel(RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 2).st.evalDepth => 2
+    natLevel(RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 2).st.depth => 2
 
 fn natArg(st: St, a: Expr) -> Result<RE, Fail>
-    ? "An argument of Nat arithmetic brought to whnf; past depth 8192, unless a literal or already known, handed up to the outermost operation (DeepArithmeticResumed)."
-    match st.evalDepth > 8192
+    ? "An argument of Nat arithmetic brought to whnf; past deepAt levels, unless a literal or already known, handed up to the outermost level (DeepArithmeticResumed, OneDeepJob)."
+    match st.depth > deepAt()
         false -> whnfValue(st, a)
         true -> evalKnown(st, a)
 
 verify natArg
-    natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Core.Exprs.fvar(0), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000))) => true
-    resultExpr(natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 9000), Core.Exprs.natLit(2))) => Core.Exprs.natLit(2)
+    natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Job.Whnf(Core.Exprs.fvar(0)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
+    resultExpr(natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.natLit(2))) => Core.Exprs.natLit(2)
 
 fn reduceNatIn(st: St, e: Expr) -> Result<RO, Fail>
     ? "Nat.succ and the binary Nat functions on literal arguments."
@@ -6063,8 +6119,8 @@ decision RaceInLazyFrom
 
 fn refWithin(st: St, tn: Expr, sn: Expr) -> Result<RI, Fail>
     ? "The reference's comparison, lazy delta and what comes after it, as an attempt of meetFirst ticks (ProbeByTicks, RaceInLazyFrom): 1 equal, 2 different when it finished, 0 undecided past its stop."
-    d = st.evalDepth
-    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth)
+    d = st.depth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel)
     o = st.stop
     riEnded(refTail(St.update(st, stop = within(o, st.ticks + meetFirst())), tn, sn), o, c, d)
 
@@ -6223,8 +6279,8 @@ verify projFirst
 fn projWithin(st: St, c1: Expr, c2: Expr, sname: Name, idx: Int, stop: Int) -> Result<RI, Fail>
     ? "lazyDeltaProj within the stop: 1 equal, 2 different (it finished), 0 undecided past the stop (attemptEnd)."
     outer = st.stop
-    d = st.evalDepth
-    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth)
+    d = st.depth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel)
     riEnded(lazyDeltaProj(St.update(st, stop = within(outer, stop)), c1, c2, sname, idx), outer, c, d)
 
 verify projWithin
@@ -6326,8 +6382,8 @@ verify partsFirst
 fn partsWithin(st: St, tn: Expr, sn: Expr, fuel: Int) -> Result<RB, Fail>
     ? "Equal heads and equal arguments, found within fuel ticks; false past the stop (attemptEnd)."
     outer = st.stop
-    d = st.evalDepth
-    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth)
+    d = st.depth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel)
     rbEnded(partsOf(St.update(st, stop = within(outer, st.ticks + fuel)), tn, sn), outer, c, d)
 
 fn rbEnded(r: Result<RB, Fail>, outer: Int, c: NatCtx, d: Int) -> Result<RB, Fail>
@@ -6613,8 +6669,8 @@ verify sameHeadOf
 fn eqWithin(st: St, x: Expr, y: Expr, stop: Int) -> Result<RB, Fail>
     ? "x =?= y within the stop; false past it (attemptEnd)."
     outer = st.stop
-    d = st.evalDepth
-    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth)
+    d = st.depth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel)
     rbEnded(isDefEq(St.update(st, stop = within(outer, stop)), x, y), outer, c, d)
 
 verify eqWithin
@@ -6624,8 +6680,8 @@ verify eqWithin
 fn stepWithin(st: St, e: Expr, stop: Int) -> Result<RO, Fail>
     ? "One step of e within the stop, itself a tick; none when it cannot step or ran past the stop (attemptEnd)."
     outer = st.stop
-    d = st.evalDepth
-    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth)
+    d = st.depth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel)
     roEnded(oneStep(St.update(st, stop = within(outer, stop), ticks = st.ticks + 1), e), outer, c, d)
 
 verify stepWithin
@@ -7407,8 +7463,8 @@ verify lazyAgain
 fn argsWithin(st: St, as: List<Expr>, bs: List<Expr>, stop: Int) -> Result<RB, Fail>
     ? "Pairwise equal arguments found within the stop; false past it (attemptEnd)."
     outer = st.stop
-    d = st.evalDepth
-    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth)
+    d = st.depth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel)
     rbEnded(argsAll(St.update(st, stop = within(outer, stop)), as, bs), outer, c, d)
 
 verify argsWithin
@@ -8127,75 +8183,63 @@ decision DeepArgumentsResumed
     rejected = ["LargerStacks", "DeclineWhenDeep"]
     impacts = [argEq, argsTyped, argsAll, eqFirst, eqOuter]
 
-fn deepEqAt() -> Int
-    ? "How many comparisons of arguments may nest before a pair is handed up (DeepArgumentsResumed)."
-    8192
-
-verify deepEqAt
-    deepEqAt() => 8192
-
 fn argEq(st: St, a: Expr, b: Expr) -> Result<RB, Fail>
-    ? "Two arguments compared one level deeper; the outermost comparison works out a pair handed up from too deep and tries again, and past deepEqAt a pair whose answer is not kept is handed up (DeepArgumentsResumed)."
-    d = st.eqDepth
+    ? "Two arguments compared one level deeper; the outermost level works out a job handed up from too deep and compares again, and past deepAt a pair whose answer is not held is handed up (DeepArgumentsResumed, OneDeepJob)."
+    d = st.depth
     match d
-        0 -> eqFirst(st, ctxOf(st), st.evalDepth, a, b)
-        _ -> match d > deepEqAt()
-            false -> Result.Ok(eqLevel(isDefEq(St.update(st, eqDepth = d + 1), a, b)?, d))
+        0 -> eqFirst(st, NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel), a, b)
+        _ -> match d > deepAt()
+            false -> Result.Ok(eqLevel(isDefEq(St.update(st, depth = d + 1), a, b)?, d))
             true -> eqKnown(st, a, b)
 
 verify argEq
     resultBool(argEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(1))) => true
-    resultBool(argEq(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), eqDepth = 3), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => false
-    argEq(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), eqDepth = 9000), Core.Exprs.fvar(0), Core.Exprs.fvar(1)) == Result.Err(Fail.DeepEq(Core.Exprs.fvar(0), Core.Exprs.fvar(1), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), eqDepth = 9000))) => true
+    resultBool(argEq(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 3), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => false
+    argEq(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.fvar(0), Core.Exprs.fvar(1)) == Result.Err(Fail.Deep(Job.Eq(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
 
-fn eqFirst(st: St, c: NatCtx, nd: Int, a: Expr, b: Expr) -> Result<RB, Fail>
-    ? "The outermost comparison of arguments, its context c and Nat depth nd read off st already, so that st has one owner while a and b are compared."
-    eqOuter(isDefEq(St.update(st, eqDepth = 1), a, b), c, nd, a, b)
+fn eqFirst(st: St, c: NatCtx, a: Expr, b: Expr) -> Result<RB, Fail>
+    ? "The outermost level, a comparison of arguments, its context c read off st already, so that st has one owner while a and b are compared."
+    eqOuter(isDefEq(St.update(st, depth = 1), a, b), c, a, b)
 
 verify eqFirst
-    resultBool(eqFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.natLit(1), Core.Exprs.natLit(1))) => true
+    resultBool(eqFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(1), Core.Exprs.natLit(1))) => true
 
 fn eqLevel(r: RB, d: Int) -> RB
-    ? "The answer with the depth of argument comparisons back at d."
-    RB(b = r.b, st = St.update(r.st, eqDepth = d))
+    ? "The answer with the depth back at d."
+    RB(b = r.b, st = St.update(r.st, depth = d))
 
 verify eqLevel
-    eqLevel(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 4).st.eqDepth => 4
+    eqLevel(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 4).st.depth => 4
 
 fn eqKnown(st: St, a: Expr, b: Expr) -> Result<RB, Fail>
-    ? "Past the depth bound: the kept answer for the pair, otherwise the pair handed up."
-    match Check.State.pairGet(st.heldEqOk, a, b)
+    ? "Past the depth bound: the held answer for the pair, otherwise the pair handed up."
+    match heldPair(st, 2, a, b)
         true -> Result.Ok(RB(b = true, st = st))
-        false -> match Check.State.pairGet(st.heldEqNo, a, b)
+        false -> match heldPair(st, 3, a, b)
             true -> Result.Ok(RB(b = false, st = st))
-            false -> Result.Err(Fail.DeepEq(a, b, st))
+            false -> Result.Err(handedUp(st, Job.Eq(a, b)))
 
 verify eqKnown
-    resultBool(eqKnown(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), heldEqOk = Check.State.pairPut(Core.Cache.empty(), Core.Exprs.fvar(0), Core.Exprs.fvar(1))), Core.Exprs.fvar(1), Core.Exprs.fvar(0))) => true
+    resultBool(eqKnown(heldEq(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.fvar(1), Core.Exprs.fvar(0))) => true
 
-fn eqOuter(r: Result<RB, Fail>, c: NatCtx, nd: Int, a: Expr, b: Expr) -> Result<RB, Fail>
-    ? "The outermost comparison of arguments: done, or a pair handed up from too deep worked out here, kept, and a against b compared again, the state set back as natOuter sets it."
+fn eqOuter(r: Result<RB, Fail>, c: NatCtx, a: Expr, b: Expr) -> Result<RB, Fail>
+    ? "The outermost level, a comparison of arguments: done, or a job handed up from too deep worked out here and a against b compared again (OneDeepJob)."
     match r
         Result.Ok(x) -> Result.Ok(eqLevel(x, 0))
-        Result.Err(Fail.DeepEq(x, y, st)) -> Result.Ok(eqAgain(argEq(heldEq(isDefEq(restored(st, c, nd), x, y)?, x, y), a, b)?))
-        Result.Err(Fail.Reject(m)) -> Result.Err(Fail.Reject(m))
-        Result.Err(Fail.Decline(m)) -> Result.Err(Fail.Decline(m))
-        Result.Err(Fail.Wants(w, st)) -> Result.Err(Fail.Wants(w, st))
-        Result.Err(Fail.Deep(x, st)) -> Result.Err(Fail.Deep(x, st))
-        Result.Err(Fail.DeepType(x, st)) -> Result.Err(Fail.DeepType(x, st))
-        Result.Err(Fail.Stopped(n, st)) -> Result.Err(Fail.Stopped(n, st))
+        Result.Err(f) -> Result.Ok(eqAgain(argEq(jobResumed(f, c)?, a, b)?))
 
 verify eqOuter
-    resultBool(eqOuter(Result.Err(Fail.DeepEq(Core.Exprs.natLit(1), Core.Exprs.natLit(1), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), eqDepth = 9000))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.natLit(2), Core.Exprs.natLit(2))) => true
+    resultBool(eqOuter(Result.Err(Fail.Deep(Job.Eq(Core.Exprs.natLit(1), Core.Exprs.natLit(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(2), Core.Exprs.natLit(2))) => true
 
 fn heldEq(r: RB, x: Expr, y: Expr) -> St
-    ? "The state with the answer for x and y kept for the rest of the declaration (HandedUpHeld)."
+    ? "The state with the answer for x and y held for the rest of the declaration (HandedUpHeld)."
     match r.b
-        true -> St.update(r.st, heldEqOk = Check.State.pairPut(r.st.heldEqOk, x, y))
-        false -> St.update(r.st, heldEqNo = Check.State.pairPut(r.st.heldEqNo, x, y))
+        true -> St.update(r.st, held = Core.Cache.add(r.st.held, heldPairKey(2, x, y), (x, y)))
+        false -> St.update(r.st, held = Core.Cache.add(r.st.held, heldPairKey(3, x, y), (x, y)))
 
 verify heldEq
-    Check.State.pairGet(heldEq(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), Core.Exprs.fvar(1)).heldEqNo, Core.Exprs.fvar(0), Core.Exprs.fvar(1)) => true
+    heldPair(heldEq(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), Core.Exprs.fvar(1)), 3, Core.Exprs.fvar(0), Core.Exprs.fvar(1)) => true
+    heldPair(heldEq(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), Core.Exprs.fvar(1)), 2, Core.Exprs.fvar(0), Core.Exprs.fvar(1)) => false
 
 fn eqAgain(r: RB) -> RB
     ? "The answer of comparing again, taken as it is: a call that is not the last, so that argEq and eqOuter do not become one loop."
