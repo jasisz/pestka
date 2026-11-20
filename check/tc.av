@@ -2709,10 +2709,44 @@ verify lcore
     resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), [], [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.natLit(5)
     resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(1)), [], [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(1))
 
+decision ClosedHeadsKnown
+    date = "2026-11-20"
+    reason =
+        "A closed term met alone in head position by a machine that"
+        "unfolds is a term whose whnf the whnf cache may already hold:"
+        "a definition's value that is a closed constant table, or a"
+        "closed argument the body returns as it is. The machine reduced"
+        "it again from the top every time. It is now looked up, young"
+        "and far, first; only a miss goes on into it. Measured on one"
+        "worker, plain builds, single declarations of CFSG:"
+        "KC.BM.Dyadic.basis 42.3 G to 1.7 G (2.98 s to 0.18 s),"
+        "KC.BM.FiveA.shape_rkW88 33.8 G to 0.7 G, the other fourteen"
+        "heavy certificates within 0.5%."
+    chosen = "ClosedHeadsKnown"
+    rejected = ["ClosedHeadsReducedAgain"]
+    impacts = [lclo, lknown]
+
 fn lclo(st: St, c: Clo, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "A closure in head position: its term, in its own environment."
+    ? "A closure in head position: its term, in its own environment. A closed term alone, with unfolding on, is a whnf the cache may hold (ClosedHeadsKnown)."
     match c
-        Clo.Clo(_, e, cenv) -> lcore(st, e, cenv, stack, ms, delta, cheapRec, cheapProj)
+        Clo.Clo(_, e, cenv) -> match delta
+            false -> lcore(st, e, cenv, stack, ms, delta, cheapRec, cheapProj)
+            true -> match cenv
+                [] -> match stack
+                    [] -> lknown(st, e, ms, cheapRec, cheapProj)
+                    _ -> lcore(st, e, cenv, stack, ms, delta, cheapRec, cheapProj)
+                _ -> lcore(st, e, cenv, stack, ms, delta, cheapRec, cheapProj)
+
+fn lknown(st: St, e: Expr, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+    ? "A closed term alone in head position: its whnf as the cache holds it, young or far, else the machine goes on into it (ClosedHeadsKnown)."
+    match Check.State.cacheGet(st.whnfCache, e)
+        Option.Some(r) -> Result.Ok(RE(e = r, st = hitCounted(st)))
+        Option.None -> match farGet(st, e)
+            Option.Some(r) -> Result.Ok(whnfStore(hitCounted(st), e, r))
+            Option.None -> lcore(st, e, [], [], ms, true, cheapRec, cheapProj)
+
+verify lknown
+    resultExpr(lknown(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2), MS(next = 0, forced = {}), false, false)) => Core.Exprs.natLit(2)
 
 verify lclo
     resultExpr(lclo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Clo.Clo(-1, Core.Exprs.natLit(2), []), [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.natLit(2)
