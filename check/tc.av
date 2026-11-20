@@ -2671,7 +2671,7 @@ verify whnfLoop
 
 fn mcore(st: St, t: Expr, env: List<Expr>, stack: List<Expr>, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
     ? "whnfCore as a machine: the head term, the values of its loose bound variables (index 0 first), and the arguments waiting for it (first argument first). The machine keeps them as closures, built only when needed; see lcore."
-    lcore(st, t, closedAll(env, []), closedAll(stack, []), MS(next = 0, forced = {}), false, cheapRec, cheapProj)
+    asRE(lcore(st, t, closedAll(env, []), closedAll(stack, []), MS(next = 0, forced = {}), false, cheapRec, cheapProj))
 
 type Clo
     Clo(Int, Expr, List<Clo>)
@@ -2688,26 +2688,31 @@ record MXs
     es: List<Expr>
     ms: MS
 
-fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "The machine on closures. An argument or a let value is a term with the environment it was met in, numbered so that it is built at most once; beta and let push such a closure, and a bound variable in head position goes on as its closure; past the environment it is loose, as in the value of a definition not checked yet, and is stuck, dropped by the environment's length as matTerm drops it. At a constant: a recursor applied to a constructor takes its rule's right-hand side with the other arguments still closures; then, when delta is on, Nat arithmetic on literals and unfolding a definition, again with the arguments as they are. Terms are built only when the head is stuck, for the major premise of a recursor, and for the arguments of quotient rules and Nat arithmetic."
+record MR
+    e: Expr
+    st: St
+    ms: MS
+
+fn lcore(st: St, t: Expr, env: List<Clo>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<MR, Fail>
+    ? "The machine on closures. An argument or a let value is a term with the environment it was met in, numbered so that it is built at most once; beta and let push such a closure, and a bound variable in head position goes on as its closure; past the environment it is loose, as in the value of a definition not checked yet, and is stuck, dropped by the environment's length as matTerm drops it. At a constant: a recursor applied to a constructor takes its rule's right-hand side with the other arguments still closures; then, when delta is on, Nat arithmetic on literals and unfolding a definition, again with the arguments as they are. Terms are built only when the head is stuck, for the major premise of a recursor, and for the arguments of quotient rules and Nat arithmetic. The answer carries the machine's memory, so that a closure run in place for a caller keeps what it found (ArgumentsByNeed)."
     match t
         Expr.App(_, f, a) -> lcore(st, f, env, List.prepend(closure(a, env, ms.next), stack), MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
         Expr.Lam(_, _, body) -> match stack
             [c, ..rest] -> lcore(st, body, List.prepend(c, env), rest, ms, delta, cheapRec, cheapProj)
-            [] -> Result.Ok(RE(e = matTerm(t, env, ms).e, st = st))
+            [] -> Result.Ok(stuckMR(matTerm(t, env, ms), st))
         Expr.BVar(_, i) -> match List.drop(env, Core.Exprs.indexValue(i))
             [c, .._] -> lclo(st, c, stack, ms, delta, cheapRec, cheapProj)
-            [] -> Result.Ok(RE(e = lstuck(MX(e = Core.Exprs.bvar(Core.Exprs.indexValue(i) - List.len(env)), ms = ms), stack), st = st))
+            [] -> Result.Ok(stuckMR(lstuckM(MX(e = Core.Exprs.bvar(Core.Exprs.indexValue(i) - List.len(env)), ms = ms), stack), st))
         Expr.Let(_, _, v, body) -> lcore(st, body, List.prepend(closure(v, env, ms.next), env), stack, MS.update(ms, next = ms.next + 1), delta, cheapRec, cheapProj)
         Expr.FVar(_, id) -> lvar(st, t, Check.State.localValue(st.lctx, id), stack, ms, delta, cheapRec, cheapProj)
         Expr.Const(_, n, ls) -> lconst(st, t, ls, Check.State.lookup(st, n), stack, ms, delta, cheapRec, cheapProj)
         Expr.Proj(_, s, i, x) -> lproject(st, s, i, matTerm(x, env, ms), stack, delta, cheapRec, cheapProj)
-        _ -> Result.Ok(RE(e = lstuck(matTerm(t, env, ms), stack), st = st))
+        _ -> Result.Ok(stuckMR(lstuckM(matTerm(t, env, ms), stack), st))
 
 verify lcore
-    resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])], [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.natLit(1)
-    resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), [], [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.natLit(5)
-    resultExpr(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(1)), [], [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(1))
+    resultExpr(asRE(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(1), [])], [], MS(next = 0, forced = {}), false, false, false))) => Core.Exprs.natLit(1)
+    resultExpr(asRE(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)), [], [], MS(next = 0, forced = {}), true, false, false))) => Core.Exprs.natLit(5)
+    resultExpr(asRE(lcore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(1)), [], [], MS(next = 0, forced = {}), true, false, false))) => Core.Exprs.app(Core.Exprs.bvar(0), Core.Exprs.natLit(1))
 
 decision ClosedHeadsKnown
     date = "2026-11-20"
@@ -2726,7 +2731,7 @@ decision ClosedHeadsKnown
     rejected = ["ClosedHeadsReducedAgain"]
     impacts = [lclo, lknown]
 
-fn lclo(st: St, c: Clo, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+fn lclo(st: St, c: Clo, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<MR, Fail>
     ? "A closure in head position: its term, in its own environment. A closed term alone, with unfolding on, is a whnf the cache may hold (ClosedHeadsKnown)."
     match c
         Clo.Clo(_, e, cenv) -> match delta
@@ -2737,28 +2742,28 @@ fn lclo(st: St, c: Clo, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, c
                     _ -> lcore(st, e, cenv, stack, ms, delta, cheapRec, cheapProj)
                 _ -> lcore(st, e, cenv, stack, ms, delta, cheapRec, cheapProj)
 
-fn lknown(st: St, e: Expr, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+fn lknown(st: St, e: Expr, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<MR, Fail>
     ? "A closed term alone in head position: its whnf as the cache holds it, young or far, else the machine goes on into it (ClosedHeadsKnown)."
     match Check.State.cacheGet(st.whnfCache, e)
-        Option.Some(r) -> Result.Ok(RE(e = r, st = hitCounted(st)))
+        Option.Some(r) -> Result.Ok(MR(e = r, st = hitCounted(st), ms = ms))
         Option.None -> match farGet(st, e)
-            Option.Some(r) -> Result.Ok(whnfStore(hitCounted(st), e, r))
+            Option.Some(r) -> Result.Ok(MR(e = r, st = whnfStore(hitCounted(st), e, r).st, ms = ms))
             Option.None -> lcore(st, e, [], [], ms, true, cheapRec, cheapProj)
 
 verify lknown
-    resultExpr(lknown(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2), MS(next = 0, forced = {}), false, false)) => Core.Exprs.natLit(2)
+    resultExpr(asRE(lknown(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2), MS(next = 0, forced = {}), false, false))) => Core.Exprs.natLit(2)
 
 verify lclo
-    resultExpr(lclo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Clo.Clo(-1, Core.Exprs.natLit(2), []), [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.natLit(2)
+    resultExpr(asRE(lclo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Clo.Clo(-1, Core.Exprs.natLit(2), []), [], MS(next = 0, forced = {}), false, false, false))) => Core.Exprs.natLit(2)
 
-fn lvar(st: St, t: Expr, v: Option<Expr>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+fn lvar(st: St, t: Expr, v: Option<Expr>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<MR, Fail>
     ? "A let-bound free variable goes on as its value; any other is stuck."
     match v
         Option.Some(x) -> lcore(st, x, [], stack, ms, delta, cheapRec, cheapProj)
-        Option.None -> Result.Ok(RE(e = lstuck(MX(e = t, ms = ms), stack), st = st))
+        Option.None -> Result.Ok(stuckMR(lstuckM(MX(e = t, ms = ms), stack), st))
 
 verify lvar
-    resultExpr(lvar(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Option.None, [], MS(next = 0, forced = {}), false, false, false)) => Core.Exprs.fvar(0)
+    resultExpr(asRE(lvar(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Option.None, [], MS(next = 0, forced = {}), false, false, false))) => Core.Exprs.fvar(0)
 
 decision RigidHeadsStuck
     date = "2026-10-25"
@@ -2776,15 +2781,15 @@ decision RigidHeadsStuck
     rejected = ["RigidHeadsUnfoldTried"]
     impacts = [lconst]
 
-fn lconst(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+fn lconst(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<MR, Fail>
     ? "A constant head: a recursor's rule, a quotient rule, or, with delta, Nat arithmetic and unfolding. A constructor other than Nat.succ, an inductive type and an axiom have nothing to unfold and are stuck at once (RigidHeadsStuck). Where the machine goes is worked out by constGo, and it takes one step there (UnfoldPicked)."
     g = constGo(st, f, ls, c, stack, ms, delta, cheapRec, cheapProj)?
     match g.run
         true -> lcore(g.st, g.t, g.env, g.rest, g.ms, delta, cheapRec, cheapProj)
-        false -> Result.Ok(RE(e = lstuck(MX(e = g.t, ms = g.ms), g.rest), st = g.st))
+        false -> Result.Ok(stuckMR(lstuckM(MX(e = g.t, ms = g.ms), g.rest), g.st))
 
 verify lconst
-    resultExpr(lconst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}), true, false, false)) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
+    resultExpr(asRE(lconst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}), true, false, false))) => Core.Exprs.cnst(Check.Lits.name1("c"), [])
 
 fn constGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "Where the machine goes from the constant f, found as c, with the waiting arguments."
@@ -2832,12 +2837,178 @@ verify quotGo
     Result.withDefault(quotGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("q"), []), MXs(es = [], ms = MS(next = 0, forced = {}))), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
 
 fn natGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
-    ? "With delta: Nat.succ of one argument or a Nat operation of two is tried on literals first, as whnf does; otherwise the head, c as found, unfolds. Without delta the constant is stuck."
+    ? "With delta: Nat.succ of one argument or a Nat operation of two is tried on literals first, as whnf does, its arguments brought to whnf by need below the outermost evaluation level (ArgumentsByNeed); otherwise the head, c as found, unfolds. Without delta the constant is stuck."
     match delta
         false -> Result.Ok(stuckGo(st, f, stack, ms))
         true -> match natArity(f, stack)
             0 -> unfoldGo(st, f, c, stack, ms, cheapRec, cheapProj)
-            k -> natTryGo(st, f, c, stack, matStack(List.take(stack, k), ms, []), cheapRec, cheapProj)
+            k -> match st.evalDepth == 0
+                true -> natTryGo(st, f, c, stack, matStack(List.take(stack, k), ms, []), cheapRec, cheapProj)
+                false -> natNeedGo(f, c, stack, needAll(st, List.take(stack, k), ms, [])?, cheapRec, cheapProj)
+
+record MRs
+    es: List<Expr>
+    st: St
+    ms: MS
+
+decision ArgumentsByNeed
+    date = "2026-11-20"
+    reason =
+        "Inside a whnf, every argument of Nat arithmetic was built as a"
+        "term, looked up in the whnf cache, worked out by a whnf run of"
+        "its own and kept there: about one store per step of a"
+        "certificate's loop, 12 to 33 million per declaration on CFSG's"
+        "heavy certificates (Fi24F4.cnt, S129061.class3, LQT.C4054.hk),"
+        "0.6 to 1.7 GB each, and storing, rehashing and the generations"
+        "it pushed out took a fifth of the time. Below the outermost"
+        "evaluation level, an argument closure whose term is Nat"
+        "arithmetic is now run by the machine in place, on the closures"
+        "it has, and its whnf becomes the closure's value: met again in"
+        "the run it is that literal, with no term built, looked up or"
+        "kept. A closure whose term calls anything else is still built"
+        "and brought to whnf through the cache, which shares the call"
+        "with every equal term, and so is a closure already built, which"
+        "other terms may hold: running those in place lost that sharing,"
+        "as a value kept by closure is found only through that closure."
+        "The arguments are worked out in order and the first that is not"
+        "a literal ends them, as Nat arithmetic ends there: working out"
+        "the rest anyway took Batch27581p2 from 56 G to 454 G."
+        "Every argument in place took LQT.C4054.hk from 216 G to 379 G and"
+        "lnSt12_9 from 6.4 G to 61 G; recursor majors in place as well"
+        "passed 4 GB on six of sixteen certificates; a deferred whnf in"
+        "each closure (Aver's lazy, worked out on a state of its own, as"
+        "a deferred call cannot carry the checker's state) passed 150 s"
+        "on ten; keeping operations on literals past a machine word"
+        "under the operation applied to its literals gained nothing and"
+        "doubled peaks; marking arithmetic whose working out stored a"
+        "result to go through the cache from then on changed nothing."
+        "One worker, plain builds, instructions, wall and peak, before"
+        "and after: C4054.hk 216 G 28.9 s 0.59 GB, 154 G 14.7 s 0.54 GB;"
+        "KernelD4.CA.lsP0_0 76.6 G 10.7 s 1.59 GB, 68.4 G 5.4 s 0.27 GB;"
+        "Fi24F4.cnt 170 G 26.8 s 0.73 GB, 213 G 16.5 s 0.77 GB;"
+        "HS3850.IK.c40 55.7 G 8.3 s 1.68 GB, 57.8 G 4.5 s 0.29 GB;"
+        "S129061.class3 194 G 30.0 s 1.24 GB, 222 G 16.7 s 0.66 GB;"
+        "KernelHS100.s5oBr2 76.9 G 10.3 s, 98.7 G 7.9 s; S26990.k10740"
+        "78.1 G 11.5 s 0.94 GB, 80.8 G 6.1 s 0.25 GB; c0f 336 G 58 s,"
+        "428 G 32 s. The work left is more steps of the machine than the"
+        "cache saved, each cheaper in wall than a store."
+    chosen = "ArgumentsByNeed"
+    rejected = ["ArgumentsBuiltAndCached", "EveryArgumentInPlace", "MajorsInPlace", "DeferredWhnfPerClosure", "WideOperationsCached"]
+    impacts = [natGo, natNeedGo, needAll, needOne, needBy, needRun, needCached, arithHead, lcore]
+
+fn natNeedGo(f: Expr, c: Option<Const>, stack: List<Clo>, v: MRs, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
+    ? "Nat arithmetic on arguments the machine brought to whnf itself: literals go to the operation, anything else unfolds the head."
+    match allNat(v.es)
+        true -> natTryGo(v.st, f, c, stack, MXs(es = v.es, ms = v.ms), cheapRec, cheapProj)
+        false -> natStuck(v.st, f, c, stack, v.ms, cheapRec, cheapProj)
+
+verify natNeedGo
+    Result.withDefault(natNeedGo(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Option.None, [], MRs(es = [Core.Exprs.natLit(1), Core.Exprs.natLit(2)], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {})), false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).t => Core.Exprs.natLit(3)
+
+fn allNat(es: List<Expr>) -> Bool
+    ? "Every term a Nat literal or Nat.zero."
+    match es
+        [] -> true
+        [e, ..rest] -> match Check.Lits.natValue(e)
+            Option.Some -> allNat(rest)
+            Option.None -> false
+
+verify allNat
+    allNat([Core.Exprs.natLit(1)]) => true
+    allNat([Core.Exprs.fvar(1)]) => false
+
+fn needAll(st: St, cs: List<Clo>, ms: MS, acc: List<Expr>) -> Result<MRs, Fail>
+    ? "Each closure brought to whnf by the machine, at most once per run: a numbered closure keeps its whnf as its value."
+    match cs
+        [] -> Result.Ok(MRs(es = List.reverse(acc), st = st, ms = ms))
+        [c, ..rest] -> needNext(needOne(st, c, ms)?, rest, acc)
+
+verify needAll
+    Result.withDefault(needAll(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [Clo.Clo(-1, Core.Exprs.natLit(1), [])], MS(next = 0, forced = {}), []), MRs(es = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}))).es => [Core.Exprs.natLit(1)]
+
+fn needNext(r: MR, rest: List<Clo>, acc: List<Expr>) -> Result<MRs, Fail>
+    ? "One more closure brought to whnf; one that is not a literal ends the arguments there, as Nat arithmetic stops at its first argument that is not one, so the rest are not worked out."
+    match Check.Lits.natValue(r.e)
+        Option.Some -> needAll(r.st, rest, r.ms, List.prepend(r.e, acc))
+        Option.None -> Result.Ok(MRs(es = List.reverse(List.prepend(r.e, acc)), st = r.st, ms = r.ms))
+
+verify needNext
+    Result.withDefault(needNext(MR(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {})), [Clo.Clo(-1, Core.Exprs.natLit(1), [])], []), MRs(es = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}))).es => [Core.Exprs.fvar(0)]
+
+fn needOne(st: St, c: Clo, ms: MS) -> Result<MR, Fail>
+    ? "A closure's whnf (ArgumentsByNeed): a closed term through the whnf cache; a numbered closure already a literal as it is; one already built, which other terms may hold, through the cache; any other by its term."
+    d = st.evalDepth
+    match c
+        Clo.Clo(id, e, cenv) -> match id < 0
+            true -> Result.Ok(closedNeed(natArg(St.update(st, evalDepth = d + 1), e)?, d, ms))
+            false -> match Map.get(ms.forced, id)
+                Option.Some(x) -> match x
+                    Expr.NatLit -> Result.Ok(MR(e = x, st = st, ms = ms))
+                    _ -> needCached(st, id, MX(e = x, ms = ms))
+                Option.None -> needBy(st, id, e, cenv, ms)
+
+fn needBy(st: St, id: Int, e: Expr, cenv: List<Clo>, ms: MS) -> Result<MR, Fail>
+    ? "Nat arithmetic run by the machine in place; a call of anything else built and brought to whnf through the whnf cache, which shares it with every equal term; either way remembered as the closure's value (ArgumentsByNeed)."
+    match arithHead(e)
+        true -> needRun(st, id, e, cenv, ms)
+        false -> needCached(st, id, matClo(Clo.Clo(id, e, cenv), ms))
+
+verify needBy
+    resultExpr(asRE(needBy(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 1), 0, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {})))) => Core.Exprs.natLit(4)
+
+fn needCached(st: St, id: Int, x: MX) -> Result<MR, Fail>
+    ? "The built closure as an argument of Nat arithmetic, one level deeper, remembered as its value."
+    d = st.evalDepth
+    r = natArg(St.update(st, evalDepth = d + 1), x.e)?
+    Result.Ok(MR(e = r.e, st = St.update(r.st, evalDepth = d), ms = MS.update(x.ms, forced = Map.set(x.ms.forced, id, r.e))))
+
+verify needCached
+    resultExpr(asRE(needCached(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, MX(e = Core.Exprs.natLit(2), ms = MS(next = 0, forced = {}))))) => Core.Exprs.natLit(2)
+
+fn arithHead(e: Expr) -> Bool
+    ? "An application of a Nat operation the kernel computes on literals, or of a notation class of arithmetic: cheap to work out again, not worth a place in the whnf cache."
+    match Core.Apps.fnOf(e)
+        Expr.Const(_, Name.Str(Name.Str(Name.Anon, ns, _), op, _), _) -> match ns == "Nat"
+            true -> Bool.or(op == "succ", Check.Lits.isNatOp(op))
+            false -> arithName(ns, op)
+        _ -> false
+
+verify arithHead
+    arithHead(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "land"), []), Core.Exprs.natLit(1))) => true
+    arithHead(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("P", "img"), []), Core.Exprs.natLit(1))) => false
+
+verify needOne
+    resultExpr(asRE(needOne(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 1), Clo.Clo(0, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(4), [])]), MS(next = 0, forced = {})))) => Core.Exprs.natLit(4)
+    resultExpr(asRE(needOne(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 1), Clo.Clo(0, Core.Exprs.bvar(0), []), MS(next = 1, forced = {0 => Core.Exprs.natLit(6)})))) => Core.Exprs.natLit(6)
+
+fn closedNeed(r: RE, d: Int, ms: MS) -> MR
+    ? "A closed term's whnf, the depth back at d."
+    MR(e = r.e, st = St.update(r.st, evalDepth = d), ms = ms)
+
+fn needRun(st: St, id: Int, e: Expr, cenv: List<Clo>, ms: MS) -> Result<MR, Fail>
+    ? "The closure run by the machine one level deeper on the run's own memory, its whnf remembered as its value (ArgumentsByNeed); a run is a tick of an attempt and ends a probe already past its stop, but is not counted as a stored result, as it keeps none: counted so, generations of the whnf cache judged by results found per store shrank and neg_a3 took 327 G instead of 116 G; past depth 8192 it is built and handed to Nat arithmetic's argument path (DeepArithmeticResumed)."
+    d = st.evalDepth
+    w = st.whnfStores
+    match Bool.and(st.probeAt >= 0, w > st.probeAt)
+        true -> Result.Err(Fail.Stopped(-2, st))
+        false -> match d > 8192
+            true -> needDeep(st, id, matClo(Clo.Clo(id, e, cenv), ms))
+            false -> Result.Ok(needDone(lcore(St.update(tick(st)?, evalDepth = d + 1), e, cenv, [], ms, true, false, false)?, id, d))
+
+verify needRun
+    resultExpr(asRE(needRun(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), evalDepth = 1), 0, Core.Exprs.bvar(0), [Clo.Clo(-1, Core.Exprs.natLit(4), [])], MS(next = 0, forced = {})))) => Core.Exprs.natLit(4)
+
+fn needDeep(st: St, id: Int, x: MX) -> Result<MR, Fail>
+    ? "Past the depth bound: the built closure as an argument of Nat arithmetic."
+    r = natArg(st, x.e)?
+    Result.Ok(MR(e = r.e, st = r.st, ms = MS.update(x.ms, forced = Map.set(x.ms.forced, id, r.e))))
+
+verify needDeep
+    resultExpr(asRE(needDeep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, MX(e = Core.Exprs.natLit(2), ms = MS(next = 0, forced = {}))))) => Core.Exprs.natLit(2)
+
+fn needDone(r: MR, id: Int, d: Int) -> MR
+    ? "The run's whnf kept as the closure's value, the depth back at d."
+    MR(e = r.e, st = St.update(r.st, evalDepth = d), ms = MS.update(r.ms, forced = Map.set(r.ms.forced, id, r.e)))
 
 verify natGo
     Result.withDefault(natGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}), false, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
@@ -4421,15 +4592,15 @@ fn peelLams(e: Expr, k: Int) -> Expr
 verify peelLams
     peelLams(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 1) => Core.Exprs.bvar(0)
 
-fn lproject(st: St, s: Name, i: Int, x: MX, stack: List<Clo>, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
+fn lproject(st: St, s: Name, i: Int, x: MX, stack: List<Clo>, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<MR, Fail>
     ? "A projection of a built structure; the field takes the waiting arguments as they are."
     r = reduceProj(st, s, i, x.e, cheapRec, cheapProj)?
     match r.o
         Option.Some(m) -> lcore(r.st, m, [], stack, x.ms, delta, cheapRec, cheapProj)
-        Option.None -> Result.Ok(RE(e = lstuck(MX(e = Core.Exprs.proj(s, i, x.e), ms = x.ms), stack), st = r.st))
+        Option.None -> Result.Ok(stuckMR(lstuckM(MX(e = Core.Exprs.proj(s, i, x.e), ms = x.ms), stack), r.st))
 
 verify lproject
-    resultExpr(lproject(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Lits.name1("P"), 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), [], false, false, false)) => Core.Exprs.proj(Check.Lits.name1("P"), 0, Core.Exprs.fvar(0))
+    resultExpr(asRE(lproject(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Lits.name1("P"), 0, MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), [], false, false, false))) => Core.Exprs.proj(Check.Lits.name1("P"), 0, Core.Exprs.fvar(0))
 
 fn lstuck(h: MX, stack: List<Clo>) -> Expr
     ? "A stuck head applied to the waiting arguments, all built."
@@ -4437,6 +4608,30 @@ fn lstuck(h: MX, stack: List<Clo>) -> Expr
 
 verify lstuck
     lstuck(MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), []) => Core.Exprs.fvar(0)
+
+fn lstuckM(h: MX, stack: List<Clo>) -> MX
+    ? "A stuck head applied to the waiting arguments, all built, with the machine's memory after building them."
+    a = matStack(stack, h.ms, [])
+    MX(e = Core.Apps.mkApps(h.e, a.es), ms = a.ms)
+
+verify lstuckM
+    lstuckM(MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), []).e => Core.Exprs.fvar(0)
+
+fn stuckMR(x: MX, st: St) -> MR
+    ? "The machine's answer: a built term, the state and the machine's memory."
+    MR(e = x.e, st = st, ms = x.ms)
+
+verify stuckMR
+    stuckMR(MX(e = Core.Exprs.fvar(0), ms = MS(next = 0, forced = {})), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)).e => Core.Exprs.fvar(0)
+
+fn asRE(r: Result<MR, Fail>) -> Result<RE, Fail>
+    ? "The machine's answer without its memory."
+    match r
+        Result.Ok(m) -> Result.Ok(RE(e = m.e, st = m.st))
+        Result.Err(f) -> Result.Err(f)
+
+verify asRE
+    resultExpr(asRE(Result.Ok(MR(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}))))) => Core.Exprs.fvar(0)
 
 decision VariableIsItsClosure
     date = "2026-10-24"
@@ -4825,7 +5020,7 @@ fn whnfCoreM(st: St, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fai
             false -> mcached(st, e, cheapRec, cheapProj)
         Expr.Let -> mcached(st, e, cheapRec, cheapProj)
         Expr.Proj -> mcached(st, e, cheapRec, cheapProj)
-        Expr.FVar(_, id) -> lvar(st, e, Check.State.localValue(st.lctx, id), [], MS(next = 0, forced = {}), false, cheapRec, cheapProj)
+        Expr.FVar(_, id) -> asRE(lvar(st, e, Check.State.localValue(st.lctx, id), [], MS(next = 0, forced = {}), false, cheapRec, cheapProj))
         _ -> Result.Ok(RE(e = e, st = st))
 
 verify whnfCoreM
@@ -7237,7 +7432,7 @@ verify stepPeeled
 
 fn stepRun(b: RE, k: Int, stack: List<Clo>) -> Result<RE, Fail>
     ? "whnfCore's machine on the body, as unfoldStep runs it after unfolding: no delta, recursors on cheap terms not reduced, projections cheap."
-    lcore(b.st, b.e, envOf(stack, k, []), List.drop(stack, k), MS(next = 0, forced = {}), false, false, true)
+    asRE(lcore(b.st, b.e, envOf(stack, k, []), List.drop(stack, k), MS(next = 0, forced = {}), false, false, true))
 
 verify stepRun
     resultExpr(stepRun(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 1, [Clo.Clo(-1, Core.Exprs.natLit(4), [])])) => Core.Exprs.natLit(4)
