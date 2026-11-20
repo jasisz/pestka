@@ -6014,13 +6014,94 @@ fn eqProj(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
     match tn
         Expr.Proj(_, s1, i1, c1) -> match sn
             Expr.Proj(_, s2, i2, c2) -> match Bool.and(s1 == s2, i1 == i2)
-                true -> eqProjAfter(lazyDeltaProj(st, c1, c2, s1, i1)?, tn, sn)
+                true -> projFirst(st, tn, sn, c1, c2, s1, i1)
                 false -> eqRewhnf(st, tn, sn)
             _ -> eqRewhnf(st, tn, sn)
         _ -> eqProjApp(st, tn, sn)
 
 verify eqProj
     resultBool(eqProj(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)))) => true
+
+fn projFirst(st: St, tn: Expr, sn: Expr, c1: Expr, c2: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
+    ? "t.i =?= s.i (ProjectionsRaced): the reference's lazy delta on the structures within meetFirst ticks, the tick it starts at read first so that the state keeps one owner."
+    t0 = st.ticks
+    projRef(t0, projWithin(st, c1, c2, sname, idx, t0 + meetFirst())?, tn, sn, c1, c2, sname, idx)
+
+verify projFirst
+    resultBool(projFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Names.anon(), 0)) => true
+
+fn projWithin(st: St, c1: Expr, c2: Expr, sname: Name, idx: Int, stop: Int) -> Result<RI, Fail>
+    ? "lazyDeltaProj within the stop: 1 equal, 2 different (it finished), 0 undecided past the stop (attemptEnd)."
+    outer = st.stop
+    d = st.evalDepth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth)
+    riEnded(lazyDeltaProj(St.update(st, stop = within(outer, stop)), c1, c2, sname, idx), outer, c, d)
+
+verify projWithin
+    resultInt(projWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Names.anon(), 0, 8)) => 1
+
+fn riEnded(r: Result<RB, Fail>, outer: Int, c: NatCtx, d: Int) -> Result<RI, Fail>
+    ? "An attempt's answer with the enclosing stop back, 1 equal or 2 different; 0 and the state it got to when it ran past its stop (attemptEnd): undecided, never different."
+    match r
+        Result.Ok(x) -> Result.Ok(RI(i = answerOf(x.b), st = St.update(x.st, stop = outer)))
+        Result.Err(f) -> Result.Ok(RI(i = 0, st = attemptEnd(f, outer, c, d)?))
+
+verify riEnded
+    resultInt(riEnded(Result.Ok(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), -1, ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0)) => 2
+
+fn answerOf(b: Bool) -> Int
+    ? "1 for equal, 2 for different."
+    match b
+        true -> 1
+        false -> 2
+
+verify answerOf
+    answerOf(true) => 1
+    answerOf(false) => 2
+
+fn projRef(t0: Int, r: RI, tn: Expr, sn: Expr, c1: Expr, c2: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
+    ? "The reference's answer when it finished: equal, or whnfCore of both projections as before. Past its stop the two projections step toward each other, each allowed as much work as the reference took since tick t0, and then lazy delta on the structures goes on without a stop."
+    match r.i
+        1 -> yes(r.st)
+        2 -> eqRewhnf(r.st, tn, sn)
+        _ -> projMet(meetBoth(r.st, tn, sn, r.st.ticks - t0)?, tn, sn, c1, c2, sname, idx)
+
+verify projRef
+    resultBool(projRef(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Names.anon(), 0)) => true
+
+fn projMet(m: RI, tn: Expr, sn: Expr, c1: Expr, c2: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
+    ? "Sides that met are equal; otherwise lazy delta on the structures, then whnfCore of both projections."
+    match m.i == 1
+        true -> yes(m.st)
+        false -> eqProjAfter(lazyDeltaProj(m.st, c1, c2, sname, idx)?, tn, sn)
+
+verify projMet
+    resultBool(projMet(RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Names.anon(), 0)) => true
+
+decision ProjectionsRaced
+    date = "2026-11-20"
+    reason =
+        "CFSG's Y443.interp_wV compares (interp w).2.2 with (inW N0).2.2."
+        "Lazy delta on the structures came to Prod.mk (interpX w) (interpW w)"
+        "against Prod.mk 0 N0, and comparing them field by field asked first"
+        "whether interpX w is 0, which forces the size of an array of 196884"
+        "entries built by pushes; field 2 alone, interpW w against N0, is"
+        "equal after a few unfoldings. Co1Patterson.TwistNative.orderOf_wT"
+        "compares the second fields of two subtype values the same way, and"
+        "the first fields made the kernel decode a string of data byte by"
+        "byte. Both ran past 25 minutes on AWS, the reference route as it"
+        "is. The reference's lazy delta on the structures now runs within"
+        "an attempt of meetFirst ticks; its answer stands when it finishes."
+        "Past the stop the two projections step toward each other"
+        "(FormsBeforeComparisons), each allowed as much work as the"
+        "reference took, and only then the reference goes on without a"
+        "stop. Comparing the structures within an attempt first and the"
+        "reference after, as projection applications are, cost mathlib 2%"
+        "of its instructions: a pair of different structures was compared"
+        "twice."
+    chosen = "ProjectionsRaced"
+    rejected = ["StructuresFirstWithoutStop"]
+    impacts = [eqProj, projFirst, projWithin, projRef, projMet]
 
 decision ProjectionAppsCompared
     date = "2026-11-01"
