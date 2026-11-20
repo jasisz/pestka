@@ -5759,12 +5759,36 @@ decision HeadsMetFromBelow
         "every write."
     chosen = "HeadsMetFromBelow"
     rejected = ["HigherAlwaysFirst", "LowerSideBeforeEachUnfolding"]
-    impacts = [lazyFrom, lazyProbe, headsFirst, lowerReaches, whnfRun]
+    impacts = [lazyFrom, lazyProbe, whnfRun]
+
+decision SidesRace
+    date = "2026-11-20"
+    reason =
+        "Past the probe of lazy delta (HeadsMetFromBelow) the lower side"
+        "stepped toward the higher side's head while its own head stayed"
+        "below (headsFirst, lowerReaches), each within meetFirst ticks, and"
+        "projection applications had their own way of the sides meeting"
+        "(SidesMeet). One way now serves both, the M of the race: the two"
+        "sides step by turns from where they began, the lower one too, each"
+        "allowed as much work as the probe took, looking first for a form"
+        "the other side had and then comparing forms of the same head"
+        "(FormsBeforeComparisons); then lazy delta goes on as the reference"
+        "has it. inv_get's left side comes to the right side as it began in"
+        "eleven steps, a form the first round finds. Step 8 of the cleanup,"
+        "first part: OriginMet and the waits of Nat arithmetic stay as they"
+        "are. Courant and Leroy (A Lazy, Concurrent Convertibility Checker,"
+        "POPL 2026) race subproblems at every node without budgets; their"
+        "measurements show the blow-up of a race at every level, so the"
+        "reference runs alone first and only it says different."
+    chosen = "SidesRace"
+    rejected = ["HeadsMetFromBelowOnly", "RaceAtEveryNodeWithoutBudgets"]
+    impacts = [lazyFrom, probed, probeMet, meetBoth]
 
 fn lazyFrom(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "Lazy delta; the outermost one, outside any attempt, between two definitions of different names, under a probe of meetFirst whnf results (HeadsMetFromBelow)."
+    ? "Lazy delta; the outermost one, outside any attempt, between two definitions of different names, first within an attempt of meetFirst ticks (HeadsMetFromBelow, SidesRace), the tick it starts at read first so that the state keeps one owner."
+    t0 = st.ticks
     match Bool.and(st.stop < 0, twoHeads(st, tn, sn))
-        true -> probed(lazyProbe(st, tn, sn)?, tn, sn)
+        true -> probed(t0, lazyProbe(st, tn, sn)?, tn, sn)
         false -> eqLazy(lazyDelta(st, tn, sn)?)
 
 fn twoHeads(st: St, tn: Expr, sn: Expr) -> Bool
@@ -5862,118 +5886,23 @@ decision ProbeEndsWhereItBegan
     rejected = ["ProbeResetOnly"]
     impacts = [ldEnded, lazyProbe]
 
-fn probed(ld: LD, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "The probe's answer, or, past it, the heads met from below and then lazy delta again without a probe."
+fn probed(t0: Int, ld: LD, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "The probe's answer, or, past it, the two sides stepping toward each other from where they began, each allowed the probe's own budget, meetFirst ticks (SidesRace), and then lazy delta again without a stop."
     match ld.status == -1
-        true -> headsFirst(ld.st, tn, sn)
+        true -> probeMet(meetBoth(ld.st, tn, sn, meetFirst())?, tn, sn)
         false -> eqLazy(ld)
 
+fn probeMet(m: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Sides that met are equal; otherwise lazy delta as the reference has it."
+    match m.i == 1
+        true -> yes(m.st)
+        false -> eqLazy(lazyDelta(m.st, tn, sn)?)
+
+verify probeMet
+    resultBool(probeMet(RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+
 verify probed
-    resultBool(probed(LD(status = 1, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
-
-fn headsFirst(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "Each side in turn steps toward the other side's head constant while its own head stays below it (lowerReaches), within meetFirst ticks; where it gets there and is then found equal to the other side within meetFirst ticks, the pair is equal. Otherwise lazy delta as the reference has it, with no probe: it was asked for as the pair was, and the work done so far is kept."
-    match isDelta(st, sn)
-        Option.Some(cs) -> headsMet(towardHead(st, tn, sn, cs)?, tn, sn)
-        Option.None -> headsMet(RB(b = false, st = st), tn, sn)
-
-verify headsFirst
-    resultBool(headsFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
-
-fn headsMet(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "Equal, or the other side's turn, or lazy delta."
-    match r.b
-        true -> yes(r.st)
-        false -> match isDelta(r.st, tn)
-            Option.Some(ct) -> headsAgain(towardHead(r.st, sn, tn, ct)?, tn, sn)
-            Option.None -> eqLazy(lazyDelta(r.st, tn, sn)?)
-
-verify headsMet
-    resultBool(headsMet(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
-
-fn headsAgain(r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "Equal, or lazy delta."
-    match r.b
-        true -> yes(r.st)
-        false -> eqLazy(lazyDelta(r.st, tn, sn)?)
-
-verify headsAgain
-    resultBool(headsAgain(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
-
-fn towardHead(st: St, lo: Expr, hi: Expr, chi: Const) -> Result<RB, Fail>
-    ? "lo stepped toward chi, hi's head, and compared with hi when it gets there, each within meetFirst ticks."
-    r = reachWithin(st, lo, chi)?
-    match r.o
-        Option.Some(lo2) -> loCompared(r.st, hi, lo2)
-        Option.None -> Result.Ok(RB(b = false, st = r.st))
-
-verify towardHead
-    resultBool(towardHead(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), dropFirst())) => false
-
-fn loCompared(st: St, hi: Expr, lo2: Expr) -> Result<RB, Fail>
-    ? "lo2 against hi within meetFirst ticks, the tick read first so that the state keeps one owner."
-    t0 = st.ticks
-    eqWithin(st, hi, lo2, t0 + meetFirst())
-
-verify loCompared
-    resultBool(loCompared(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
-
-fn reachWithin(st: St, lo: Expr, chi: Const) -> Result<RO, Fail>
-    ? "lowerReaches within meetFirst ticks; none past the stop (attemptEnd)."
-    outer = st.stop
-    d = st.evalDepth
-    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, inferDepth = st.inferDepth, eqDepth = st.eqDepth)
-    t0 = st.ticks
-    roEnded(lowerReaches(St.update(st, stop = within(outer, t0 + meetFirst())), lo, chi), outer, c, d)
-
-verify reachWithin
-    resultOpt(reachWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), dropFirst())) => Option.None
-
-fn lowerReaches(st: St, lo: Expr, chi: Const) -> Result<RO, Fail>
-    ? "lo unfolded one step at a time while its head stays below chi, the head of the other side, until that head is chi's constant (HeadsMetFromBelow)."
-    u = unfoldWhnf(st, lo)?
-    lowerOn(projReduced(u.st, u.e)?, chi)
-
-verify lowerReaches
-    resultOpt(lowerReaches(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), dropFirst())) => Option.None
-
-fn projReduced(st: St, e: Expr) -> Result<RE, Fail>
-    ? "e with a projection at its head reduced, as lazy delta reduces one on the side it does not unfold (tryUnfoldProjApp)."
-    pa = tryUnfoldProjApp(st, e)?
-    match pa.o
-        Option.Some(x) -> Result.Ok(RE(e = x, st = pa.st))
-        Option.None -> Result.Ok(RE(e = e, st = pa.st))
-
-verify projReduced
-    resultExpr(projReduced(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1))) => Core.Exprs.fvar(1)
-
-fn lowerOn(u: RE, chi: Const) -> Result<RO, Fail>
-    ? "The lower side after a step: at chi's constant, still below it, or neither."
-    match Core.Apps.isConst(Core.Apps.fnOf(u.e), Check.State.headOf(chi).name)
-        true -> Result.Ok(RO(o = Option.Some(u.e), st = u.st))
-        false -> match isDelta(u.st, u.e)
-            Option.Some(c2) -> match stillBelow(Check.State.hintsOf(chi), Check.State.hintsOf(c2))
-                true -> lowerReaches(u.st, u.e, chi)
-                false -> Result.Ok(RO(o = Option.None, st = u.st))
-            Option.None -> Result.Ok(RO(o = Option.None, st = u.st))
-
-verify lowerOn
-    resultOpt(lowerOn(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), dropFirst())) => Option.None
-
-fn stillBelow(hi: Hints, h: Hints) -> Bool
-    ? "A head with hints h is still below a head with hints hi: an abbreviation, or a regular definition lower than hi."
-    match h
-        Hints.Abbrev -> true
-        Hints.Regular -> hintOrder(hi, h) < 0
-        Hints.Opaque -> false
-
-verify stillBelow
-    stillBelow(Hints.Regular(3), Hints.Abbrev) => true
-    stillBelow(Hints.Regular(3), Hints.Regular(2)) => true
-    stillBelow(Hints.Regular(3), Hints.Regular(3)) => false
-
-verify eqProofIrrel
-    resultBool(eqProofIrrel(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Succ(Level.Zero)))) => false
+    resultBool(probed(0, LD(status = 1, t = Core.Exprs.fvar(1), s = Core.Exprs.fvar(2), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
 
 fn eqLazy(ld: LD) -> Result<RB, Fail>
     ? "After lazy delta: a known answer, or the remaining structural cases."
