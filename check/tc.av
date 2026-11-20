@@ -29,6 +29,17 @@ record RI
     i: Int
     st: St
 
+record RM
+    i: Int
+    st: St
+    ht: List<Expr>
+    hs: List<Expr>
+
+record Replay
+    on: Bool
+    qt: List<Expr>
+    qs: List<Expr>
+
 record LD
     status: Int
     t: Expr
@@ -6084,10 +6095,63 @@ fn eqProjParts(t0: Int, r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Equal parts settle it; otherwise the sides step toward each other, each side allowed as much work as the parts took since tick t0, and then the comparison goes on as before."
     match r.b
         true -> yes(r.st)
-        false -> eqProjMet(sidesMeet(r.st, [tn], [sn], tn, sn, r.st.ticks - t0, r.st.ticks - t0)?, tn, sn)
+        false -> eqProjMet(meetBoth(r.st, tn, sn, r.st.ticks - t0)?, tn, sn)
 
 verify eqProjParts
     resultBool(eqProjParts(0, RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+
+fn meetBoth(st: St, tn: Expr, sn: Expr, b: Int) -> Result<RI, Fail>
+    ? "The sides step toward each other, each allowed b ticks, looking only for a form the other side had; then the forms they took are gone through again in the same order, comparing forms of the same head (FormsBeforeComparisons)."
+    meetAgain(sidesMeet(st, [tn], [sn], tn, sn, b, b, Replay(on = false, qt = [], qs = []))?, tn, sn, b)
+
+verify meetBoth
+    resultInt(meetBoth(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8)) => 0
+
+fn meetAgain(m: RM, tn: Expr, sn: Expr, b: Int) -> Result<RI, Fail>
+    ? "Met, or the forms taken gone through again with comparisons."
+    match m.i == 1
+        true -> Result.Ok(RI(i = 1, st = m.st))
+        false -> riOf(sidesMeet(m.st, [tn], [sn], tn, sn, b, b, Replay(on = true, qt = formsAfter(m.ht), qs = formsAfter(m.hs)))?)
+
+verify meetAgain
+    resultInt(meetAgain(RM(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ht = [], hs = []), Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8)) => 1
+
+fn formsAfter(h: List<Expr>) -> List<Expr>
+    ? "The forms a side took after its first, in the order taken (h holds the latest first)."
+    restOf(List.reverse(h))
+
+verify formsAfter
+    formsAfter([Core.Exprs.fvar(3), Core.Exprs.fvar(2), Core.Exprs.fvar(1)]) => [Core.Exprs.fvar(2), Core.Exprs.fvar(3)]
+
+fn riOf(m: RM) -> Result<RI, Fail>
+    ? "The answer alone."
+    Result.Ok(RI(i = m.i, st = m.st))
+
+verify riOf
+    resultInt(riOf(RM(i = 0, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ht = [], hs = []))) => 0
+
+decision FormsBeforeComparisons
+    date = "2026-11-20"
+    reason =
+        "In CFSG's KC.S63K.hexLineKeyMap_eq two copies of a Range loop of"
+        "2457 rounds building a HashMap are compared through projection"
+        "applications at every round. The parts failed within their attempt,"
+        "and the sides stepped toward each other, but each new form of the"
+        "right side had the head of a left form, and the comparison of the"
+        "two took half of what was left: the allowance halved at each step"
+        "and was gone a few steps before the right side came to the left"
+        "side's form itself. Then the projections were reduced, at every"
+        "round: 762 s and 4.9 GB on AWS. The sides now step first looking"
+        "only for a form the other had, each within the same allowance, and"
+        "only when that finds none step again comparing forms of the same"
+        "head, as before (invol_eq and zwK_sound need those comparisons)."
+        "Looking for a form is a test of identity, so the first round costs"
+        "the steps alone; the second goes through the forms the first took,"
+        "in the order taken, and takes no step again (stepping both sides"
+        "again cost mathlib 0.5% of its instructions)."
+    chosen = "FormsBeforeComparisons"
+    rejected = ["ComparisonsWithEachStep", "FormsOnly"]
+    impacts = [meetBoth, meetAgain, sidesMeet, metAny]
 
 fn eqProjMet(m: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Sides that met are equal; otherwise the projections are reduced (SidesMeet): the parts were already tried within their attempt, and comparing them again without a stop is the shortcut that can run into a computation."
@@ -6145,91 +6209,123 @@ fn meetFirst() -> Int
 verify meetFirst
     meetFirst() => 4096
 
-fn sidesMeet(st: St, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
-    ? "Steps on t and s by turns, the left first, each side within its own allowance of work (bt, bs ticks): 1 when one side comes to a form the other had, 0 when both are spent or stuck. A side whose step runs past its allowance or cannot step takes no more steps, and the other goes on alone."
+fn sidesMeet(st: St, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int, rp: Replay) -> Result<RM, Fail>
+    ? "Steps on t and s by turns, the left first, each side within its own allowance of work (bt, bs ticks): 1 when one side comes to a form the other had, 0 with the forms of both sides when both are spent or stuck. A side whose step runs past its allowance or cannot step takes no more steps, and the other goes on alone. Replayed (rp.on), the steps are the forms taken before, and forms of the same head are compared (FormsBeforeComparisons)."
     t0 = st.ticks
     match Bool.and(bt <= 0, bs <= 0)
-        true -> Result.Ok(RI(i = 0, st = st))
+        true -> Result.Ok(RM(i = 0, st = st, ht = ht, hs = hs))
         false -> match bt > 0
-            true -> meetLeft(t0, stepWithin(st, t, t0 + bt)?, ht, hs, t, s, bt, bs)
-            false -> meetRight(t0, stepWithin(st, s, t0 + bs)?, ht, hs, t, s, bt, bs)
+            true -> meetLeft(t0, nextForm(st, t, rp.qt, t0 + bt, rp.on)?, ht, hs, t, s, bt, bs, rp)
+            false -> meetRight(t0, nextForm(st, s, rp.qs, t0 + bs, rp.on)?, ht, hs, t, s, bt, bs, rp)
 
 verify sidesMeet
-    resultInt(sidesMeet(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 8)) => 0
-    resultInt(sidesMeet(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 0)) => 0
+    resultRM(sidesMeet(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 8, Replay(on = false, qt = [], qs = []))) => 0
+    resultRM(sidesMeet(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 0, Replay(on = false, qt = [], qs = []))) => 0
+    resultRM(sidesMeet(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [Core.Exprs.fvar(1)], [Core.Exprs.fvar(2)], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 8, Replay(on = true, qt = [], qs = [Core.Exprs.fvar(1)]))) => 1
 
-fn meetLeft(t0: Int, r: RO, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
+fn resultRM(r: Result<RM, Fail>) -> Int
+    ? "The answer of sidesMeet, -1 on a failure."
+    match r
+        Result.Ok(m) -> m.i
+        Result.Err -> -1
+
+verify resultRM
+    resultRM(Result.Err(Fail.Reject("r"))) => -1
+
+fn nextForm(st: St, e: Expr, q: List<Expr>, stop: Int, replay: Bool) -> Result<RO, Fail>
+    ? "The next form of a side: one step of e within the stop, or, replayed, the next form it took before."
+    match replay
+        true -> match q
+            [x, .._] -> Result.Ok(RO(o = Option.Some(x), st = st))
+            [] -> Result.Ok(RO(o = Option.None, st = st))
+        false -> stepWithin(st, e, stop)
+
+verify nextForm
+    resultOpt(nextForm(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), [Core.Exprs.fvar(2)], 8, true)) => Option.Some(Core.Exprs.fvar(2))
+    resultOpt(nextForm(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), [], 8, true)) => Option.None
+
+fn restOf(q: List<Expr>) -> List<Expr>
+    ? "A queue of forms past its first."
+    match q
+        [_, ..rest] -> rest
+        [] -> []
+
+verify restOf
+    restOf([Core.Exprs.fvar(1), Core.Exprs.fvar(2)]) => [Core.Exprs.fvar(2)]
+    restOf([]) => []
+
+fn meetLeft(t0: Int, r: RO, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int, rp: Replay) -> Result<RM, Fail>
     ? "After a step on the left, begun at tick t0: met, or the right side's turn, the left's allowance less what the step and the comparisons took; a left side that did not step is done."
     match r.o
-        Option.Some(t2) -> leftCompared(t0, metAny(r.st, t2, hs, t0 + bt)?, ht, hs, t2, s, bt, bs)
-        Option.None -> meetRightTurn(r.st, ht, hs, t, s, 0, bs)
+        Option.Some(t2) -> leftCompared(t0, metAny(r.st, t2, hs, t0 + bt, rp.on)?, ht, hs, t2, s, bt, bs, Replay(on = rp.on, qt = restOf(rp.qt), qs = rp.qs))
+        Option.None -> meetRightTurn(r.st, ht, hs, t, s, 0, bs, rp)
 
 verify meetLeft
-    resultInt(meetLeft(0, RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 0)) => 0
-    resultInt(meetLeft(0, RO(o = Option.Some(Core.Exprs.fvar(2)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [Core.Exprs.fvar(2)], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 0)) => 1
+    resultRM(meetLeft(0, RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 0, Replay(on = false, qt = [], qs = []))) => 0
+    resultRM(meetLeft(0, RO(o = Option.Some(Core.Exprs.fvar(2)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [Core.Exprs.fvar(2)], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 0, Replay(on = false, qt = [], qs = []))) => 1
 
-fn leftCompared(t0: Int, m: RI, ht: List<Expr>, hs: List<Expr>, t2: Expr, s: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
+fn leftCompared(t0: Int, m: RI, ht: List<Expr>, hs: List<Expr>, t2: Expr, s: Expr, bt: Int, bs: Int, rp: Replay) -> Result<RM, Fail>
     ? "The new left form met the right side's forms, or the right side's turn."
     match m.i == 1
-        true -> Result.Ok(m)
-        false -> meetRightTurn(m.st, List.prepend(t2, ht), hs, t2, s, bt - (m.st.ticks - t0), bs)
+        true -> Result.Ok(RM(i = 1, st = m.st, ht = [], hs = []))
+        false -> meetRightTurn(m.st, List.prepend(t2, ht), hs, t2, s, bt - (m.st.ticks - t0), bs, rp)
 
 verify leftCompared
-    resultInt(leftCompared(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 8)) => 1
+    resultRM(leftCompared(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 8, Replay(on = false, qt = [], qs = []))) => 1
 
-fn meetRightTurn(st: St, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
+fn meetRightTurn(st: St, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int, rp: Replay) -> Result<RM, Fail>
     ? "The right side steps when it has an allowance left; otherwise the left goes on."
     t0 = st.ticks
     match bs > 0
-        true -> meetRight(t0, stepWithin(st, s, t0 + bs)?, ht, hs, t, s, bt, bs)
-        false -> sidesMeet(st, ht, hs, t, s, bt, bs)
+        true -> meetRight(t0, nextForm(st, s, rp.qs, t0 + bs, rp.on)?, ht, hs, t, s, bt, bs, rp)
+        false -> sidesMeet(st, ht, hs, t, s, bt, bs, rp)
 
 verify meetRightTurn
-    resultInt(meetRightTurn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 0)) => 0
+    resultRM(meetRightTurn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 0, Replay(on = false, qt = [], qs = []))) => 0
 
-fn meetRight(t0: Int, r: RO, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
+fn meetRight(t0: Int, r: RO, ht: List<Expr>, hs: List<Expr>, t: Expr, s: Expr, bt: Int, bs: Int, rp: Replay) -> Result<RM, Fail>
     ? "After a step on the right, begun at tick t0: met, or round again; a right side that did not step is done."
     match r.o
-        Option.Some(s2) -> rightCompared(t0, metAny(r.st, s2, ht, t0 + bs)?, ht, hs, t, s2, bt, bs)
-        Option.None -> sidesMeet(r.st, ht, hs, t, s, bt, 0)
+        Option.Some(s2) -> rightCompared(t0, metAny(r.st, s2, ht, t0 + bs, rp.on)?, ht, hs, t, s2, bt, bs, Replay(on = rp.on, qt = rp.qt, qs = restOf(rp.qs)))
+        Option.None -> sidesMeet(r.st, ht, hs, t, s, bt, 0, rp)
 
 verify meetRight
-    resultInt(meetRight(0, RO(o = Option.Some(Core.Exprs.fvar(1)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [Core.Exprs.fvar(1)], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 8)) => 1
-    resultInt(meetRight(0, RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 8)) => 0
+    resultRM(meetRight(0, RO(o = Option.Some(Core.Exprs.fvar(1)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [Core.Exprs.fvar(1)], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 8, Replay(on = false, qt = [], qs = []))) => 1
+    resultRM(meetRight(0, RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 0, 8, Replay(on = false, qt = [], qs = []))) => 0
 
-fn rightCompared(t0: Int, m: RI, ht: List<Expr>, hs: List<Expr>, t: Expr, s2: Expr, bt: Int, bs: Int) -> Result<RI, Fail>
+fn rightCompared(t0: Int, m: RI, ht: List<Expr>, hs: List<Expr>, t: Expr, s2: Expr, bt: Int, bs: Int, rp: Replay) -> Result<RM, Fail>
     ? "The new right form met the left side's forms, or round again."
     match m.i == 1
-        true -> Result.Ok(m)
-        false -> sidesMeet(m.st, ht, List.prepend(s2, hs), t, s2, bt, bs - (m.st.ticks - t0))
+        true -> Result.Ok(RM(i = 1, st = m.st, ht = [], hs = []))
+        false -> sidesMeet(m.st, ht, List.prepend(s2, hs), t, s2, bt, bs - (m.st.ticks - t0), rp)
 
 verify rightCompared
-    resultInt(rightCompared(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 8)) => 1
+    resultRM(rightCompared(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], [], Core.Exprs.fvar(1), Core.Exprs.fvar(2), 8, 8, Replay(on = false, qt = [], qs = []))) => 1
 
-fn metAny(st: St, x: Expr, ys: List<Expr>, stop: Int) -> Result<RI, Fail>
-    ? "1 when x is one of ys, or has the head of one of them and is found equal to it; each form compared is a tick, and a comparison may take half of what is left before the stop, so that one that runs long leaves the side room to step on."
+fn metAny(st: St, x: Expr, ys: List<Expr>, stop: Int, eq: Bool) -> Result<RI, Fail>
+    ? "1 when x is one of ys, or, when eq, has the head of one of them and is found equal to it; each form compared is a tick, and a comparison may take half of what is left before the stop, so that one that runs long leaves the side room to step on."
     match ys
         [] -> Result.Ok(RI(i = 0, st = st))
         [y, ..rest] -> match st.ticks >= stop
             true -> Result.Ok(RI(i = 0, st = st))
             false -> match x == y
                 true -> Result.Ok(RI(i = 1, st = st))
-                false -> match sameHeadOf(x, y)
-                    true -> metNext(eqWithin(St.update(st, ticks = st.ticks + 1), x, y, st.ticks + 1 + Int.div(stop - st.ticks, 2))?, x, rest, stop)
-                    false -> metAny(St.update(st, ticks = st.ticks + 1), x, rest, stop)
+                false -> match Bool.and(eq, sameHeadOf(x, y))
+                    true -> metNext(eqWithin(St.update(st, ticks = st.ticks + 1), x, y, st.ticks + 1 + Int.div(stop - st.ticks, 2))?, x, rest, stop, eq)
+                    false -> metAny(St.update(st, ticks = st.ticks + 1), x, rest, stop, eq)
 
 verify metAny
-    resultInt(metAny(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), [Core.Exprs.fvar(2), Core.Exprs.fvar(1)], 8)) => 1
-    resultInt(metAny(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), [Core.Exprs.fvar(2)], 8)) => 0
+    resultInt(metAny(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), [Core.Exprs.fvar(2), Core.Exprs.fvar(1)], 8, true)) => 1
+    resultInt(metAny(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), [Core.Exprs.fvar(2)], 8, true)) => 0
 
-fn metNext(r: RB, x: Expr, rest: List<Expr>, stop: Int) -> Result<RI, Fail>
+fn metNext(r: RB, x: Expr, rest: List<Expr>, stop: Int, eq: Bool) -> Result<RI, Fail>
     ? "Met, or the next form."
     match r.b
         true -> Result.Ok(RI(i = 1, st = r.st))
-        false -> metAny(r.st, x, rest, stop)
+        false -> metAny(r.st, x, rest, stop, true)
 
 verify metNext
-    resultInt(metNext(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), [], 8)) => 1
+    resultInt(metNext(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), [], 8, true)) => 1
 
 fn sameHeadOf(x: Expr, y: Expr) -> Bool
     ? "Applications with the same constant or the same projection at the head."
