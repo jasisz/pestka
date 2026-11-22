@@ -653,15 +653,15 @@ fn runSize(n: Int, workers: Int) -> Int
     Int.max(16 * perDecl(), Result.withDefault(Int.div(n + w - 1, w), 16))
 
 fn runsPerWorker() -> Int
-    ? "How many runs each worker is dealt (WorkersByNamespace, RunsForTheTail)."
-    16
+    ? "How many runs each worker is dealt (WorkersByNamespace, RunsForTheTail, RunsFinerThanComputation)."
+    64
 
 verify runsPerWorker
     runsPerWorker() > 0 => true
 
 verify runSize
     runSize(0, 1) => 16 * perDecl()
-    runSize(3200000000, 8) => 25000000
+    runSize(3200000000, 8) => 6250000
     runSize(100, 4) => 16 * perDecl()
 
 fn costOf(jobs: List<Job>, acc: Int) -> Int
@@ -718,6 +718,39 @@ decision RunsForTheTail
         "512 runs), so a worker still carries its facts from run to run."
     chosen = "SixteenRunsPerWorker"
     rejected = ["FourRunsPerWorker", "DealtByEstimatedCost"]
+    impacts = [runsPerWorker, runSize]
+
+decision RunsFinerThanComputation
+    date = "2026-11-22"
+    reason =
+        "The estimate a run is cut by misses computation almost wholly. On"
+        "CFSG's run124 slice (628202 declarations, four workers, --only of"
+        "its certificates) 85% of the checking time is spent in jobs that"
+        "the estimate puts at perDecl, with no block of their own; the"
+        "slowest 1% of jobs take 89.5% of it, the slowest single job 13 s;"
+        "Pearson between estimate and time 0.04. On p5 (32 workers, 512"
+        "runs), runs equal by the estimate took 1 s to 37384 s, and the"
+        "slowest hundred 84% of the time. That work lies in stretches of"
+        "neighbouring runs, and runs dealt in turn spread a stretch over as"
+        "many workers as it has runs, so finer runs spread it further;"
+        "dealing by the estimate cannot, as all runs are equal by it."
+        "PGO, four workers, 16 against 64 and 256 runs per worker:"
+        "run124 1052.7 s, 22698 G, 9.88 GB against 706.3 s, 22698 G,"
+        "8.96 GB and 954.5 s, 22739 G, 8.92 GB; run349 343.3 s, 8668 G,"
+        "4.70 GB against 334.0 s, 8669 G, 5.39 GB and 326.3 s, 8671 G,"
+        "4.79 GB; mathlib 1273.2 G, 60.3 s, 3.72 GB against 1283.3 G,"
+        "59.0 s, 3.77 GB and 1307.0 G, 59.0 s, 3.66 GB; Init 56.62 G against"
+        "56.65 G and 57.48 G, 2.3 to 2.4 s each. At 256 the heavy runs of"
+        "run124 fell every fourth run, on one worker (944 s against the"
+        "others' 342 to 429 s): runs dealt in turn are as even as the"
+        "stretches allow only while the work does not repeat with the"
+        "workers' period. Replaying p5's run times split evenly, the last"
+        "of 32 workers would end at 15.9 h with 16 runs a worker, 12.4 h"
+        "with 64, against 10.8 h with every run placed best; of 64 workers"
+        "7.9 h, 6.2 h and 5.4 h. One worker checks the same runs in the"
+        "same order whatever the count, so its work does not change."
+    chosen = "SixtyFourRunsPerWorker"
+    rejected = ["SixteenRunsPerWorker", "TwoHundredFiftySixRunsPerWorker", "RoundsRotatedByHash", "DealtInSnakeOrder"]
     impacts = [runsPerWorker, runSize]
 
 decision RunsByProofSize
