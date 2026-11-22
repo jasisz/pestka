@@ -28,6 +28,7 @@ decision CongruenceAfterSteps
 record CW
     seen: Map<Core.Exprs.Key, Bucket>
     walked: Bool
+    ok: Bool
 
 record RI
     i: Int
@@ -6824,9 +6825,7 @@ verify quickParts
 
 fn congruentParts(st: St, t: Expr, s: Expr) -> Bool
     ? "Two applications with congruent functions and arguments, or two projections of the same field of congruent structures, each pair of arguments with a walked pair below it walked once (CongruenceWalkedOnce)."
-    match partsSeen(st, t, s, Core.Cache.empty())
-        Option.Some -> true
-        Option.None -> false
+    partsSeen(st, t, s, Core.Cache.empty()).ok
 
 verify congruentParts
     congruentParts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1))) => true
@@ -6834,16 +6833,16 @@ verify congruentParts
     congruentParts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1)) => false
     congruentParts(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), eqOk = Check.State.pairPut(Core.Cache.empty(), Core.Exprs.fvar(1), Core.Exprs.fvar(2))), Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2)), Core.Exprs.fvar(2))) => true
 
-fn argSeen(st: St, t: Expr, s: Expr, seen: Map<Core.Exprs.Key, Bucket>) -> Option<CW>
+fn argSeen(st: St, t: Expr, s: Expr, seen: Map<Core.Exprs.Key, Bucket>) -> CW
     ? "A pair of arguments: identical, already found equal or taken by this walk (not walked), or made of congruent parts (walked), recorded once found congruent when a pair below it was walked too."
     match trivially(st, t, s, seen)
-        true -> Option.Some(CW(seen = seen, walked = false))
+        true -> CW(seen = seen, walked = false, ok = true)
         false -> walkedArg(partsSeen(st, t, s, seen), t, s)
 
 verify argSeen
-    argSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Cache.empty()) == Option.None => false
-    argSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Cache.empty()) == Option.None => true
-    argSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Check.State.pairPut(Core.Cache.empty(), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) == Option.None => false
+    argSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Cache.empty()).ok => true
+    argSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Cache.empty()).ok => false
+    argSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Check.State.pairPut(Core.Cache.empty(), Core.Exprs.fvar(1), Core.Exprs.fvar(2))).ok => true
 
 fn trivially(st: St, t: Expr, s: Expr, seen: Map<Core.Exprs.Key, Bucket>) -> Bool
     ? "Identical, already found equal, or a pair this walk has found congruent."
@@ -6856,62 +6855,68 @@ fn trivially(st: St, t: Expr, s: Expr, seen: Map<Core.Exprs.Key, Bucket>) -> Boo
 verify trivially
     trivially(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Cache.empty()) => false
 
-fn walkedArg(r: Option<CW>, t: Expr, s: Expr) -> Option<CW>
+fn walkedArg(r: CW, t: Expr, s: Expr) -> CW
     ? "A pair of arguments found congruent by its parts, recorded when a pair below it was walked: a pair whose parts were all found at once costs no more than its parts to find again."
-    match r
-        Option.Some(w) -> match w.walked
-            true -> Option.Some(CW(seen = Check.State.pairPut(w.seen, t, s), walked = true))
-            false -> Option.Some(CW(seen = w.seen, walked = true))
-        Option.None -> Option.None
+    match Bool.and(r.ok, r.walked)
+        true -> CW(seen = Check.State.pairPut(r.seen, t, s), walked = true, ok = true)
+        false -> CW(seen = r.seen, walked = r.ok, ok = r.ok)
 
 verify walkedArg
-    walkedArg(Option.None, Core.Exprs.fvar(1), Core.Exprs.fvar(2)) == Option.None => true
+    walkedArg(failed(Core.Cache.empty()), Core.Exprs.fvar(1), Core.Exprs.fvar(2)).ok => false
+    walkedArg(CW(seen = Core.Cache.empty(), walked = false, ok = true), Core.Exprs.fvar(1), Core.Exprs.fvar(2)).walked => true
+    Check.State.pairGet(walkedArg(CW(seen = Core.Cache.empty(), walked = true, ok = true), Core.Exprs.fvar(1), Core.Exprs.fvar(2)).seen, Core.Exprs.fvar(1), Core.Exprs.fvar(2)) => true
 
-fn headSeen(st: St, t: Expr, s: Expr, seen: Map<Core.Exprs.Key, Bucket>) -> Option<CW>
+fn failed(seen: Map<Core.Exprs.Key, Bucket>) -> CW
+    ? "A walk that met a pair it cannot find congruent: it ends there, handing its record back up to be dropped."
+    CW(seen = seen, walked = false, ok = false)
+
+verify failed
+    failed(Core.Cache.empty()).ok => false
+
+fn headSeen(st: St, t: Expr, s: Expr, seen: Map<Core.Exprs.Key, Bucket>) -> CW
     ? "A pair of function parts, reached once from its application and never recorded."
     match trivially(st, t, s, seen)
-        true -> Option.Some(CW(seen = seen, walked = false))
+        true -> CW(seen = seen, walked = false, ok = true)
         false -> partsSeen(st, t, s, seen)
 
 verify headSeen
-    headSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Cache.empty()) == Option.None => true
+    headSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Cache.empty()).ok => false
 
-fn partsSeen(st: St, t: Expr, s: Expr, seen: Map<Core.Exprs.Key, Bucket>) -> Option<CW>
-    ? "The parts of t and s: the walk ends at its first failure, so every pair it found congruent on the way is."
+fn partsSeen(st: St, t: Expr, s: Expr, seen: Map<Core.Exprs.Key, Bucket>) -> CW
+    ? "The parts of t and s: the walk ends at its first failure, so every pair it found congruent on the way is. The record is handed down and back up on every path, failures too, so it has one owner and each pair it records is written in place (WalkRecordOwnedOnce)."
     match t
         Expr.App(_, f, a) -> match s
             Expr.App(_, g, b) -> headThen(headSeen(st, f, g, seen), st, a, b)
-            _ -> Option.None
+            _ -> failed(seen)
         Expr.Proj(_, n, i, x) -> match s
             Expr.Proj(_, m, j, y) -> match Bool.and(n == m, i == j)
                 true -> argSeen(st, x, y, seen)
-                false -> Option.None
-            _ -> Option.None
-        _ -> Option.None
+                false -> failed(seen)
+            _ -> failed(seen)
+        _ -> failed(seen)
 
 verify partsSeen
-    partsSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Cache.empty()) == Option.None => false
-    partsSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2)), Core.Cache.empty()) == Option.None => true
+    partsSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Cache.empty()).ok => true
+    partsSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(2)), Core.Cache.empty()).ok => false
 
-fn headThen(h: Option<CW>, st: St, a: Expr, b: Expr) -> Option<CW>
+fn headThen(h: CW, st: St, a: Expr, b: Expr) -> CW
     ? "Congruent functions, then the arguments; walked when either was."
-    match h
-        Option.Some(w) -> bothWalked(w.walked, argSeen(st, a, b, w.seen))
-        Option.None -> Option.None
+    match h.ok
+        true -> bothWalked(h.walked, argSeen(st, a, b, h.seen))
+        false -> h
 
 verify headThen
-    headThen(Option.None, Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1)) == Option.None => true
+    headThen(failed(Core.Cache.empty()), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1)).ok => false
 
-fn bothWalked(head: Bool, r: Option<CW>) -> Option<CW>
+fn bothWalked(head: Bool, r: CW) -> CW
     ? "The arguments' walk, walked too when the function part was."
-    match head
-        true -> match r
-            Option.Some(w) -> Option.Some(CW(seen = w.seen, walked = true))
-            Option.None -> Option.None
+    match Bool.and(head, r.ok)
+        true -> CW(seen = r.seen, walked = true, ok = true)
         false -> r
 
 verify bothWalked
-    bothWalked(true, Option.None) == Option.None => true
+    bothWalked(true, failed(Core.Cache.empty())).ok => false
+    bothWalked(true, CW(seen = Core.Cache.empty(), walked = false, ok = true)).walked => true
 
 decision CongruenceWalkedOnce
     date = "2026-11-20"
@@ -6938,6 +6943,31 @@ decision CongruenceWalkedOnce
     chosen = "CongruenceWalkedOnce"
     rejected = ["CongruenceAsTree", "CongruenceWithFuel", "EveryPairRecorded"]
     impacts = [congruentParts, argSeen, headSeen, partsSeen, walkedArg]
+
+decision WalkRecordOwnedOnce
+    date = "2026-11-22"
+    reason =
+        "On CFSG (AWS, 32 workers) one worker spent three hours in one"
+        "congruence walk, 18486 frames deep: its samples were half in"
+        "partsSeen and half in dropping a whole map. The walk's record had"
+        "two owners whenever it was written: partsSeen, which dropped it on"
+        "its failures, only borrowed it and handed copies down, and"
+        "walkedArg, which only matched the walk below it, borrowed that and"
+        "copied the record out of it to add a pair. So every pair recorded"
+        "copied the record whole and freed the copy before, and a walk"
+        "recording n pairs moved n * n / 2 entries: CFSG's"
+        "E6TwoMat.wordElt_toVec recorded 24962 pairs and copied 1.30 million"
+        "entries for them. The record now goes down and back up on every"
+        "path, failures too, in a result with a field for the failure, so it"
+        "has one owner when written and each pair is put in place; the"
+        "generated code clones it nowhere. Against the same PGO build of the"
+        "walk before, four workers: the 57 CFSG walls -1.4...+1.0% of their"
+        "instructions (wordElt_toVec 304.2 and 304.3 G), RAM within the"
+        "noise; Init 70.65 to 70.6 G; mathlib 1591.3 to 1606.6 G before and"
+        "1597.4 to 1603.6 G after, the spread of runs."
+    chosen = "WalkRecordOwnedOnce"
+    rejected = ["RecordLentDown"]
+    impacts = [congruentParts, argSeen, headSeen, partsSeen, walkedArg, headThen, bothWalked, failed]
 
 fn known(st: St, t: Expr, s: Expr) -> Bool
     ? "A success recorded in this declaration, or one an earlier declaration kept for closed terms."
