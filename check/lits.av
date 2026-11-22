@@ -251,11 +251,11 @@ verify fitsBits
     fitsBits(1, 0) => false
 
 fn shiftLeft(a: Int, b: Int) -> Result<Expr, Fail>
-    ? "The reference refuses a shift count beyond 32 bits, and a result past natMaxBits before computing it: a <<< b has bits(a) + b bits. A count Bits.shiftLeft refuses is a decline, as before."
-    match b > 4294967295
-        true -> Result.Err(Fail.Reject("Nat.shiftLeft count does not fit in 32 bits"))
-        false -> match a == 0
-            true -> Result.Ok(Core.Exprs.natLit(0))
+    ? "As the reference: 0 shifted by any count is 0, before the count is looked at; otherwise it refuses a count beyond 32 bits, and a result past natMaxBits before computing it: a <<< b has bits(a) + b bits. A count Bits.shiftLeft refuses is a decline, as before."
+    match a == 0
+        true -> Result.Ok(Core.Exprs.natLit(0))
+        false -> match b > 4294967295
+            true -> Result.Err(Fail.Reject("Nat.shiftLeft count does not fit in 32 bits"))
             false -> match Bool.and(b < natMaxBits, fitsBits(a, natMaxBits - b))
                 true -> shifted(Bits.shiftLeft(a, b))
                 false -> Result.Err(Fail.Reject("Nat.shiftLeft result exceeds the 128 MiB size limit"))
@@ -266,6 +266,7 @@ verify shiftLeft
     shiftLeft(1, 2147483648) => Result.Err(Fail.Reject("Nat.shiftLeft result exceeds the 128 MiB size limit"))
     shiftLeft(1, 1073741824) => Result.Err(Fail.Reject("Nat.shiftLeft result exceeds the 128 MiB size limit"))
     shiftLeft(3, 4294967296) => Result.Err(Fail.Reject("Nat.shiftLeft count does not fit in 32 bits"))
+    shiftLeft(0, 18446744073709551616) => Result.Ok(Core.Exprs.natLit(0))
 
 fn pow(a: Int, b: Int) -> Result<Expr, Fail>
     ? "The reference refuses an exponent beyond 32 bits, and, for a base above 1, a result past natMaxBits before computing it: a ^ b has at most bits(a) * b bits."
