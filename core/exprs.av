@@ -180,6 +180,30 @@ decision LiteralsHashedApart
     rejected = ["LiteralRemainderOfTheWhole", "OnesOfTheWhole", "LowBitsOnly"]
     impacts = [natHash, scrambled]
 
+decision LiteralsSampledWhole
+    date = "2026-11-22"
+    reason =
+        "Past 2^62 the count of one bits among the lowest 4096 kept apart"
+        "literals that differ there, but not those that are permutations"
+        "of each other: CFSG's permC builds literals of about 656 words"
+        "equal in their lowest 4096 bits and in that count, and they all"
+        "met in one bucket, where 93% of the time went into comparing"
+        "them in full (673.0 G). Int.sampleHash reads at most 64 of a"
+        "number's 64-bit words spread over its whole length, with their"
+        "places, the length and the sign, in a bounded pass, and it is"
+        "mixed in instead of the count. permC 673.0 G 162.8 s to 8.88 G"
+        "1.12 s on four workers at 0.97 GB; Init on one worker 49.21 G to"
+        "49.16 G, mathlib 1219.85 G to 1217.36 G, peaks as they were."
+        "Measured before: a remainder of the whole number cost gf3 +720%,"
+        "rowOK49 +360%, c0f +127%; a hash of every word gf3 +32%,"
+        "rowOK49 +15%; the places of the lowest 4096 bits alone left"
+        "permC past its time limit. Keys that agree in every sampled word"
+        "still share a bucket and are compared in full: equality never"
+        "rests on the hash."
+    chosen = "LiteralsSampledWhole"
+    rejected = ["OnesOfTheLowest4096", "LiteralRemainderOfTheWhole", "WholeLiteralHashed", "LowPlacesOnly"]
+    impacts = [natHash]
+
 decision KeysAsMachineWords
     date = "2026-10-25"
     reason =
@@ -690,15 +714,16 @@ verify longSize
     longSize(Bits.shiftLeft(1, 2000000)) => 63
 
 fn natHash(n: Int) -> Int
-    ? "A literal's hash: below 2^62 its two 31-bit halves, scrambled; above, its lowest 62 bits so, taken first so that nothing long is shifted, and the count of the one bits among its lowest 4096 (64 machine words, a bounded pass), so that bit sets alike in their low bits no longer share a bucket (LiteralsHashedApart)."
+    ? "A literal's hash: below 2^62 its two 31-bit halves, scrambled; above, its lowest 62 bits so, taken first so that nothing long is shifted, and a hash of at most 64 of its words spread over its whole length (Int.sampleHash, a bounded pass), so that literals alike in their low bits, or permutations of each other, no longer share a bucket (LiteralsHashedApart, LiteralsSampledWhole)."
     match n < 4611686018427387904
         true -> scrambled(Bits.and(n, 2147483647), Bits.shiftRight(n, 31))
-        false -> Core.Hash.mix(natHash(Bits.and(n, 4611686018427387903)), Bits.popCount(n, 4096))
+        false -> Core.Hash.mix(natHash(Bits.and(n, 4611686018427387903)), Bits.and(Int.sampleHash(n), 2147483647))
 
 verify natHash
     natHash(2) == natHash(4294967296) => false
     natHash(31) + natHash(2066) == natHash(23) + natHash(2074) => false
     natHash(Bits.shiftLeft(1, 3000)) == natHash(Bits.shiftLeft(3, 3000)) => false
+    natHash(Bits.shiftLeft(1, 5000) + Bits.shiftLeft(1, 6000)) == natHash(Bits.shiftLeft(1, 5000) + Bits.shiftLeft(1, 7000)) => false
 
 fn scrambled(lo: Int, hi: Int) -> Int
     ? "The halves of a number below 2^62 mixed, then put through a multiply and two xor-shifts, which the arithmetic modulo 2^31 - 1 that builds a node's hash from its parts' does not commute with: a sum of literal hashes no longer stays the same when one literal grows by what another shrinks (LiteralsHashedApart). Every step stays below 2^62."
