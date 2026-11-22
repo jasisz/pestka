@@ -13,7 +13,7 @@ module Decl
         "as checking strictly in order would."
     exposes [Run, Job, Admitted, Chunk, Checked, Checking, Part, checkAll, checkPart, skippedAmong, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
     depends [Bytes, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Cache, Check.Shapes, Check.State, Check.Tc, Check.IndAdd]
-    effects [Console.error, Disk.readBytesAt, Time.unixMs]
+    effects [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
 
 record Run
     env: Env
@@ -70,13 +70,13 @@ record Checking
 
 fn checkAll(decls: List<Decl>) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations before the first failure the building met, one after another. A proof block still in its file is not read here: checkHeld reads them."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     a = admit(decls)
     finish(a, checkJobs(List.reverse(a.run.jobs), a.run.env, Facts.update(noFacts(), closed = a.run.closed), a.at))
 
 fn admit(decls: List<Decl>) -> Admitted
     ? "Builds the environment from nothing; the deferred declarations wait in the result."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     admitAll(Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0), decls)
 
 verify admit
@@ -532,7 +532,7 @@ verify keyOf
 
 fn checkParallel(decls: List<Decl>, workers: Int, memory: Memory) -> Result<Run, Fail>
     ? "Builds the environment, then checks the deferred declarations on workers at once: runs of 16 consecutive declarations are dealt to the workers in turn, which evens out their loads, and each worker checks its runs in file order."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     checkHeld(decls, workers, memory, false, false, false).run
 
 verify checkParallel
@@ -556,7 +556,7 @@ decision FactsHeldToExit
 
 fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always: Bool, say: Bool) -> Checking
     ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit); the maps carried are bounded as the memory mode says (LowMemoryMode) and shared out among the workers (FrugalWorkers); always groups by namespace whatever the count, for tests (CheckedByNamespace)."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     a = admit(decls)
     w = Int.max(workers, 1)
     unit = unitFor(w)
@@ -601,7 +601,7 @@ record Part
 
 fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory) -> Part
     ? "A subset check: the environment built from decls, the declarations before the last target and the targets, then of the deferred declarations only the targets, at the positions targets lists in increasing order, checked on workers; unchecked counts the deferred declarations admitted without a check (SubsetAdmitsUnchecked)."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     a = admit(decls)
     w = Int.max(workers, 1)
     unit = unitFor(w)
@@ -858,10 +858,25 @@ fn deal(cs: List<Chunk>, n: Int, i: Int, groups: List<List<Chunk>>) -> List<List
     ? "Deals the runs to n groups in turn, run i to group i mod n, keeping each group in file order."
     match cs
         [] -> reverseEach(groups, [])
-        [c, ..rest] -> deal(rest, n, i + 1, addAt(groups, Result.withDefault(Int.mod(i, Int.max(n, 1)), 0), c, []))
+        [c, ..rest] -> deal(rest, n, i + 1, addAt(groups, slot(i, n), dealt(c, slot(i, n)), []))
 
 verify deal
     deal([], 2, 0, emptyGroups(2, [])) => [[], []]
+
+fn slot(i: Int, n: Int) -> Int
+    ? "The group run i goes to."
+    Result.withDefault(Int.mod(i, Int.max(n, 1)), 0)
+
+verify slot
+    slot(5, 4) => 1
+    slot(3, 0) => 0
+
+fn dealt(c: Chunk, k: Int) -> Chunk
+    ? "A run told the worker it goes to, counted from 1, for what the workers say (SlowDeclarationsNamed)."
+    Chunk.update(c, limits = Limits.update(c.limits, worker = k + 1))
+
+verify dealt
+    dealt(Chunk(env = Check.State.envEmpty(), jobs = [], limits = Check.State.limitsOf(65536, Memory.Fast)), 2).limits.worker => 3
 
 fn addAt(groups: List<List<Chunk>>, k: Int, c: Chunk, before: List<List<Chunk>>) -> List<List<Chunk>>
     ? "Prepends c to group k."
@@ -885,7 +900,7 @@ verify reverseEach
 
 fn runWorkers(groups: List<List<Chunk>>) -> List<Checked>
     ? "Every group on a worker of its own: the list is halved, and the halves run as an independent product."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     match groups
         [] -> []
         [g] -> [checkGroup(g)]
@@ -896,7 +911,7 @@ verify runWorkers
 
 fn halves(left: List<List<Chunk>>, right: List<List<Chunk>>) -> List<Checked>
     ? "The two halves at once."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     match (runWorkers(left), runWorkers(right))!
         (l, r) -> List.concat(l, r)
 
@@ -904,9 +919,13 @@ verify halves
     halves([], []) => []
 
 fn checkGroup(g: List<Chunk>) -> Checked
-    ? "One worker: its runs in file order with the facts kept across declarations, stopping at the first failure."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
-    groupLoop(g, {}, noFacts(), 0, Option.None, 0)
+    ? "One worker: its runs in file order with the facts kept across declarations, stopping at the first failure; with --progress, a watcher beside it (SlowDeclarationsNamed)."
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
+    match g
+        [c, ..rest] -> match c.limits.say
+            true -> watchedGroup(g, c.limits)
+            false -> groupLoop(g, {}, noFacts(), 0, Option.None, 0)
+        [] -> groupLoop(g, {}, noFacts(), 0, Option.None, 0)
 
 verify checkGroup
     checkGroup([]) => Checked(failure = Option.None, at = 0, count = 0, kept = noFacts())
@@ -920,7 +939,7 @@ verify noFacts
 
 fn groupLoop(g: List<Chunk>, held: Map<Int, Bytes>, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Checked
     ? "Run after run, with the proof blocks the worker holds (BlockReadForItsCheck); fail is the failure found so far, at its position in the file."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     match g
         [] -> Checked(failure = fail, at = at, count = count, kept = kept)
         [c, ..rest] -> begun(c, held, rest, kept, count, fail, at)
@@ -930,9 +949,20 @@ verify groupLoop
 
 fn begun(c: Chunk, held: Map<Int, Bytes>, rest: List<Chunk>, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Checked
     ? "A run begun, said when asked (ProgressFromWorkers)."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     said(c.limits, "run {c.limits.run}/{c.limits.runs} begun, {count} declarations checked by this worker before it")
-    chunkLoop(c.jobs, Check.State.envWithHeld(c.env, held), c.limits, rest, kept, count, fail, at)
+    l = Limits.update(c.limits, from = firstPos(c.jobs))
+    posted(l, "RUN", l.run)
+    chunkLoop(c.jobs, Check.State.envWithHeld(c.env, held), l, rest, kept, count, fail, at)
+
+fn firstPos(jobs: List<Job>) -> Int
+    ? "The place in the file of a run's first job, from which the watcher is told where the run is (SlowDeclarationsNamed)."
+    match jobs
+        [j, ..rest] -> j.pos
+        [] -> 0
+
+verify firstPos
+    firstPos([]) => 0
 
 fn startedAt(say: Bool) -> Int
     ? "When checking began, in milliseconds, read only when progress is asked for (ProgressFromWorkers)."
@@ -960,6 +990,102 @@ verify secondsSince
     secondsSince(1000, 13456) => "12.4"
     secondsSince(5, 0) => "0.0"
 
+fn posted(l: Limits, what: String, value: Int) -> Unit
+    ? "Tells this worker's watcher where its checking is, when progress is asked for: the run, 0 once the worker is done, or the place of the declaration from the run's first job (SlowDeclarationsNamed)."
+    ! [Env.set]
+    match l.say
+        false -> Unit
+        true -> match Env.set(postKey(what, l.worker), String.fromInt(value))
+            Result.Ok(_) -> Unit
+            Result.Err(_) -> Unit
+
+fn postKey(what: String, worker: Int) -> String
+    ? "Where a worker tells its watcher what it checks: the run, or the place of the declaration from the run's first one."
+    "PESTKA_PROGRESS_{what}_{worker}"
+
+verify postKey
+    postKey("RUN", 3) => "PESTKA_PROGRESS_RUN_3"
+
+fn watchedGroup(g: List<Chunk>, l: Limits) -> Checked
+    ? "A worker's runs beside its watcher (SlowDeclarationsNamed)."
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
+    match (groupPosted(g, l), watch(g, l, "", 0, 0))!
+        (c, _) -> c
+
+fn groupPosted(g: List<Chunk>, l: Limits) -> Checked
+    ? "A worker's runs, then the word for its watcher to stop."
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
+    c = groupLoop(g, {}, noFacts(), 0, Option.None, 0)
+    posted(l, "RUN", 0)
+    c
+
+fn watch(g: List<Chunk>, l: Limits, seen: String, since: Int, last: Int) -> Unit
+    ? "Five times a second, where the worker is; seen is what it was last time, since when it has been so and last when it was last said, in milliseconds."
+    ! [Console.error, Env.get, Time.sleep, Time.unixMs]
+    _ = Time.sleep(200)
+    run = Option.withDefault(Env.get(postKey("RUN", l.worker)), "")
+    match run == "0"
+        true -> Unit
+        false -> watchAt(g, l, "{run} {Option.withDefault(Env.get(postKey("AT", l.worker)), "")}", seen, since, last, Time.unixMs())
+
+fn watchAt(g: List<Chunk>, l: Limits, here: String, seen: String, since: Int, last: Int, now: Int) -> Unit
+    ? "A declaration checked for a minute is named, and again every five minutes while it goes on."
+    ! [Console.error, Env.get, Time.sleep, Time.unixMs]
+    match here == seen
+        false -> watch(g, l, here, now, 0)
+        true -> match Bool.and(now - since >= 60000, Bool.or(last == 0, now - last >= 300000))
+            false -> watch(g, l, seen, since, last)
+            true -> watchSaid(g, l, seen, since, now)
+
+fn watchSaid(g: List<Chunk>, l: Limits, seen: String, since: Int, now: Int) -> Unit
+    ? "One line naming the declaration, then watching on."
+    ! [Console.error, Env.get, Time.sleep, Time.unixMs]
+    said(l, slowLine(g, l.worker, String.split(seen, " "), Int.div(now - since, 1000)))
+    watch(g, l, seen, since, now)
+
+fn slowLine(g: List<Chunk>, worker: Int, parts: List<String>, secs: Int) -> String
+    ? "What the watcher says: the run, the worker and the declaration checked for secs seconds."
+    match parts
+        [r, a] -> slowNamed(runOf(g, Result.withDefault(Int.fromString(r), 0)), worker, Result.withDefault(Int.fromString(a), 0), secs)
+        _ -> "worker {worker}: a declaration checked for {secs} s"
+
+verify slowLine
+    slowLine([], 2, ["x"], 61) => "worker 2: a declaration checked for 61 s"
+
+fn runOf(g: List<Chunk>, r: Int) -> Option<Chunk>
+    ? "The run numbered r among a worker's runs."
+    match g
+        [] -> Option.None
+        [c, ..rest] -> match c.limits.run == r
+            true -> Option.Some(c)
+            false -> runOf(rest, r)
+
+verify runOf
+    runOf([], 1) == Option.None => true
+    runOf([Chunk(env = Check.State.envEmpty(), jobs = [], limits = Limits.update(Check.State.limitsOf(65536, Memory.Fast), run = 4))], 4) == Option.None => false
+
+fn slowNamed(c: Option<Chunk>, worker: Int, at: Int, secs: Int) -> String
+    ? "The line for a declaration at at from its run's first job."
+    match c
+        Option.None -> "worker {worker}: a declaration checked for {secs} s"
+        Option.Some(k) -> "run {k.limits.run}/{k.limits.runs}, worker {worker}: {jobNameAt(k.jobs, firstPos(k.jobs) + at)} checked for {secs} s"
+
+verify slowNamed
+    slowNamed(Option.None, 1, 0, 60) => "worker 1: a declaration checked for 60 s"
+    slowNamed(Option.Some(Chunk(env = Check.State.envEmpty(), jobs = [job2("a", 3), job2("b", 5)], limits = Limits.update(Check.State.limitsOf(65536, Memory.Fast), run = 7, runs = 9))), 2, 2, 61) => "run 7/9, worker 2: b.x checked for 61 s"
+
+fn jobNameAt(jobs: List<Job>, pos: Int) -> String
+    ? "The name of the job at pos in the file."
+    match jobs
+        [] -> "a declaration at {pos}"
+        [j, ..rest] -> match j.pos == pos
+            true -> Core.Names.render(j.head.name)
+            false -> jobNameAt(rest, pos)
+
+verify jobNameAt
+    jobNameAt([], 7) => "a declaration at 7"
+    jobNameAt([job2("a", 3), job2("b", 5)], 5) => "b.x"
+
 decision ProgressFromWorkers
     date = "2026-11-19"
     reason =
@@ -978,9 +1104,35 @@ decision ProgressFromWorkers
     rejected = ["OneLineForTheRun"]
     impacts = [said, begun, chunkLoop, chunkNext, checkHeld]
 
+decision SlowDeclarationsNamed
+    date = "2026-11-22"
+    reason =
+        "On CFSG two workers each checked one declaration for three hours"
+        "and --progress said only that their runs had begun. A worker checks"
+        "a declaration in pure code, which cannot read the clock or write a"
+        "line, and the elements of a product share no value. So with"
+        "--progress each worker runs beside a watcher, the other element of"
+        "a product: before each declaration the worker sets two variables of"
+        "the process environment, its run and the declaration's place in the"
+        "file from the run's first job, and the watcher reads them five"
+        "times a second. A declaration they have named for a minute is named in a"
+        "line, with the run and the worker, and again every five minutes"
+        "while it goes on. The place is counted from the run's first job so"
+        "that the values a worker sets repeat from run to run, as glibc"
+        "keeps every distinct value a variable has had. When its runs are"
+        "done the worker sets its run to 0 and the watcher stops within a"
+        "fifth of a second. Without the flag nothing is set and no watcher"
+        "runs: one test of a field per declaration. With it, PGO, four"
+        "workers: Init 70.6 to 71.05 G (+0.6%, about 7500 instructions a"
+        "declaration, most of them in Env.set), 3.4 to 3.5 s; mathlib"
+        "1596.4 G against 1597.4 and 1603.6 G without it."
+    chosen = "SlowDeclarationsNamed"
+    rejected = ["NameEveryDeclaration", "WatcherPerDeclaration", "ClockInTheChecker"]
+    impacts = [checkGroup, watchedGroup, groupPosted, posted, watch, watchAt, watchSaid, slowLine, begun, chunkStep, dealt]
+
 fn checkChunk(c: Chunk) -> Checked
     ? "Checks one run of deferred declarations with facts of its own; the first failure is reported with its place in the file."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     chunkLoop(c.jobs, c.env, c.limits, [], noFacts(), 0, Option.None, 0)
 
 verify checkChunk
@@ -988,7 +1140,7 @@ verify checkChunk
 
 fn chunkLoop(jobs: List<Job>, env: Env, limits: Limits, more: List<Chunk>, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Checked
     ? "One job after another, then the next run, until one fails. Each job gets its proof block read (BlockReadForItsCheck) and the facts kept from the ones before it."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     match jobs
         [] -> ended(limits, more, Check.State.envHeld(env), kept, count, fail, at)
         [j, ..rest] -> match Bool.and(fail != Option.None, j.pos > at)
@@ -1000,20 +1152,21 @@ verify chunkLoop
 
 fn ended(l: Limits, more: List<Chunk>, held: Map<Int, Bytes>, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Checked
     ? "A run done, said when asked, then the next (ProgressFromWorkers)."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     said(l, "run {l.run}/{l.runs} done, {count} declarations checked by this worker")
     groupLoop(more, held, kept, count, fail, at)
 
 fn chunkStep(r: Result<Job, Fail>, j: Job, env: Env, limits: Limits, rest: List<Job>, more: List<Chunk>, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Checked
     ? "The job checked once its block is read, or failed when it cannot be. The facts are moved into its checker here, in the loop that owns them, so that every map reaches the checker with one owner and is updated in place."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
+    posted(limits, "AT", j.pos - limits.from)
     match r
         Result.Ok(jr) -> chunkNext(jobChecks(jr, St.update(checkerFor(env, jr), limits = limits, closed = kept.closed, unfoldCache = kept.unfolds, levelTypes = kept.types, vars = kept.vars, lctx = kept.lctx, next = kept.next, topLevel = kept.topLevel, inferCache = kept.inferCache, checkCache = kept.checkCache, whnfCache = kept.whnfCache, coreCache = kept.coreCache, eqOk = kept.eqOk, eqFail = kept.eqFail, eqNo = kept.eqNo, rules = kept.rules)), jr, env, limits, rest, more, count, fail, at)
         Result.Err(e) -> chunkNext(Result.Err(e), j, env, limits, rest, more, count, fail, at)
 
 fn chunkNext(r: Result<Facts, Fail>, j: Job, env: Env, limits: Limits, rest: List<Job>, more: List<Chunk>, count: Int, fail: Option<Fail>, at: Int) -> Checked
     ? "Goes on after a failure too, now with the named failure and its position, checking only declarations placed before it: the runs are not in file order, and the earliest failure is the one reported. A job that wants a proof block is checked again once it is read (BlockReadForItsCheck)."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     match r
         Result.Ok(kept) -> chunkLoop(rest, env, limits, more, kept, count + 1, fail, at)
         Result.Err(Fail.Wants(w, st)) -> wanted(readSpot(w), w, carried(st), j, env, limits, rest, more, count, fail, at)
@@ -1024,7 +1177,7 @@ verify chunkNext
 
 fn failedHere(f: Fail, j: Job, env: Env, limits: Limits, rest: List<Job>, more: List<Chunk>, count: Int, fail: Option<Fail>, at: Int) -> Checked
     ? "A failure found, said at once when asked (ProgressFromWorkers), and checking goes on before it."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     said(limits, "failed: {failText(f)}")
     chunkLoop(rest, env, limits, more, noFacts(), count, Option.Some(f), j.pos)
 
@@ -1040,7 +1193,7 @@ verify failText
 
 fn wanted(r: Result<Bytes, Fail>, w: Spot, kept: Facts, j: Job, env: Env, limits: Limits, rest: List<Job>, more: List<Chunk>, count: Int, fail: Option<Fail>, at: Int) -> Checked
     ? "The job again, from the facts its stopped check found, with the block it wanted held from now on; or failed when the block cannot be read (BlockReadForItsCheck)."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     match r
         Result.Ok(b) -> chunkLoop(List.prepend(j, rest), Check.State.envHolding(env, w.decl, b), limits, more, kept, count, fail, at)
         Result.Err(e) -> chunkLoop(rest, env, limits, more, noFacts(), count, Option.Some(failNamed(e, j.head.name)), j.pos)
@@ -1069,7 +1222,7 @@ verify firstOf
 
 fn admitAll(run: Run, decls: List<Decl>) -> Admitted
     ? "One declaration at a time; the first failure stops the building and is kept with its position. A declaration is checked against the environment, which it only reads, and added after: a failure leaves the run as it was without a copy of it kept, so the environment always has one owner and is added to in place. One that wants a proof block is built again once the environment holds it, which every worker then holds too (WantedBlocksStopTheCheck in Check.State)."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     match decls
         [] -> Admitted(run = run, failure = Option.None, at = run.pos)
         [d, ..rest] -> match prepared(run.env, d)
@@ -1079,7 +1232,7 @@ fn admitAll(run: Run, decls: List<Decl>) -> Admitted
 
 fn admitHeld(run: Run, d: Decl, rest: List<Decl>, w: Spot, r: Result<Bytes, Fail>) -> Admitted
     ? "d built again with the block it wanted held, or failed when the block cannot be read."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
     match r
         Result.Ok(b) -> admitAll(Run.update(run, env = Check.State.envHolding(run.env, w.decl, b)), List.prepend(d, rest))
         Result.Err(e) -> Admitted(run = run, failure = Option.Some(failNamed(e, Core.Decls.nameOf(d))), at = run.pos)
