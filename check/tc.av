@@ -6298,8 +6298,18 @@ fn lazyFrom(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Lazy delta; the outermost one, outside any attempt, between two definitions of different names, first within an attempt of meetFirst ticks (HeadsMetFromBelow, SidesRace), the tick it starts at read first so that the state keeps one owner."
     t0 = st.ticks
     match Bool.and(st.stop < 0, twoHeads(st, tn, sn))
-        true -> probed(t0, refWithin(st, tn, sn)?, tn, sn)
+        true -> match probeDue(st)
+            true -> probed(t0, refWithin(st, tn, sn)?, tn, sn)
+            false -> eqLazy(lazyDelta(st, tn, sn)?)
         false -> eqLazy(lazyDelta(st, tn, sn)?)
+
+fn probeDue(st: St) -> Bool
+    ? "The outermost probe runs only once the work done since the last probe that found nothing (whnf results stored, each at least a tick) has reached the ticks that probe and its race burned (ProbesPaidByWork): the probes cost at most as much as the work between them."
+    st.whnfStores - st.probeMark >= st.probeDebt
+
+verify probeDue
+    probeDue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => true
+    probeDue(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), probeDebt = 5)) => false
 
 fn twoHeads(st: St, tn: Expr, sn: Expr) -> Bool
     ? "Both sides headed by definitions delta can unfold, of different names: only then can one side step toward the other's head. A computation against a literal or a constructor is never probed, so it is never cut and done again."
@@ -6422,16 +6432,16 @@ fn probed(t0: Int, r: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
     match r.i
         1 -> yes(r.st)
         2 -> no(r.st)
-        _ -> probeMet(meetBoth(r.st, tn, sn, meetFirst())?, tn, sn)
+        _ -> probeMet(t0, meetBoth(r.st, tn, sn, meetFirst())?, tn, sn)
 
-fn probeMet(m: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "Sides that met are equal; otherwise lazy delta as the reference has it."
+fn probeMet(t0: Int, m: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Sides that met are equal; otherwise lazy delta as the reference has it, the ticks the probe and the race burned since t0 owed before the next outermost probe (ProbesPaidByWork)."
     match m.i == 1
         true -> yes(m.st)
-        false -> eqLazy(lazyDelta(m.st, tn, sn)?)
+        false -> eqLazy(lazyDelta(St.update(m.st, probeDebt = m.st.ticks - t0, probeMark = m.st.whnfStores), tn, sn)?)
 
 verify probeMet
-    resultBool(probeMet(RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+    resultBool(probeMet(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
 
 verify probed
     resultBool(probed(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
