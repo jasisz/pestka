@@ -5994,13 +5994,112 @@ verify sortZero
     sortZero(Option.Some(Core.Exprs.sort(Level.Succ(Level.Zero))), [], []) => false
     sortZero(Option.None, [], []) => false
 
+decision RecursorArgsFirst
+    date = "2026-11-23"
+    reason =
+        "CFSG's octTab_size compares Prod.snd (oST OCT 4096), oST unfolding"
+        "to Nat.rec z (oStep OCT) 4096, with Prod.snd (Nat.rec z (fun a ih"
+        "=> ...) 4096), the step written out. whnfCore took one iteration on"
+        "both sides (the major a literal, Prod.rec by structure eta), so the"
+        "structures met as cond (popc8T a) X Y twice, and comparing their"
+        "arguments asked for the fields of Nat.rec z (oStep OCT) 4095"
+        "against Nat.rec z (fun ...) 4095, and so on down: 4096 nested"
+        "levels, no answer before the bottom. Every attempt of meetFirst"
+        "ticks on the way (projections, sides meeting) ran out unanswered,"
+        "its work done again a level lower and its results kept: with one"
+        "worker past 1260 s and 14 GB, while the same pair with 256"
+        "iterations took 66 G instructions and with 96 under 1 G. The"
+        "reference walks the same levels (Gruszka in 3 million ticks). Two"
+        "applications of one recursor with pairwise equal arguments are"
+        "equal by congruence, and here the arguments differ by oStep OCT"
+        "against its own value, one unfolding. When whnfCore changed both"
+        "sides of such a pair, its arguments are now compared first, as lazy"
+        "delta compares the arguments of one regular definition (tryArgs); a"
+        "failure is kept in eqFail and the reduced sides are compared as"
+        "before, so only the order changed and either answer is one the"
+        "reference gives. octTab_size alone 0.36 G, either slice whole"
+        "13.9 G and 1.2 s. Asking before whnfCore found the same but read"
+        "the environment for every pair of one head: Init +0.4%; after it,"
+        "only pairs that both reduced are looked at, and Init is unchanged."
+    chosen = "RecursorArgsFirst"
+    rejected = ["RecursorsReducedFirst", "RecursorArgsBeforeWhnfCore"]
+    impacts = [eqCoreReduced, recArgsFirst, recArgsTried, sameRecApp, sameRecHeads, sameRecArity, recWithMajor]
+
 fn eqCoreReduced(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
-    ? "Cheap whnfCore on both sides (projections without whnf), and the easy cases again if anything changed."
+    ? "Cheap whnfCore on both sides (projections without whnf), and the easy cases again if anything changed; two applications of one recursor that both reduced compare their arguments first (RecursorArgsFirst)."
     tn = whnfCoreM(st, t, false, true)?
     sn = whnfCoreM(tn.st, s, false, true)?
     match Bool.or(tn.e != t, sn.e != s)
-        true -> eqAfterQuick(quickParts(sn.st, tn.e, sn.e)?, tn.e, sn.e)
+        true -> match Bool.and(tn.e != t, sn.e != s)
+            true -> match sameRecApp(sn.st, t, s)
+                true -> recArgsFirst(sn.st, t, s, tn.e, sn.e)
+                false -> eqAfterQuick(quickParts(sn.st, tn.e, sn.e)?, tn.e, sn.e)
+            false -> eqAfterQuick(quickParts(sn.st, tn.e, sn.e)?, tn.e, sn.e)
         false -> eqProofIrrel(sn.st, tn.e, sn.e)
+
+fn recArgsFirst(st: St, t: Expr, s: Expr, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "t and s, applications of one recursor, compared argument by argument unless that failed before; tn and sn what whnfCore made of them, compared as before when the arguments differ."
+    match Check.State.pairGet(st.eqFail, t, s)
+        true -> eqAfterQuick(quickParts(st, tn, sn)?, tn, sn)
+        false -> recArgsTried(defEqArgs(st, t, s, [])?, t, s, tn, sn)
+
+verify recArgsFirst
+    resultBool(recArgsFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
+    resultBool(recArgsFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), Core.Exprs.natLit(3), Core.Exprs.natLit(3))) => true
+
+fn recArgsTried(r: RB, t: Expr, s: Expr, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Equal arguments settle it; otherwise the failure is remembered and the reduced sides are compared as before."
+    match r.b
+        true -> yes(r.st)
+        false -> eqAfterQuick(quickParts(St.update(r.st, eqFail = Check.State.pairPut(r.st.eqFail, t, s)), tn, sn)?, tn, sn)
+
+verify recArgsTried
+    resultBool(recArgsTried(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+
+fn sameRecApp(st: St, t: Expr, s: Expr) -> Bool
+    ? "Both sides the same recursor at equivalent levels, applied to as many arguments, its major premise among them."
+    match t
+        Expr.App -> match s
+            Expr.App -> sameRecHeads(st, t, s, Core.Apps.fnOf(t), Core.Apps.fnOf(s))
+            _ -> false
+        _ -> false
+
+verify sameRecApp
+    sameRecApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => false
+    sameRecApp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1)) => false
+
+fn sameRecHeads(st: St, t: Expr, s: Expr, f: Expr, g: Expr) -> Bool
+    ? "The heads f and g of the applications t and s one constant, applied as often, and that constant a recursor reached by its major premise; the environment is read only for one name on both sides."
+    match f
+        Expr.Const(_, n, ls) -> match g
+            Expr.Const(_, m, ms) -> match n == m
+                true -> sameRecArity(st, n, ls, ms, Core.Apps.numArgs(t), Core.Apps.numArgs(s))
+                false -> false
+            _ -> false
+        _ -> false
+
+verify sameRecHeads
+    sameRecHeads(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(0), Core.Exprs.fvar(0), Core.Exprs.fvar(0)) => false
+
+fn sameRecArity(st: St, n: Name, ls: List<Level>, ms: List<Level>, k: Int, j: Int) -> Bool
+    ? "As many arguments on both sides, then the recursor and its levels."
+    match k == j
+        true -> recWithMajor(Check.State.lookup(st, n), k, ls, ms)
+        false -> false
+
+verify sameRecArity
+    sameRecArity(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon(), [], [], 1, 2) => false
+
+fn recWithMajor(c: Option<Const>, k: Int, ls: List<Level>, ms: List<Level>) -> Bool
+    ? "A recursor applied to k arguments that reach its major premise, at equivalent levels."
+    match c
+        Option.Some(Const.CRec(rv)) -> Bool.and(k > rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices, Core.Univ.isEquivList(ls, ms))
+        _ -> false
+
+verify recWithMajor
+    recWithMajor(Option.None, 1, [], []) => false
+    recWithMajor(Option.Some(Const.CRec(sampleRec())), 4, [Level.Zero], [Level.Zero]) => true
+    recWithMajor(Option.Some(Const.CRec(sampleRec())), 3, [Level.Zero], [Level.Zero]) => false
 
 verify eqCoreReduced
     resultBool(eqCoreReduced(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Core.Exprs.sort(Level.Zero)), Core.Exprs.sort(Level.Zero))) => true
