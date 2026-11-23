@@ -8,7 +8,7 @@ module Main
         "declined as before; index invalid: <why>, 2, which is no verdict on"
         "the file."
     depends [Core.Names, Check.State, Check.Decl, Export.Stream, Export.Tables, Export.Susz, Export.Pack]
-    effects [Args.get, Console.error, Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes, Env.get, Env.set, Time.sleep, Time.unixMs]
+    effects [Args.get, Console.error, Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes, Time.unixMs]
 
 record Verdict
     code: Int
@@ -20,13 +20,13 @@ record Held
 
 fn main() -> Int
     ? "Reads the file, checks it and ends with the exit status. The input and what checking found are a local of main when it ends, so the process ends without freeing them (FactsHeldToExit)."
-    ! [Args.get, Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Args.get, Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs]
     h = ran(Args.get())
     h.verdict.code
 
 fn ran(args: List<String>) -> Held
     ? "pestka pack, or the check the arguments ask for, with what main holds to the end (FactsHeldToExit)."
-    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs]
     match args
         ["pack", ..rest] -> statusOnly(packArgs(withoutIndexFlag(rest, []), List.contains(rest, "--no-index") == false))
         _ -> checked(args)
@@ -79,14 +79,14 @@ verify withoutIndexFlag
 
 fn checked(args: List<String>) -> Held
     ? "Reads and checks the file the arguments name, or with --only NAMES the declarations named; the verdict, with the input."
-    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs]
     match onlyOf(args)
         Option.Some(names) -> checkedPart(withoutOnly(args, []), names)
         Option.None -> checkedWhole(args)
 
 fn checkedWhole(args: List<String>) -> Held
     ? "Reads and checks the whole file; the verdict, with the input, both handed back for main to hold (FactsHeldToExit)."
-    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs]
     plain = withoutFlag(args, [])
     o = input(plain)
     v = report(o, workersIn(plain), memoryIn(args), List.contains(args, "--reorder-always"), List.contains(args, "--show-placed"), List.contains(args, "--progress"))
@@ -130,7 +130,7 @@ verify withoutOnly
 
 fn checkedPart(args: List<String>, names: List<String>) -> Held
     ? "A subset check of a Susz file with INDEX: the declarations named and what they need (SubsetAdmitsUnchecked in Check.Decl); the verdict, with the input."
-    ! [Console.error, Console.print, Disk.readBytesAt, Disk.size, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Disk.size, Time.unixMs]
     plain = withoutFlag(args, [])
     match plain
         [path] -> partOf(path, names, 4, memoryIn(args))
@@ -139,7 +139,7 @@ fn checkedPart(args: List<String>, names: List<String>) -> Held
 
 fn partOf(path: String, names: List<String>, workers: Int, memory: Memory) -> Held
     ? "A subset check needs names, and a Susz file: only Susz has INDEX."
-    ! [Console.error, Console.print, Disk.readBytesAt, Disk.size, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Disk.size, Time.unixMs]
     match names
         [] -> statusOnly(declined("--only needs at least one name"))
         _ -> match Export.Susz.isSusz(path)
@@ -148,12 +148,12 @@ fn partOf(path: String, names: List<String>, workers: Int, memory: Memory) -> He
 
 fn partHeld(o: Outcome, names: List<String>, workers: Int, memory: Memory) -> Held
     ? "The subset verdict, with the part read, both handed back for main to hold (FactsHeldToExit)."
-    ! [Console.error, Console.print, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs]
     Held(verdict = partReport(o, names, workers, memory), input = Option.Some(o))
 
 fn partReport(o: Outcome, names: List<String>, workers: Int, memory: Memory) -> Verdict
     ? "Prints the subset verdict: a file rejected or declined while reading is so here too; a bad INDEX ends the check as index invalid, status 2, no verdict on the file (Susz 1 spec, section 2)."
-    ! [Console.error, Console.print, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs]
     match o
         Outcome.Rejected(why) -> Verdict(code = rejected(why), held = Option.None)
         Outcome.Declined(why) -> Verdict(code = declined(why), held = Option.None)
@@ -162,7 +162,7 @@ fn partReport(o: Outcome, names: List<String>, workers: Int, memory: Memory) -> 
 
 fn partSummary(p: Parsed, names: List<String>, workers: Int, memory: Memory) -> Verdict
     ? "What was read, then the targets checked; a target Pestka skips, unsafe or partial, declines the check."
-    ! [Console.error, Console.print, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs]
     Console.print("subset: {List.len(p.targets)} declarations asked for; the first {List.len(p.decls)} declarations of the file read")
     match Check.Decl.skippedAmong(p.decls, p.targets, 0, [])
         [n, .._] -> Verdict(code = declined("{Core.Names.render(n)} is unsafe or partial, which Pestka does not check"), held = Option.None)
@@ -266,7 +266,7 @@ verify withoutFlag
 
 fn input(args: List<String>) -> Outcome
     ? "The file read on as many workers as asked for, or the usage as a decline."
-    ! [Console.error, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs]
     match args
         [path] -> fileOf(path, 4)
         [path, n] -> fileOf(path, workersOf(n))
@@ -274,7 +274,7 @@ fn input(args: List<String>) -> Outcome
 
 fn fileOf(path: String, workers: Int) -> Outcome
     ? "A Susz file by its signature, otherwise lean4export's ndjson, packed into Susz 1 in memory and read as Susz (NdjsonThroughSusz)."
-    ! [Console.error, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs]
     match Export.Susz.isSusz(path)
         true -> Export.Susz.readFile(path)
         false -> packedOf(path, workers, Export.Pack.image(path, workers))
@@ -302,7 +302,7 @@ decision NdjsonThroughSusz
 
 fn packedOf(path: String, workers: Int, r: Result<Image, String>) -> Outcome
     ? "The image read; a decline when packing met something it does not support; otherwise the file read by the ndjson reader when it could not be packed (NdjsonThroughSusz)."
-    ! [Console.error, Disk.readBytesAt, Disk.size, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Disk.readBytesAt, Disk.size, Time.unixMs]
     match r
         Result.Ok(m) -> readPacked(path, workers, Export.Susz.readImage(m))
         Result.Err(e) -> match String.contains(e, "is not supported")
@@ -339,7 +339,7 @@ verify workersOf
 
 fn report(o: Outcome, workers: Int, memory: Memory, always: Bool, show: Bool, say: Bool) -> Verdict
     ? "Prints the verdict; always, from --reorder-always, a tool for tests, checks out of file order on any file the reader allows it on (CheckedByNamespace)."
-    ! [Console.error, Console.print, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs]
     match o
         Outcome.Rejected(why) -> Verdict(code = rejected(why), held = Option.None)
         Outcome.Declined(why) -> Verdict(code = declined(why), held = Option.None)
@@ -348,7 +348,7 @@ fn report(o: Outcome, workers: Int, memory: Memory, always: Bool, show: Bool, sa
 
 fn summary(p: Parsed, workers: Int, memory: Memory, always: Bool, show: Bool, say: Bool) -> Verdict
     ? "Counts of what the file defines, then the checking verdict, with what checking found. show, from --show-placed, a tool for tests, also prints whether the reader found every declaration naming only constants placed before it (NamesPlacedWhereRead), which decides whether checking may leave file order."
-    ! [Console.error, Console.print, Disk.readBytesAt, Env.get, Env.set, Time.sleep, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs]
     Console.print("constants {p.constants}, declarations {List.len(p.decls)}, names {p.names}, levels {p.levels}, expressions {p.exprs}")
     shown(show, p.allPlaced)
     c = Check.Decl.checkHeld(p.decls, workers, memory, p.allPlaced, always, say)
