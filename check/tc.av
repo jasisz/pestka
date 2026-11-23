@@ -6298,10 +6298,19 @@ fn lazyFrom(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Lazy delta; the outermost one, outside any attempt, between two definitions of different names, first within an attempt of meetFirst ticks (HeadsMetFromBelow, SidesRace), the tick it starts at read first so that the state keeps one owner."
     t0 = st.ticks
     match Bool.and(st.stop < 0, twoHeads(st, tn, sn))
-        true -> match probeDue(st)
+        true -> match lazyDue(st, tn, sn)
             true -> probed(t0, refWithin(st, tn, sn)?, tn, sn)
             false -> eqLazy(lazyDelta(st, tn, sn)?)
         false -> eqLazy(lazyDelta(st, tn, sn)?)
+
+fn owed(st: St, t0: Int, key: Int) -> St
+    ? "Outside any attempt, the ticks burned since t0 by an attempt and race that found nothing, owed before the next outermost attempt (ProbesPaidByWork)."
+    match st.stop < 0
+        true -> St.update(st, probeDebts = Map.set(st.probeDebts, key, st.ticks - t0), probeMarks = Map.set(st.probeMarks, key, st.whnfStores))
+        false -> st
+
+verify owed
+    Map.get(owed(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ticks = 9), 4, 0).probeDebts, 0) => Option.Some(5)
 
 fn debtQuarters() -> Int
     ? "What a burned attempt is owed in, a quarter of a tick for each: four, a whnf result stored paying one tick (ProbesPaidByWork)."
@@ -6310,13 +6319,51 @@ fn debtQuarters() -> Int
 verify debtQuarters
     debtQuarters() => 4
 
-fn probeDue(st: St) -> Bool
+fn headKey(e: Expr) -> Int
+    ? "The head an attempt is owed on: the constant or the field of a structure at the head of e, 0 for any other."
+    match Core.Apps.fnOf(e)
+        Expr.Const(_, _, _) -> Core.Exprs.hashOf(Core.Apps.fnOf(e))
+        Expr.Proj(_, sn, i, _) -> Core.Exprs.hashOf(Core.Exprs.proj(sn, i, Core.Exprs.bvar(0)))
+        _ -> 0
+
+verify headKey
+    headKey(Core.Exprs.fvar(1)) => 0
+
+fn pairKey(t: Expr, s: Expr) -> Int
+    ? "The heads of both sides as one key."
+    headKey(t) * 65537 + headKey(s)
+
+verify pairKey
+    pairKey(Core.Exprs.fvar(1), Core.Exprs.fvar(2)) => 0
+
+fn lazyDue(st: St, tn: Expr, sn: Expr) -> Bool
+    ? "probeDue on the heads of both sides; with nothing owed, at once."
+    match Map.len(st.probeDebts) == 0
+        true -> true
+        false -> probeDue(st, pairKey(tn, sn))
+
+verify lazyDue
+    lazyDue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2)) => true
+
+fn headDue(st: St, tn: Expr) -> Bool
+    ? "probeDue on the head of the left side; with nothing owed, at once."
+    match Map.len(st.probeDebts) == 0
+        true -> true
+        false -> probeDue(st, headKey(tn))
+
+verify headDue
+    headDue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1)) => true
+
+fn probeDue(st: St, key: Int) -> Bool
     ? "The outermost probe runs only once the work done since the last probe that found nothing (whnf results stored, each at least a tick) has reached the ticks that probe and its race burned (ProbesPaidByWork): the probes cost at most as much as the work between them."
-    (st.whnfStores - st.probeMark) * 4 >= st.probeDebt * debtQuarters()
+    match Map.get(st.probeDebts, key)
+        Option.None -> true
+        Option.Some(d) -> (st.whnfStores - Option.withDefault(Map.get(st.probeMarks, key), 0)) * 4 >= d * debtQuarters()
 
 verify probeDue
-    probeDue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => true
-    probeDue(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), probeDebt = 5)) => false
+    probeDue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0) => true
+    probeDue(owed(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ticks = 5), 0, 3), 3) => false
+    probeDue(owed(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ticks = 5), 0, 3), 7) => true
 
 fn twoHeads(st: St, tn: Expr, sn: Expr) -> Bool
     ? "Both sides headed by definitions delta can unfold, of different names: only then can one side step toward the other's head. A computation against a literal or a constructor is never probed, so it is never cut and done again."
@@ -6446,26 +6493,27 @@ decision ProbesPaidByWork
         "level for about 3 of the reference's own: the probe at level k"
         "walked the elements from k on and was cut, the probe at k + 1 the"
         "same window moved by one, and progress fell as 1/meetFirst (56274,"
-        "13871, 3214 levels a minute at 1024, 4096, 16384). Now a probe"
-        "that found nothing, with its race, is a debt of the ticks it"
-        "burned: the next outermost probe waits, going to lazy delta at"
-        "once, until the whnf results stored since (each at least a tick)"
-        "pay it, so the probes cost at most the work between them. The rule"
-        "only ever leaves a probe out, never above meetFirst, reads and"
-        "writes the account only where a probe begins and ends, and an"
+        "13871, 3214 levels a minute at 1024, 4096, 16384). Now a probe,"
+        "projection race or parts attempt outside any attempt that found"
+        "nothing is a debt of the ticks it burned, kept for its head (the"
+        "constants at the heads of both sides, or the field of the"
+        "structure): the next such attempt on that head waits, going to the"
+        "reference at once, until the whnf results stored since (each at"
+        "least a tick) pay it. The rule only ever leaves an attempt out,"
+        "never above meetFirst, reads and writes the account only where an"
+        "attempt begins and ends and only once something is owed, and an"
         "answer still comes only from the reference or a finished attempt."
         "words_ok, past 120 s before (about 30 minutes at its rate), is"
-        "checked in 8.4 s, 81.8 G: 460063 levels, 3.06 isDefEq a level."
-        "Owing at a quarter or four times the rate: 83.1 G and 81.0 G."
-        "Init 59.11 G to 59.01 G; the other corpora and the CFSG walls"
-        "within noise. Owing the projection and parts attempts at the top"
-        "too checks the octTab_size variant with swapped steps in 282 G"
-        "where it ran past 120 s, but leaves orderOf_wT's race out after"
-        "a debt and decodes its string: 14.1 G to 566 G; parts alone:"
-        "lyLet +5%, the variant 1420 G."
+        "checked in 8.6 s, 82.2 G: 459744 levels, 3.1 isDefEq a level. The"
+        "octTab_size variant with swapped steps, past 120 s, in 284 G."
+        "Owing at a quarter or four times the rate moves them by 2%. Init"
+        "59.05 G to 58.99 G, the other corpora within 0.7%, the 42 CFSG"
+        "walls under 130 G 1354.2 G to 1353.7 G. One debt for the whole"
+        "declaration left orderOf_wT's projection race out after a debt on"
+        "other heads and decoded its string, 14.1 G to 566 G."
     chosen = "ProbesPaidByWork"
-    rejected = ["BudgetsFromWorkSinceCut", "AttemptsAtTheTopOwed", "PartsAtTheTopOwed"]
-    impacts = [lazyFrom, probeDue, probeMet, probed]
+    rejected = ["BudgetsFromWorkSinceCut", "OneDebtPerDeclaration", "OneDebtSlot"]
+    impacts = [lazyFrom, lazyDue, headDue, probeDue, owed, probeMet, projFirst, projMet, partsFirst, eqProjMet]
 
 fn probed(t0: Int, r: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "The reference's answer when it finished within its attempt; past its stop the two sides step toward each other from where they began, each allowed meetFirst ticks (SidesRace), and then the reference again without a stop."
@@ -6478,7 +6526,7 @@ fn probeMet(t0: Int, m: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Sides that met are equal; otherwise lazy delta as the reference has it, the ticks the probe and the race burned since t0 owed before the next outermost probe (ProbesPaidByWork)."
     match m.i == 1
         true -> yes(m.st)
-        false -> eqLazy(lazyDelta(St.update(m.st, probeDebt = m.st.ticks - t0, probeMark = m.st.whnfStores), tn, sn)?)
+        false -> eqLazy(lazyDelta(owed(m.st, t0, pairKey(tn, sn)), tn, sn)?)
 
 verify probeMet
     resultBool(probeMet(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
@@ -6545,7 +6593,9 @@ verify eqProj
 fn projFirst(st: St, tn: Expr, sn: Expr, c1: Expr, c2: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
     ? "t.i =?= s.i (ProjectionsRaced): the reference's lazy delta on the structures within meetFirst ticks, the tick it starts at read first so that the state keeps one owner."
     t0 = st.ticks
-    projRef(t0, projWithin(st, c1, c2, sname, idx, t0 + meetFirst())?, tn, sn, c1, c2, sname, idx)
+    match Bool.or(st.stop >= 0, headDue(st, tn))
+        true -> projRef(t0, projWithin(st, c1, c2, sname, idx, t0 + meetFirst())?, tn, sn, c1, c2, sname, idx)
+        false -> eqProjAfter(lazyDeltaProj(st, c1, c2, sname, idx)?, tn, sn)
 
 verify projFirst
     resultBool(projFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Names.anon(), 0)) => true
@@ -6584,19 +6634,19 @@ fn projRef(t0: Int, r: RI, tn: Expr, sn: Expr, c1: Expr, c2: Expr, sname: Name, 
     match r.i
         1 -> yes(r.st)
         2 -> eqRewhnf(r.st, tn, sn)
-        _ -> projMet(meetBoth(r.st, tn, sn, r.st.ticks - t0)?, tn, sn, c1, c2, sname, idx)
+        _ -> projMet(t0, meetBoth(r.st, tn, sn, r.st.ticks - t0)?, tn, sn, c1, c2, sname, idx)
 
 verify projRef
     resultBool(projRef(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Names.anon(), 0)) => true
 
-fn projMet(m: RI, tn: Expr, sn: Expr, c1: Expr, c2: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
+fn projMet(t0: Int, m: RI, tn: Expr, sn: Expr, c1: Expr, c2: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
     ? "Sides that met are equal; otherwise lazy delta on the structures, then whnfCore of both projections."
     match m.i == 1
         true -> yes(m.st)
-        false -> eqProjAfter(lazyDeltaProj(m.st, c1, c2, sname, idx)?, tn, sn)
+        false -> eqProjAfter(lazyDeltaProj(owed(m.st, t0, headKey(tn)), c1, c2, sname, idx)?, tn, sn)
 
 verify projMet
-    resultBool(projMet(RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Names.anon(), 0)) => true
+    resultBool(projMet(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Names.anon(), 0)) => true
 
 decision ProjectionsRaced
     date = "2026-11-20"
@@ -6648,7 +6698,9 @@ fn eqProjApp(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
 fn partsFirst(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Heads and arguments within meetFirst ticks, the tick they start at read first so that the state keeps one owner."
     t0 = st.ticks
-    eqProjParts(t0, partsWithin(st, tn, sn, meetFirst())?, tn, sn)
+    match Bool.or(st.stop >= 0, headDue(st, tn))
+        true -> eqProjParts(t0, partsWithin(st, tn, sn, meetFirst())?, tn, sn)
+        false -> eqRewhnf(st, tn, sn)
 
 verify partsFirst
     resultBool(partsFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
@@ -6696,7 +6748,7 @@ fn eqProjParts(t0: Int, r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Equal parts settle it; otherwise the sides step toward each other, each side allowed as much work as the parts took since tick t0, and then the comparison goes on as before."
     match r.b
         true -> yes(r.st)
-        false -> eqProjMet(meetBoth(r.st, tn, sn, r.st.ticks - t0)?, tn, sn)
+        false -> eqProjMet(t0, meetBoth(r.st, tn, sn, r.st.ticks - t0)?, tn, sn)
 
 verify eqProjParts
     resultBool(eqProjParts(0, RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
@@ -6754,15 +6806,15 @@ decision FormsBeforeComparisons
     rejected = ["ComparisonsWithEachStep", "FormsOnly"]
     impacts = [meetBoth, meetAgain, sidesMeet, metAny]
 
-fn eqProjMet(m: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
+fn eqProjMet(t0: Int, m: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Sides that met are equal; otherwise the projections are reduced (SidesMeet): the parts were already tried within their attempt, and comparing them again without a stop is the shortcut that can run into a computation."
     match m.i == 1
         true -> yes(m.st)
-        false -> eqRewhnf(m.st, tn, sn)
+        false -> eqRewhnf(owed(m.st, t0, headKey(tn)), tn, sn)
 
 verify eqProjMet
-    resultBool(eqProjMet(RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
-    resultBool(eqProjMet(RI(i = 0, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => false
+    resultBool(eqProjMet(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+    resultBool(eqProjMet(0, RI(i = 0, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => false
 
 decision SidesMeet
     date = "2026-11-18"
