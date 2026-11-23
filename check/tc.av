@@ -5994,67 +5994,185 @@ verify sortZero
     sortZero(Option.Some(Core.Exprs.sort(Level.Succ(Level.Zero))), [], []) => false
     sortZero(Option.None, [], []) => false
 
-decision RecursorArgsFirst
+decision LiteralRecursionsComputed
     date = "2026-11-23"
     reason =
-        "CFSG's octTab_size compares Prod.snd (oST OCT 4096), oST unfolding"
-        "to Nat.rec z (oStep OCT) 4096, with Prod.snd (Nat.rec z (fun a ih"
-        "=> ...) 4096), the step written out. whnfCore took one iteration on"
-        "both sides (the major a literal, Prod.rec by structure eta), so the"
-        "structures met as cond (popc8T a) X Y twice, and comparing their"
-        "arguments asked for the fields of Nat.rec z (oStep OCT) 4095"
-        "against Nat.rec z (fun ...) 4095, and so on down: 4096 nested"
-        "levels, no answer before the bottom. Every attempt of meetFirst"
-        "ticks on the way (projections, sides meeting) ran out unanswered,"
-        "its work done again a level lower and its results kept: with one"
-        "worker past 1260 s and 14 GB, while the same pair with 256"
-        "iterations took 66 G instructions and with 96 under 1 G. The"
-        "reference walks the same levels (Gruszka in 3 million ticks). Two"
-        "applications of one recursor with pairwise equal arguments are"
-        "equal by congruence, and here the arguments differ by oStep OCT"
-        "against its own value, one unfolding. When whnfCore changed both"
-        "sides of such a pair, its arguments are now compared first, as lazy"
-        "delta compares the arguments of one regular definition (tryArgs); a"
-        "failure is kept in eqFail and the reduced sides are compared as"
-        "before, so only the order changed and either answer is one the"
-        "reference gives. octTab_size alone 0.36 G, either slice whole"
-        "13.9 G and 1.2 s. Asking before whnfCore found the same but read"
-        "the environment for every pair of one head: Init +0.4%; after it,"
-        "only pairs that both reduced are looked at, and Init is unchanged."
-    chosen = "RecursorArgsFirst"
-    rejected = ["RecursorsReducedFirst", "RecursorArgsBeforeWhnfCore"]
-    impacts = [eqCoreReduced, recArgsFirst, recArgsTried, sameRecApp, sameRecHeads, sameRecArity, recWithMajor]
+        "CFSG's octTab_size compares oST OCT 4096, which unfolds to Nat.rec"
+        "z (oStep OCT) 4096, with the same recursion whose step is written"
+        "out; in octswap, a copy with the step's n + 1 written 1 + n, the"
+        "steps are equal on literals only. whnfCore took one iteration on"
+        "each side and the comparison went down lazily, but the two sides"
+        "came apart: oStep takes one unfolding more, and where popc8T k is"
+        "false a level passes its fields on, so the pairs met were level k"
+        "against k + 1 up to k + 50, each tried and failing through f12 on"
+        "the free OCT. 256 iterations took 155 G, 1024 1639 G, 4096 never"
+        "finished; Gruszka, which evaluates both recursions to values and"
+        "compares them with sharing, 0.2 to 1.7 G. The rule of Nat.succ is"
+        "Nat.rec z s (n + 1) = s n (Nat.rec z s n), so the value at n is"
+        "computed from the bottom: v0 the whnf of z, v(j + 1) the whnf of s"
+        "j vj, the step getting the previous value itself, a constructor, so"
+        "that iota fires on it and the levels never meet a recursion again."
+        "Each vj is a reduct of Nat.rec z s j: identical values settle the"
+        "pair, and different ones are compared as any two terms, level"
+        "against its own level. A value that is not data (a lambda, as in a"
+        "recursion that builds a function, or a stuck term) gives no value"
+        "and the pair goes the lazy way, remembered in eqFail. Each level is"
+        "an attempt of meetFirst ticks (SidesMeet): a level that takes more,"
+        "a step whose whnf forces work on a free variable that the lazy way"
+        "never asks for, ends the values with none. CFSG's"
+        "SL.testBit_spreadRow (run495), its levels on the free r, ran past"
+        "18 minutes without that stop; with it 2.00 G, 0.51 s, against"
+        "0.39 G lazily. The iterations are as many as the literal says and"
+        "no constant is tuned. RecursorArgsFirst, which compared"
+        "the arguments of two such applications first, is gone: on octswap"
+        "it compared the steps under binders, and cond's major popc8T a on a"
+        "free a unfolded Nat.mul (bitN a 0) 1110326, a million levels (80 G"
+        "whatever the iterations). One worker, plain build: octswap --only"
+        "octTab_size 256 155.5 G, 13.6 s, 1.05 GB to 0.38 G, 0.03 s,"
+        "0.01 GB; 1024 1639.5 G, 131.1 s, 2.55 GB to 0.89 G, 0.07 s,"
+        "0.02 GB; 4096 never to 3.14 G, 0.25 s, 0.06 GB (Gruszka 0.24 G,"
+        "0.46 G, 1.71 G). The KDense slices whole, where the steps were"
+        "congruent: octTab_size 13.86 G, 1.57 s to 16.23 G, 1.44 s,"
+        "f12_octOK 13.87 G, 1.19 s to 16.24 G, 1.47 s, 0.22 GB each"
+        "(Gruszka 10.53 G); the values cost about what the reference's own"
+        "descent does, each level's cond computed. Values after the"
+        "arguments kept RecursorArgsFirst's 0.36 G on octTab_size but left"
+        "octswap at 80 G. Corpora within 0.1%: Init 59.09 G to 59.03 G, std"
+        "100.03 G to 99.91 G, con-leche 91.39 G to 91.36 G, etale, contdiff,"
+        "taylor, colim, reachability unchanged; wall and peak within noise."
+    chosen = "LiteralRecursionsComputed"
+    rejected = ["RecursorArgsFirst", "ValuesAfterArguments", "FieldsBroughtToData", "RecursionsReducedLazily", "ValuesWithoutStop", "OneStopForAllLevels"]
+    impacts = [eqCoreReduced, recLitFirst, recValuesFirst, recValuesThen, recNoValue, litRecValue, litRecArgs, litRecFrom, dataWithin, dataValue, ctorApplied, sameRecApp]
 
 fn eqCoreReduced(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
-    ? "Cheap whnfCore on both sides (projections without whnf), and the easy cases again if anything changed; two applications of one recursor that both reduced compare their arguments first (RecursorArgsFirst)."
+    ? "Cheap whnfCore on both sides (projections without whnf), and the easy cases again if anything changed; two applications of one recursor that both reduced, on a Nat literal, compare their values first (LiteralRecursionsComputed)."
     tn = whnfCoreM(st, t, false, true)?
     sn = whnfCoreM(tn.st, s, false, true)?
     match Bool.or(tn.e != t, sn.e != s)
         true -> match Bool.and(tn.e != t, sn.e != s)
             true -> match sameRecApp(sn.st, t, s)
-                true -> recArgsFirst(sn.st, t, s, tn.e, sn.e)
+                true -> recLitFirst(sn.st, t, s, tn.e, sn.e)
                 false -> eqAfterQuick(quickParts(sn.st, tn.e, sn.e)?, tn.e, sn.e)
             false -> eqAfterQuick(quickParts(sn.st, tn.e, sn.e)?, tn.e, sn.e)
         false -> eqProofIrrel(sn.st, tn.e, sn.e)
 
-fn recArgsFirst(st: St, t: Expr, s: Expr, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "t and s, applications of one recursor, compared argument by argument unless that failed before; tn and sn what whnfCore made of them, compared as before when the arguments differ."
+fn recLitFirst(st: St, t: Expr, s: Expr, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "t and s, applications of one recursor that both reduced: on a Nat literal their values first, unless that found nothing before (LiteralRecursionsComputed); tn and sn what whnfCore made of them, compared as before otherwise."
     match Check.State.pairGet(st.eqFail, t, s)
         true -> eqAfterQuick(quickParts(st, tn, sn)?, tn, sn)
-        false -> recArgsTried(defEqArgs(st, t, s, [])?, t, s, tn, sn)
+        false -> recValuesFirst(litRecValue(st, t)?, t, s, tn, sn)
 
-verify recArgsFirst
-    resultBool(recArgsFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
-    resultBool(recArgsFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), Core.Exprs.natLit(3), Core.Exprs.natLit(3))) => true
+verify recLitFirst
+    resultBool(recLitFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), Core.Exprs.natLit(3), Core.Exprs.natLit(3))) => true
+    resultBool(recLitFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), Core.Exprs.natLit(3), Core.Exprs.natLit(4))) => false
 
-fn recArgsTried(r: RB, t: Expr, s: Expr, tn: Expr, sn: Expr) -> Result<RB, Fail>
-    ? "Equal arguments settle it; otherwise the failure is remembered and the reduced sides are compared as before."
-    match r.b
-        true -> yes(r.st)
-        false -> eqAfterQuick(quickParts(St.update(r.st, eqFail = Check.State.pairPut(r.st.eqFail, t, s)), tn, sn)?, tn, sn)
+fn recValuesFirst(vt: RO, t: Expr, s: Expr, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "vt the value of t when t is a recursion of Nat on a literal that comes to data: then s's value too, and the two compared; otherwise as before."
+    match vt.o
+        Option.None -> recNoValue(vt.st, t, s, tn, sn)
+        Option.Some(a) -> recValuesThen(litRecValue(vt.st, s)?, a, t, s, tn, sn)
 
-verify recArgsTried
-    resultBool(recArgsTried(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+verify recValuesFirst
+    resultBool(recValuesFirst(RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.natLit(3), Core.Exprs.natLit(3))) => true
+    resultBool(recValuesFirst(RO(o = Option.Some(Core.Exprs.natLit(2)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.natLit(3), Core.Exprs.natLit(4))) => false
+
+fn recValuesThen(r: RO, a: Expr, t: Expr, s: Expr, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "Both values: identical settles it, otherwise they are compared as any two terms, each a reduct of its side. s without a value: as before."
+    match r.o
+        Option.None -> recNoValue(r.st, t, s, tn, sn)
+        Option.Some(b) -> match a == b
+            true -> yes(r.st)
+            false -> isDefEq(r.st, a, b)
+
+verify recValuesThen
+    resultBool(recValuesThen(RO(o = Option.Some(Core.Exprs.natLit(2)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+    resultBool(recValuesThen(RO(o = Option.Some(Core.Exprs.natLit(2)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(3), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => false
+
+fn recNoValue(st: St, t: Expr, s: Expr, tn: Expr, sn: Expr) -> Result<RB, Fail>
+    ? "No value to compare: the pair is remembered so that it is not worked out again, and the reduced sides are compared as before."
+    eqAfterQuick(quickParts(St.update(st, eqFail = Check.State.pairPut(st.eqFail, t, s)), tn, sn)?, tn, sn)
+
+verify recNoValue
+    resultBool(recNoValue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.natLit(3), Core.Exprs.natLit(3))) => true
+
+fn litRecValue(st: St, e: Expr) -> Result<RO, Fail>
+    ? "The value of Nat.rec m z s n with n a literal and nothing applied after it, as data (LiteralRecursionsComputed); nothing for any other term."
+    match Core.Apps.fnOf(e)
+        Expr.Const(_, n, _) -> match Check.State.lookup(st, n)
+            Option.Some(Const.CRec(rv)) -> litRecArgs(st, rv, Core.Apps.argsOf(e))
+            _ -> Result.Ok(RO(o = Option.None, st = st))
+        _ -> Result.Ok(RO(o = Option.None, st = st))
+
+verify litRecValue
+    Result.withDefault(litRecValue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)), RO(o = Option.Some(Core.Exprs.fvar(1)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).o => Option.None
+
+fn litRecArgs(st: St, rv: Rec, args: List<Expr>) -> Result<RO, Fail>
+    ? "The recursor of Nat, its zero and successor rules in that order, applied up to its major premise and no further, the major a literal: the minor premises z and s and the literal."
+    k = rv.numParams + rv.numMotives
+    match Bool.and(Bool.and(rv.major == Check.Lits.nat, List.len(args) == k + rv.numMinors + rv.numIndices + 1), natRules(rv.rules))
+        false -> Result.Ok(RO(o = Option.None, st = st))
+        true -> match List.drop(args, k)
+            [z, sc, Expr.NatLit(_, n)] -> litRecFrom(dataWithin(st, z)?, sc, 0, n)
+            _ -> Result.Ok(RO(o = Option.None, st = st))
+
+verify litRecArgs
+    Result.withDefault(litRecArgs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), sampleRec(), [Core.Exprs.fvar(0)]), RO(o = Option.Some(Core.Exprs.fvar(1)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).o => Option.None
+
+fn natRules(rules: List<RecRule>) -> Bool
+    ? "The rules of Nat.zero and Nat.succ, in that order: the minor premises come in the same order."
+    match rules
+        [a, b] -> Bool.and(a.ctor == Check.Lits.natZero, b.ctor == Check.Lits.natSucc)
+        _ -> false
+
+verify natRules
+    natRules([]) => false
+    natRules([RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.natSucc, nfields = 1, rhs = Core.Exprs.bvar(0))]) => true
+
+fn litRecFrom(r: RO, sc: Expr, j: Int, n: Int) -> Result<RO, Fail>
+    ? "r the value at j: done at n; otherwise the step sc applied to j and that value, as the rule of Nat.succ fires it, brought to data. A value that is not data ends it without one."
+    match r.o
+        Option.None -> Result.Ok(r)
+        Option.Some(v) -> match j >= n
+            true -> Result.Ok(r)
+            false -> litRecFrom(dataWithin(r.st, Core.Exprs.app(Core.Exprs.app(sc, Core.Exprs.natLit(j)), v))?, sc, j + 1, n)
+
+verify litRecFrom
+    Result.withDefault(litRecFrom(RO(o = Option.Some(Core.Exprs.natLit(0)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.cnst(Check.Lits.natSucc, []), 0, 0), RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).o => Option.Some(Core.Exprs.natLit(0))
+
+fn dataWithin(st: St, e: Expr) -> Result<RO, Fail>
+    ? "dataValue as an attempt of meetFirst ticks: a level that takes more gives no value, and the pair goes the lazy way (LiteralRecursionsComputed, SidesMeet)."
+    outer = st.stop
+    d = st.depth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, evaluating = st.evaluating)
+    roEnded(dataValue(St.update(st, stop = within(outer, st.ticks + meetFirst())), e), outer, c, d)
+
+verify dataWithin
+    Result.withDefault(dataWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(4)), RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).o => Option.Some(Core.Exprs.natLit(4))
+
+fn dataValue(st: St, e: Expr) -> Result<RO, Fail>
+    ? "e in whnf when that is data: a literal, or a constructor applied to all its fields; nothing for any other whnf (LiteralRecursionsComputed)."
+    r = whnf(st, e)?
+    match r.e
+        Expr.NatLit -> Result.Ok(RO(o = Option.Some(r.e), st = r.st))
+        Expr.StrLit -> Result.Ok(RO(o = Option.Some(r.e), st = r.st))
+        _ -> Result.Ok(RO(o = ctorApplied(r.st, r.e), st = r.st))
+
+verify dataValue
+    Result.withDefault(dataValue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3))), RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).o => Option.Some(Core.Exprs.natLit(5))
+    Result.withDefault(dataValue(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)), RO(o = Option.Some(Core.Exprs.fvar(1)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).o => Option.None
+
+fn ctorApplied(st: St, e: Expr) -> Option<Expr>
+    ? "e itself when its head is a constructor applied to its parameters and all its fields."
+    match Core.Apps.fnOf(e)
+        Expr.Const(_, n, _) -> match Check.State.lookup(st, n)
+            Option.Some(Const.CCtor(k)) -> match Core.Apps.numArgs(e) == k.numParams + k.numFields
+                true -> Option.Some(e)
+                false -> Option.None
+            _ -> Option.None
+        _ -> Option.None
+
+verify ctorApplied
+    ctorApplied(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0)) => Option.None
 
 fn sameRecApp(st: St, t: Expr, s: Expr) -> Bool
     ? "Both sides the same recursor at equivalent levels, applied to as many arguments, its major premise among them."
