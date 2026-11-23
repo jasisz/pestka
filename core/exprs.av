@@ -7,7 +7,7 @@ module Exprs
         "a tree, capped, so that traversals know when memoizing pays), packed"
         "into one word below 2^62 so that every node stays small, computed once"
         "by the constructors here and never by callers."
-    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, appHash3, key, keyAt, hashKey, looseRange, within, withinDepth, depthOf, depthZero, deeper, depthValue, indexValue, indexBelow, indexWithin, indexPast, indexBack, bvarAt, bvarUp, bvarDown, bvarAbstracted, keyAtDepth, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
+    exposes [Expr, Binder, Meta, bvar, fvar, sort, cnst, app, lam, pi, letE, natLit, strLit, proj, metaOf, wordOf, hashIn, sizeIn, flagsOf, hashOf, pairHash, appHash, appHash3, key, keyAt, hashKey, keyValue, looseRange, within, withinDepth, depthOf, depthZero, deeper, depthValue, indexValue, indexBelow, indexWithin, indexPast, indexBack, bvarAt, bvarUp, bvarDown, bvarAbstracted, keyAtDepth, isClosed, isSmall, hasFVar, hasParam, treeSize, varsOf, varsOfId]
     exposes opaque [Word, Tag, Index, Key, Depth]
     depends [Core.Hash, Core.Names, Core.Levels]
     effects []
@@ -448,6 +448,13 @@ fn keyAt(e: Expr, depth: Int) -> Key
 
 verify keyAt
     keyAt(bvar(0), 1) == keyAt(bvar(0), 0) => false
+
+fn keyValue(k: Key) -> Int
+    ? "The hash a key holds, as a number."
+    k.value
+
+verify keyValue
+    keyValue(key(7)) => 7
 
 fn hashKey(e: Expr) -> Key
     ? "The key of e: its hash."

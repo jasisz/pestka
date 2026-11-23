@@ -2711,7 +2711,7 @@ fn whnfGo(st: St, orig: Expr, t: Expr) -> Result<RE, Fail>
     before = st.whnfStores
     r = lcore(st, t, [], [], MS(next = 0, forced = {}), true, false, false)?
     cost = r.st.whnfStores - before
-    Result.Ok(dearStore(whnfStore(r.st, orig, r.e), orig, cost))
+    Result.Ok(dearStore(whnfStore(lostSeen(r.st, orig), orig, r.e), orig, cost))
 
 verify whnfGo
     resultExpr(whnfGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
@@ -5272,6 +5272,45 @@ decision GenerationsThatPay
     rejected = ["GenerationsOfOneWeight", "GrowWhenLetGoComeBack", "WideResultsWeighed"]
     impacts = [whnfAged, genOf, genNext, genPays, hitCounted, dearAged, whnfCached, whnfValue, byValues]
 
+decision LossesCountAsHits
+    date = "2026-11-23"
+    reason =
+        "A generation shrinks when its results were found again fewer than"
+        "once in genPays() stores (GenerationsThatPay), and a smaller"
+        "generation finds fewer of them for being smaller: the shrinking"
+        "confirmed itself. CFSG's AX.c60xx.weq compare 372 words read by"
+        "index from one long computed list; the first generation of a"
+        "million results found 15060, one in 70, the next weighed a quarter"
+        "and let the first go, and the generations went down to a 64th,"
+        "16384 results finding 12 to 16 each, while the pass that read the"
+        "list again worked out every result anew, each one's parts as well."
+        "Kept at a million, the same pass finds 492572 in one generation."
+        "Now the results a generation lets go early, while it weighs less"
+        "than the limits' and the limits' would have kept them one"
+        "generation more, leave one hash in lostSample() behind, kept for"
+        "two generations at the limits' weight; a result worked out again"
+        "under such a hash was wanted back and counts as lostSample() hits"
+        "for the generation that works it out. A generation never weighs"
+        "more than the limits' (unlike GrowWhenLetGoComeBack and"
+        "GrowWhenWantedBack, which grew past them); nothing is kept or read"
+        "until a generation has shrunk, and declarations that never ask"
+        "again, as totalC and lev_size, shrink as before. One worker, plain"
+        "build, against cea66e6: c6016weq 10210 G, 1206 s to 64.3 G, 10.5 s"
+        "at 1.04 GB to 1.05 GB (Gruszka 32.9 G, 8.3 s, 2.9 GB; past 3000 s"
+        "on AWS); c6012weq 1144.8 G, 144.9 s to 56.3 G, 10.0 s; c6018weq"
+        "to 55.7 G, 10.0 s. Init 59.15 G to 59.10 G, etale 20.99 G to"
+        "20.96 G, contdiff, taylor, colim, reachability, std and con-leche"
+        "within 0.06%, peaks unchanged; octTab_size 16.41 G to 16.42 G,"
+        "f12_octOK 16.31 G to 16.32 G. Judging a generation over its whole"
+        "life, young and old, changed nothing: about 2 results a generation"
+        "were found among the old, the pass reading again from further back."
+        "Remembering only the results worked out while small, and forgetting"
+        "them when a generation came back to the limits' weight, forgot"
+        "them just before the pass: c6016weq still past 300 s."
+    chosen = "LossesCountAsHits"
+    rejected = ["GenerationsThatOnlyShrink", "LivesJudgedWhole", "LostWhileSmallOnly"]
+    impacts = [whnfAged, aged, lostKept, lostNoted, lostSeen, lostHit, lostSample, whnfGo]
+
 fn farGet(st: St, e: Expr) -> Option<Expr>
     ? "A result outside the young generation: dear, dear before, or old (DearResultsKept)."
     match oldGet(st.whnfDear, e)
@@ -5322,8 +5361,67 @@ verify oldGet
 fn whnfAged(st: St) -> St
     ? "Past its generation's weight, the young whnf results become the old ones and the young start empty: what was found or asked for within the last generation lives on (GenerationsWithinADeclaration). The next generation's weight follows what this one paid (GenerationsThatPay)."
     match st.whnfWeight > genOf(st)
-        true -> St.update(st, whnfOld = st.whnfCache, whnfCache = Core.Cache.empty(), whnfWeight = 0, genSize = genNext(genOf(st), st.genHits, st.whnfStores - st.genStart, st.limits.whnfGen), genHits = 0, genStart = st.whnfStores)
+        true -> aged(st, st.whnfOld, genOf(st) < st.limits.whnfGen)
         false -> st
+
+fn aged(st: St, dropped: Map<Core.Exprs.Key, Bucket>, small: Bool) -> St
+    ? "whnfAged past the weight: the old results are let go, and when the generation that ends weighed less than the limits', which would have kept them a generation more, a sample of their hashes is remembered (LossesCountAsHits)."
+    next = genNext(genOf(st), st.genHits + lostSample() * st.lostHits, st.whnfStores - st.genStart, st.limits.whnfGen)
+    young = St.update(st, whnfOld = st.whnfCache, whnfCache = Core.Cache.empty(), whnfWeight = 0, genSize = next, genHits = 0, genStart = st.whnfStores, lostHits = 0)
+    match small
+        true -> lostKept(young, Map.keys(dropped))
+        false -> young
+
+verify aged
+    aged(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), {}, true).genHits => 0
+    Map.len(aged(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), {}, false).lostNew) => 0
+
+fn lostKept(st: St, ks: List<Core.Exprs.Key>) -> St
+    ? "The hashes of results let go early, one in lostSample() by its low bits, remembered for as many results as a generation at the limits' weight holds, and then for one such generation more (LossesCountAsHits)."
+    match ks
+        [] -> st
+        [k, ..rest] -> lostKept(lostNoted(st, Core.Exprs.keyValue(k)), rest)
+
+fn lostNoted(st: St, h: Int) -> St
+    ? "lostKept for one hash."
+    match Bits.and(h, lostSample() - 1) == 0
+        false -> st
+        true -> match Map.len(st.lostNew) * lostSample() >= st.limits.whnfGen
+            true -> St.update(st, lostOld = st.lostNew, lostNew = Map.set({}, h, true))
+            false -> St.update(st, lostNew = Map.set(st.lostNew, h, true))
+
+verify lostNoted
+    Map.len(lostNoted(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 32).lostNew) => 1
+    Map.len(lostNoted(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 33).lostNew) => 0
+
+verify lostKept
+    Map.len(lostKept(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [Core.Exprs.key(16), Core.Exprs.key(17), Core.Exprs.key(48)]).lostNew) => 2
+
+fn lostSeen(st: St, orig: Expr) -> St
+    ? "A result worked out whose hash is remembered as let go early was wanted back: a hit lost, counted lostSample() times over when the generation ends (LossesCountAsHits). Nothing is read while nothing is remembered."
+    match Map.len(st.lostNew) == 0
+        true -> st
+        false -> lostHit(st, Core.Exprs.hashOf(orig))
+
+fn lostHit(st: St, h: Int) -> St
+    ? "lostSeen for a hash."
+    match Bool.or(Map.has(st.lostNew, h), Map.has(st.lostOld, h))
+        true -> St.update(st, lostHits = st.lostHits + 1)
+        false -> st
+
+verify lostHit
+    lostHit(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), lostNew = Map.set({}, 32, true)), 32).lostHits => 1
+    lostHit(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), lostNew = Map.set({}, 32, true)), 33).lostHits => 0
+
+verify lostSeen
+    lostSeen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.bvar(0)).lostHits => 0
+
+fn lostSample() -> Int
+    ? "One hash in this many is remembered when its result is let go early (LossesCountAsHits): a power of two, read from the hash's low bits."
+    16
+
+verify lostSample
+    Bits.and(lostSample(), lostSample() - 1) => 0
 
 fn genOf(st: St) -> Int
     ? "The weight of a generation of whnf results now: the limits' until a generation has been weighed (GenerationsThatPay)."
