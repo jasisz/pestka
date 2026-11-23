@@ -6303,6 +6303,15 @@ fn lazyFrom(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
             false -> eqLazy(lazyDelta(st, tn, sn)?)
         false -> eqLazy(lazyDelta(st, tn, sn)?)
 
+fn owed(st: St, t0: Int) -> St
+    ? "Outside any attempt, the ticks burned since t0 by an attempt and race that found nothing, owed before the next outermost attempt (ProbesPaidByWork)."
+    match st.stop < 0
+        true -> St.update(st, probeDebt = st.ticks - t0, probeMark = st.whnfStores)
+        false -> st
+
+verify owed
+    owed(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ticks = 9), 4).probeDebt => 5
+
 fn probeDue(st: St) -> Bool
     ? "The outermost probe runs only once the work done since the last probe that found nothing (whnf results stored, each at least a tick) has reached the ticks that probe and its race burned (ProbesPaidByWork): the probes cost at most as much as the work between them."
     st.whnfStores - st.probeMark >= st.probeDebt
@@ -6505,7 +6514,9 @@ verify eqProj
 fn projFirst(st: St, tn: Expr, sn: Expr, c1: Expr, c2: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
     ? "t.i =?= s.i (ProjectionsRaced): the reference's lazy delta on the structures within meetFirst ticks, the tick it starts at read first so that the state keeps one owner."
     t0 = st.ticks
-    projRef(t0, projWithin(st, c1, c2, sname, idx, t0 + meetFirst())?, tn, sn, c1, c2, sname, idx)
+    match Bool.or(st.stop >= 0, probeDue(st))
+        true -> projRef(t0, projWithin(st, c1, c2, sname, idx, t0 + meetFirst())?, tn, sn, c1, c2, sname, idx)
+        false -> eqProjAfter(lazyDeltaProj(st, c1, c2, sname, idx)?, tn, sn)
 
 verify projFirst
     resultBool(projFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.proj(Core.Names.anon(), 0, Core.Exprs.fvar(1)), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Names.anon(), 0)) => true
@@ -6544,19 +6555,19 @@ fn projRef(t0: Int, r: RI, tn: Expr, sn: Expr, c1: Expr, c2: Expr, sname: Name, 
     match r.i
         1 -> yes(r.st)
         2 -> eqRewhnf(r.st, tn, sn)
-        _ -> projMet(meetBoth(r.st, tn, sn, r.st.ticks - t0)?, tn, sn, c1, c2, sname, idx)
+        _ -> projMet(t0, meetBoth(r.st, tn, sn, r.st.ticks - t0)?, tn, sn, c1, c2, sname, idx)
 
 verify projRef
     resultBool(projRef(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Names.anon(), 0)) => true
 
-fn projMet(m: RI, tn: Expr, sn: Expr, c1: Expr, c2: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
+fn projMet(t0: Int, m: RI, tn: Expr, sn: Expr, c1: Expr, c2: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
     ? "Sides that met are equal; otherwise lazy delta on the structures, then whnfCore of both projections."
     match m.i == 1
         true -> yes(m.st)
-        false -> eqProjAfter(lazyDeltaProj(m.st, c1, c2, sname, idx)?, tn, sn)
+        false -> eqProjAfter(lazyDeltaProj(owed(m.st, t0), c1, c2, sname, idx)?, tn, sn)
 
 verify projMet
-    resultBool(projMet(RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Names.anon(), 0)) => true
+    resultBool(projMet(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Exprs.fvar(1), Core.Exprs.fvar(2), Core.Names.anon(), 0)) => true
 
 decision ProjectionsRaced
     date = "2026-11-20"
@@ -6608,7 +6619,9 @@ fn eqProjApp(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
 fn partsFirst(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Heads and arguments within meetFirst ticks, the tick they start at read first so that the state keeps one owner."
     t0 = st.ticks
-    eqProjParts(t0, partsWithin(st, tn, sn, meetFirst())?, tn, sn)
+    match Bool.or(st.stop >= 0, probeDue(st))
+        true -> eqProjParts(t0, partsWithin(st, tn, sn, meetFirst())?, tn, sn)
+        false -> eqRewhnf(st, tn, sn)
 
 verify partsFirst
     resultBool(partsFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => true
@@ -6656,7 +6669,7 @@ fn eqProjParts(t0: Int, r: RB, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Equal parts settle it; otherwise the sides step toward each other, each side allowed as much work as the parts took since tick t0, and then the comparison goes on as before."
     match r.b
         true -> yes(r.st)
-        false -> eqProjMet(meetBoth(r.st, tn, sn, r.st.ticks - t0)?, tn, sn)
+        false -> eqProjMet(t0, meetBoth(r.st, tn, sn, r.st.ticks - t0)?, tn, sn)
 
 verify eqProjParts
     resultBool(eqProjParts(0, RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
@@ -6714,15 +6727,15 @@ decision FormsBeforeComparisons
     rejected = ["ComparisonsWithEachStep", "FormsOnly"]
     impacts = [meetBoth, meetAgain, sidesMeet, metAny]
 
-fn eqProjMet(m: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
+fn eqProjMet(t0: Int, m: RI, tn: Expr, sn: Expr) -> Result<RB, Fail>
     ? "Sides that met are equal; otherwise the projections are reduced (SidesMeet): the parts were already tried within their attempt, and comparing them again without a stop is the shortcut that can run into a computation."
     match m.i == 1
         true -> yes(m.st)
-        false -> eqRewhnf(m.st, tn, sn)
+        false -> eqRewhnf(owed(m.st, t0), tn, sn)
 
 verify eqProjMet
-    resultBool(eqProjMet(RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
-    resultBool(eqProjMet(RI(i = 0, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => false
+    resultBool(eqProjMet(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => true
+    resultBool(eqProjMet(0, RI(i = 0, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => false
 
 decision SidesMeet
     date = "2026-11-18"
