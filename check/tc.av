@@ -8480,10 +8480,70 @@ fn projFallback(st: St, t: Expr, s: Expr, sname: Name, idx: Int) -> Result<RB, F
             Option.None -> defEqCore(st, pt, Core.Exprs.proj(sname, idx, s))
         Option.None -> match projCore(st, s, sname, idx)
             Option.Some(ps) -> defEqCore(st, Core.Exprs.proj(sname, idx, t), ps)
-            Option.None -> defEqCore(st, t, s)
+            Option.None -> projWhole(st, t, s, sname, idx)
 
 verify projFallback
     resultBool(projFallback(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Names.anon(), 0)) => true
+
+fn projWhole(st: St, t: Expr, s: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
+    ? "Neither structure a constructor application: the structures themselves, as an attempt of meetFirst ticks; past its stop the fields (FieldReducedFirst)."
+    d = st.depth
+    c = NatCtx(kinds = st.kinds, kindCounts = st.kindCounts, kindsOpen = st.kindsOpen, open = st.open, opened = st.opened, eager = st.eager, fuel = st.fuel, evaluating = st.evaluating)
+    o = st.stop
+    wholeEnded(riEnded(defEqCore(St.update(st, stop = within(o, st.ticks + meetFirst())), t, s), o, c, d)?, t, s, sname, idx)
+
+verify projWhole
+    resultBool(projWhole(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Names.anon(), 0)) => true
+
+fn wholeEnded(r: RI, t: Expr, s: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
+    ? "The structures' answer when the attempt finished; undecided, both brought to whnf and compared by their fields (FieldReducedFirst)."
+    match r.i
+        1 -> yes(r.st)
+        2 -> no(r.st)
+        _ -> projStructs(whnf(r.st, t)?, t, s, sname, idx)
+
+verify wholeEnded
+    resultBool(wholeEnded(RI(i = 2, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Names.anon(), 0)) => false
+
+fn projStructs(a: RE, t: Expr, s: Expr, sname: Name, idx: Int) -> Result<RB, Fail>
+    ? "Past the attempt on the whole structures, each brought to whnf: one that turns into a constructor application gives its field (FieldReducedFirst); otherwise the structures themselves without a stop."
+    b = whnf(a.st, s)?
+    match projCore(b.st, a.e, sname, idx)
+        Option.Some(pt) -> match projCore(b.st, b.e, sname, idx)
+            Option.Some(ps) -> defEqCore(b.st, pt, ps)
+            Option.None -> defEqCore(b.st, pt, Core.Exprs.proj(sname, idx, b.e))
+        Option.None -> match projCore(b.st, b.e, sname, idx)
+            Option.Some(ps) -> defEqCore(b.st, Core.Exprs.proj(sname, idx, a.e), ps)
+            Option.None -> defEqCore(b.st, t, s)
+
+verify projStructs
+    resultBool(projStructs(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(1), Core.Names.anon(), 0)) => true
+
+decision FieldReducedFirst
+    date = "2026-11-23"
+    reason =
+        "t.i =?= s.i where lazy delta leaves neither structure a constructor"
+        "application compared the two structures whole. They need not have"
+        "one type: in CFSG's fibreHL_conj one is eQM x, an element of the"
+        "subgroup Q, the other x.1, an element of M, and their first fields"
+        "are the same element of J. Compared whole, eQM x reduced to"
+        "Subtype.mk and structure eta asked first whether the types are"
+        "equal, so whether M is Q, which unfolds both subgroups down to the"
+        "248 by 248 matrices that generate them, without a stop: hours and"
+        "a growing heap on AWS, where Gruszka takes 0.09 s. Only field i is"
+        "asked for: the whole structures are now compared as an attempt of"
+        "meetFirst ticks, and past its stop both are brought to whnf, and a"
+        "side that becomes a constructor application gives its field i,"
+        "compared with the field or the projection of the other. Equal"
+        "structures have equal fields, so no answer that was yes becomes"
+        "no; the whole structures are compared without a stop only when"
+        "neither side becomes a constructor application. Bringing the"
+        "structures to whnf first, before any attempt, cost std 1.8% of its"
+        "instructions and 0.12 GB: most such pairs (4320 of 6900 there) are"
+        "equal as they stand."
+    chosen = "FieldReducedFirst"
+    rejected = ["StructuresWhole"]
+    impacts = [projFallback, projWhole, wholeEnded, projStructs]
 
 decision FieldNotStructure
     date = "2026-11-08"
