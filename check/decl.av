@@ -176,6 +176,194 @@ fn thm2(ns: String, pos: Int, exprs: Int) -> Job
 verify thm2
     thm2("a", 3, 9).isThm => true
 
+decision ComputationsSpread
+    date = "2026-11-23"
+    reason =
+        "Runs are cut by the expressions of each proof's block and perDecl"
+        "(RunsByProofSize), which sees nothing of what a proof by computation"
+        "costs. CFSG's run495 slice ends with 914 theorems"
+        "CFSG.KC.BM.Census.rN, each Nat.beq (censusRange ...) K = true proved"
+        "by Eq.refl, about a second each: at perDecl apiece they fill one run"
+        "of 256, and one worker checked them one after another for 900 s"
+        "while the other three were done. Such a theorem is told by its"
+        "record alone: its statement is closed, no binder in front and no"
+        "universe parameter, and its proof is no larger than its statement"
+        "(the block's expressions, or the tree size of a proof built in"
+        "place), so whatever the check costs is reduction the statement asks"
+        "for. The runs are cut as before; then no run keeps more of these"
+        "than its even share, their count over the runs' rounded up, and the"
+        "ones over it are dealt to the runs in turn, at their ends. The runs"
+        "go to the workers in turn as before, so the computations are shared"
+        "out evenly by count, whatever each costs, while a computation that"
+        "already sits in a run with few of them stays among its neighbours."
+        "Nothing is queued or measured while checking: the partition stays"
+        "static. The order changes only where checking out of file order is"
+        "allowed already (placed names, after the literal prefix,"
+        "LiteralPrefix), and only with more than one worker, so one worker's"
+        "order and work stay as they were. Of run495's 61695 theorems 24246"
+        "are such computations, of Init's 41447 794, std's 71308 1346,"
+        "con-leche's 14607 151. Four workers, plain build, with"
+        "LiteralRecursionsComputed: run495 1684.6 s, 38153 G, 4.09 GB, the"
+        "workers done at 557, 622, 744 and 1683 s, to 1153.3 s, 38155 G,"
+        "4.82 GB, done at 916, 936, 968 and 1152 s, on a machine loaded by"
+        "other work; Init 66.86 G to 66.91 G, std 112.42 G to 112.53 G,"
+        "con-leche 103.64 G to 103.76 G, etale 22.59 G to 22.60 G,"
+        "reachability 26.36 G to 26.39 G, wall within the machine's noise."
+        "Dealing every such theorem in turn, wherever it sat, ended run495"
+        "at 982 s, all four workers within 13 s, but took con-leche to"
+        "104.76 G (+1.1%): its 151 left their namespaces. A cost for such a proof was rejected: any number"
+        "put on it is a guess that the next certificate makes wrong;"
+        "spreading needs none."
+    chosen = "ComputationsSpread"
+    rejected = ["ComputationCostGuessed", "EveryComputationDealt", "WorkQueue"]
+    impacts = [checkHeld, runsOf, spreadable, shareOf, countComputed, evened, trimRuns, trimNext, trimJobs, computedPast, isComputation, proofLen, compBuckets, withBuckets]
+
+fn spreadable(w: Int, placed: Bool, lits: Int) -> Bool
+    ? "Theorems proved by computation may leave file order: more than one worker, and checking out of file order allowed, every name placed and the literal constants placed (ComputationsSpread, CheckedByNamespace, LiteralPrefix)."
+    Bool.and(w > 1, Bool.and(placed, lits >= 0))
+
+verify spreadable
+    spreadable(1, true, 0) => false
+    spreadable(4, true, 0) => true
+    spreadable(4, false, 0) => false
+    spreadable(4, true, -1) => false
+
+fn runsOf(jobs: List<Job>, env: Env, limits: Limits, w: Int, spread: Bool, lits: Int) -> List<Chunk>
+    ? "The runs cut by cost (RunsByProofSize); when spread, no run keeps more theorems proved by computation past the literal prefix than its even share, and those over it are dealt to the runs in turn (ComputationsSpread)."
+    cs = chunks(jobs, env, limits, runSize(costOf(jobs, 0), w), [], 0, [])
+    match spread
+        false -> cs
+        true -> evened(cs, lits, shareOf(countComputed(jobs, lits, 0), List.len(cs)))
+
+verify runsOf
+    List.len(runsOf([job2("a", 0), job2("a", 1)], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 1, false, 0)) => 1
+    List.len(runsOf([job2("a", 0), closedThm(1, 3)], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 2, true, 0)) => 1
+
+fn shareOf(n: Int, runs: Int) -> Int
+    ? "n spread evenly over runs: what one run keeps, rounded up."
+    match runs <= 0
+        true -> n
+        false -> Result.withDefault(Int.div(n + runs - 1, runs), n)
+
+verify shareOf
+    shareOf(914, 256) => 4
+    shareOf(0, 256) => 0
+    shareOf(3, 0) => 3
+
+fn countComputed(jobs: List<Job>, lits: Int, acc: Int) -> Int
+    ? "How many of the jobs are theorems proved by computation past the literal prefix."
+    match jobs
+        [] -> acc
+        [j, ..rest] -> match computedPast(j, lits)
+            true -> countComputed(rest, lits, acc + 1)
+            false -> countComputed(rest, lits, acc)
+
+verify countComputed
+    countComputed([job2("a", 0), closedThm(1, 2)], 0, 0) => 1
+
+record Trimmed
+    runs: List<Chunk>
+    over: List<Job>
+
+fn evened(cs: List<Chunk>, lits: Int, q: Int) -> List<Chunk>
+    ? "Each run keeps its first q computations; the rest go to the runs in turn, at their ends."
+    t = trimRuns(cs, lits, q, [], [])
+    withBuckets(t.runs, compBuckets(t.over, List.len(t.runs), 0, {}), 0, [])
+
+verify evened
+    evened([], 0, 1) => []
+
+fn trimRuns(cs: List<Chunk>, lits: Int, q: Int, acc: List<Chunk>, over: List<Job>) -> Trimmed
+    ? "The runs with what each keeps, and what all of them gave up, in order (over newest first while built)."
+    match cs
+        [] -> Trimmed(runs = List.reverse(acc), over = List.reverse(over))
+        [c, ..rest] -> trimNext(trimJobs(c.jobs, lits, q, [], over), c, rest, lits, q, acc)
+
+verify trimRuns
+    List.len(trimRuns([], 0, 1, [], []).runs) => 0
+
+record Kept
+    keep: List<Job>
+    over: List<Job>
+
+fn trimNext(k: Kept, c: Chunk, rest: List<Chunk>, lits: Int, q: Int, acc: List<Chunk>) -> Trimmed
+    ? "One run trimmed to what it keeps, then the others."
+    trimRuns(rest, lits, q, List.prepend(Chunk.update(c, jobs = k.keep), acc), k.over)
+
+verify trimNext
+    List.len(trimNext(Kept(keep = [], over = []), Chunk(env = Check.State.envEmpty(), jobs = [job2("a", 0)], limits = Check.State.limitsOf(65536, Memory.Fast)), [], 0, 1, []).runs) => 1
+
+fn trimJobs(jobs: List<Job>, lits: Int, left: Int, keep: List<Job>, over: List<Job>) -> Kept
+    ? "A run's jobs: a computation beyond the first left goes to over (newest first), everything else stays in order."
+    match jobs
+        [] -> Kept(keep = List.reverse(keep), over = over)
+        [j, ..rest] -> match computedPast(j, lits)
+            false -> trimJobs(rest, lits, left, List.prepend(j, keep), over)
+            true -> match left > 0
+                true -> trimJobs(rest, lits, left - 1, List.prepend(j, keep), over)
+                false -> trimJobs(rest, lits, left, keep, List.prepend(j, over))
+
+verify trimJobs
+    List.len(trimJobs([closedThm(1, 2), closedThm(2, 2)], 0, 1, [], []).over) => 1
+
+fn computedPast(j: Job, lits: Int) -> Bool
+    ? "A theorem proved by computation past the literal prefix."
+    Bool.and(j.pos > lits, isComputation(j))
+
+verify computedPast
+    computedPast(closedThm(3, 2), 0) => true
+    computedPast(closedThm(0, 2), 0) => false
+
+fn isComputation(j: Job) -> Bool
+    ? "A theorem with a closed statement, no binder in front and no universe parameter, whose proof is no larger than the statement: what checking it costs is reduction (ComputationsSpread)."
+    match j.isThm
+        false -> false
+        true -> match j.head.ty
+            Expr.Pi -> false
+            _ -> match j.head.params
+                [] -> Bool.and(Core.Exprs.isClosed(j.head.ty), proofLen(j.value) <= Core.Exprs.treeSize(j.head.ty))
+                _ -> false
+
+verify isComputation
+    isComputation(job2("a", 0)) => false
+    isComputation(closedThm(1, 2)) => true
+    isComputation(closedThm(1, 100)) => false
+
+fn proofLen(v: Option<Proof>) -> Int
+    ? "How large a proof is: the expressions of its block, or the tree size of a proof built in place (capped as treeSize is)."
+    match v
+        Option.Some(Proof.Built(e)) -> Core.Exprs.treeSize(e)
+        _ -> proofSize(v)
+
+verify proofLen
+    proofLen(Option.Some(Proof.Built(Core.Exprs.bvar(0)))) => 1
+    proofLen(Option.None) => 0
+
+fn closedThm(pos: Int, exprs: Int) -> Job
+    ? "A theorem at pos stating a closed equation of five nodes, its block holding exprs expressions, for examples."
+    Job.update(thm2("c", pos, exprs), head = Head(name = Core.Names.str(Core.Names.anon(), "c"), params = [], ty = Core.Exprs.app(Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "Eq"), []), Core.Exprs.sort(Level.Zero)), Core.Exprs.natLit(1)), Core.Exprs.natLit(1))))
+
+verify closedThm
+    closedThm(2, 3).isThm => true
+
+fn compBuckets(comp: List<Job>, k: Int, i: Int, m: Map<Int, List<Job>>) -> Map<Int, List<Job>>
+    ? "Job i to bucket i mod k, each bucket newest first."
+    match comp
+        [] -> m
+        [j, ..rest] -> compBuckets(rest, k, i + 1, Map.set(m, Result.withDefault(Int.mod(i, k), 0), List.prepend(j, Option.withDefault(Map.get(m, Result.withDefault(Int.mod(i, k), 0)), []))))
+
+verify compBuckets
+    Map.len(compBuckets([job2("a", 0), job2("a", 1), job2("a", 2)], 2, 0, {})) => 2
+
+fn withBuckets(cs: List<Chunk>, m: Map<Int, List<Job>>, i: Int, acc: List<Chunk>) -> List<Chunk>
+    ? "Each run with its bucket after its own jobs, in file order."
+    match cs
+        [] -> List.reverse(acc)
+        [c, ..rest] -> withBuckets(rest, m, i + 1, List.prepend(Chunk.update(c, jobs = List.concat(c.jobs, List.reverse(Option.withDefault(Map.get(m, i), [])))), acc))
+
+verify withBuckets
+    withBuckets([], {}, 0, []) => []
+
 decision CheckedByNamespace
     date = "2026-11-06"
     reason =
@@ -560,9 +748,10 @@ fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, alwa
     a = admit(decls)
     w = Int.max(workers, 1)
     unit = unitFor(w)
-    jobs = orderFor(due(a), w, unit, placed, always, literalsPlaced(decls, 0, litNames))
+    lits = literalsPlaced(decls, 0, litNames)
+    jobs = orderFor(due(a), w, unit, placed, always, lits)
     limits = Limits.update(Check.State.limitsOf(unit, memory), say = say, since = startedAt(say))
-    cs = runWorkers(deal(numbered(chunks(jobs, a.run.env, limits, runSize(costOf(jobs, 0), w), [], 0, [])), w, 0, emptyGroups(w, [])))
+    cs = runWorkers(deal(numbered(runsOf(jobs, a.run.env, limits, w, spreadable(w, placed, lits), lits)), w, 0, emptyGroups(w, [])))
     Checking(run = combine(a, cs), held = cs)
 
 verify checkHeld
