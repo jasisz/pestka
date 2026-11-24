@@ -22,6 +22,9 @@
 # renov_flags_* are made from them by hand: flags in a 3.1 export (read and
 # used), and in malformed/ a 3.2 export whose type lacks its flags, a type
 # with only some of them, and a 3.1 export mixing flagged blocks with others.
+# renov_sBTree* come from tests/export/RenovationNested.lean: the auxiliary
+# recursor of a nested block with large elimination, nested through a type
+# without it, does not reduce, as in the reference kernel.
 #   unsupported/  2 (declined: format version)
 # and every export tests/soundness.py kept under tests/soundness-findings, each
 # invalid, against 1 (rejected).

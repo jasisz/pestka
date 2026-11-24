@@ -7,9 +7,12 @@ module Decls
         "carries what reduction asks of it at every step, found once when it"
         "enters the environment: the type of its major premise, whether that"
         "is a non-recursive structure, and whether its motive may land in"
-        "any sort. An inductive type of lean4export 3.2 also carries the"
-        "five flags of the kernel renovation (lean4#16595): those are"
-        "inputs, which the checker judges allowed or not and then uses."
+        "any sort; and the rules reduction may use, which are its declared"
+        "rules unless its major premise's type has the renovation's flags"
+        "without large elimination. An inductive type of lean4export 3.2"
+        "also carries the five flags of the kernel renovation"
+        "(lean4#16595): those are inputs, which the checker judges allowed"
+        "or not and then uses."
     exposes [Head, Hints, Safety, QuotKind, IndFlags, IndType, Ctor, RecRule, Rec, Decl, nameOf, constantCount]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Lazy]
     effects []
@@ -80,6 +83,7 @@ record Rec
     major: Name
     majorIsStruct: Bool
     elimAnySort: Bool
+    declared: List<RecRule>
 
 type Decl
     Axiom(Head, Bool)

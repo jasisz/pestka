@@ -731,7 +731,7 @@ verify fire
 
 fn sampleRec() -> Rec
     ? "Test fixture: Nat.rec with one motive, rules for zero (the minor premise z) and succ (s n (rec n))."
-    Rec(head = Head(name = Check.Lits.name2("Nat", "rec"), params = [Check.Lits.name1("u")], ty = Core.Exprs.sort(Level.Zero)), all = [Check.Lits.nat], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 2, rules = [RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(1)), RecRule(ctor = Check.Lits.natSucc, nfields = 1, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Check.Lits.nat, majorIsStruct = false, elimAnySort = true)
+    Rec(head = Head(name = Check.Lits.name2("Nat", "rec"), params = [Check.Lits.name1("u")], ty = Core.Exprs.sort(Level.Zero)), all = [Check.Lits.nat], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 2, rules = [RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(1)), RecRule(ctor = Check.Lits.natSucc, nfields = 1, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Check.Lits.nat, majorIsStruct = false, elimAnySort = true, declared = [RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(1)), RecRule(ctor = Check.Lits.natSucc, nfields = 1, rhs = Core.Exprs.bvar(0))])
 
 verify sampleRec
     sampleRec().numMinors => 2

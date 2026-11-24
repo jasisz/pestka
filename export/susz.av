@@ -1922,7 +1922,7 @@ fn recWithK(t: Tables, head: Head, isUnsafe: Bool, all: List<Int>, nums: List<In
             false -> match Export.Tables.names(t, all)
                 Result.Err(e) -> Got.GotBad(e)
                 Result.Ok(group) -> match nums
-                    [np, ni, nm, nmi] -> Got.GRec(Rec(head = head, all = group, numParams = np, numIndices = ni, numMotives = nm, numMinors = nmi, rules = rules, k = k == 1, isUnsafe = isUnsafe, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), at)
+                    [np, ni, nm, nmi] -> Got.GRec(Rec(head = head, all = group, numParams = np, numIndices = ni, numMotives = nm, numMinors = nmi, rules = rules, k = k == 1, isUnsafe = isUnsafe, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false, declared = rules), at)
                     _ -> Got.GotBad("a recursor needs four numbers")
 
 verify recWithK

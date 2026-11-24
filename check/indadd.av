@@ -401,11 +401,11 @@ verify recsMatch
 fn sameRec(g: Option<Const>, r: Rec) -> Bool
     ? "Every field and rule equal, terms up to binder names."
     match g
-        Option.Some(Const.CRec(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == r.head.params, d.head.ty == r.head.ty), Bool.and(d.all == r.all, d.numParams == r.numParams)), Bool.and(Bool.and(Bool.and(d.numIndices == r.numIndices, d.numMotives == r.numMotives), Bool.and(d.numMinors == r.numMinors, d.k == r.k)), Bool.and(d.isUnsafe == r.isUnsafe, sameRules(d.rules, r.rules))))
+        Option.Some(Const.CRec(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == r.head.params, d.head.ty == r.head.ty), Bool.and(d.all == r.all, d.numParams == r.numParams)), Bool.and(Bool.and(Bool.and(d.numIndices == r.numIndices, d.numMotives == r.numMotives), Bool.and(d.numMinors == r.numMinors, d.k == r.k)), Bool.and(d.isUnsafe == r.isUnsafe, sameRules(d.declared, r.rules))))
         _ -> false
 
 verify sameRec
-    sameRec(Option.None, Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false)) => false
+    sameRec(Option.None, Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false, declared = [])) => false
 
 fn sameRules(as: List<RecRule>, bs: List<RecRule>) -> Bool
     ? "Rules pairwise equal."
