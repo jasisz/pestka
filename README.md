@@ -36,8 +36,9 @@ reduction.
 
 It checks **all of mathlib**: 702,040 declarations in the recorded export.
 The same Aver source also compiles to **WebAssembly**, where it checks the
-same corpus under V8. On the small Lean Kernel Arena suite, the recorded
-result is **179/179 correct**. [Measurements and setup →](docs/benchmarks.md)
+same corpus under V8. On the [Lean Kernel Arena](https://arena.lean-lang.org/checker/pestka/)
+it answers **all 240 tests with a prescribed outcome correctly** (92 soundness,
+148 completeness). [Measurements and setup →](docs/benchmarks.md)
 It has also checked whole exports of CFSG (39.7 million declarations, in
 4 h 6 min on 32 workers and 102 GiB), the Riemann hypothesis claim and FLT.
 [Large developments →](#large-developments)
