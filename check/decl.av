@@ -771,7 +771,7 @@ fn planned(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always
 verify planned
     planned([], 2, Memory.Fast, false, false, false).runs => []
 
-fn planPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory) -> Plan
+fn planPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory, say: Bool) -> Plan
     ? "A subset check planned: the environment built and the targets cut into runs, numbered; unchecked counts the deferred declarations admitted without a check (SubsetAdmitsUnchecked)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs]
     a = admit(decls)
@@ -779,10 +779,10 @@ fn planPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory)
     unit = unitFor(w)
     all = due(a)
     jobs = onlyTargets(all, targets, [])
-    Plan(admitted = a, runs = numbered(chunks(jobs, a.run.env, Check.State.limitsOf(unit, memory), runSize(costOf(jobs, 0), w), [], 0, [])), unchecked = List.len(all) - List.len(jobs))
+    Plan(admitted = a, runs = numbered(chunks(jobs, a.run.env, Limits.update(Check.State.limitsOf(unit, memory), say = say, since = startedAt(say)), runSize(costOf(jobs, 0), w), [], 0, [])), unchecked = List.len(all) - List.len(jobs))
 
 verify planPart
-    planPart([axiomNamed("a", false), axiomNamed("b", false)], [1], 1, Memory.Fast).unchecked => 1
+    planPart([axiomNamed("a", false), axiomNamed("b", false)], [1], 1, Memory.Fast, false).unchecked => 1
 
 fn checkingOf(p: Plan, cs: List<Checked>) -> Checking
     ? "The verdict of a planned check from what its runs found, with that held (FactsHeldToExit)."
@@ -961,17 +961,17 @@ record Part
     checking: Checking
     unchecked: Int
 
-fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory) -> Part
+fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory, say: Bool) -> Part
     ? "A subset check: the environment built from decls, the declarations before the last target and the targets, then of the deferred declarations only the targets, at the positions targets lists in increasing order, checked on workers; unchecked counts the deferred declarations admitted without a check (SubsetAdmitsUnchecked)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs]
-    p = planPart(decls, targets, workers, memory)
+    p = planPart(decls, targets, workers, memory, say)
     w = Int.max(workers, 1)
     partOf(p, runWorkers(deal(p.runs, w, 0, emptyGroups(w, []))))
 
 verify checkPart
-    checkPart([axiomNamed("a", false), axiomNamed("b", false)], [1], 1, Memory.Fast).unchecked => 1
-    Result.withDefault(checkPart([Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "a"), params = [], ty = Core.Exprs.bvar(0)), false), axiomNamed("b", false)], [1], 1, Memory.Fast).checking.run, Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).checked => 1
-    checkPart([Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "a"), params = [], ty = Core.Exprs.bvar(0)), false), axiomNamed("b", false)], [0], 1, Memory.Fast).checking.run => Result.Err(Fail.Reject("a: the type checker met a loose bound variable"))
+    checkPart([axiomNamed("a", false), axiomNamed("b", false)], [1], 1, Memory.Fast, false).unchecked => 1
+    Result.withDefault(checkPart([Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "a"), params = [], ty = Core.Exprs.bvar(0)), false), axiomNamed("b", false)], [1], 1, Memory.Fast, false).checking.run, Run(env = Check.State.envEmpty(), closed = Core.Cache.empty(), checked = 0, trusted = 0, skipped = 0, jobs = [], pos = 0)).checked => 1
+    checkPart([Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "a"), params = [], ty = Core.Exprs.bvar(0)), false), axiomNamed("b", false)], [0], 1, Memory.Fast, false).checking.run => Result.Err(Fail.Reject("a: the type checker met a loose bound variable"))
 
 fn onlyTargets(jobs: List<Job>, targets: List<Int>, acc: List<Job>) -> List<Job>
     ? "The jobs at the positions targets lists; both in increasing order."

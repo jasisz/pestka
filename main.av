@@ -133,40 +133,40 @@ fn checkedPart(args: List<String>, names: List<String>) -> Held
     ! [Console.error, Console.print, Disk.readBytesAt, Disk.size, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     plain = withoutFlag(args, [])
     match plain
-        [path] -> partOf(path, names, 4, memoryIn(args), List.contains(args, "--dealt"))
-        [path, n] -> partOf(path, names, workersOf(n), memoryIn(args), List.contains(args, "--dealt"))
+        [path] -> partOf(path, names, 4, memoryIn(args), List.contains(args, "--dealt"), List.contains(args, "--progress"))
+        [path, n] -> partOf(path, names, workersOf(n), memoryIn(args), List.contains(args, "--dealt"), List.contains(args, "--progress"))
         _ -> statusOnly(declined("usage: pestka --only NAME[,NAME...] FILE.susz [WORKERS]; NAME may be Foo.* for every name under Foo"))
 
-fn partOf(path: String, names: List<String>, workers: Int, memory: Memory, dealt: Bool) -> Held
+fn partOf(path: String, names: List<String>, workers: Int, memory: Memory, dealt: Bool, say: Bool) -> Held
     ? "A subset check needs names, and a Susz file: only Susz has INDEX."
     ! [Console.error, Console.print, Disk.readBytesAt, Disk.size, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match names
         [] -> statusOnly(declined("--only needs at least one name"))
         _ -> match Export.Susz.isSusz(path)
             false -> statusOnly(declined("--only checks part of a Susz file, by its INDEX: pack the export first (pestka pack FILE.ndjson FILE.susz)"))
-            true -> partHeld(Export.Susz.readPart(path, Export.Susz.planOf(names)), names, workers, memory, dealt)
+            true -> partHeld(Export.Susz.readPart(path, Export.Susz.planOf(names)), names, workers, memory, dealt, say)
 
-fn partHeld(o: Outcome, names: List<String>, workers: Int, memory: Memory, dealt: Bool) -> Held
+fn partHeld(o: Outcome, names: List<String>, workers: Int, memory: Memory, dealt: Bool, say: Bool) -> Held
     ? "The subset verdict, with the part read, both handed back for main to hold (FactsHeldToExit)."
     ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
-    Held(verdict = partReport(o, names, workers, memory, dealt), input = Option.Some(o))
+    Held(verdict = partReport(o, names, workers, memory, dealt, say), input = Option.Some(o))
 
-fn partReport(o: Outcome, names: List<String>, workers: Int, memory: Memory, dealt: Bool) -> Verdict
+fn partReport(o: Outcome, names: List<String>, workers: Int, memory: Memory, dealt: Bool, say: Bool) -> Verdict
     ? "Prints the subset verdict: a file rejected or declined while reading is so here too; a bad INDEX ends the check as index invalid, status 2, no verdict on the file (Susz 1 spec, section 2)."
     ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match o
         Outcome.Rejected(why) -> Verdict(code = rejected(why), held = Option.None)
         Outcome.Declined(why) -> Verdict(code = declined(why), held = Option.None)
         Outcome.IndexInvalid(why) -> Verdict(code = printed("index invalid: {why}", 2), held = Option.None)
-        Outcome.Read(p) -> partSummary(p, names, workers, memory, dealt)
+        Outcome.Read(p) -> partSummary(p, names, workers, memory, dealt, say)
 
-fn partSummary(p: Parsed, names: List<String>, workers: Int, memory: Memory, dealt: Bool) -> Verdict
+fn partSummary(p: Parsed, names: List<String>, workers: Int, memory: Memory, dealt: Bool, say: Bool) -> Verdict
     ? "What was read, then the targets checked; a target Pestka skips, unsafe or partial, declines the check."
     ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     Console.print("subset: {List.len(p.targets)} declarations asked for; the first {List.len(p.decls)} declarations of the file read")
     match Check.Decl.skippedAmong(p.decls, p.targets, 0, [])
         [n, .._] -> Verdict(code = declined("{Core.Names.render(n)} is unsafe or partial, which Pestka does not check"), held = Option.None)
-        [] -> partChecked(Check.Queue.checkPart(p.decls, p.targets, workers, memory, dealt), names, List.len(p.targets))
+        [] -> partChecked(Check.Queue.checkPart(p.decls, p.targets, workers, memory, dealt, say), names, List.len(p.targets))
 
 fn partChecked(c: Check.Decl.Part, names: List<String>, n: Int) -> Verdict
     ? "The subset verdict, with what checking found held to the end (FactsHeldToExit)."

@@ -65,12 +65,12 @@ fn queuedPlan(p: Check.Decl.Plan, w: Int) -> Check.Decl.Checking
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     Check.Decl.checkingOf(p, queued(p.admitted.run.env, p.runs, w))
 
-fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory, dealt: Bool) -> Check.Decl.Part
+fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory, dealt: Bool, say: Bool) -> Check.Decl.Part
     ? "Check.Decl.checkPart with the runs taken from a queue when more than one worker checks and --dealt is not given (RunsQueued)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match Bool.or(workers <= 1, dealt)
-        true -> Check.Decl.checkPart(decls, targets, workers, memory)
-        false -> queuedPart(Check.Decl.planPart(decls, targets, workers, memory), workers)
+        true -> Check.Decl.checkPart(decls, targets, workers, memory, say)
+        false -> queuedPart(Check.Decl.planPart(decls, targets, workers, memory, say), workers)
 
 fn queuedPart(p: Check.Decl.Plan, w: Int) -> Check.Decl.Part
     ? "A planned subset check on w workers taken from the queue."
