@@ -8248,12 +8248,169 @@ fn tryArgs(st: St, t: Expr, s: Expr, c: Const) -> Result<LD, Fail>
     match Core.Univ.isEquivList(headLevels(t), headLevels(s))
         false -> unfoldBothNow(St.update(st, eqFail = Check.State.pairPut(st.eqFail, t, s)), t, s)
         true -> match unusedArgs(st, c, Core.Apps.numArgs(t))
-            Result.Ok(flags) -> argsTried(defEqArgs(st, t, s, flags)?, t, s)
+            Result.Ok(flags) -> argsFirst(st, t, s, flags)
             Result.Err(w) -> Result.Err(Fail.Wants(w, st))
 
 verify tryArgs
     resultStatus(tryArgs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), dropFirst())) => 1
     resultStatus(tryArgs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), dropFirst())) => 1
+
+decision ArgumentsWholeThenEach
+    date = "2026-11-24"
+    reason =
+        "f as =?= f bs for a regular f compares the arguments first, as the"
+        "reference does, and unfolds both sides when they differ. Equal"
+        "arguments are a shortcut that only ever says equal: a comparison"
+        "of them that was not finished says nothing about the sides, which"
+        "the reference unfolds anyway. Outside any attempt the arguments"
+        "were compared without a stop, the last first. In CFSG's s03 slice"
+        "an iteration was compared with itself one step apart, f (x + 1)"
+        "(g x) against f x (h x): the last pair needs two arrays of 1755"
+        "elements worked out (with hand-ups from too deep and the spine"
+        "checked again around them) before x + 1 =?= x, settled in about 31"
+        "steps, is reached. Now, outside any attempt, the whole list is"
+        "compared first within an attempt of meetFirst ticks, and its"
+        "answer stands when it finishes: equal, or different, remembered in"
+        "eqFail and both sides unfolded as the reference does. When it is"
+        "cut, each pair is compared within an attempt of its own, meetFirst"
+        "ticks from where the pair before it ended: a pair that finishes"
+        "different settles it as before, all finished equal is equal, and a"
+        "cut pair is passed over undecided. Undecided, the comparison of the"
+        "two unfolded sides, lazy delta and the cases after it, is an"
+        "attempt of meetFirst ticks whose answer stands when it finishes;"
+        "when that is cut too the reference runs as before without a stop,"
+        "the ticks burned owed on the head (ProbesPaidByWork). The order of"
+        "the pairs no longer decides whether a cheap different pair is"
+        "found, no new bound is added (n pairs cost at most n + 1 times"
+        "meetFirst, paid by the work after them as every other attempt),"
+        "and an answer comes only from a finished attempt or the reference."
+        "PGO (Init x4, LyOm x1), four workers, against bc4c3eb: s03 1108.4 G,"
+        "134 s to 2.76 G, 0.10 s (sqE_eq._f alone 1201 G to 0.40 G, no"
+        "hand-up from too deep left); Init 56.50 / 56.42 G to 56.49 / 56.42"
+        "G; std 95.31 G to 95.50 G, 0.733 GB to 0.747 GB; mathlib 1278.1 /"
+        "1277.4 G to 1280.9 / 1280.3 G (+0.22%), 3.77 GB as before; s02 176.1"
+        "G to 176.2 G; s04 1965.7 G to 1955.3 G; the 58 walls 34881 G to"
+        "34806 G (-0.22%), none worse by more than 0.2%. One attempt over"
+        "the whole list alone (OneAttemptForAllArguments) was spent on the"
+        "arrays and never reached x + 1 =?= x: s03 as before (1241 G against"
+        "1242 G, plain). Each pair in its own attempt from the start"
+        "(EachPairAlways): s03 2.71 G, but mathlib 1282.1 / 1281.8 G"
+        "(+0.33%): 1.89 M pairs on mathlib, 99.5% of them equal, compared"
+        "within a stop take other ways (no lazy delta probe, parts in"
+        "attempts) and cost more than one attempt over the list. A quarter"
+        "and four times meetFirst per pair: s03 3.16 G and 3.33 G against"
+        "3.19 G (plain)."
+    chosen = "ArgumentsWholeThenEach"
+    rejected = ["ArgumentsWithoutStop", "OneAttemptForAllArguments", "EachPairAlways", "UnfoldedBeforeArguments"]
+    impacts = [tryArgs, argsFirst, argsWithinStop, pairsIfCut, argsEach, argEach, argWithin, argsAnswer, unfoldedWithin, unfoldedTail, argsRef]
+
+fn argsFirst(st: St, t: Expr, s: Expr, flags: List<Bool>) -> Result<LD, Fail>
+    ? "Equal arguments; outside any attempt, and when nothing is owed on the head, the whole list within an attempt of meetFirst ticks and, when that is cut, each pair within one of its own (ArgumentsWholeThenEach), the tick it starts at read first so that the state keeps one owner."
+    t0 = st.ticks
+    match Bool.and(st.stop < 0, headDue(st, t))
+        true -> argsAnswer(t0, pairsIfCut(argsWithinStop(st, t, s, flags, st.ticks + meetFirst())?, t, s, flags)?, t, s, flags)
+        false -> argsTried(defEqArgs(st, t, s, flags)?, t, s)
+
+verify argsFirst
+    resultStatus(argsFirst(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), [])) => 1
+
+fn argsWithinStop(st: St, t: Expr, s: Expr, flags: List<Bool>, stop: Int) -> Result<RI, Fail>
+    ? "defEqArgs within the stop: 1 equal, 2 different (it finished), 0 undecided past the stop (attemptEnd)."
+    outer = st.stop
+    d = st.depth
+    c = ctxOf(st)
+    riEnded(defEqArgs(St.update(st, stop = within(outer, stop)), t, s, flags), outer, c, d)
+
+verify argsWithinStop
+    resultInt(argsWithinStop(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), [], 8)) => 2
+
+fn pairsIfCut(r: RI, t: Expr, s: Expr, flags: List<Bool>) -> Result<RI, Fail>
+    ? "The whole list's answer when its attempt finished; cut, each pair within an attempt of its own (ArgumentsWholeThenEach)."
+    match r.i
+        0 -> argsEach(r.st, t, s, flags, 1)
+        _ -> Result.Ok(r)
+
+verify pairsIfCut
+    resultInt(pairsIfCut(RI(i = 2, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), Core.Exprs.fvar(0), [])) => 2
+
+fn argsEach(st: St, t: Expr, s: Expr, skip: List<Bool>, acc: Int) -> Result<RI, Fail>
+    ? "The pairs of arguments of two spines, last first as defEqArgs goes, leaving out those flagged in skip, each within an attempt of its own (ArgumentsWholeThenEach): 2 when a pair finished different, otherwise acc, 1 while every pair so far finished equal and 0 once one was cut."
+    match t
+        Expr.App(_, ft, at) -> match s
+            Expr.App(_, fs, as) -> match skip
+                [true, ..rest] -> argsEach(st, ft, fs, rest, acc)
+                [false, ..rest] -> argEach(argWithin(st, at, as)?, ft, fs, rest, acc)
+                [] -> argEach(argWithin(st, at, as)?, ft, fs, [], acc)
+            _ -> Result.Ok(RI(i = 2, st = st))
+        _ -> match s
+            Expr.App -> Result.Ok(RI(i = 2, st = st))
+            _ -> Result.Ok(RI(i = acc, st = st))
+
+verify argsEach
+    resultInt(argsEach(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), [], 1)) => 2
+    resultInt(argsEach(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), [], 1)) => 1
+    resultInt(argsEach(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(1)), Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.natLit(2)), [true], 1)) => 1
+
+fn argEach(r: RI, ft: Expr, fs: Expr, skip: List<Bool>, acc: Int) -> Result<RI, Fail>
+    ? "A pair that finished different settles it; otherwise the rest of the spine, undecided from now on when this pair was cut."
+    match r.i
+        2 -> Result.Ok(r)
+        1 -> argsEach(r.st, ft, fs, skip, acc)
+        _ -> argsEach(r.st, ft, fs, skip, 0)
+
+verify argEach
+    resultInt(argEach(RI(i = 0, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), Core.Exprs.fvar(0), [], 1)) => 0
+
+fn argWithin(st: St, a: Expr, b: Expr) -> Result<RI, Fail>
+    ? "One pair of arguments within an attempt of meetFirst ticks from now: 1 equal, 2 different (it finished), 0 undecided past its stop (attemptEnd)."
+    outer = st.stop
+    d = st.depth
+    c = ctxOf(st)
+    riEnded(isDefEq(St.update(st, stop = within(outer, st.ticks + meetFirst())), a, b), outer, c, d)
+
+verify argWithin
+    resultInt(argWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => 2
+
+fn argsAnswer(t0: Int, r: RI, t: Expr, s: Expr, flags: List<Bool>) -> Result<LD, Fail>
+    ? "Equal arguments settle it; different ones are remembered and both sides unfold; undecided, the unfolded sides are compared within an attempt of meetFirst ticks."
+    match r.i
+        1 -> Result.Ok(LD(status = 1, t = t, s = s, st = r.st))
+        2 -> unfoldBothNow(St.update(r.st, eqFail = Check.State.pairPut(r.st.eqFail, t, s)), t, s)
+        _ -> argsRef(t0, unfoldedWithin(r.st, t, s)?, t, s, flags)
+
+verify argsAnswer
+    resultStatus(argsAnswer(0, RI(i = 1, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(1), [])) => 1
+
+fn unfoldedWithin(st: St, t: Expr, s: Expr) -> Result<RI, Fail>
+    ? "Both sides unfolded and compared as the reference goes on, within an attempt of meetFirst ticks: 1 equal, 2 different when it finished, 0 undecided past its stop."
+    outer = st.stop
+    d = st.depth
+    c = ctxOf(st)
+    riEnded(unfoldedTail(St.update(st, stop = within(outer, st.ticks + meetFirst())), t, s), outer, c, d)
+
+verify unfoldedWithin
+    resultInt(unfoldedWithin(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(1))) => 1
+
+fn unfoldedTail(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "Both sides unfolded, then lazy delta and the cases after it."
+    u = unfoldBothNow(st, t, s)?
+    match u.status
+        1 -> yes(u.st)
+        2 -> no(u.st)
+        _ -> refTail(u.st, u.t, u.s)
+
+verify unfoldedTail
+    resultBool(unfoldedTail(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => false
+
+fn argsRef(t0: Int, r: RI, t: Expr, s: Expr, flags: List<Bool>) -> Result<LD, Fail>
+    ? "The unfolded sides' answer when that attempt finished; past its stop the reference without a stop, the ticks both attempts burned since t0 owed on the head (ProbesPaidByWork)."
+    match r.i
+        1 -> Result.Ok(LD(status = 1, t = t, s = s, st = r.st))
+        2 -> Result.Ok(LD(status = 2, t = t, s = s, st = r.st))
+        _ -> argsTried(defEqArgs(owed(r.st, t0, headKey(t)), t, s, flags)?, t, s)
+
+verify argsRef
+    resultStatus(argsRef(0, RI(i = 2, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1), Core.Exprs.fvar(2), [])) => 2
 
 fn dropFirst() -> Const
     ? "A sample regular definition that ignores its argument: fun x => 0."
