@@ -112,9 +112,12 @@ decision PortionsGuided
         "milliseconds a job, and what the workers' jobs cost against how long"
         "they ran, worked over work units a millisecond; a portion is at"
         "least 100 times what main spends a job, in units of cost, so that"
-        "main's share of a portion is at most 1% of its checking. Before the"
-        "first job has come back it is what 16 declarations cost, the floor"
-        "runs had (runSize). The cost of a declaration is the estimate the"
+        "main's share of a portion is at most 1% of its checking (the 100 is"
+        "that bound, not a tuned number). Until the first job has come back"
+        "and main has measured both there is no minimum: the first portions"
+        "are the cost left over the share alone, the largest the scheme"
+        "makes. A job's overhead below a millisecond reads as none, and the"
+        "last portions may then be one declaration each. The cost of a declaration is the estimate the"
         "runs were cut by, so a portion's time is still a guess; what the"
         "scheme bounds is how late the last portions begin, as the portions"
         "shrink toward the end. The portions follow the order the runs had,"
@@ -159,14 +162,13 @@ verify templateOf
     templateOf([]).worker => 0
 
 fn minimumCost(q: Queue) -> Int
-    ? "The least a portion costs: 100 times what main spends a job, in units of cost at the rate the workers checked so far; what 16 declarations cost until both are known (PortionsGuided)."
-    floor = 16 * Check.Decl.perDecl()
+    ? "The least a portion costs: 100 times what main spends a job, in units of cost at the rate the workers checked so far; none until both are known (PortionsGuided)."
     match Bool.or(Bool.or(q.handled == 0, q.work == 0), q.worked == 0)
-        true -> floor
-        false -> Int.max(floor, Result.withDefault(Int.div(100 * q.spent * q.worked, q.handled * q.work), floor))
+        true -> 0
+        false -> Result.withDefault(Int.div(100 * q.spent * q.worked, q.handled * q.work), 0)
 
 verify minimumCost
-    minimumCost(emptyQueue()) => 16 * Check.Decl.perDecl()
+    minimumCost(emptyQueue()) => 0
     minimumCost(Queue.update(emptyQueue(), spent = 10, handled = 10, work = 1000, worked = 1000000)) => 100000
 
 record Portion
@@ -190,7 +192,7 @@ fn wanted0(q: Queue) -> Int
     Int.max(minimumCost(q), Result.withDefault(Int.div(q.left + q.share - 1, q.share), q.left))
 
 verify wanted0
-    wanted0(emptyQueue()) => 16 * Check.Decl.perDecl()
+    wanted0(emptyQueue()) => 0
 
 fn sayOf(runs: List<Check.Decl.Chunk>) -> Bool
     ? "Whether progress is asked for, as the runs' limits say."
