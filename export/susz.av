@@ -374,6 +374,10 @@ record Dir
     upTo: Int
     marks: Map<Int, Mark>
     targets: List<Int>
+    flags: Int
+    flagsLength: Int
+    flagsAt: Int
+    flagsEntry: Int
 
 fn withTrailer(src: Src, end: Int, tr: Bytes) -> Outcome
     ? "The counts and the directory, whose section count must give the trailer's length; then the entries, the PAD sections and MAIN (HeaderAndDirectory)."
@@ -381,9 +385,11 @@ fn withTrailer(src: Src, end: Int, tr: Bytes) -> Outcome
     n = u32At(tr, 16)
     match Bytes.len(tr) == 28 + 24 * n
         false -> Outcome.Rejected("trailer @ {end + Bytes.len(tr) - 8}: a trailer length of {Bytes.len(tr)} bytes does not hold {n} directory entries")
-        true -> match entries(tr, 0, n, 16, end, Dir(names = u32At(tr, 0), levels = u32At(tr, 4), exprs = u32At(tr, 8), decls = u32At(tr, 12), countsAt = end, dirAt = end + 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1, mustEntry = 0, index = -1, indexLength = 0, upTo = -1, marks = {}, targets = []))
+        true -> match entries(tr, 0, n, 16, end, Dir(names = u32At(tr, 0), levels = u32At(tr, 4), exprs = u32At(tr, 8), decls = u32At(tr, 12), countsAt = end, dirAt = end + 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1, mustEntry = 0, index = -1, indexLength = 0, upTo = -1, marks = {}, targets = [], flags = -1, flagsLength = 0, flagsAt = 0, flagsEntry = 0))
             Result.Err(o) -> o
-            Result.Ok(d) -> padded(src, d, List.reverse(d.pads))
+            Result.Ok(d) -> match d.flagsLength == 0
+                true -> padded(src, d, List.reverse(d.pads))
+                false -> Outcome.Rejected("directory @ {d.flagsAt}: entry {d.flagsEntry}: FLAGS holds {d.flagsLength} bytes: it is empty")
 
 fn entries(tr: Bytes, k: Int, n: Int, expected: Int, end: Int, d: Dir) -> Result<Dir, Outcome>
     ? "Entry k of n, starting where the section before ended; at the end the sections must reach the trailer and MAIN be among them; only then does an unknown section that must be understood decline the file (HeaderAndDirectory)."
@@ -445,7 +451,7 @@ fn entryKept(d: Dir, id: Int, f: Int, flags: Int, off: Int, len: Int, at: Int, k
         true -> match Bool.and(flags == 1, d.must < 0)
             true -> Dir.update(d, must = at, mustEntry = k1)
             false -> d
-        false -> sectionKept(d, id, off, len)
+        false -> sectionKept(d, id, off, len, at, k1)
 
 verify entryKept
     entryKept(dir0(), 9, -1, 1, 16, 4, 40, 1).must => 40
@@ -454,10 +460,11 @@ verify entryKept
 
 
 fn flagsOf(id: Int) -> Int
-    ? "The flags of a known section: 1, must be understood, for MAIN and PROOFS, 0 for SOURCE, PAD and INDEX; -1 for an unknown id (HeaderAndDirectory)."
+    ? "The flags of a known section: 1, must be understood, for MAIN, PROOFS and FLAGS, 0 for SOURCE, PAD and INDEX; -1 for an unknown id (HeaderAndDirectory)."
     match id
         1 -> 1
         2 -> 1
+        6 -> 1
         3 -> 0
         4 -> 0
         5 -> 0
@@ -466,23 +473,27 @@ fn flagsOf(id: Int) -> Int
 verify flagsOf
     flagsOf(2) => 1
     flagsOf(5) => 0
-    flagsOf(6) => -1
+    flagsOf(6) => 1
+    flagsOf(7) => -1
 
-fn sectionKept(d: Dir, id: Int, off: Int, len: Int) -> Dir
-    ? "Where MAIN, PROOFS, INDEX and each PAD lie; SOURCE is not read, and INDEX only by a subset check (PartByIndex)."
+fn sectionKept(d: Dir, id: Int, off: Int, len: Int, at: Int, k1: Int) -> Dir
+    ? "Where MAIN, PROOFS, INDEX, FLAGS and each PAD lie; SOURCE is not read, and INDEX only by a subset check (PartByIndex). FLAGS has no bytes to read: its entry announces flagged inductive blocks (kind 7), and its length field, at at + 16 of entry k1, is where a FLAGS that is not empty is reported."
     match id
         1 -> Dir.update(d, main = off, mainLength = len)
         2 -> Dir.update(d, proofs = off, proofsLength = len)
         4 -> Dir.update(d, pads = List.prepend((off, len), d.pads))
         5 -> Dir.update(d, index = off, indexLength = len)
+        6 -> Dir.update(d, flags = off, flagsLength = len, flagsAt = at + 16, flagsEntry = k1)
         _ -> d
 
 verify sectionKept
-    sectionKept(dir0(), 3, 16, 4) => dir0()
+    sectionKept(dir0(), 3, 16, 4, 40, 1) => dir0()
+    sectionKept(dir0(), 6, 16, 0, 40, 1).flags => 16
+    sectionKept(dir0(), 6, 16, 2, 40, 1).flagsAt => 56
 
 fn dir0() -> Dir
     ? "A directory of nothing, for examples."
-    Dir(names = 1, levels = 1, exprs = 0, decls = 0, countsAt = 0, dirAt = 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1, mustEntry = 0, index = -1, indexLength = 0, upTo = -1, marks = {}, targets = [])
+    Dir(names = 1, levels = 1, exprs = 0, decls = 0, countsAt = 0, dirAt = 16, main = -1, mainLength = 0, proofs = -1, proofsLength = 0, pads = [], ids = [], must = -1, mustEntry = 0, index = -1, indexLength = 0, upTo = -1, marks = {}, targets = [], flags = -1, flagsLength = 0, flagsAt = 0, flagsEntry = 0)
 
 verify dir0
     dir0().main => -1
@@ -521,7 +532,7 @@ fn mainOf(src: Src, d: Dir) -> Outcome
 fn mainFrom(src: Src, d: Dir) -> Outcome
     ? "MAIN from its first chunk."
     ! [Disk.readBytesAt]
-    refill(Rd(src = src, b = Bytes.fromList([]), base = 0, stop = d.main + d.mainLength, n = 0), Tables.update(Export.Tables.empty(), proofBase = Int.max(d.proofs, 0), proofLength = d.proofsLength), d.main, chunkBytes(), d)
+    refill(Rd(src = src, b = Bytes.fromList([]), base = 0, stop = d.main + d.mainLength, n = 0), Tables.update(Export.Tables.empty(), proofBase = Int.max(d.proofs, 0), proofLength = d.proofsLength, flagsRequired = d.flags >= 0), d.main, chunkBytes(), d)
 
 fn padChecked(src: Src, d: Dir, rest: List<Tuple<Int, Int>>, off: Int, i: Int) -> Outcome
     ? "The next PAD section, or the first byte of this one that is not zero."
@@ -591,9 +602,11 @@ fn ended(src: Src, t: Tables, d: Dir) -> Outcome
     k = countsWrong([d.names, d.levels, d.exprs, d.decls], [t.nextName, t.nextLevel, t.nextExpr, t.declCount], 0)
     match k < 0
         false -> Outcome.Rejected("trailer @ {d.countsAt + 4 * k}: the counts {d.names}, {d.levels}, {d.exprs}, {d.decls} are not MAIN's {t.nextName}, {t.nextLevel}, {t.nextExpr}, {t.declCount}")
-        true -> match Bool.or(t.proofAt > 0, d.proofs >= 0)
-            false -> Outcome.Read(Export.Tables.finish(t))
-            true -> withSections(src, t, d)
+        true -> match Bool.and(d.flags >= 0, Bool.not(t.flagged))
+            true -> Outcome.Rejected("FLAGS @ {d.flags}: FLAGS without a flagged inductive block")
+            false -> match Bool.or(t.proofAt > 0, d.proofs >= 0)
+                false -> Outcome.Read(Export.Tables.finish(t))
+                true -> withSections(src, t, d)
 
 fn countsWrong(said: List<Int>, read: List<Int>, k: Int) -> Int
     ? "The first count, from k, that the trailer says and MAIN does not read; -1 when all agree."
@@ -1427,11 +1440,30 @@ fn param(t: Tables, n: At) -> Done
 verify param
     param(Export.Tables.empty(), At(value = 4, at = Pos(value = 1))) => Done.Bad("unknown name index 4")
 
+decision FlaggedFilesWhole
+    date = "2026-11-24"
+    reason =
+        "A file with FLAGS holds lean4export 3.2 blocks, whose types all"
+        "carry the renovation's flags (lean4#16595). An inductive block"
+        "without flags (kind 5) in such a file would be checked under the"
+        "rules from before the renovation next to blocks checked under the"
+        "new ones, and a 3.2 export without flags is an error anyway. So"
+        "the file is refused at that record, as Gruszka refuses it: a file"
+        "is all old blocks or all flagged ones."
+    chosen = "FlaggedFilesWhole"
+    rejected = ["MixedBlocksEachByItsRules"]
+    impacts = [decl]
+
 fn decl(t: Tables, b: Bytes, i: Pos) -> Done
     ? "18: a declaration, its kind first; every kind but an inductive block then has a head."
     match Bytes.get(b, i.value)
         Option.None -> Done.Short(t)
-        Option.Some(5) -> inductiveFrom(t, b, orNone(posOf(i.value + 1)))
+        Option.Some(5) -> match t.flagsRequired
+            false -> inductiveFrom(t, b, orNone(posOf(i.value + 1)), false)
+            true -> Done.Bad("an inductive block without flags in a file with FLAGS")
+        Option.Some(7) -> match t.flagsRequired
+            true -> inductiveFrom(Tables.update(t, flagged = true), b, orNone(posOf(i.value + 1)), true)
+            false -> Done.Bad("a flagged inductive block in a file without FLAGS")
         Option.Some(k) -> match headAt(t, b, orNone(posOf(i.value + 1)))
             Got.GotShort -> Done.Short(t)
             Got.GotBad(e) -> Done.Bad(e)
@@ -1441,6 +1473,8 @@ fn decl(t: Tables, b: Bytes, i: Pos) -> Done
 verify decl
     decl(Export.Tables.empty(), Bytes.fromList([0, 7, 0, 1]), Pos(value = 0)) => Done.Bad("unknown name index 7")
     decl(Export.Tables.empty(), Bytes.fromList([5, 0, 0, 0]), Pos(value = 0)) => added(Export.Tables.addDecl(Export.Tables.empty(), Decl.Induct([], [], [])), Pos(value = 4))
+    decl(Export.Tables.empty(), Bytes.fromList([7, 0, 0, 0]), Pos(value = 0)) => Done.Bad("a flagged inductive block in a file without FLAGS")
+    decl(Tables.update(Export.Tables.empty(), flagsRequired = true), Bytes.fromList([5, 0, 0, 0]), Pos(value = 0)) => Done.Bad("an inductive block without flags in a file with FLAGS")
 
 type Got
     GHead(Head, Pos)
@@ -1649,15 +1683,15 @@ fn quot(t: Tables, head: Head, k: Int, at: Pos, there: Bool) -> Done
 verify quot
     quot(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), 7, Pos(value = 1), true) => Done.Bad("unknown quot kind 7")
 
-fn inductiveFrom(t: Tables, b: Bytes, i: Pos) -> Done
-    ? "Inductive block: the types, the constructors and the recursors, each list with its length first."
+fn inductiveFrom(t: Tables, b: Bytes, i: Pos, flagged: Bool) -> Done
+    ? "Inductive block: the types, the constructors and the recursors, each list with its length first; in a flagged block (kind 7) each type ends in its five flags."
     n = vAt(b, i)
     match n.at.value < 0
         true -> cut(t, [n])
-        false -> afterTypes(t, b, typesAt(t, b, n.at, n.value, []))
+        false -> afterTypes(t, b, typesAt(t, b, n.at, n.value, [], flagged))
 
 verify inductiveFrom
-    inductiveFrom(Export.Tables.empty(), Bytes.fromList([0, 0, 0]), Pos(value = 0)) => added(Export.Tables.addDecl(Export.Tables.empty(), Decl.Induct([], [], [])), Pos(value = 3))
+    inductiveFrom(Export.Tables.empty(), Bytes.fromList([0, 0, 0]), Pos(value = 0), false) => added(Export.Tables.addDecl(Export.Tables.empty(), Decl.Induct([], [], [])), Pos(value = 3))
 
 fn afterTypes(t: Tables, b: Bytes, ts: Got) -> Done
     ? "The types read; the constructors next."
@@ -1710,31 +1744,31 @@ fn afterRecs(t: Tables, types: List<IndType>, ctors: List<Ctor>, rs: Got) -> Don
 verify afterRecs
     afterRecs(Export.Tables.empty(), [], [], Got.GotBad("x")) => Done.Bad("x")
 
-fn typesAt(t: Tables, b: Bytes, i: Pos, n: Int, acc: List<IndType>) -> Got
+fn typesAt(t: Tables, b: Bytes, i: Pos, n: Int, acc: List<IndType>, flagged: Bool) -> Got
     ? "n more inductive types."
     match n <= 0
         true -> Got.GTypes(List.reverse(acc), i)
-        false -> match indType(t, b, headAt(t, b, i))
-            Got.GType(x, j) -> typesAt(t, b, j, n - 1, List.prepend(x, acc))
+        false -> match indType(t, b, headAt(t, b, i), flagged)
+            Got.GType(x, j) -> typesAt(t, b, j, n - 1, List.prepend(x, acc), flagged)
             Got.GotShort -> Got.GotShort
             Got.GotBad(e) -> Got.GotBad(e)
             _ -> Got.GotBad("malformed")
 
 verify typesAt
-    typesAt(Export.Tables.empty(), Bytes.fromList([]), Pos(value = 0), 0, []) => Got.GTypes([], Pos(value = 0))
+    typesAt(Export.Tables.empty(), Bytes.fromList([]), Pos(value = 0), 0, [], false) => Got.GTypes([], Pos(value = 0))
 
-fn indType(t: Tables, b: Bytes, h: Got) -> Got
-    ? "A type: whether it is unsafe, numParams, numIndices, its group, its constructors, numNested, isRec and isReflexive."
+fn indType(t: Tables, b: Bytes, h: Got, flagged: Bool) -> Got
+    ? "A type: whether it is unsafe, numParams, numIndices, its group, its constructors, numNested, isRec and isReflexive; in a flagged block then isImpredicative, isK, hasProjections, hasEta and hasLargeElim."
     match h
         Got.GotShort -> Got.GotShort
         Got.GotBad(e) -> Got.GotBad(e)
-        Got.GHead(head, i) -> indTypeRest(t, b, head, i)
+        Got.GHead(head, i) -> indTypeRest(t, b, head, i, flagged)
         _ -> Got.GotBad("malformed")
 
 verify indType
-    indType(Export.Tables.empty(), Bytes.fromList([]), Got.GotShort) => Got.GotShort
+    indType(Export.Tables.empty(), Bytes.fromList([]), Got.GotShort, false) => Got.GotShort
 
-fn indTypeRest(t: Tables, b: Bytes, head: Head, i: Pos) -> Got
+fn indTypeRest(t: Tables, b: Bytes, head: Head, i: Pos, flagged: Bool) -> Got
     ? "The fields after the head."
     u = boolAt(b, i.value)
     np = vAt(b, orNone(posOf(i.value + 1)))
@@ -1748,21 +1782,41 @@ fn indTypeRest(t: Tables, b: Bytes, head: Head, i: Pos) -> Got
         true -> gcut([np, ni, asAt(all), asAt(cs), nn])
         false -> match Bool.or(Bool.or(u > 1, r > 1), rf > 1)
             true -> Got.GotBad("a bool byte is neither 0 nor 1")
-            false -> indTypeOf(t, head, u == 1, np.value, ni.value, all.ids, cs.ids, nn.value, r == 1, rf == 1, orNone(posOf(nn.at.value + 2)))
+            false -> match flagged
+                false -> indTypeOf(t, head, u == 1, np.value, ni.value, all.ids, cs.ids, nn.value, r == 1, rf == 1, Option.None, orNone(posOf(nn.at.value + 2)))
+                true -> withFlags(t, b, head, u == 1, np.value, ni.value, all.ids, cs.ids, nn.value, r == 1, rf == 1, nn.at.value + 2)
+
+fn withFlags(t: Tables, b: Bytes, head: Head, isUnsafe: Bool, np: Int, ni: Int, all: List<Int>, cs: List<Int>, nn: Int, isRec: Bool, isReflexive: Bool, at: Int) -> Got
+    ? "The five flags of a type in a flagged block, a bool byte each, in the order isImpredicative, isK, hasProjections, hasEta, hasLargeElim."
+    ip = boolAt(b, at)
+    k = boolAt(b, at + 1)
+    pr = boolAt(b, at + 2)
+    et = boolAt(b, at + 3)
+    le = boolAt(b, at + 4)
+    match Int.min(Int.min(Int.min(ip, k), Int.min(pr, et)), le) < 0
+        true -> Got.GotShort
+        false -> match Int.max(Int.max(Int.max(ip, k), Int.max(pr, et)), le) > 1
+            true -> Got.GotBad("a bool byte is neither 0 nor 1")
+            false -> indTypeOf(t, head, isUnsafe, np, ni, all, cs, nn, isRec, isReflexive, Option.Some(IndFlags(impredicative = ip == 1, k = k == 1, projections = pr == 1, eta = et == 1, largeElim = le == 1)), orNone(posOf(at + 5)))
+
+verify withFlags
+    withFlags(Export.Tables.empty(), Bytes.fromList([1, 0, 1]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false, 0, 0, [], [], 0, false, false, 0) => Got.GotShort
+    withFlags(Export.Tables.empty(), Bytes.fromList([1, 0, 1, 2, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false, 0, 0, [], [], 0, false, false, 0) => Got.GotBad("a bool byte is neither 0 nor 1")
+    withFlags(Export.Tables.empty(), Bytes.fromList([1, 0, 1, 1, 0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false, 0, 0, [], [], 0, false, false, 0) => Got.GType(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.Some(IndFlags(impredicative = true, k = false, projections = true, eta = true, largeElim = false))), Pos(value = 5))
 
 verify indTypeRest
-    indTypeRest(Export.Tables.empty(), Bytes.fromList([0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Pos(value = 0)) => Got.GotShort
+    indTypeRest(Export.Tables.empty(), Bytes.fromList([0]), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), Pos(value = 0), false) => Got.GotShort
 
-fn indTypeOf(t: Tables, head: Head, isUnsafe: Bool, np: Int, ni: Int, all: List<Int>, cs: List<Int>, nn: Int, isRec: Bool, isReflexive: Bool, at: Pos) -> Got
+fn indTypeOf(t: Tables, head: Head, isUnsafe: Bool, np: Int, ni: Int, all: List<Int>, cs: List<Int>, nn: Int, isRec: Bool, isReflexive: Bool, flags: Option<IndFlags>, at: Pos) -> Got
     ? "The type, its constructors and group looked up in the order the ndjson reader looks them up."
     match Export.Tables.names(t, cs)
         Result.Err(e) -> Got.GotBad(e)
         Result.Ok(ctors) -> match Export.Tables.names(t, all)
             Result.Err(e) -> Got.GotBad(e)
-            Result.Ok(group) -> Got.GType(IndType(head = head, numParams = np, numIndices = ni, all = group, ctors = ctors, numNested = nn, isRec = isRec, isUnsafe = isUnsafe, isReflexive = isReflexive), at)
+            Result.Ok(group) -> Got.GType(IndType(head = head, numParams = np, numIndices = ni, all = group, ctors = ctors, numNested = nn, isRec = isRec, isUnsafe = isUnsafe, isReflexive = isReflexive, flags = flags), at)
 
 verify indTypeOf
-    indTypeOf(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false, 0, 0, [], [9], 0, false, false, Pos(value = 1)) => Got.GotBad("unknown name index 9")
+    indTypeOf(Export.Tables.empty(), Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), false, 0, 0, [], [9], 0, false, false, Option.None, Pos(value = 1)) => Got.GotBad("unknown name index 9")
 
 fn ctorsAt(t: Tables, b: Bytes, i: Pos, n: Int, acc: List<Ctor>) -> Got
     ? "n more constructors."
@@ -2152,17 +2206,17 @@ verify indexFound
     indexFound(Bytes.fromList([1, 0, 0, 1, 0, 3, 1, 1, 97, 0, 9]), 1, [askOf("a")]) => Result.Err("byte 10: bytes after the name table")
 
 fn entriesPast(b: Bytes, p: Pos, i: Int, nd: Int) -> Result<Pos, String>
-    ? "Entry i of nd and those after it: a kind up to 6, a varint, and for kind 6 one more; where the name table starts."
+    ? "Entry i of nd and those after it: a kind up to 7, a varint, and for kind 6 one more; where the name table starts."
     match i >= nd
         true -> Result.Ok(p)
         false -> match Bytes.get(b, p.value)
             Option.None -> Result.Err("entry {i} runs past the section")
-            Option.Some(k) -> match k > 6
+            Option.Some(k) -> match k > 7
                 true -> Result.Err("byte {p.value}: entry {i}: kind {k}")
                 false -> entryPast(b, p, i, nd, k, vAt(b, ahead1(p)))
 
 verify entriesPast
-    entriesPast(Bytes.fromList([7, 0]), posAt(0), 0, 1) => Result.Err("byte 0: entry 0: kind 7")
+    entriesPast(Bytes.fromList([8, 0]), posAt(0), 0, 1) => Result.Err("byte 0: entry 0: kind 8")
     entriesPast(Bytes.fromList([6, 0]), posAt(0), 0, 1) => Result.Err("byte 0: entry 0: a bad varint")
 
 fn entryPast(b: Bytes, p: Pos, i: Int, nd: Int, k: Int, delta: At) -> Result<Pos, String>

@@ -1335,8 +1335,8 @@ fn projInduct(st: St, idx: Int, x: Expr, ty: Expr, ls: List<Level>, args: List<E
     ? "A structure: one constructor, fully applied to parameters and indices."
     match c
         Option.Some(Const.CInduct(iv)) -> match iv.ctors
-            [k] -> match List.len(args) == iv.numParams + iv.numIndices
-                true -> projCtor(st, idx, x, ty, ls, List.take(args, iv.numParams), iv.head.name, Check.State.lookup(st, k))
+            [k] -> match Bool.and(List.len(args) == iv.numParams + iv.numIndices, projectable(iv))
+                true -> projCtor(st, idx, x, ty, ls, List.take(args, iv.numParams), iv.head.name, Check.State.lookup(st, k), iv.flags == Option.None)
                 false -> Result.Err(badProj())
             _ -> Result.Err(badProj())
         _ -> Result.Err(badProj())
@@ -1344,21 +1344,46 @@ fn projInduct(st: St, idx: Int, x: Expr, ty: Expr, ls: List<Level>, args: List<E
 verify projInduct
     projInduct(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, Core.Exprs.natLit(1), Core.Exprs.bvar(0), [], [], Option.None) => Result.Err(Fail.Reject("invalid projection"))
 
-fn projCtor(st: St, idx: Int, x: Expr, ty: Expr, ls: List<Level>, params: List<Expr>, sname: Name, c: Option<Const>) -> Result<RE, Fail>
-    ? "Walks the constructor type past the parameters and the earlier fields."
+decision ProjectionsByFlag
+    date = "2026-11-24"
+    reason =
+        "With the renovation's flags (lean4#16595) a type has projections"
+        "for all its fields or for none, as its hasProjections flag says,"
+        "and that flag is allowed only for a type that is not impredicative."
+        "So the rule that only proofs may be projected out of a proof is"
+        "gone for a flagged type: a flagged proposition with projections has"
+        "only proofs as fields, and one with other fields is impredicative"
+        "and has no projections at all. A type without flags keeps the rule,"
+        "as the reference kernel had it before."
+    chosen = "ProjectionsByFlag"
+    rejected = ["ProofRuleForAll"]
+    impacts = [projInduct, projectable, projWalk]
+
+fn projectable(iv: IndType) -> Bool
+    ? "Whether a type has projections: its hasProjections flag, or without flags any type of one constructor, as before (ProjectionsByFlag)."
+    match iv.flags
+        Option.Some(f) -> f.projections
+        Option.None -> true
+
+verify projectable
+    projectable(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) => true
+    projectable(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = true)))) => false
+
+fn projCtor(st: St, idx: Int, x: Expr, ty: Expr, ls: List<Level>, params: List<Expr>, sname: Name, c: Option<Const>, proofRule: Bool) -> Result<RE, Fail>
+    ? "Walks the constructor type past the parameters and the earlier fields; out of a proof only proofs when proofRule (ProjectionsByFlag)."
     match c
-        Option.Some(Const.CCtor(k)) -> projAtLevels(levelledType(st, Core.Exprs.cnst(k.head.name, ls), k.head, ls), idx, x, ty, sname, params)
+        Option.Some(Const.CCtor(k)) -> projAtLevels(levelledType(st, Core.Exprs.cnst(k.head.name, ls), k.head, ls), idx, x, ty, sname, params, proofRule)
         _ -> Result.Err(badProj())
 
 verify projCtor
-    projCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, Core.Exprs.natLit(1), Core.Exprs.bvar(0), [], [], Core.Names.anon(), Option.None) => Result.Err(Fail.Reject("invalid projection"))
+    projCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, Core.Exprs.natLit(1), Core.Exprs.bvar(0), [], [], Core.Names.anon(), Option.None, true) => Result.Err(Fail.Reject("invalid projection"))
 
-fn projAtLevels(r: RE, idx: Int, x: Expr, ty: Expr, sname: Name, params: List<Expr>) -> Result<RE, Fail>
+fn projAtLevels(r: RE, idx: Int, x: Expr, ty: Expr, sname: Name, params: List<Expr>, proofRule: Bool) -> Result<RE, Fail>
     ? "The constructor's type at the structure's levels, taken where the constructor's own uses keep it (ProjTypeKept), walked."
-    projWalk(r.st, idx, x, ty, sname, r.e, params)
+    projWalk(r.st, idx, x, ty, sname, r.e, params, proofRule)
 
 verify projAtLevels
-    projAtLevels(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.natLit(1), Core.Exprs.sort(Level.Zero), Core.Names.anon(), []) => Result.Err(Fail.Reject("invalid projection"))
+    projAtLevels(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.natLit(1), Core.Exprs.sort(Level.Zero), Core.Names.anon(), [], true) => Result.Err(Fail.Reject("invalid projection"))
 
 decision ProjTypeKept
     date = "2026-11-08"
@@ -1376,10 +1401,10 @@ decision ProjTypeKept
     rejected = ["ProjTypeInstantiated"]
     impacts = [projCtor, projAtLevels]
 
-fn projWalk(st: St, idx: Int, x: Expr, ty: Expr, sname: Name, r: Expr, params: List<Expr>) -> Result<RE, Fail>
-    ? "Parameters, then fields, then the field's own type."
+fn projWalk(st: St, idx: Int, x: Expr, ty: Expr, sname: Name, r: Expr, params: List<Expr>, proofRule: Bool) -> Result<RE, Fail>
+    ? "Parameters, then fields, then the field's own type; whether x is a proof matters only under proofRule (ProjectionsByFlag)."
     p = projParams(st, r, params)?
-    pp = isProp(p.st, ty)?
+    pp = proofProjected(p.st, ty, proofRule)?
     f = projFields(pp.st, p.e, sname, x, 0, idx, pp.b)?
     w = whnf(f.st, f.e)?
     match w.e
@@ -1387,7 +1412,17 @@ fn projWalk(st: St, idx: Int, x: Expr, ty: Expr, sname: Name, r: Expr, params: L
         _ -> Result.Err(badProj())
 
 verify projWalk
-    projWalk(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, Core.Exprs.natLit(1), Core.Exprs.sort(Level.Zero), Core.Names.anon(), Core.Exprs.sort(Level.Zero), []) => Result.Err(Fail.Reject("invalid projection"))
+    projWalk(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), 0, Core.Exprs.natLit(1), Core.Exprs.sort(Level.Zero), Core.Names.anon(), Core.Exprs.sort(Level.Zero), [], true) => Result.Err(Fail.Reject("invalid projection"))
+
+fn proofProjected(st: St, ty: Expr, proofRule: Bool) -> Result<RB, Fail>
+    ? "Whether the projected value is a proof whose fields must be proofs: asked only under proofRule."
+    match proofRule
+        true -> isProp(st, ty)
+        false -> Result.Ok(RB(b = false, st = st))
+
+verify proofProjected
+    proofProjected(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), true) => Result.Err(Fail.Reject("type expected"))
+    proofProjected(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), false) => Result.Ok(RB(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
 
 fn projParams(st: St, r: Expr, params: List<Expr>) -> Result<RE, Fail>
     ? "Instantiates the constructor's parameter binders."
@@ -2103,9 +2138,9 @@ verify withFacts
     withFacts(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = true, elimAnySort = true)).majorIsStruct => false
 
 fn recFacts(rv: Rec, c: Option<Const>) -> Rec
-    ? "What reduction asks of a recursor at every step, found once from c, the constant its major premise's type names (FactsOnTheRecursor): that type; whether it is a non-recursive structure; whether the recursor has one more universe parameter than the type, so that the motive may land in any sort."
+    ? "What reduction asks of a recursor at every step, found once from c, the constant its major premise's type names (FactsOnTheRecursor): that type; whether it has eta; whether the motive may land in any sort, by the type's hasLargeElim or, without flags, by the recursor having one more universe parameter than the type (EtaByFlag)."
     match c
-        Option.Some(Const.CInduct(iv)) -> Rec.update(rv, major = majorInduct(rv), majorIsStruct = structureLike(iv), elimAnySort = List.len(rv.head.params) > List.len(iv.head.params))
+        Option.Some(Const.CInduct(iv)) -> Rec.update(rv, major = majorInduct(rv), majorIsStruct = hasEta(iv), elimAnySort = elimsAnywhere(rv, iv))
         _ -> Rec.update(rv, major = majorInduct(rv), majorIsStruct = false, elimAnySort = false)
 
 verify recFacts
@@ -2113,6 +2148,16 @@ verify recFacts
 
 verify majorToCtor
     resultExpr(majorToCtor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), Core.Exprs.natLit(0), false, false)) => Core.Exprs.cnst(Check.Lits.name2("Nat", "zero"), [])
+
+fn elimsAnywhere(rv: Rec, iv: IndType) -> Bool
+    ? "Whether the recursor's motive may land in any sort: the major's type's hasLargeElim, or without flags one more universe parameter on the recursor than on the type (EtaByFlag)."
+    match iv.flags
+        Option.Some(f) -> f.largeElim
+        Option.None -> List.len(rv.head.params) > List.len(iv.head.params)
+
+verify elimsAnywhere
+    elimsAnywhere(Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) => true
+    elimsAnywhere(Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false)))) => false
 
 fn kMajor(st: St, rv: Rec, major: Expr) -> Result<RE, Fail>
     ? "For a K-like recursor the major premise may be replaced by the nullary constructor."
@@ -2201,20 +2246,53 @@ verify nullaryOf
     nullaryOf(Option.None, [], []) => Option.None
 
 fn isNonRecStructure(st: St, n: Name) -> Bool
-    ? "One constructor, no indices, not recursive."
+    ? "Whether the type n has eta (hasEta)."
     match Check.State.lookup(st, n)
-        Option.Some(Const.CInduct(iv)) -> structureLike(iv)
+        Option.Some(Const.CInduct(iv)) -> hasEta(iv)
         _ -> false
 
 verify isNonRecStructure
     isNonRecStructure(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Names.anon()) => false
+
+decision EtaByFlag
+    date = "2026-11-24"
+    reason =
+        "With the renovation's flags (lean4#16595) eta for structures,"
+        "unit-like types and the expansion of a recursor's major premise all"
+        "go by the type's hasEta flag, which is allowed only for a type with"
+        "projections that is not recursive; and whether a recursor's motive"
+        "may land in any sort goes by the major's type's hasLargeElim, as"
+        "the reference kernel reads it. Without flags a type has eta when it"
+        "has one constructor, no indices and is not recursive, and its"
+        "recursor eliminates anywhere when it has one more universe"
+        "parameter than the type, as before."
+        "The reference kernel also refuses to reduce a recursor whose"
+        "major's type lacks hasLargeElim. Pestka lets the rules decide: a"
+        "block without large elimination has recursors without rules, which"
+        "never reduce. The two differ only for the auxiliary recursor of a"
+        "nested block with large elimination whose nested type, from another"
+        "block, has none: there Pestka reduces by the derived rule, which"
+        "preserves types like every rule."
+    chosen = "EtaByFlag"
+    rejected = ["EtaFromShape", "RecursorGatedByMajor"]
+    impacts = [hasEta, isNonRecStructure, recFacts, elimsAnywhere]
+
+fn hasEta(iv: IndType) -> Bool
+    ? "Whether a type has eta: its hasEta flag, or without flags its shape (structureLike) (EtaByFlag)."
+    match iv.flags
+        Option.Some(f) -> f.eta
+        Option.None -> structureLike(iv)
+
+verify hasEta
+    hasEta(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [Core.Names.anon()], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) => true
+    hasEta(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [Core.Names.anon()], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.Some(IndFlags(impredicative = false, k = false, projections = true, eta = false, largeElim = true)))) => false
 
 fn structureLike(iv: IndType) -> Bool
     ? "One constructor, no indices, not recursive."
     Bool.and(List.len(iv.ctors) == 1, Bool.and(iv.numIndices == 0, Bool.not(iv.isRec)))
 
 verify structureLike
-    structureLike(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false)) => false
+    structureLike(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) => false
 
 fn isCtorApp(st: St, e: Expr) -> Bool
     ? "Headed by a constructor."
@@ -5776,7 +5854,7 @@ fn sampleSt() -> St
     zero = Check.Lits.name2("N", "zero")
     succ = Check.Lits.name2("N", "succ")
     z = Core.Exprs.cnst(zero, [])
-    e1 = Check.State.envSet(Check.State.envEmpty(), n, Const.CInduct(IndType(head = Head(name = n, params = [], ty = Core.Exprs.sort(Level.Succ(Level.Zero))), numParams = 0, numIndices = 0, all = [n], ctors = [zero, succ], numNested = 0, isRec = true, isUnsafe = false, isReflexive = false)))
+    e1 = Check.State.envSet(Check.State.envEmpty(), n, Const.CInduct(IndType(head = Head(name = n, params = [], ty = Core.Exprs.sort(Level.Succ(Level.Zero))), numParams = 0, numIndices = 0, all = [n], ctors = [zero, succ], numNested = 0, isRec = true, isUnsafe = false, isReflexive = false, flags = Option.None)))
     e2 = Check.State.envSet(e1, zero, Const.CCtor(Ctor(head = Head(name = zero, params = [], ty = Core.Exprs.cnst(n, [])), induct = n, cidx = 0, numParams = 0, numFields = 0, isUnsafe = false)))
     e3 = Check.State.envSet(e2, succ, Const.CCtor(Ctor(head = Head(name = succ, params = [], ty = Core.Exprs.cnst(n, [])), induct = n, cidx = 1, numParams = 0, numFields = 1, isUnsafe = false)))
     e4 = Check.State.envSet(e3, Check.Lits.name2("N", "rec"), Const.CRec(sampleRec()))

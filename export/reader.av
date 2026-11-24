@@ -4,7 +4,7 @@ module Reader
         "other line in order. A line is a declaration when its object has a"
         "single key, and an item of the name, level or expression table"
         "when it carries an in, il or ie index."
-    exposes [Chunk, Line, BinderIds, DeclIds, header, supported, readAll, readChunk, readParallel, readRange, readLine, parseLine]
+    exposes [Chunk, Line, BinderIds, DeclIds, header, supported, needsFlags, readAll, readChunk, readParallel, readRange, readLine, parseLine]
     depends [Json.Line, Json.Escapes, Json.Access, Core.Exprs, Core.Decls, Export.Tables, Export.Items, Export.Declarations]
     effects []
 
@@ -20,13 +20,22 @@ verify header
     header("{{\"in\":1}}") => Result.Err("missing key 'meta'")
 
 fn supported(version: String) -> Bool
-    ? "Format versions this reader understands: 3.1.x."
-    String.startsWith(version, "3.1.")
+    ? "Format versions this reader understands: 3.1.x, and 3.2.x, whose inductive types carry the renovation's flags (lean4#16595)."
+    Bool.or(String.startsWith(version, "3.1."), needsFlags(version))
 
 verify supported
     supported("3.1.0") => true
-    supported("3.2.0") => false
+    supported("3.2.0") => true
+    supported("3.3.0") => false
     supported("2.0.0") => false
+
+fn needsFlags(version: String) -> Bool
+    ? "Whether every inductive type of the export must carry its flags: format 3.2.x. Otherwise the version decides nothing: flags are read where they are."
+    String.startsWith(version, "3.2.")
+
+verify needsFlags
+    needsFlags("3.2.1") => true
+    needsFlags("3.1.0") => false
 
 fn readAll(t: Tables, lines: List<String>, n: Int) -> Result<Tables, String>
     ? "Reads every remaining line; n is the line number of the first one."

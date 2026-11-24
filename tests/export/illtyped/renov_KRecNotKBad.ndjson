@@ -1,0 +1,19 @@
+{"meta":{"exporter":{"name":"lean4export","version":"3.2.0"},"format":{"version":"3.2.0"},"lean":{"githash":"8f3431ee714a7a96acf091678540b0e42e4e8423","version":"4.38.0, commit 8f3431ee714a7a96acf091678540b0e42e4e8423"}}}
+{"in":1,"str":{"pre":0,"str":"KRecNotK"}}
+{"ie":0,"sort":0}
+{"in":2,"str":{"pre":1,"str":"intro"}}
+{"const":{"name":1,"us":[]},"ie":1}
+{"in":3,"str":{"pre":1,"str":"rec"}}
+{"in":4,"str":{"pre":0,"str":"motive"}}
+{"in":5,"str":{"pre":0,"str":"t"}}
+{"forallE":{"binderInfo":"default","body":0,"name":5,"type":1},"ie":2}
+{"in":6,"str":{"pre":0,"str":"intro"}}
+{"bvar":0,"ie":3}
+{"const":{"name":2,"us":[]},"ie":4}
+{"app":{"arg":4,"fn":3},"ie":5}
+{"bvar":2,"ie":6}
+{"app":{"arg":3,"fn":6},"ie":7}
+{"forallE":{"binderInfo":"default","body":7,"name":5,"type":1},"ie":8}
+{"forallE":{"binderInfo":"default","body":8,"name":6,"type":5},"ie":9}
+{"forallE":{"binderInfo":"implicit","body":9,"name":4,"type":2},"ie":10}
+{"inductive":{"ctors":[{"cidx":0,"induct":1,"isUnsafe":false,"levelParams":[],"name":2,"numFields":0,"numParams":0,"type":1}],"recs":[{"all":[1],"isUnsafe":false,"k":false,"levelParams":[],"name":3,"numIndices":0,"numMinors":1,"numMotives":1,"numParams":0,"rules":[],"type":10}],"types":[{"all":[1],"ctors":[2],"hasEta":false,"hasLargeElim":false,"hasProjections":false,"isImpredicative":false,"isK":true,"isRec":false,"isReflexive":false,"isUnsafe":false,"levelParams":[],"name":1,"numIndices":0,"numNested":0,"numParams":0,"type":0}]}}

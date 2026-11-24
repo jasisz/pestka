@@ -85,7 +85,7 @@ fn eqShapes(env: Env, iv: IndType, u: Name, refl: Option<Const>) -> Result<Env, 
         true -> reflShape(env, refl)
 
 verify eqShapes
-    eqShapes(Check.State.envEmpty(), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false), Core.Names.anon(), Option.None) => Result.Err(Fail.Reject("failed to initialize quot module, 'Eq' has an unexpected type"))
+    eqShapes(Check.State.envEmpty(), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None), Core.Names.anon(), Option.None) => Result.Err(Fail.Reject("failed to initialize quot module, 'Eq' has an unexpected type"))
 
 fn reflShape(env: Env, refl: Option<Const>) -> Result<Env, Fail>
     ? "The constructor's type, at its own universe parameter."

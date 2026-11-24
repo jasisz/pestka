@@ -85,7 +85,7 @@ fn motiveOf(ix: XS, blk: Blk, t: TypeIn, d: Int, rest: List<TypeIn>, acc: List<R
     motives(mot.st, blk, rest, d + 1, List.prepend(RInfo(motive = mot.e, indices = ix.xs, major = major.e), acc))
 
 verify motiveOf
-    List.len(Result.withDefault(motiveOf(XS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = []), Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [])], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = []), 0, [], []), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = [])).infos) => 1
+    List.len(Result.withDefault(motiveOf(XS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), xs = []), Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [], flags = Option.None)], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [], flags = Option.None), 0, [], []), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = [])).infos) => 1
 
 fn motiveName(d: Int, n: Int) -> Name
     ? "motive, or motive_1, motive_2, ... in a mutual block."
@@ -140,7 +140,7 @@ fn minorsOf(rs: RS, blk: Blk, t: TypeIn, cs: List<CtorIn>) -> Result<RS, Fail>
         [c, ..rest] -> minorsOf(minorOf(rs, blk, t, c, ctorShape(rs.st, blk, c.ty, 0, [], [])?)?, blk, t, rest)
 
 verify minorsOf
-    minorsOf(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = []), []) => Result.Ok(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []))
+    minorsOf(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [], flags = Option.None), []) => Result.Ok(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []))
 
 fn ctorShape(st: St, blk: Blk, t: Expr, i: Int, fieldsRev: List<Expr>, recsRev: List<Expr>) -> Result<CF, Fail>
     ? "Opens a constructor type: the block's parameters, then a fresh variable per field, noting the recursive ones."
@@ -222,7 +222,7 @@ fn minorOf(rs: RS, blk: Blk, t: TypeIn, c: CtorIn, cf: CF) -> Result<RS, Fail>
     Result.Ok(RS(st = m.st, infos = rs.infos, minors = List.prepend(m.e, rs.minors)))
 
 verify minorOf
-    minorOf(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = []), CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0)), CF(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.fvar(0), fields = [], recs = [])) => Result.Err(Fail.Reject("internal: a recursive field is not a valid application of the block"))
+    minorOf(RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [], flags = Option.None), CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0)), CF(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.fvar(0), fields = [], recs = [])) => Result.Err(Fail.Reject("internal: a recursive field is not a valid application of the block"))
 
 fn minorName(c: Name, t: Name) -> Name
     ? "The constructor's name without the type's prefix."
@@ -289,16 +289,25 @@ fn oneRec(bs: BS, rs: RS, t: TypeIn, d: Int, minorIdx: Int) -> Result<BS, Fail>
     ? "The recursor's type and rules."
     info = infoAt(rs.infos, d)
     ty = Check.Telescope.piBinding(bs.st, List.concat(prefixArgs(bs.blk, rs), List.concat(info.indices, [info.major])), Core.Apps.mkApps(info.motive, List.concat(info.indices, [info.major])))
-    rules = rulesOf(bs.st, bs.blk, rs, t.ctors, minorIdx, [])?
+    rules = rulesOf(bs.st, bs.blk, rs, rulesFor(bs.blk, t.ctors), minorIdx, [])?
     rv = Check.Tc.withFacts(rules.st, Rec(head = Head(name = Check.Blk.recName(t.name), params = recParams(bs.blk), ty = ty), all = bs.blk.names, numParams = bs.blk.nparams, numIndices = Check.Blk.nthInt(bs.blk.nindices, d), numMotives = List.len(rs.infos), numMinors = List.len(rs.minors), rules = rules.rules, k = bs.blk.k, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false))
     Result.Ok(BS(blk = bs.blk, st = St.update(rules.st, block = Map.set(rules.st.block, rv.head.name, Const.CRec(rv)))))
 
 verify oneRec
-    oneRec(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = []), 0, 0) == Result.Err(Fail.Reject("x")) => false
+    oneRec(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None), 0, 0) == Result.Err(Fail.Reject("x")) => false
 
 record RR
     st: St
     rules: List<RecRule>
+
+fn rulesFor(blk: Blk, cs: List<CtorIn>) -> List<CtorIn>
+    ? "The constructors that get a computation rule: all of them, or none when the block has no large elimination under its flags (Check.Blk.hasRules)."
+    match Check.Blk.hasRules(blk)
+        true -> cs
+        false -> []
+
+verify rulesFor
+    rulesFor(Check.Blk.start([], 0, [], 0), [CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))]) => [CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))]
 
 fn rulesOf(st: St, blk: Blk, rs: RS, cs: List<CtorIn>, m: Int, acc: List<RecRule>) -> Result<RR, Fail>
     ? "One computation rule per constructor of the type."
@@ -379,14 +388,14 @@ fn checkOneRec(st: St, blk: Blk, rs: RS, t: TypeIn) -> Result<St, Fail>
         _ -> Result.Err(reject("internal: recursor of '{Core.Names.render(t.name)}' missing"))
 
 verify checkOneRec
-    checkOneRec(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [])) => Result.Err(Fail.Reject("internal: recursor of '[anonymous]' missing"))
+    checkOneRec(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None)) => Result.Err(Fail.Reject("internal: recursor of '[anonymous]' missing"))
 
 fn recTypeChecked(r: RE, params: List<Name>, blk: Blk, rs: RS, t: TypeIn) -> Result<St, Fail>
     ? "Restores the declaration's universe parameters and checks the rules."
-    rulesPreserve(St.update(r.st, params = params), blk, rs, t, t.ctors)
+    rulesPreserve(St.update(r.st, params = params), blk, rs, t, rulesFor(blk, t.ctors))
 
 verify rulesPreserve
-    rulesPreserve(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = []), []) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+    rulesPreserve(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None), []) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
 
 fn rulesPreserve(st: St, blk: Blk, rs: RS, t: TypeIn, cs: List<CtorIn>) -> Result<St, Fail>
     ? "rec ... (c params fields) and its reduct have the same type."
@@ -395,7 +404,7 @@ fn rulesPreserve(st: St, blk: Blk, rs: RS, t: TypeIn, cs: List<CtorIn>) -> Resul
         [c, ..rest] -> rulesPreserve(rulePreserves(ctorShape(st, blk, c.ty, 0, [], [])?, blk, rs, t, c)?, blk, rs, t, rest)
 
 verify recTypeChecked
-    recTypeChecked(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [])) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
+    recTypeChecked(RE(e = Core.Exprs.bvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [], Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None)) => Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))
 
 fn rulePreserves(cf: CF, blk: Blk, rs: RS, t: TypeIn, c: CtorIn) -> Result<St, Fail>
     ? "Infers the type before and after one reduction step and compares them."
@@ -409,4 +418,4 @@ fn rulePreserves(cf: CF, blk: Blk, rs: RS, t: TypeIn, c: CtorIn) -> Result<St, F
         false -> Result.Err(reject("generated recursor computation rule for '{Core.Names.render(c.name)}' is not type-preserving"))
 
 verify rulePreserves
-    rulePreserves(CF(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.bvar(0), fields = [], recs = []), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = []), CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))) == Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => false
+    rulePreserves(CF(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), t = Core.Exprs.bvar(0), fields = [], recs = []), Check.Blk.start([], 0, [], 0), RS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), infos = [], minors = []), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None), CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))) == Result.Ok(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => false

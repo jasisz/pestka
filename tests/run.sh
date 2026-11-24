@@ -16,6 +16,12 @@
 # origin_sumGood (tests/export/Origin.lean) holds only when a side of lazy
 # delta that comes to the form the other side began at meets it: otherwise a
 # loop of 300000 rounds runs past the 20 s cap.
+# renov_* (wellformed/ and illtyped/) are tests of the kernel renovation's
+# flags (lean4#16595), taken from the Arena's renovation tests
+# (lean-kernel-arena, renovation/Renovation.lean), exported as format 3.2;
+# renov_flags_* are made from them by hand: flags in a 3.1 export (read and
+# used), and in malformed/ a 3.2 export whose type lacks its flags, a type
+# with only some of them, and a 3.1 export mixing flagged blocks with others.
 #   unsupported/  2 (declined: format version)
 # and every export tests/soundness.py kept under tests/soundness-findings, each
 # invalid, against 1 (rejected).

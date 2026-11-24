@@ -7,7 +7,12 @@ module Induct
         "the constructors are checked (parameters, universe of each field,"
         "strict positivity, return type) and declared; finally the universe"
         "the recursor may eliminate into and whether K-like reduction applies."
-    exposes [RIx, checkUniform, checkTypes, declareTypes, checkCtors, declareCtors, elimAndK, isRecArg]
+        "A block of lean4export 3.2 states the renovation's flags"
+        "(lean4#16595): each is checked to be allowed, right after the types,"
+        "and then used where the kernel would compute: the universe of a"
+        "field, the elimination level, K-likeness. A block without them is"
+        "added as before the renovation (FlagsWhereGiven)."
+    exposes [RIx, checkUniform, checkTypes, checkFlags, declareTypes, checkCtors, declareCtors, elimAndK, isRecArg]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Univ, Core.Subst, Core.Apps, Core.Decls, Core.Cache, Core.Hash, Check.State, Check.Tc, Check.Telescope, Check.Blk]
     effects []
 
@@ -190,7 +195,7 @@ fn oneType(bs: BS, t: TypeIn, first: Bool) -> Result<TR, Fail>
         false -> oneTypeChecked(bs, t, first, Check.Tc.check(bs.st, t.ty)?)
 
 verify oneType
-    oneType(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.natLit(1), ctors = []), true) => Result.Err(Fail.Reject("type expected"))
+    oneType(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.natLit(1), ctors = [], flags = Option.None), true) => Result.Err(Fail.Reject("type expected"))
 
 fn oneTypeChecked(bs: BS, t: TypeIn, first: Bool, c: RE) -> Result<TR, Fail>
     ? "Walks the binders: parameters, then indices; the rest must be a sort."
@@ -200,7 +205,7 @@ fn oneTypeChecked(bs: BS, t: TypeIn, first: Bool, c: RE) -> Result<TR, Fail>
         true -> typeSort(bs.blk, w, first, Check.Tc.ensureSort(w.st, w.t)?)
 
 verify oneTypeChecked
-    oneTypeChecked(BS(blk = Check.Blk.start([], 1, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = []), true, RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("number of parameters mismatch in inductive datatype declaration"))
+    oneTypeChecked(BS(blk = Check.Blk.start([], 1, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [], flags = Option.None), true, RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("number of parameters mismatch in inductive datatype declaration"))
 
 fn typeSort(blk: Blk, w: WT, first: Bool, s: RE) -> Result<TR, Fail>
     ? "The first type fixes the result universe; the others must agree with it."
@@ -260,8 +265,197 @@ fn walkSameParam(st: St, d: Expr, b: Expr, nparams: Int, params: List<Expr>, i: 
 verify walkSameParam
     walkSameParam(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), 1, [Core.Exprs.fvar(5)], 0, [], 0) => Result.Err(Fail.Reject("parameters of all inductive datatypes must match"))
 
+decision FlagsWhereGiven
+    date = "2026-11-24"
+    reason =
+        "lean4export 3.2 states five flags on every inductive type (the"
+        "kernel renovation, lean4#16595): isImpredicative, isK,"
+        "hasProjections, hasEta, hasLargeElim. They are inputs: the kernel"
+        "checks that each is allowed for the declaration and refuses it if"
+        "not, and never recomputes them. Pestka goes by whether a block"
+        "carries them, not by the export's version number: a block with"
+        "them is checked under the new rules and its types used through"
+        "them; a block without them, from an export of format 3.1, is"
+        "checked and used as before. A file of format 3.2 whose types lack"
+        "the flags is refused before it gets here, by the packer, and a"
+        "Susz file mixing flagged blocks with others by the reader"
+        "(FlaggedFilesWhole in Export.Susz)."
+    chosen = "FlagsWhereGiven"
+    rejected = ["FlagsByVersion", "FlagsRecomputed"]
+    impacts = [checkFlags, ctorField, elimAndK, declareTypes]
+
+fn checkFlags(bs: BS) -> Result<BS, Fail>
+    ? "A flagged block's flags each allowed, in the reference kernel's order: impredicativity, which the block's types share with large elimination; projections and eta of each type; K-likeness; large elimination. The elimination level and K then follow from the flags (FlagsWhereGiven). A block without flags is left as it is."
+    match bs.blk.flags
+        Option.None -> Result.Ok(bs)
+        Option.Some(f) -> flagsOfTypes(bs, f, impredicativeAllowed(bs.blk, f)?)
+
+verify checkFlags
+    checkFlags(BS(blk = Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.Some(IndFlags(impredicative = false, k = false, projections = true, eta = false, largeElim = false)))], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("'[anonymous]' cannot have projections: it does not have exactly one constructor"))
+    checkFlags(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+    checkFlags(BS(blk = Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Succ(Level.Zero)), ctors = [], flags = Option.Some(flagsNone()))], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(BS(blk = Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Succ(Level.Zero)), ctors = [], flags = Option.Some(flagsNone()))], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn flagsNone() -> IndFlags
+    ? "Every flag off, for examples."
+    IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false)
+
+verify flagsNone
+    flagsNone().eta => false
+
+fn flagsOfTypes(bs: BS, f: IndFlags, u: Unit) -> Result<BS, Fail>
+    ? "Each type's projections and eta, then K, then large elimination; the block then eliminates where its flags say."
+    k = kAllowed(projectionsAllowed(bs.blk, bs.blk.types, 0, anyRec(bs.blk.types, bs.blk.names))?, bs.blk, f)?
+    match largeElimAllowed(bs.blk, f, k)?
+        true -> Result.Ok(BS(blk = Blk.update(bs.blk, elim = Level.Param(freshU(bs.blk.lparams, 0)), k = k), st = bs.st))
+        false -> Result.Ok(BS(blk = Blk.update(bs.blk, elim = Level.Zero, k = k), st = bs.st))
+
+verify flagsOfTypes
+    flagsOfTypes(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = true), Unit) => Result.Err(Fail.Reject("'[anonymous]' is incorrectly marked as having large elimination"))
+    flagsOfTypes(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), notZero = true), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = true), Unit) => Result.Ok(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), notZero = true, elim = Level.Param(Core.Names.str(Core.Names.anon(), "u"))), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn impredicativeAllowed(blk: Blk, f: IndFlags) -> Result<Unit, Fail>
+    ? "An impredicative block lives in Prop for every universe instance; every type agrees with the first on impredicativity and large elimination."
+    match Bool.and(f.impredicative, Bool.not(Core.Univ.normalizesToZero(blk.result)))
+        true -> Result.Err(reject("inductive datatype marked as impredicative must always live in Prop"))
+        false -> blockFlagsShared(blk.types, f)
+
+verify impredicativeAllowed
+    impredicativeAllowed(Blk.update(Check.Blk.start([], 0, [], 0), result = Level.Succ(Level.Zero)), IndFlags(impredicative = true, k = false, projections = false, eta = false, largeElim = false)) => Result.Err(Fail.Reject("inductive datatype marked as impredicative must always live in Prop"))
+    impredicativeAllowed(Check.Blk.start([], 0, [], 0), IndFlags(impredicative = true, k = false, projections = false, eta = false, largeElim = false)) => Result.Ok(Unit)
+
+fn blockFlagsShared(ts: List<TypeIn>, f: IndFlags) -> Result<Unit, Fail>
+    ? "The flags that belong to the whole block are the same on every type."
+    match ts
+        [] -> Result.Ok(Unit)
+        [t, ..rest] -> match t.flags
+            Option.None -> Result.Err(reject("'{nm(t.name)}' carries no flags in a block whose first type does"))
+            Option.Some(g) -> match g.impredicative == f.impredicative
+                false -> Result.Err(reject("mutually defined inductive types must all have the same impredicativity tag"))
+                true -> match g.largeElim == f.largeElim
+                    false -> Result.Err(reject("mutually defined inductive types must all have the same large elimination tag"))
+                    true -> blockFlagsShared(rest, f)
+
+verify blockFlagsShared
+    blockFlagsShared([TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = true)))], flagsNone()) => Result.Err(Fail.Reject("mutually defined inductive types must all have the same large elimination tag"))
+    blockFlagsShared([], flagsNone()) => Result.Ok(Unit)
+    blockFlagsShared([TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None)], flagsNone()) => Result.Err(Fail.Reject("'[anonymous]' carries no flags in a block whose first type does"))
+
+fn projectionsAllowed(blk: Blk, ts: List<TypeIn>, idx: Int, isRec: Bool) -> Result<Unit, Fail>
+    ? "Each type with projections has one constructor, no indices and is not impredicative; with eta it also has projections and the block is not recursive."
+    match ts
+        [] -> Result.Ok(Unit)
+        [t, ..rest] -> projectionsNext(projectionsOf(blk, t, Option.withDefault(t.flags, flagsNone()), idx, isRec)?, blk, rest, idx, isRec)
+
+verify projectionsAllowed
+    projectionsAllowed(Check.Blk.start([], 0, [], 0), [], 0, false) => Result.Ok(Unit)
+    projectionsAllowed(Check.Blk.start([], 0, [], 0), [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.Some(IndFlags(impredicative = false, k = false, projections = true, eta = false, largeElim = false)))], 0, false) => Result.Err(Fail.Reject("'[anonymous]' cannot have projections: it does not have exactly one constructor"))
+    projectionsAllowed(Blk.update(Check.Blk.start([], 0, [], 0), nindices = [0]), [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))], flags = Option.Some(IndFlags(impredicative = false, k = false, projections = true, eta = false, largeElim = false)))], 0, false) => Result.Ok(Unit)
+
+fn projectionsNext(u: Unit, blk: Blk, rest: List<TypeIn>, idx: Int, isRec: Bool) -> Result<Unit, Fail>
+    ? "On to the next type."
+    projectionsAllowed(blk, rest, idx + 1, isRec)
+
+verify projectionsNext
+    projectionsNext(Unit, Check.Blk.start([], 0, [], 0), [], 0, false) => Result.Ok(Unit)
+    projectionsNext(Unit, Check.Blk.start([], 0, [], 0), [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.Some(IndFlags(impredicative = false, k = false, projections = true, eta = false, largeElim = false)))], 0, false) => Result.Err(Fail.Reject("'[anonymous]' cannot have projections: it does not have exactly one constructor"))
+
+fn projectionsOf(blk: Blk, t: TypeIn, g: IndFlags, idx: Int, isRec: Bool) -> Result<Unit, Fail>
+    ? "One type's projections and eta."
+    match g.projections
+        false -> match g.eta
+            true -> Result.Err(reject("'{nm(t.name)}' cannot have eta with no projections"))
+            false -> Result.Ok(Unit)
+        true -> match t.ctors
+            [_] -> projectionsOne(blk, t, g, idx, isRec)
+            _ -> Result.Err(reject("'{nm(t.name)}' cannot have projections: it does not have exactly one constructor"))
+
+verify projectionsOne
+    projectionsOne(Blk.update(Check.Blk.start([], 0, [], 0), nindices = [0]), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None), IndFlags(impredicative = false, k = false, projections = true, eta = false, largeElim = false), 0, false) => Result.Ok(Unit)
+
+fn projectionsOne(blk: Blk, t: TypeIn, g: IndFlags, idx: Int, isRec: Bool) -> Result<Unit, Fail>
+    ? "A type of one constructor with projections: no indices, not impredicative, and with eta not recursive."
+    match Check.Blk.nthInt(blk.nindices, idx) == 0
+        false -> Result.Err(reject("'{nm(t.name)}' cannot have projections: it has indices"))
+        true -> match g.impredicative
+            true -> Result.Err(reject("'{nm(t.name)}' is impredicative and cannot have projections"))
+            false -> match Bool.and(g.eta, isRec)
+                true -> Result.Err(reject("'{nm(t.name)}' is recursive and cannot be eta-expandable"))
+                false -> Result.Ok(Unit)
+
+verify projectionsOf
+    projectionsOf(Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None), IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false), 0, false) => Result.Ok(Unit)
+    projectionsOf(Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None), IndFlags(impredicative = false, k = false, projections = false, eta = true, largeElim = false), 0, false) => Result.Err(Fail.Reject("'[anonymous]' cannot have eta with no projections"))
+    projectionsOf(Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None), IndFlags(impredicative = false, k = false, projections = true, eta = false, largeElim = false), 0, false) => Result.Err(Fail.Reject("'[anonymous]' cannot have projections: it does not have exactly one constructor"))
+    projectionsOf(Blk.update(Check.Blk.start([], 0, [], 0), nindices = [1]), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))], flags = Option.None), IndFlags(impredicative = false, k = false, projections = true, eta = false, largeElim = false), 0, false) => Result.Err(Fail.Reject("'[anonymous]' cannot have projections: it has indices"))
+    projectionsOf(Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))], flags = Option.None), IndFlags(impredicative = true, k = false, projections = true, eta = false, largeElim = false), 0, false) => Result.Err(Fail.Reject("'[anonymous]' is impredicative and cannot have projections"))
+    projectionsOf(Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))], flags = Option.None), IndFlags(impredicative = false, k = false, projections = true, eta = true, largeElim = false), 0, true) => Result.Err(Fail.Reject("'[anonymous]' is recursive and cannot be eta-expandable"))
+    projectionsOf(Check.Blk.start([], 0, [], 0), TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))], flags = Option.None), IndFlags(impredicative = false, k = false, projections = true, eta = true, largeElim = false), 0, false) => Result.Ok(Unit)
+
+fn kAllowed(u: Unit, blk: Blk, f: IndFlags) -> Result<Bool, Fail>
+    ? "Once projections are allowed: isK only on the first type, and only for one type in Prop with one constructor and no fields, what K-like reduction needs (kTarget)."
+    match f.k
+        true -> match kTarget(blk)
+            true -> Result.Ok(true)
+            false -> Result.Err(reject("'{nm(firstName(blk.types))}' is incorrectly marked as K-like"))
+        false -> match laterK(List.drop(blk.types, 1))
+            Option.Some(n) -> Result.Err(reject("'{nm(n)}' is incorrectly marked as K-like"))
+            Option.None -> Result.Ok(false)
+
+verify kAllowed
+    kAllowed(Unit, Check.Blk.start([], 0, [], 0), IndFlags(impredicative = false, k = true, projections = false, eta = false, largeElim = false)) => Result.Err(Fail.Reject("'[anonymous]' is incorrectly marked as K-like"))
+    kAllowed(Unit, Check.Blk.start([], 0, [], 0), flagsNone()) => Result.Ok(false)
+
+fn firstName(ts: List<TypeIn>) -> Name
+    ? "The first type's name."
+    match ts
+        [t, .._] -> t.name
+        [] -> Core.Names.anon()
+
+verify firstName
+    firstName([]) => Core.Names.anon()
+    firstName([TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false)))]) => Core.Names.anon()
+
+fn laterK(ts: List<TypeIn>) -> Option<Name>
+    ? "A type after the first marked isK."
+    match ts
+        [] -> Option.None
+        [t, ..rest] -> match Option.withDefault(t.flags, flagsNone()).k
+            true -> Option.Some(t.name)
+            false -> laterK(rest)
+
+verify laterK
+    laterK([TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.Some(IndFlags(impredicative = false, k = true, projections = false, eta = false, largeElim = false)))]) => Option.Some(Core.Names.anon())
+    laterK([]) => Option.None
+
+fn largeElimAllowed(blk: Blk, f: IndFlags, k: Bool) -> Result<Bool, Fail>
+    ? "Large elimination: never for an impredicative block; always for one that is never a proposition; otherwise for one type without constructors, or with one constructor and eta or K."
+    match f.largeElim
+        false -> Result.Ok(false)
+        true -> match Bool.and(Bool.not(f.impredicative), largeElimFits(blk, k))
+            true -> Result.Ok(true)
+            false -> Result.Err(reject("'{nm(firstName(blk.types))}' is incorrectly marked as having large elimination"))
+
+verify largeElimAllowed
+    largeElimAllowed(Blk.update(Check.Blk.start([], 0, [], 0), notZero = true), IndFlags(impredicative = true, k = false, projections = false, eta = false, largeElim = true), false) => Result.Err(Fail.Reject("'[anonymous]' is incorrectly marked as having large elimination"))
+    largeElimAllowed(Blk.update(Check.Blk.start([], 0, [], 0), notZero = true), IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = true), false) => Result.Ok(true)
+
+fn largeElimFits(blk: Blk, k: Bool) -> Bool
+    ? "The shape large elimination asks of a block that may be a proposition."
+    match blk.notZero
+        true -> true
+        false -> match blk.types
+            [t] -> match t.ctors
+                [] -> true
+                [_] -> Bool.or(k, Option.withDefault(t.flags, flagsNone()).eta)
+                _ -> false
+            _ -> false
+
+verify largeElimFits
+    largeElimFits(Check.Blk.start([], 0, [], 0), false) => false
+    largeElimFits(Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None)], 0), false) => true
+
 fn declareTypes(bs: BS) -> BS
-    ? "Adds the types with the flags the kernel computes: recursive, reflexive, nested count."
+    ? "Adds the types with the flags the kernel computes (recursive, reflexive, nested count) and the renovation's flags as checked (FlagsWhereGiven)."
     BS(blk = bs.blk, st = St.update(bs.st, block = typeConsts(bs.st.block, bs.blk, bs.blk.types, 0, anyRec(bs.blk.types, bs.blk.names), anyReflexive(bs.blk.types, bs.blk.names))))
 
 verify declareTypes
@@ -271,7 +465,7 @@ fn typeConsts(env: Map<Name, Const>, blk: Blk, ts: List<TypeIn>, idx: Int, isRec
     ? "One constant per type."
     match ts
         [] -> env
-        [t, ..rest] -> typeConsts(Map.set(env, t.name, Const.CInduct(IndType(head = Head(name = t.name, params = blk.lparams, ty = t.ty), numParams = blk.nparams, numIndices = Check.Blk.nthInt(blk.nindices, idx), all = blk.names, ctors = ctorNames(t.ctors, []), numNested = blk.nnested, isRec = isRec, isUnsafe = false, isReflexive = isRefl))), blk, rest, idx + 1, isRec, isRefl)
+        [t, ..rest] -> typeConsts(Map.set(env, t.name, Const.CInduct(IndType(head = Head(name = t.name, params = blk.lparams, ty = t.ty), numParams = blk.nparams, numIndices = Check.Blk.nthInt(blk.nindices, idx), all = blk.names, ctors = ctorNames(t.ctors, []), numNested = blk.nnested, isRec = isRec, isUnsafe = false, isReflexive = isRefl, flags = t.flags))), blk, rest, idx + 1, isRec, isRefl)
 
 verify typeConsts
     Map.len(typeConsts({}, Check.Blk.start([], 0, [], 0), [], 0, false, false)) => 0
@@ -408,16 +602,26 @@ verify ctorParam
     ctorParam(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 1, [], 0), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Core.Names.anon(), 0, 0) => Result.Err(Fail.Reject("arg #1 of '[anonymous]' does not match inductive datatypes parameters"))
 
 fn ctorField(st: St, blk: Blk, t: Expr, d: Expr, b: Expr, n: Name, idx: Int, i: Int) -> Result<St, Fail>
-    ? "A field's universe fits the type's (or the type is a predicate), and the field is strictly positive."
+    ? "A field's universe fits the type's (or the type is impredicative), and the field is strictly positive."
     ty = Check.Tc.inferType(st, d)?
     s = Check.Tc.ensureSort(ty.st, ty.e)?
-    match Bool.or(Core.Univ.isGeq(blk.result, Check.Tc.sortLevel(s.e)), Core.Univ.normalizesToZero(blk.result))
+    match Bool.or(Core.Univ.isGeq(blk.result, Check.Tc.sortLevel(s.e)), impredicative(blk))
         false -> Result.Err(reject("universe level of type_of(arg #{i + 1}) of '{nm(n)}' is too big for the corresponding inductive datatype"))
         true -> ctorFieldNext(positivity(s.st, blk, d, n, i)?, blk, t, b, n, idx, i)
 
 verify ctorField
     ctorField(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Blk.update(Check.Blk.start([], 0, [], 0), result = Level.Succ(Level.Zero), notZero = true), Core.Exprs.bvar(0), Core.Exprs.sort(Level.Succ(Level.Zero)), Core.Exprs.bvar(0), Core.Names.anon(), 0, 0) => Result.Err(Fail.Reject("universe level of type_of(arg #1) of '[anonymous]' is too big for the corresponding inductive datatype"))
     ctorField(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.Blk.start([], 0, [], 0), Core.Exprs.bvar(0), Core.Exprs.sort(Level.Succ(Level.Zero)), Core.Exprs.bvar(0), Core.Names.anon(), 0, 0) => Result.Err(Fail.Reject("invalid return type for '[anonymous]'"))
+
+fn impredicative(blk: Blk) -> Bool
+    ? "A field may live in any universe: the block says it is impredicative, or, without flags, it is a predicate (FlagsWhereGiven)."
+    match blk.flags
+        Option.Some(f) -> f.impredicative
+        Option.None -> Core.Univ.normalizesToZero(blk.result)
+
+verify impredicative
+    impredicative(Check.Blk.start([], 0, [], 0)) => true
+    impredicative(Blk.update(Check.Blk.start([], 0, [], 0), flags = Option.Some(flagsNone()))) => false
 
 fn ctorFieldNext(st: St, blk: Blk, t: Expr, b: Expr, n: Name, idx: Int, i: Int) -> Result<St, Fail>
     ? "Declares the field and goes on."
@@ -476,14 +680,25 @@ verify ctorConsts
     Map.len(ctorConsts({}, Check.Blk.start([], 0, [], 0), Core.Names.anon(), [CtorIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0))], 0)) => 1
 
 fn elimAndK(bs: BS) -> Result<BS, Fail>
-    ? "Where the recursor may eliminate, and whether the type is a K target."
+    ? "Where the recursor may eliminate, and whether the type is a K target; a flagged block has both from its flags already (checkFlags)."
+    match bs.blk.flags
+        Option.Some -> Result.Ok(bs)
+        Option.None -> elimAndKComputed(bs)
+
+verify elimAndK
+    elimAndK(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), flags = Option.Some(flagsNone())), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), flags = Option.Some(flagsNone())), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+    elimAndK(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), notZero = true), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), notZero = true, elim = Level.Param(Core.Names.str(Core.Names.anon(), "u"))), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+
+fn elimAndKComputed(bs: BS) -> Result<BS, Fail>
+    ? "Without flags, as the kernel computed them before the renovation."
     z = elimOnlyZero(bs)?
     match z.b
         true -> Result.Ok(BS(blk = Blk.update(bs.blk, elim = Level.Zero, k = kTarget(bs.blk)), st = z.st))
         false -> Result.Ok(BS(blk = Blk.update(bs.blk, elim = Level.Param(freshU(bs.blk.lparams, 0)), k = kTarget(bs.blk)), st = z.st))
 
-verify elimAndK
-    elimAndK(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), notZero = true), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), notZero = true, elim = Level.Param(Core.Names.str(Core.Names.anon(), "u"))), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
+verify elimAndKComputed
+    elimAndKComputed(BS(blk = Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [CtorIn(name = Core.Names.anon(), ty = Core.Exprs.pi(Core.Names.anon(), Core.Exprs.natLit(1), Core.Exprs.bvar(0), Binder.Default))], flags = Option.None)], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Err(Fail.Reject("type expected"))
+    elimAndKComputed(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), notZero = true), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))) => Result.Ok(BS(blk = Blk.update(Check.Blk.start([], 0, [], 0), notZero = true, elim = Level.Param(Core.Names.str(Core.Names.anon(), "u"))), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)))
 
 fn freshU(ps: List<Name>, i: Int) -> Name
     ? "u, or u_1, u_2, ... when taken."

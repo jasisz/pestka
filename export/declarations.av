@@ -3,17 +3,33 @@ module Declarations
         "Lines that declare constants: axioms, definitions, theorems, opaque"
         "constants, the quotient package and inductive blocks. Every name,"
         "level and expression they mention must already be in the tables."
-    exposes [declLine, thmAt, defAt, headOf]
+    exposes [declLine, thmAt, defAt, headOf, flagsOf, flaggedBlock]
     depends [Json.Line, Json.Access, Core.Names, Core.Exprs, Core.Decls, Core.Lazy, Export.Tables]
     effects []
 
 fn declLine(t: Tables, kind: String, o: List<Tuple<String, J>>) -> Result<Tables, String>
     ? "One declaration line, already split into its kind and its object."
     d = declOf(t, kind, o)?
-    Export.Tables.addDecl(t, d)
+    Export.Tables.addDecl(blockNoted(t, d)?, d)
 
 verify declLine
     declLine(Export.Tables.empty(), "lemma", []) => Result.Err("unknown declaration kind 'lemma'")
+
+fn blockNoted(t: Tables, d: Decl) -> Result<Tables, String>
+    ? "An inductive block noted as flagged or not; a file holds one kind or the other (FlaggedFilesWhole in Export.Susz)."
+    match d
+        Decl.Induct([first, .._], _, _) -> match first.flags
+            Option.Some -> match t.plain
+                true -> Result.Err("a flagged inductive block in a file with blocks without flags")
+                false -> Result.Ok(Tables.update(t, flagged = true))
+            Option.None -> match t.flagged
+                true -> Result.Err("an inductive block without flags in a file with flagged blocks")
+                false -> Result.Ok(Tables.update(t, plain = true))
+        _ -> Result.Ok(t)
+
+verify blockNoted
+    blockNoted(Export.Tables.empty(), Decl.Induct([], [], [])) => Result.Ok(Export.Tables.empty())
+    blockNoted(Tables.update(Export.Tables.empty(), plain = true), Decl.Induct([IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false)))], [], [])) => Result.Err("a flagged inductive block in a file with blocks without flags")
 
 fn declOf(t: Tables, kind: String, o: List<Tuple<String, J>>) -> Result<Decl, String>
     ? "Builds the declaration of one kind."
@@ -132,13 +148,72 @@ verify quotKind
     quotKind("x") => Result.Err("unknown quot kind 'x'")
 
 fn inductiveOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Decl, String>
-    ? "A block of inductive types with their constructors and recursors."
+    ? "A block of inductive types with their constructors and recursors; its types all carry their flags or none does, and all do under format 3.2."
+    _ = flaggedBlock(Json.Access.arr(o, "types")?, t.flagsRequired)?
     types = indTypes(t, Json.Access.arr(o, "types")?, [])?
     ctors = ctorsOf(t, Json.Access.arr(o, "ctors")?, [])?
     Result.Ok(Decl.Induct(types, ctors, recsOf(t, Json.Access.arr(o, "recs")?, [])?))
 
 verify inductiveOf
     inductiveOf(Export.Tables.empty(), [("ctors", J.JArr([])), ("recs", J.JArr([])), ("types", J.JArr([]))]) => Result.Ok(Decl.Induct([], [], []))
+
+fn flagsOf(o: List<Tuple<String, J>>) -> Result<Option<IndFlags>, String>
+    ? "The renovation's five flags of a type (lean4#16595): all five or none."
+    n = keysIn(o, ["isImpredicative", "isK", "hasProjections", "hasEta", "hasLargeElim"], 0)
+    match n
+        0 -> Result.Ok(Option.None)
+        5 -> Result.Ok(Option.Some(IndFlags(impredicative = Json.Access.bool(o, "isImpredicative")?, k = Json.Access.bool(o, "isK")?, projections = Json.Access.bool(o, "hasProjections")?, eta = Json.Access.bool(o, "hasEta")?, largeElim = Json.Access.bool(o, "hasLargeElim")?)))
+        _ -> Result.Err("an inductive type with only some of its five flags")
+
+verify flagsOf
+    flagsOf([]) => Result.Ok(Option.None)
+    flagsOf([("isK", J.JBool(true))]) => Result.Err("an inductive type with only some of its five flags")
+    flagsOf([("isImpredicative", J.JBool(true)), ("isK", J.JBool(false)), ("hasProjections", J.JBool(false)), ("hasEta", J.JBool(false)), ("hasLargeElim", J.JBool(true))]) => Result.Ok(Option.Some(IndFlags(impredicative = true, k = false, projections = false, eta = false, largeElim = true)))
+
+fn keysIn(o: List<Tuple<String, J>>, ks: List<String>, n: Int) -> Int
+    ? "How many of the keys the object has."
+    match ks
+        [] -> n
+        [k, ..rest] -> match Json.Access.has(o, k)
+            true -> keysIn(o, rest, n + 1)
+            false -> keysIn(o, rest, n)
+
+verify keysIn
+    keysIn([("isK", J.JBool(true))], ["isK", "hasEta"], 0) => 1
+    keysIn([], [], 2) => 2
+
+fn flaggedBlock(ts: List<J>, required: Bool) -> Result<Bool, String>
+    ? "Whether a block's types carry their flags: all of them or none, and all under format 3.2 (required)."
+    match ts
+        [] -> Result.Ok(false)
+        [first, ..rest] -> flaggedAlike(rest, hasFlags(objectOf(first)?), required)
+
+verify flaggedBlock
+    flaggedBlock([], true) => Result.Ok(false)
+    flaggedBlock([J.JObj([])], true) => Result.Err("an inductive type without its flags in a format 3.2 export")
+    flaggedBlock([J.JObj([])], false) => Result.Ok(false)
+
+fn flaggedAlike(ts: List<J>, flagged: Bool, required: Bool) -> Result<Bool, String>
+    ? "The other types agree with the first."
+    match ts
+        [] -> match Bool.and(required, Bool.not(flagged))
+            true -> Result.Err("an inductive type without its flags in a format 3.2 export")
+            false -> Result.Ok(flagged)
+        [x, ..rest] -> match hasFlags(objectOf(x)?) == flagged
+            true -> flaggedAlike(rest, flagged, required)
+            false -> Result.Err("the types of an inductive block do not agree on carrying their flags")
+
+verify flaggedAlike
+    flaggedAlike([J.JObj([("isK", J.JBool(true))])], false, false) => Result.Err("the types of an inductive block do not agree on carrying their flags")
+    flaggedAlike([], true, true) => Result.Ok(true)
+
+fn hasFlags(o: List<Tuple<String, J>>) -> Bool
+    ? "A type that carries flags, any of the five."
+    keysIn(o, ["isImpredicative", "isK", "hasProjections", "hasEta", "hasLargeElim"], 0) > 0
+
+verify hasFlags
+    hasFlags([]) => false
+    hasFlags([("isImpredicative", J.JBool(false))]) => true
 
 fn objectOf(j: J) -> Result<List<Tuple<String, J>>, String>
     ? "An array element that must be an object."
@@ -164,7 +239,7 @@ fn indType(t: Tables, o: List<Tuple<String, J>>) -> Result<IndType, String>
     ? "One inductive type and the flags the export claims for it."
     h = head(t, o)?
     ctors = Export.Tables.names(t, Json.Access.ints(o, "ctors")?)?
-    Result.Ok(IndType(head = h, numParams = Json.Access.int(o, "numParams")?, numIndices = Json.Access.int(o, "numIndices")?, all = all(t, o)?, ctors = ctors, numNested = Json.Access.int(o, "numNested")?, isRec = Json.Access.bool(o, "isRec")?, isUnsafe = Json.Access.bool(o, "isUnsafe")?, isReflexive = Json.Access.bool(o, "isReflexive")?))
+    Result.Ok(IndType(head = h, numParams = Json.Access.int(o, "numParams")?, numIndices = Json.Access.int(o, "numIndices")?, all = all(t, o)?, ctors = ctors, numNested = Json.Access.int(o, "numNested")?, isRec = Json.Access.bool(o, "isRec")?, isUnsafe = Json.Access.bool(o, "isUnsafe")?, isReflexive = Json.Access.bool(o, "isReflexive")?, flags = flagsOf(o)?))
 
 verify indType
     indType(Export.Tables.empty(), []) => Result.Err("missing key 'name'")

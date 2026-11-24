@@ -7,7 +7,9 @@ module Tables
         "same index replaces the earlier one. A reference to an index not"
         "yet defined is an error, which is what keeps every term a finite"
         "DAG. The next fields count the lines read (plus the implicit name"
-        "and level 0)."
+        "and level 0). Whether inductive blocks must carry the renovation's"
+        "flags (a FLAGS section, a format 3.2 header), and whether blocks"
+        "with and without them were read, keep a file all one or the other."
     exposes [Tables, Parsed, empty, name, level, expr, names, levels, addName, addLevel, addExpr, addDecl, declNames, finish]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy]
     effects []
@@ -40,6 +42,9 @@ record Tables
     proofBase: Int
     proofLength: Int
     proofAt: Int
+    flagsRequired: Bool
+    flagged: Bool
+    plain: Bool
 
 record Parsed
     constants: Int
@@ -59,7 +64,7 @@ verify finish
 
 fn empty() -> Tables
     ? "Name 0 is the anonymous name and level 0 is zero; neither has a line."
-    Tables(names = {0 => Core.Names.anon()}, levels = {0 => Level.Zero}, exprs = {}, cur = freshChunk(), chunks = Vector.fromList([]), dense = 0, nextName = 1, nextLevel = 1, nextExpr = 0, decls = [], constants = 0, known = {}, pending = [], allPlaced = true, declCount = 0, outNames = [], outLevels = [], outExprs = [], nOutNames = 0, nOutLevels = 0, nOutExprs = 0, lastName = -1, lastLevel = -1, lastExpr = -1, proofBase = 0, proofLength = 0, proofAt = 0)
+    Tables(names = {0 => Core.Names.anon()}, levels = {0 => Level.Zero}, exprs = {}, cur = freshChunk(), chunks = Vector.fromList([]), dense = 0, nextName = 1, nextLevel = 1, nextExpr = 0, decls = [], constants = 0, known = {}, pending = [], allPlaced = true, declCount = 0, outNames = [], outLevels = [], outExprs = [], nOutNames = 0, nOutLevels = 0, nOutExprs = 0, lastName = -1, lastLevel = -1, lastExpr = -1, proofBase = 0, proofLength = 0, proofAt = 0, flagsRequired = false, flagged = false, plain = false)
 
 verify empty
     empty().nextName => 1
@@ -272,8 +277,8 @@ verify addDecl
     Result.withDefault(addDecl(noted(empty(), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), [])), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), false)), empty()).allPlaced => false
     Result.withDefault(addDecl(Result.withDefault(addDecl(empty(), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), false)), empty()), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "y"), params = [], ty = Core.Exprs.sort(Level.Zero)), false)), empty()).allPlaced => true
     List.len(Result.withDefault(addDecl(empty(), Decl.Induct([], [], [])), empty()).decls) => 1
-    Result.withDefault(addDecl(noted(empty(), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), [])), Decl.Induct([IndType(head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = true, isReflexive = false)], [], [])), empty()).allPlaced => false
-    Result.withDefault(addDecl(noted(empty(), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), [])), Decl.Induct([IndType(head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false)], [], [])), empty()).allPlaced => true
+    Result.withDefault(addDecl(noted(empty(), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), [])), Decl.Induct([IndType(head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = true, isReflexive = false, flags = Option.None)], [], [])), empty()).allPlaced => false
+    Result.withDefault(addDecl(noted(empty(), Core.Exprs.cnst(Core.Names.str(Core.Names.anon(), "x"), [])), Decl.Induct([IndType(head = Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)], [], [])), empty()).allPlaced => true
     addDecl(Result.withDefault(addDecl(empty(), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), true)), empty()), Decl.Axiom(Head(name = Core.Names.str(Core.Names.anon(), "x"), params = [], ty = Core.Exprs.sort(Level.Zero)), false)) => Result.Err("x is declared twice")
 
 decision UniqueDeclaredNames

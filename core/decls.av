@@ -7,8 +7,10 @@ module Decls
         "carries what reduction asks of it at every step, found once when it"
         "enters the environment: the type of its major premise, whether that"
         "is a non-recursive structure, and whether its motive may land in"
-        "any sort."
-    exposes [Head, Hints, Safety, QuotKind, IndType, Ctor, RecRule, Rec, Decl, nameOf, constantCount]
+        "any sort. An inductive type of lean4export 3.2 also carries the"
+        "five flags of the kernel renovation (lean4#16595): those are"
+        "inputs, which the checker judges allowed or not and then uses."
+    exposes [Head, Hints, Safety, QuotKind, IndFlags, IndType, Ctor, RecRule, Rec, Decl, nameOf, constantCount]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Lazy]
     effects []
 
@@ -33,6 +35,13 @@ type QuotKind
     QLift
     QInd
 
+record IndFlags
+    impredicative: Bool
+    k: Bool
+    projections: Bool
+    eta: Bool
+    largeElim: Bool
+
 record IndType
     head: Head
     numParams: Int
@@ -43,6 +52,7 @@ record IndType
     isRec: Bool
     isUnsafe: Bool
     isReflexive: Bool
+    flags: Option<IndFlags>
 
 record Ctor
     head: Head

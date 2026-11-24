@@ -3,9 +3,12 @@ module Blk
         "One inductive block while it is being checked: the input types and"
         "constructors, the parameters as free variables, and what checking"
         "the types established (indices, result universe, elimination level,"
-        "K-likeness). The checker state travels next to it."
-    exposes [CtorIn, TypeIn, Blk, BS, start, nthExpr, nthInt, consts, isValidIndApp, validIndex, indicesOf, recName]
-    depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Check.State, Check.Telescope]
+        "K-likeness). A block of lean4export 3.2 carries the renovation's"
+        "flags on each type; the block's own (impredicative, large"
+        "elimination) are its first type's. The checker state travels next"
+        "to it."
+    exposes [CtorIn, TypeIn, Blk, BS, start, firstFlags, hasRules, nthExpr, nthInt, consts, isValidIndApp, validIndex, indicesOf, recName]
+    depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Core.Decls, Check.State, Check.Telescope]
     effects []
 
 record CtorIn
@@ -16,6 +19,7 @@ record TypeIn
     name: Name
     ty: Expr
     ctors: List<CtorIn>
+    flags: Option<IndFlags>
 
 record Blk
     lparams: List<Name>
@@ -30,6 +34,7 @@ record Blk
     elim: Level
     k: Bool
     nnested: Int
+    flags: Option<IndFlags>
 
 record BS
     blk: Blk
@@ -37,10 +42,30 @@ record BS
 
 fn start(lparams: List<Name>, nparams: Int, types: List<TypeIn>, nnested: Int) -> Blk
     ? "A block before any check."
-    Blk(lparams = lparams, levels = paramLevels(lparams, []), nparams = nparams, types = types, names = typeNames(types, []), params = [], nindices = [], result = Level.Zero, notZero = false, elim = Level.Zero, k = false, nnested = nnested)
+    Blk(lparams = lparams, levels = paramLevels(lparams, []), nparams = nparams, types = types, names = typeNames(types, []), params = [], nindices = [], result = Level.Zero, notZero = false, elim = Level.Zero, k = false, nnested = nnested, flags = firstFlags(types))
 
 verify start
     start([Core.Names.anon()], 0, [], 0).levels => [Level.Param(Core.Names.anon())]
+
+fn firstFlags(ts: List<TypeIn>) -> Option<IndFlags>
+    ? "The flags of the first type, which stand for the block's."
+    match ts
+        [t, .._] -> t.flags
+        [] -> Option.None
+
+verify firstFlags
+    firstFlags([]) => Option.None
+    firstFlags([TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [], flags = Option.Some(IndFlags(impredicative = true, k = false, projections = false, eta = false, largeElim = false)))]) => Option.Some(IndFlags(impredicative = true, k = false, projections = false, eta = false, largeElim = false))
+
+fn hasRules(b: Blk) -> Bool
+    ? "Whether the recursors get computation rules: always without flags; with them only under large elimination, as a recursor into Prop alone has none (lean4#16595)."
+    match b.flags
+        Option.None -> true
+        Option.Some(f) -> f.largeElim
+
+verify hasRules
+    hasRules(start([], 0, [], 0)) => true
+    hasRules(Blk.update(start([], 0, [], 0), flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false)))) => false
 
 fn paramLevels(ps: List<Name>, acc: List<Level>) -> List<Level>
     ? "Each universe parameter as a level."

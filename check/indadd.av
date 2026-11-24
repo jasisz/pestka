@@ -34,10 +34,10 @@ verify addInductive
     addInductive(Check.State.envEmpty(), [], [], []) => Result.Err(Fail.Reject("invalid empty (mutual) inductive datatype declaration"))
 
 fn typeIns(types: List<IndType>, ctors: List<Ctor>, acc: List<TypeIn>) -> Result<List<TypeIn>, Fail>
-    ? "Each type with the types of the constructors it lists."
+    ? "Each type with the types of the constructors it lists, and its flags if the export gives them."
     match types
         [] -> Result.Ok(List.reverse(acc))
-        [t, ..rest] -> typeIns(rest, ctors, List.prepend(TypeIn(name = t.head.name, ty = t.head.ty, ctors = ctorIns(t.ctors, ctors, [])?), acc))
+        [t, ..rest] -> typeIns(rest, ctors, List.prepend(TypeIn(name = t.head.name, ty = t.head.ty, ctors = ctorIns(t.ctors, ctors, [])?, flags = t.flags), acc))
 
 verify typeIns
     typeIns([], [], []) => Result.Ok([])
@@ -81,7 +81,7 @@ verify withParams
     withParams(Unit, Check.State.envEmpty(), Check.Blk.start([], 0, [], 0), [], [], [], []) => Result.Ok({})
 
 verify fromFirst
-    fromFirst(Check.State.envEmpty(), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false), [], [], [], []) => Result.Ok({})
+    fromFirst(Check.State.envEmpty(), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None), [], [], [], []) => Result.Ok({})
 
 fn afterUniform(u: Unit, env: Env, blk: Blk, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> Result<Map<Name, Const>, Fail>
     ? "Runs the kernel's steps, then compares with the export."
@@ -109,10 +109,10 @@ verify compared
     compared(Unit, {}) => Result.Ok({})
 
 fn steps(env: Env, blk: Blk) -> Result<Map<Name, Const>, Fail>
-    ? "Types, constructors, elimination level, recursors, and the rule check."
+    ? "Types and their flags, constructors, elimination level, recursors, and the rule check."
     match hasDup(blk.lparams)
         true -> Result.Err(reject("duplicate universe level parameter"))
-        false -> stepsFrom(Check.Induct.checkTypes(BS(blk = blk, st = Check.State.fresh(env, blk.lparams, Safety.Safe)))?)
+        false -> stepsFrom(Check.Induct.checkFlags(Check.Induct.checkTypes(BS(blk = blk, st = Check.State.fresh(env, blk.lparams, Safety.Safe)))?)?)
 
 verify steps
     steps(Check.State.envEmpty(), Check.Blk.start([Core.Names.anon(), Core.Names.anon()], 0, [], 0)) => Result.Err(Fail.Reject("duplicate universe level parameter"))
@@ -354,11 +354,11 @@ verify badType
 fn sameType(g: Option<Const>, t: IndType) -> Bool
     ? "Every field equal, the type up to binder names."
     match g
-        Option.Some(Const.CInduct(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == t.head.params, d.head.ty == t.head.ty), Bool.and(d.numParams == t.numParams, d.numIndices == t.numIndices)), Bool.and(Bool.and(d.all == t.all, d.ctors == t.ctors), Bool.and(Bool.and(d.numNested == t.numNested, d.isRec == t.isRec), Bool.and(d.isUnsafe == t.isUnsafe, d.isReflexive == t.isReflexive))))
+        Option.Some(Const.CInduct(d)) -> Bool.and(Bool.and(Bool.and(d.head.params == t.head.params, d.head.ty == t.head.ty), Bool.and(d.numParams == t.numParams, d.numIndices == t.numIndices)), Bool.and(Bool.and(d.all == t.all, d.ctors == t.ctors), Bool.and(Bool.and(d.numNested == t.numNested, d.isRec == t.isRec), Bool.and(Bool.and(d.isUnsafe == t.isUnsafe, d.isReflexive == t.isReflexive), d.flags == t.flags))))
         _ -> false
 
 verify sameType
-    sameType(Option.None, IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false)) => false
+    sameType(Option.None, IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) => false
 
 fn ctorsMatch(env: Map<Name, Const>, ctors: List<Ctor>) -> Bool
     ? "All constructors match."

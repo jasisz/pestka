@@ -239,7 +239,7 @@ fn afterHeader(t: Tables, version: Result<String, String>, rest: List<String>, w
     match version
         Result.Err(e) -> Fed.Stop(Outcome.Rejected("line 1: {e}"))
         Result.Ok(v) -> match Export.Reader.supported(v)
-            true -> fedBody(Export.Reader.readParallel(t, rest, 2, workers), 2 + List.len(rest))
+            true -> fedBody(Export.Reader.readParallel(Tables.update(t, flagsRequired = Export.Reader.needsFlags(v)), rest, 2, workers), 2 + List.len(rest))
             false -> Fed.Stop(Outcome.Declined("format version {v} is not supported"))
 
 verify afterHeader

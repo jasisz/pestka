@@ -115,8 +115,15 @@ Pestka implements Lean's type theory, including:
 - Quotients, proof irrelevance, and the Nat and String literal extensions.
 
 The input is [Susz 1](https://github.com/jasisz/susz/blob/main/docs/spec.md)
-or lean4export ndjson 3.1.0. The last output line and exit code give the
-result:
+or lean4export ndjson 3.1 or 3.2. Format 3.2 gives every inductive type the
+five flags of the kernel renovation
+([lean4#16595](https://github.com/leanprover/lean4/pull/16595)):
+`isImpredicative`, `isK`, `hasProjections`, `hasEta`, `hasLargeElim`. Pestka
+checks that each flag is allowed for the declaration and then goes by the
+flags for projections, structure eta, K-like reduction and large
+elimination. A block without flags is checked as before the renovation; a
+3.2 export whose types lack them, or a file that mixes flagged blocks with
+others, is rejected. The last output line and exit code give the result:
 
 | Output | Exit code | Meaning |
 | :--- | :---: | :--- |

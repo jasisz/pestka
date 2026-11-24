@@ -197,8 +197,8 @@ fn paramsAreBinders(env: Env, blk: Blk) -> Result<Unit, Fail>
         false -> Result.Err(reject("invalid inductive datatype declaration, incorrect number of parameters"))
 
 verify paramsAreBinders
-    paramsAreBinders(Check.State.envEmpty(), Check.Blk.start([], 1, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [])], 0)) => Result.Err(Fail.Reject("invalid inductive datatype declaration, incorrect number of parameters"))
-    paramsAreBinders(Check.State.envEmpty(), Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [])], 0)) => Result.Ok(Unit)
+    paramsAreBinders(Check.State.envEmpty(), Check.Blk.start([], 1, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [], flags = Option.None)], 0)) => Result.Err(Fail.Reject("invalid inductive datatype declaration, incorrect number of parameters"))
+    paramsAreBinders(Check.State.envEmpty(), Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.sort(Level.Zero), ctors = [], flags = Option.None)], 0)) => Result.Ok(Unit)
 
 fn firstType(ts: List<TypeIn>) -> Expr
     ? "The first type's type."
@@ -224,10 +224,10 @@ record NC
 
 fn retype(r: NC, q: Int, t: TypeIn) -> NS
     ? "Stores type q with its rewritten constructors."
-    NS.update(r.ns, types = List.concat(List.take(r.ns.types, q), List.prepend(TypeIn(name = t.name, ty = t.ty, ctors = r.ctors), List.drop(r.ns.types, q + 1))))
+    NS.update(r.ns, types = List.concat(List.take(r.ns.types, q), List.prepend(TypeIn.update(t, ctors = r.ctors), List.drop(r.ns.types, q + 1))))
 
 verify retype
-    retype(NC(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), ctors = []), 0, TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [])).types => [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [])]
+    retype(NC(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), ctors = []), 0, TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None)).types => [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None)]
 
 fn ctorsDone(ns: NS, cs: List<CtorIn>, acc: List<CtorIn>) -> Result<NC, Fail>
     ? "Rewrites each constructor type under its own parameter variables."
@@ -318,7 +318,7 @@ fn nestedFound(ns: NS, as: List<Expr>, e: Expr, iv: IndType) -> Result<NO, Fail>
         Option.None -> createGroup(ns, as, iv, Core.Apps.fnOf(e), args)
 
 verify nestedFound
-    nestedFound(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [(Core.Exprs.fvar(0), Core.Names.anon())], types = [], next = 1), [], Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false)) == Result.Err(Fail.Reject("x")) => false
+    nestedFound(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [(Core.Exprs.fvar(0), Core.Names.anon())], types = [], next = 1), [], Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) == Result.Err(Fail.Reject("x")) => false
 
 fn auxApp(ns: NS, aux: Name, as: List<Expr>, rest: List<Expr>) -> Expr
     ? "auxI As is."
@@ -348,7 +348,7 @@ fn createGroup(ns: NS, as: List<Expr>, iv: IndType, fn0: Expr, args: List<Expr>)
     Result.Ok(NO(ns = r.ns, o = r.result))
 
 verify createGroup
-    createGroup(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false), Core.Exprs.fvar(0), []) => Result.Ok(NO(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), o = Option.None))
+    createGroup(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None), Core.Exprs.fvar(0), []) => Result.Ok(NO(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), o = Option.None))
 
 fn groupMembers(gr: GR, as: List<Expr>, iv: IndType, iName: Option<Name>, fn0: Expr, args: List<Expr>, js: List<Name>) -> Result<GR, Fail>
     ? "Creates each member's auxiliary type and constructors."
@@ -357,7 +357,7 @@ fn groupMembers(gr: GR, as: List<Expr>, iv: IndType, iName: Option<Name>, fn0: E
         [j, ..rest] -> groupMembers(oneMember(gr, as, iv, iName, fn0, args, j, uniqueName(gr.ns, concatNames(nestedPrefix(), j), gr.ns.next))?, as, iv, iName, fn0, args, rest)
 
 verify groupMembers
-    groupMembers(GR(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), result = Option.None), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false), Option.None, Core.Exprs.fvar(0), [], []) == Result.Err(Fail.Reject("x")) => false
+    groupMembers(GR(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), result = Option.None), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None), Option.None, Core.Exprs.fvar(0), [], []) == Result.Err(Fail.Reject("x")) => false
 
 record UN
     name: Name
@@ -389,13 +389,46 @@ fn oneMember(gr: GR, as: List<Expr>, iv: IndType, iName: Option<Name>, fn0: Expr
     jv = memberInd(ns.env, j)?
     jty = Check.Telescope.piBinding(ns.st, as, instPiParams(Core.Subst.instLevelParams(jv.head.ty, jv.head.params, ilvls), iv.numParams, ps)?)
     ctors = auxCtors(ns, as, jv.ctors, j, un.name, ilvls, iv.numParams, ps, [])?
-    ns2 = NS.update(ns, aux = List.concat(ns.aux, [(replaceParams(Core.Apps.mkApps(Core.Exprs.cnst(j, ilvls), ps), as, ns.params), un.name)]), types = List.concat(ns.types, [TypeIn(name = un.name, ty = jty, ctors = ctors)]))
+    ns2 = NS.update(ns, aux = List.concat(ns.aux, [(replaceParams(Core.Apps.mkApps(Core.Exprs.cnst(j, ilvls), ps), as, ns.params), un.name)]), types = List.concat(ns.types, [TypeIn(name = un.name, ty = jty, ctors = ctors, flags = auxFlags(Check.Blk.firstFlags(ns.types), jv.flags))]))
     match iName == Option.Some(j)
         true -> Result.Ok(GR(ns = ns2, result = Option.Some(auxApp(ns2, un.name, as, List.drop(args, iv.numParams)))))
         false -> Result.Ok(GR(ns = ns2, result = gr.result))
 
 verify oneMember
-    oneMember(GR(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), result = Option.None), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false), Option.None, Core.Exprs.fvar(0), [], Core.Names.anon(), UN(name = Core.Names.anon(), next = 2)) => Result.Err(Fail.Reject("invalid nested inductive datatype, ill-formed declaration"))
+    oneMember(GR(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), result = Option.None), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None), Option.None, Core.Exprs.fvar(0), [], Core.Names.anon(), UN(name = Core.Names.anon(), next = 2)) => Result.Err(Fail.Reject("invalid nested inductive datatype, ill-formed declaration"))
+
+decision AuxFlagsFromBlockAndMember
+    date = "2026-11-24"
+    reason =
+        "In a flagged block an auxiliary type needs flags of its own, which"
+        "the export cannot state, as the export never sees it. The reference"
+        "kernel (lean4#16595) gives it the block's impredicativity and large"
+        "elimination, the nested type's isK and hasProjections, and never"
+        "eta: the copy is recursive whenever it nests the block, and the"
+        "block's own flags must agree across its types. So an impredicative"
+        "proposition nested through a structure with projections is refused,"
+        "as the copy would be impredicative with projections. A nested type"
+        "from a block without flags (lean4export 3.1) has no isK or"
+        "hasProjections to copy: its copy claims neither, which claims"
+        "nothing the copy could be refused for. The flags of auxiliary types"
+        "only decide whether the block is allowed: the copies leave the"
+        "environment once the block is restored."
+    chosen = "AuxFlagsFromBlockAndMember"
+    rejected = ["AuxFlagsRecomputed", "AuxWithoutFlags"]
+    impacts = [oneMember, auxFlags]
+
+fn auxFlags(block: Option<IndFlags>, member: Option<IndFlags>) -> Option<IndFlags>
+    ? "The flags of an auxiliary type: none in a block without flags; otherwise the block's impredicativity and large elimination, the nested type's isK and hasProjections, never eta (AuxFlagsFromBlockAndMember)."
+    match block
+        Option.None -> Option.None
+        Option.Some(b) -> match member
+            Option.Some(m) -> Option.Some(IndFlags(impredicative = b.impredicative, k = m.k, projections = m.projections, eta = false, largeElim = b.largeElim))
+            Option.None -> Option.Some(IndFlags(impredicative = b.impredicative, k = false, projections = false, eta = false, largeElim = b.largeElim))
+
+verify auxFlags
+    auxFlags(Option.None, Option.Some(IndFlags(impredicative = false, k = false, projections = true, eta = true, largeElim = true))) => Option.None
+    auxFlags(Option.Some(IndFlags(impredicative = true, k = false, projections = false, eta = false, largeElim = false)), Option.Some(IndFlags(impredicative = false, k = false, projections = true, eta = true, largeElim = true))) => Option.Some(IndFlags(impredicative = true, k = false, projections = true, eta = false, largeElim = false))
+    auxFlags(Option.Some(IndFlags(impredicative = false, k = false, projections = true, eta = true, largeElim = true)), Option.None) => Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = true))
 
 fn memberInd(env: Env, j: Name) -> Result<IndType, Fail>
     ? "A member of the nested type's group."

@@ -26,6 +26,10 @@ spec, and a benchmark for Aver. For real use, `susz pack` is faster.
 
 A full check never reads the index or the source section.
 
+Flagged inductive blocks (kind 7, with the FLAGS section) are read as the
+spec says. A file with FLAGS must have only flagged blocks: a kind-5 block in
+it is rejected at its record, as Gruszka does.
+
 Nor does it hold PROOFS. A theorem's proof block is read from the file when
 the worker checking the theorem gets to it, and dropped after its check. A
 declaration that unfolds a theorem whose block its worker does not hold
