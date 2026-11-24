@@ -11,7 +11,7 @@ module Decl
         "environment at its own place in the file, so that they can be"
         "checked apart; the verdict names the first failure in file order,"
         "as checking strictly in order would."
-    exposes [Run, Job, Admitted, Chunk, Checked, Checking, Part, Facts, Plan, Pre, Task, Done, planned, planPart, checkingOf, partOf, runTask, preRead, taskOf, blockMissing, tally, laneEnded, noFacts, readSpot, said, failText, checkAll, checkPart, skippedAmong, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
+    exposes [jobCost, perDecl, costOf, Run, Job, Admitted, Chunk, Checked, Checking, Part, Facts, Plan, Pre, Task, Done, planned, planPart, checkingOf, partOf, runTask, preRead, taskOf, blockMissing, tally, laneEnded, noFacts, readSpot, said, failText, checkAll, checkPart, skippedAmong, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
     depends [Bytes, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Cache, Check.Shapes, Check.State, Check.Tc, Check.IndAdd]
     effects [Console.error, Disk.readBytesAt, Time.unixMs]
 
