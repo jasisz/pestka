@@ -11,7 +11,7 @@ module Decl
         "environment at its own place in the file, so that they can be"
         "checked apart; the verdict names the first failure in file order,"
         "as checking strictly in order would."
-    exposes [jobCost, perDecl, costOf, Run, Job, Admitted, Chunk, Checked, Checking, Part, Facts, Plan, Pre, Task, Done, planned, planPart, checkingOf, partOf, runTask, preRead, taskOf, blockMissing, tally, laneEnded, noFacts, readSpot, said, failText, checkAll, checkPart, skippedAmong, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
+    exposes [jobCost, perDecl, costOf, preCost, Run, Job, Admitted, Chunk, Checked, Checking, Part, Facts, Plan, Pre, Task, Done, planned, planPart, checkingOf, partOf, runTask, preRead, taskOf, blockMissing, tally, laneEnded, noFacts, readSpot, said, failText, checkAll, checkPart, skippedAmong, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
     depends [Bytes, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Cache, Check.Shapes, Check.State, Check.Tc, Check.IndAdd]
     effects [Console.error, Disk.readBytesAt, Time.unixMs]
 
@@ -57,6 +57,7 @@ record Facts
     eqFail: Map<Core.Exprs.Key, Bucket>
     eqNo: Map<Core.Exprs.Key, Bucket>
     rules: Map<Core.Exprs.Key, Tuple<Expr, Check.Shapes.Hot>>
+    work: Int
 
 record Checked
     failure: Option<Fail>
@@ -810,6 +811,7 @@ record Task
     kept: Facts
     fail: Option<Fail>
     at: Int
+    budget: Int
 
 record Done
     kept: Facts
@@ -819,13 +821,21 @@ record Done
     at: Int
     wants: Option<Spot>
     left: List<Pre>
+    work: Int
+    cost: Int
 
-fn taskOf(env: Env, held: Map<Int, Bytes>, jobs: List<Pre>, limits: Limits, kept: Facts, fail: Option<Fail>, at: Int) -> Task
+record Pace
+    count: Int
+    work: Int
+    cost: Int
+    budget: Int
+
+fn taskOf(env: Env, held: Map<Int, Bytes>, jobs: List<Pre>, limits: Limits, kept: Facts, fail: Option<Fail>, at: Int, budget: Int) -> Task
     ? "A run handed to a worker: its jobs with their blocks read, the blocks the worker holds, the facts it carries on and the earliest failure known, past which nothing is checked (RunsQueued in Check.Queue)."
-    Task(env = env, held = held, jobs = jobs, limits = limits, kept = kept, fail = fail, at = at)
+    Task(env = env, held = held, jobs = jobs, limits = limits, kept = kept, fail = fail, at = at, budget = budget)
 
 verify taskOf
-    taskOf(Check.State.envEmpty(), {}, [], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0).at => 0
+    taskOf(Check.State.envEmpty(), {}, [], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0, -1).at => 0
 
 fn preRead(jobs: List<Job>, acc: List<Pre>) -> List<Pre>
     ? "The jobs of a run with their proof blocks read, by the one who hands the run out, since a worker's run reads nothing (BlockReadForItsCheck, RunsQueued in Check.Queue); a block that cannot be read is kept with the job, which it declines."
@@ -858,45 +868,88 @@ verify posOf
 
 fn runTask(t: Task) -> Done
     ? "One run on a worker, nothing read or written: the jobs in order from the facts handed in, until the run ends or a job wants a proof block the worker does not hold, which the one who handed the run out reads (RunsQueued in Check.Queue). What the worker found comes back to be handed to its next run."
-    taskLoop(t.jobs, Check.State.envWithHeld(t.env, t.held), t.limits, t.kept, 0, t.fail, t.at)
+    taskLoop(t.jobs, Check.State.envWithHeld(t.env, t.held), t.limits, t.kept, Pace(count = 0, work = 0, cost = 0, budget = t.budget), t.fail, t.at)
 
 verify runTask
-    runTask(taskOf(Check.State.envEmpty(), {}, [], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0)).count => 0
-    runTask(taskOf(Check.State.envEmpty(), {}, [Pre.Read(job2("a", 0))], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0)).count => 1
-    runTask(taskOf(Check.State.envEmpty(), {}, [Pre.Unread(job2("a", 2), Fail.Decline("gone"))], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0)).at => 2
-    runTask(taskOf(Check.State.envEmpty(), {}, [Pre.Read(job2("a", 5))], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.Some(Fail.Reject("x")), 3)).count => 0
+    runTask(taskOf(Check.State.envEmpty(), {}, [], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0, -1)).count => 0
+    runTask(taskOf(Check.State.envEmpty(), {}, [Pre.Read(job2("a", 0))], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0, -1)).count => 1
+    runTask(taskOf(Check.State.envEmpty(), {}, [Pre.Unread(job2("a", 2), Fail.Decline("gone"))], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0, -1)).at => 2
+    runTask(taskOf(Check.State.envEmpty(), {}, [Pre.Read(job2("a", 5))], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.Some(Fail.Reject("x")), 3, -1)).count => 0
 
-fn taskLoop(jobs: List<Pre>, env: Env, limits: Limits, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Done
-    ? "One job after another; past a failure only those placed before it (chunkLoop)."
+fn taskLoop(jobs: List<Pre>, env: Env, limits: Limits, kept: Facts, pace: Pace, fail: Option<Fail>, at: Int) -> Done
+    ? "One job after another; past a failure only those placed before it (chunkLoop). Once the work done passes the budget, after at least one job, the rest goes back to be handed out again (PortionsSpilled in Check.Queue)."
     match jobs
-        [] -> Done(kept = kept, held = Check.State.envHeld(env), count = count, fail = fail, at = at, wants = Option.None, left = [])
+        [] -> ranTask(kept, env, pace, fail, at, Option.None, [])
         [p, ..rest] -> match Bool.and(fail != Option.None, posOf(p) > at)
-            true -> taskLoop(rest, env, limits, kept, count, fail, at)
-            false -> taskStep(p, rest, env, limits, kept, count, fail, at)
+            true -> taskLoop(rest, env, limits, kept, pace, fail, at)
+            false -> match overBudget(pace)
+                true -> ranTask(kept, env, pace, fail, at, Option.None, jobs)
+                false -> taskStep(p, rest, env, limits, kept, pace, fail, at)
+
+fn ranTask(kept: Facts, env: Env, pace: Pace, fail: Option<Fail>, at: Int, wants: Option<Spot>, left: List<Pre>) -> Done
+    ? "What a run found, and what it leaves."
+    Done(kept = kept, held = Check.State.envHeld(env), count = pace.count, fail = fail, at = at, wants = wants, left = left, work = pace.work, cost = pace.cost)
+
+verify ranTask
+    ranTask(noFacts(), Check.State.envEmpty(), Pace(count = 3, work = 0, cost = 0, budget = -1), Option.None, 0, Option.None, []).count => 3
+
+fn overBudget(pace: Pace) -> Bool
+    ? "A budget is set, a job was checked, and the work done reached the budget."
+    Bool.and(pace.budget >= 0, Bool.and(pace.count > 0, pace.work >= pace.budget))
+
+verify overBudget
+    overBudget(Pace(count = 1, work = 5, cost = 0, budget = 5)) => true
+    overBudget(Pace(count = 0, work = 5, cost = 0, budget = 5)) => false
+    overBudget(Pace(count = 1, work = 5, cost = 0, budget = -1)) => false
+
+fn paced(pace: Pace, k: Facts, j: Job) -> Pace
+    ? "One more job checked, with the work it took (whnf results stored) and what it was reckoned to cost."
+    Pace.update(pace, count = pace.count + 1, work = pace.work + k.work, cost = pace.cost + jobCost(j))
+
+verify paced
+    paced(Pace(count = 0, work = 0, cost = 0, budget = -1), noFacts(), job2("a", 0)).cost => perDecl()
+
+fn preCost(ps: List<Pre>, acc: Int) -> Int
+    ? "What jobs not yet checked are reckoned to cost (jobCost)."
+    match ps
+        [] -> acc
+        [p, ..rest] -> preCost(rest, acc + jobCost(preJob(p)))
+
+verify preCost
+    preCost([Pre.Read(job2("a", 0))], 0) => perDecl()
+
+fn preJob(p: Pre) -> Job
+    ? "The job, read or not."
+    match p
+        Pre.Read(j) -> j
+        Pre.Unread(j, _) -> j
+
+verify preJob
+    preJob(Pre.Read(job2("a", 1))).pos => 1
 
 verify taskLoop
-    taskLoop([], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), noFacts(), 2, Option.None, 0).count => 2
-    taskLoop([Pre.Read(job2("a", 9))], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), noFacts(), 0, Option.Some(Fail.Reject("x")), 4).count => 0
+    taskLoop([], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), noFacts(), Pace(count = 2, work = 0, cost = 0, budget = -1), Option.None, 0).count => 2
+    taskLoop([Pre.Read(job2("a", 9))], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), noFacts(), Pace(count = 0, work = 0, cost = 0, budget = -1), Option.Some(Fail.Reject("x")), 4).count => 0
 
-fn taskStep(p: Pre, rest: List<Pre>, env: Env, limits: Limits, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Done
+fn taskStep(p: Pre, rest: List<Pre>, env: Env, limits: Limits, kept: Facts, pace: Pace, fail: Option<Fail>, at: Int) -> Done
     ? "A job checked with the facts moved into its checker (chunkStep), or declined when its block could not be read."
     match p
-        Pre.Read(j) -> taskNext(jobChecks(j, St.update(checkerFor(env, j), limits = limits, closed = kept.closed, unfoldCache = kept.unfolds, levelTypes = kept.types, vars = kept.vars, lctx = kept.lctx, next = kept.next, topLevel = kept.topLevel, inferCache = kept.inferCache, checkCache = kept.checkCache, whnfCache = kept.whnfCache, coreCache = kept.coreCache, eqOk = kept.eqOk, eqFail = kept.eqFail, eqNo = kept.eqNo, rules = kept.rules)), p, j, rest, env, limits, count, fail, at)
-        Pre.Unread(j, e) -> taskLoop(rest, env, limits, noFacts(), count, Option.Some(failNamed(e, j.head.name)), j.pos)
+        Pre.Read(j) -> taskNext(jobChecks(j, St.update(checkerFor(env, j), limits = limits, closed = kept.closed, unfoldCache = kept.unfolds, levelTypes = kept.types, vars = kept.vars, lctx = kept.lctx, next = kept.next, topLevel = kept.topLevel, inferCache = kept.inferCache, checkCache = kept.checkCache, whnfCache = kept.whnfCache, coreCache = kept.coreCache, eqOk = kept.eqOk, eqFail = kept.eqFail, eqNo = kept.eqNo, rules = kept.rules)), p, j, rest, env, limits, pace, fail, at)
+        Pre.Unread(j, e) -> taskLoop(rest, env, limits, noFacts(), pace, Option.Some(failNamed(e, j.head.name)), j.pos)
 
 verify taskStep
-    taskStep(Pre.Unread(job2("a", 3), Fail.Decline("gone")), [], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), noFacts(), 0, Option.None, 0).fail => Option.Some(Fail.Decline("a.x: gone"))
+    taskStep(Pre.Unread(job2("a", 3), Fail.Decline("gone")), [], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), noFacts(), Pace(count = 0, work = 0, cost = 0, budget = -1), Option.None, 0).fail => Option.Some(Fail.Decline("a.x: gone"))
 
-fn taskNext(r: Result<Facts, Fail>, p: Pre, j: Job, rest: List<Pre>, env: Env, limits: Limits, count: Int, fail: Option<Fail>, at: Int) -> Done
+fn taskNext(r: Result<Facts, Fail>, p: Pre, j: Job, rest: List<Pre>, env: Env, limits: Limits, pace: Pace, fail: Option<Fail>, at: Int) -> Done
     ? "On to the next job; a job that wants a block ends the run here, with the facts its stopped check found and the jobs left, itself first (chunkNext)."
     match r
-        Result.Ok(k) -> taskLoop(rest, env, limits, k, count + 1, fail, at)
-        Result.Err(Fail.Wants(w, st)) -> Done(kept = carried(st), held = Check.State.envHeld(env), count = count, fail = fail, at = at, wants = Option.Some(w), left = List.prepend(p, rest))
-        Result.Err(e) -> taskLoop(rest, env, limits, noFacts(), count, Option.Some(failNamed(e, j.head.name)), j.pos)
+        Result.Ok(k) -> taskLoop(rest, env, limits, k, paced(pace, k, j), fail, at)
+        Result.Err(Fail.Wants(w, st)) -> ranTask(carried(st), env, pace, fail, at, Option.Some(w), List.prepend(p, rest))
+        Result.Err(e) -> taskLoop(rest, env, limits, noFacts(), pace, Option.Some(failNamed(e, j.head.name)), j.pos)
 
 verify taskNext
-    taskNext(Result.Err(Fail.Reject("bad")), Pre.Read(job2("a", 6)), job2("a", 6), [], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 0, Option.None, 0).at => 6
-    taskNext(Result.Ok(noFacts()), Pre.Read(job2("a", 6)), job2("a", 6), [], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 1, Option.None, 0).count => 2
+    taskNext(Result.Err(Fail.Reject("bad")), Pre.Read(job2("a", 6)), job2("a", 6), [], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), Pace(count = 0, work = 0, cost = 0, budget = -1), Option.None, 0).at => 6
+    taskNext(Result.Ok(noFacts()), Pre.Read(job2("a", 6)), job2("a", 6), [], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), Pace(count = 1, work = 0, cost = 0, budget = -1), Option.None, 0).count => 2
 
 fn blockMissing(d: Done, e: Fail) -> Done
     ? "A run stopped for a block that could not be read: the job that wanted it declined (wanted), the rest left to check from no facts."
@@ -905,7 +958,7 @@ fn blockMissing(d: Done, e: Fail) -> Done
         [p, ..rest] -> Done.update(d, kept = noFacts(), fail = Option.Some(failNamed(e, nameOf(p))), at = posOf(p), wants = Option.None, left = rest)
 
 verify blockMissing
-    blockMissing(Done(kept = noFacts(), held = {}, count = 0, fail = Option.None, at = 0, wants = Option.None, left = [Pre.Read(job2("a", 7))]), Fail.Decline("short")).at => 7
+    blockMissing(Done(kept = noFacts(), held = {}, count = 0, fail = Option.None, at = 0, wants = Option.None, left = [Pre.Read(job2("a", 7))], work = 0, cost = 0), Fail.Decline("short")).at => 7
 
 fn nameOf(p: Pre) -> Name
     ? "A job's declaration's name."
@@ -1286,7 +1339,7 @@ verify checkGroup
 
 fn noFacts() -> Facts
     ? "No facts kept yet."
-    Facts(closed = Core.Cache.empty(), unfolds = Core.Cache.empty(), types = Core.Cache.empty(), vars = Core.Cache.empty(), lctx = Locals.NoLocals, next = 0, topLevel = 0, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), rules = {})
+    Facts(closed = Core.Cache.empty(), unfolds = Core.Cache.empty(), types = Core.Cache.empty(), vars = Core.Cache.empty(), lctx = Locals.NoLocals, next = 0, topLevel = 0, inferCache = Core.Cache.empty(), checkCache = Core.Cache.empty(), whnfCache = Core.Cache.empty(), coreCache = Core.Cache.empty(), eqOk = Core.Cache.empty(), eqFail = Core.Cache.empty(), eqNo = Core.Cache.empty(), rules = {}, work = 0)
 
 verify noFacts
     Core.Cache.size(noFacts().unfolds) => 0
@@ -1681,7 +1734,7 @@ decision LimitsFromReuseDistances
 fn carried(st: St) -> Facts
     ? "What checking takes from a declaration to the next: the facts about closed terms; the values and constant types instantiated at universe levels, which depend on the levels as written, not on what they mean in a declaration; and, since a free variable is made of its type and value and how many of its kind are open around it (CountedVariables), the variables made so far with their context, and what was found by inference, checking, reduction and comparison about terms holding them, which holds wherever the same variables appear. What was found by checking terms with a universe parameter is kept under the declaration's parameters (ParamsInTheKey). Each map is emptied past its limit, a multiple of the unit set by what its entries are used again at and cost to keep (LimitsFromReuseDistances), the closed terms only in the low-memory mode (LowMemoryMode); when the variables are, their context and every map that may hold a variable go with them, so no kept result names a variable that is gone."
     full = Core.Cache.size(st.vars) > st.limits.vars
-    Facts(closed = bounded(st.closed, st.limits.closed), unfolds = bounded(st.unfoldCache, st.limits.unfold), types = bounded(st.levelTypes, st.limits.types), vars = bounded(st.vars, st.limits.vars), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = openKept(st.inferCache, full, st.limits.infer), checkCache = openKept(st.checkCache, full, st.limits.check), whnfCache = openKept(st.whnfCache, full, st.limits.whnf), coreCache = openKept(st.coreCache, full, st.limits.core), eqOk = openKept(st.eqOk, full, st.limits.eqOk), eqFail = openKept(st.eqFail, full, st.limits.eqFail), eqNo = openKept(st.eqNo, full, st.limits.eqNo), rules = st.rules)
+    Facts(closed = bounded(st.closed, st.limits.closed), unfolds = bounded(st.unfoldCache, st.limits.unfold), types = bounded(st.levelTypes, st.limits.types), vars = bounded(st.vars, st.limits.vars), lctx = localsKept(st.lctx, full), next = st.next, topLevel = st.topLevel, inferCache = openKept(st.inferCache, full, st.limits.infer), checkCache = openKept(st.checkCache, full, st.limits.check), whnfCache = openKept(st.whnfCache, full, st.limits.whnf), coreCache = openKept(st.coreCache, full, st.limits.core), eqOk = openKept(st.eqOk, full, st.limits.eqOk), eqFail = openKept(st.eqFail, full, st.limits.eqFail), eqNo = openKept(st.eqNo, full, st.limits.eqNo), rules = st.rules, work = st.whnfStores)
 
 fn openKept(m: Map<Core.Exprs.Key, Bucket>, full: Bool, limit: Int) -> Map<Core.Exprs.Key, Bucket>
     ? "A map that may hold free variables: emptied with the variables, else past its own limit."
