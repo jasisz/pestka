@@ -102,9 +102,15 @@ the quotient package as it meets them, and then checks the types and
 values of the other declarations on WORKERS threads at once (four by
 default), each against the environment at its own place in the file. The
 verdict is the first failure in file order, as in a strictly sequential
-check. A Susz file is read on one thread. A theorem's proof stays in
-the file until its declaration is checked: the worker checking it reads
-and decodes it then. An ndjson file is first packed into Susz in memory, with its
+check. A Susz file is read on one thread. The deferred declarations are
+cut into runs, 64 per worker; with more than one worker each run is a job
+(Aver's `Work`), main keeps one in flight per worker and hands the next run
+to whichever worker ends first, with the facts that worker found (decision
+`RunsQueued` in `check/queue.av`). A theorem's proof stays in the file
+until its run is handed out: main reads the run's proof blocks then, and
+the worker decodes each as it checks its declaration. `--dealt` deals the
+runs to the workers before checking instead, run i to worker i mod the
+workers, as one worker and the wasm build do. An ndjson file is first packed into Susz in memory, with its
 lines parsed on the workers.
 
 When each worker has more declarations than its caches hold (`mathlib` on

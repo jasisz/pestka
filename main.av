@@ -7,8 +7,8 @@ module Main
         "checked instead: checked: <names> (subset; ...), 0; rejected and"
         "declined as before; index invalid: <why>, 2, which is no verdict on"
         "the file."
-    depends [Core.Names, Check.State, Check.Decl, Export.Stream, Export.Tables, Export.Susz, Export.Pack]
-    effects [Args.get, Console.error, Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes, Time.unixMs]
+    depends [Core.Names, Check.State, Check.Decl, Check.Queue, Runs, Wait, Export.Stream, Export.Tables, Export.Susz, Export.Pack]
+    effects [Args.get, Console.error, Console.print, Disk.readBytesAt, Disk.size, Disk.writeBytes, Disk.appendBytes, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
 
 record Verdict
     code: Int
@@ -20,13 +20,13 @@ record Held
 
 fn main() -> Int
     ? "Reads the file, checks it and ends with the exit status. The input and what checking found are a local of main when it ends, so the process ends without freeing them (FactsHeldToExit)."
-    ! [Args.get, Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs]
+    ! [Args.get, Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     h = ran(Args.get())
     h.verdict.code
 
 fn ran(args: List<String>) -> Held
     ? "pestka pack, or the check the arguments ask for, with what main holds to the end (FactsHeldToExit)."
-    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs]
+    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match args
         ["pack", ..rest] -> statusOnly(packArgs(withoutIndexFlag(rest, []), List.contains(rest, "--no-index") == false))
         _ -> checked(args)
@@ -79,17 +79,17 @@ verify withoutIndexFlag
 
 fn checked(args: List<String>) -> Held
     ? "Reads and checks the file the arguments name, or with --only NAMES the declarations named; the verdict, with the input."
-    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs]
+    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match onlyOf(args)
         Option.Some(names) -> checkedPart(withoutOnly(args, []), names)
         Option.None -> checkedWhole(args)
 
 fn checkedWhole(args: List<String>) -> Held
     ? "Reads and checks the whole file; the verdict, with the input, both handed back for main to hold (FactsHeldToExit)."
-    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs]
+    ! [Console.error, Console.print, Disk.appendBytes, Disk.readBytesAt, Disk.size, Disk.writeBytes, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     plain = withoutFlag(args, [])
     o = input(plain)
-    v = report(o, workersIn(plain), memoryIn(args), List.contains(args, "--reorder-always"), List.contains(args, "--show-placed"), List.contains(args, "--progress"))
+    v = report(o, workersIn(plain), memoryIn(args), List.contains(args, "--reorder-always"), List.contains(args, "--show-placed"), List.contains(args, "--progress"), List.contains(args, "--dealt"))
     Held(verdict = v, input = Option.Some(o))
 
 fn onlyOf(args: List<String>) -> Option<List<String>>
@@ -130,43 +130,43 @@ verify withoutOnly
 
 fn checkedPart(args: List<String>, names: List<String>) -> Held
     ? "A subset check of a Susz file with INDEX: the declarations named and what they need (SubsetAdmitsUnchecked in Check.Decl); the verdict, with the input."
-    ! [Console.error, Console.print, Disk.readBytesAt, Disk.size, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Disk.size, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     plain = withoutFlag(args, [])
     match plain
-        [path] -> partOf(path, names, 4, memoryIn(args))
-        [path, n] -> partOf(path, names, workersOf(n), memoryIn(args))
+        [path] -> partOf(path, names, 4, memoryIn(args), List.contains(args, "--dealt"))
+        [path, n] -> partOf(path, names, workersOf(n), memoryIn(args), List.contains(args, "--dealt"))
         _ -> statusOnly(declined("usage: pestka --only NAME[,NAME...] FILE.susz [WORKERS]; NAME may be Foo.* for every name under Foo"))
 
-fn partOf(path: String, names: List<String>, workers: Int, memory: Memory) -> Held
+fn partOf(path: String, names: List<String>, workers: Int, memory: Memory, dealt: Bool) -> Held
     ? "A subset check needs names, and a Susz file: only Susz has INDEX."
-    ! [Console.error, Console.print, Disk.readBytesAt, Disk.size, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Disk.size, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match names
         [] -> statusOnly(declined("--only needs at least one name"))
         _ -> match Export.Susz.isSusz(path)
             false -> statusOnly(declined("--only checks part of a Susz file, by its INDEX: pack the export first (pestka pack FILE.ndjson FILE.susz)"))
-            true -> partHeld(Export.Susz.readPart(path, Export.Susz.planOf(names)), names, workers, memory)
+            true -> partHeld(Export.Susz.readPart(path, Export.Susz.planOf(names)), names, workers, memory, dealt)
 
-fn partHeld(o: Outcome, names: List<String>, workers: Int, memory: Memory) -> Held
+fn partHeld(o: Outcome, names: List<String>, workers: Int, memory: Memory, dealt: Bool) -> Held
     ? "The subset verdict, with the part read, both handed back for main to hold (FactsHeldToExit)."
-    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs]
-    Held(verdict = partReport(o, names, workers, memory), input = Option.Some(o))
+    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
+    Held(verdict = partReport(o, names, workers, memory, dealt), input = Option.Some(o))
 
-fn partReport(o: Outcome, names: List<String>, workers: Int, memory: Memory) -> Verdict
+fn partReport(o: Outcome, names: List<String>, workers: Int, memory: Memory, dealt: Bool) -> Verdict
     ? "Prints the subset verdict: a file rejected or declined while reading is so here too; a bad INDEX ends the check as index invalid, status 2, no verdict on the file (Susz 1 spec, section 2)."
-    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match o
         Outcome.Rejected(why) -> Verdict(code = rejected(why), held = Option.None)
         Outcome.Declined(why) -> Verdict(code = declined(why), held = Option.None)
         Outcome.IndexInvalid(why) -> Verdict(code = printed("index invalid: {why}", 2), held = Option.None)
-        Outcome.Read(p) -> partSummary(p, names, workers, memory)
+        Outcome.Read(p) -> partSummary(p, names, workers, memory, dealt)
 
-fn partSummary(p: Parsed, names: List<String>, workers: Int, memory: Memory) -> Verdict
+fn partSummary(p: Parsed, names: List<String>, workers: Int, memory: Memory, dealt: Bool) -> Verdict
     ? "What was read, then the targets checked; a target Pestka skips, unsafe or partial, declines the check."
-    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     Console.print("subset: {List.len(p.targets)} declarations asked for; the first {List.len(p.decls)} declarations of the file read")
     match Check.Decl.skippedAmong(p.decls, p.targets, 0, [])
         [n, .._] -> Verdict(code = declined("{Core.Names.render(n)} is unsafe or partial, which Pestka does not check"), held = Option.None)
-        [] -> partChecked(Check.Decl.checkPart(p.decls, p.targets, workers, memory), names, List.len(p.targets))
+        [] -> partChecked(Check.Queue.checkPart(p.decls, p.targets, workers, memory, dealt), names, List.len(p.targets))
 
 fn partChecked(c: Check.Decl.Part, names: List<String>, n: Int) -> Verdict
     ? "The subset verdict, with what checking found held to the end (FactsHeldToExit)."
@@ -249,10 +249,10 @@ verify memoryIn
     memoryIn(["--ground", "f"]) => Memory.LowGround
 
 fn withoutFlag(args: List<String>, acc: List<String>) -> List<String>
-    ? "The arguments without the flags --low-memory, --high-memory, --no-carry, --ground, --reorder-always, --show-placed and --progress, in their order."
+    ? "The arguments without the flags --low-memory, --high-memory, --no-carry, --ground, --reorder-always, --show-placed, --progress and --dealt, in their order."
     match args
         [] -> List.reverse(acc)
-        [a, ..rest] -> match Bool.or(Bool.or(Bool.or(a == "--low-memory", a == "--high-memory"), Bool.or(a == "--no-carry", a == "--ground")), Bool.or(Bool.or(a == "--reorder-always", a == "--show-placed"), a == "--progress"))
+        [a, ..rest] -> match Bool.or(Bool.or(Bool.or(a == "--low-memory", a == "--high-memory"), Bool.or(a == "--no-carry", a == "--ground")), Bool.or(Bool.or(a == "--reorder-always", a == "--show-placed"), Bool.or(a == "--progress", a == "--dealt")))
             true -> withoutFlag(rest, acc)
             false -> withoutFlag(rest, List.prepend(a, acc))
 
@@ -263,6 +263,7 @@ verify withoutFlag
     withoutFlag([], []) => []
     withoutFlag(["--ground", "f"], []) => ["f"]
     withoutFlag(["f", "--progress"], []) => ["f"]
+    withoutFlag(["f", "--dealt", "2"], []) => ["f", "2"]
 
 fn input(args: List<String>) -> Outcome
     ? "The file read on as many workers as asked for, or the usage as a decline."
@@ -270,7 +271,7 @@ fn input(args: List<String>) -> Outcome
     match args
         [path] -> fileOf(path, 4)
         [path, n] -> fileOf(path, workersOf(n))
-        _ -> Outcome.Declined("usage: pestka [--high-memory] [--reorder-always] [--show-placed] [--progress] FILE [WORKERS] | pestka --only NAME[,NAME...] FILE.susz [WORKERS] | pestka pack [--no-index] FILE.ndjson FILE.susz [WORKERS]")
+        _ -> Outcome.Declined("usage: pestka [--high-memory] [--reorder-always] [--show-placed] [--progress] [--dealt] FILE [WORKERS] | pestka --only NAME[,NAME...] FILE.susz [WORKERS] | pestka pack [--no-index] FILE.ndjson FILE.susz [WORKERS]")
 
 fn fileOf(path: String, workers: Int) -> Outcome
     ? "A Susz file by its signature, otherwise lean4export's ndjson, packed into Susz 1 in memory and read as Susz (NdjsonThroughSusz)."
@@ -337,21 +338,21 @@ verify workersOf
     workersOf("0") => 1
     workersOf("x") => 4
 
-fn report(o: Outcome, workers: Int, memory: Memory, always: Bool, show: Bool, say: Bool) -> Verdict
+fn report(o: Outcome, workers: Int, memory: Memory, always: Bool, show: Bool, say: Bool, dealt: Bool) -> Verdict
     ? "Prints the verdict; always, from --reorder-always, a tool for tests, checks out of file order on any file the reader allows it on (CheckedByNamespace)."
-    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match o
         Outcome.Rejected(why) -> Verdict(code = rejected(why), held = Option.None)
         Outcome.Declined(why) -> Verdict(code = declined(why), held = Option.None)
         Outcome.IndexInvalid(why) -> Verdict(code = declined(why), held = Option.None)
-        Outcome.Read(t) -> summary(t, workers, memory, always, show, say)
+        Outcome.Read(t) -> summary(t, workers, memory, always, show, say, dealt)
 
-fn summary(p: Parsed, workers: Int, memory: Memory, always: Bool, show: Bool, say: Bool) -> Verdict
+fn summary(p: Parsed, workers: Int, memory: Memory, always: Bool, show: Bool, say: Bool, dealt: Bool) -> Verdict
     ? "Counts of what the file defines, then the checking verdict, with what checking found. show, from --show-placed, a tool for tests, also prints whether the reader found every declaration naming only constants placed before it (NamesPlacedWhereRead), which decides whether checking may leave file order."
-    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs]
+    ! [Console.error, Console.print, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     Console.print("constants {p.constants}, declarations {List.len(p.decls)}, names {p.names}, levels {p.levels}, expressions {p.exprs}")
     shown(show, p.allPlaced)
-    c = Check.Decl.checkHeld(p.decls, workers, memory, p.allPlaced, always, say)
+    c = Check.Queue.checkHeld(p.decls, workers, memory, p.allPlaced, always, say, dealt)
     Verdict(code = verdict(c.run), held = Option.Some(c))
 
 fn shown(show: Bool, placed: Bool) -> Unit

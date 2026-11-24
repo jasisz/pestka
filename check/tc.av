@@ -896,7 +896,7 @@ fn spineRetry(r: Result<RE, Fail>, c: NatCtx, e: Expr) -> Result<RE, Fail>
         Result.Err(Fail.Stopped(n, st)) -> Result.Err(Fail.Stopped(n, st))
 
 verify spineRetry
-    resultExpr(spineRetry(Result.Err(Fail.Deep(Job.Infer(Core.Exprs.natLit(1)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, evaluating = false), Core.Exprs.natLit(2))) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
+    resultExpr(spineRetry(Result.Err(Fail.Deep(Check.State.Job.Infer(Core.Exprs.natLit(1)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, evaluating = false), Core.Exprs.natLit(2))) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
 
 fn typeAgain(r: RE) -> RE
     ? "The result of checking again, taken as it is: a call that is not the last, so that the spine and its retry do not become one loop."
@@ -921,12 +921,12 @@ fn argType(st: St, x: Expr) -> Result<RE, Fail>
                 Option.Some(t) -> Result.Ok(RE(e = t, st = st))
                 Option.None -> match cachedType(st, x, false)
                     Option.Some(t) -> Result.Ok(RE(e = t, st = st))
-                    Option.None -> Result.Err(handedUp(st, Job.Infer(x)))
+                    Option.None -> Result.Err(handedUp(st, Check.State.Job.Infer(x)))
             _ -> infer(st, x, false)
 
 verify argType
     resultExpr(argType(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.natLit(3))) => Core.Exprs.cnst(Check.Lits.name1("Nat"), [])
-    argType(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) == Result.Err(Fail.Deep(Job.Infer(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
+    argType(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))) == Result.Err(Fail.Deep(Check.State.Job.Infer(Core.Exprs.app(Core.Exprs.natLit(1), Core.Exprs.natLit(2))), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
 
 fn spineCheckedIn(st: St, e: Expr) -> Result<RE, Fail>
     ? "A closed application checked as a whole spine: the head, then each argument against its domain."
@@ -1866,7 +1866,7 @@ fn majorDeeper(st: St, e: Expr) -> Result<RE, Fail>
 
 verify majorDeeper
     resultExpr(majorDeeper(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 3), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Core.Exprs.natLit(5)
-    majorDeeper(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Job.Whnf(Core.Exprs.fvar(0)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
+    majorDeeper(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Check.State.Job.Whnf(Core.Exprs.fvar(0)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
 
 fn majorFirst(st: St, c: NatCtx, e: Expr) -> Result<RE, Fail>
     ? "The outermost level, a major's whnf, its context c read off st already."
@@ -1886,7 +1886,7 @@ fn majorOuter(r: Result<RE, Fail>, c: NatCtx, e: Expr) -> Result<RE, Fail>
         Result.Err(Fail.Stopped(n, st)) -> Result.Err(Fail.Stopped(n, st))
 
 verify majorOuter
-    resultExpr(majorOuter(Result.Err(Fail.Deep(Job.Whnf(Core.Exprs.natLit(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, evaluating = false), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
+    resultExpr(majorOuter(Result.Err(Fail.Deep(Check.State.Job.Whnf(Core.Exprs.natLit(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, evaluating = false), Core.Exprs.fvar(0))) => Core.Exprs.fvar(0)
 
 decision OneDeepJob
     date = "2026-11-20"
@@ -1922,15 +1922,15 @@ fn deepAt() -> Int
 verify deepAt
     deepAt() => 8192
 
-fn jobDone(j: Job, st: St) -> Result<St, Fail>
+fn jobDone(j: Check.State.Job, st: St) -> Result<St, Fail>
     ? "At the outermost level (OneDeepJob), a job handed up from too deep worked out on a shallow stack, from the state it came with set back as finishing would leave it, and its result held for the rest of the declaration (HandedUpHeld): a whnf, a type, or the answer for a pair. Each outermost level takes the state out of the failure in its own match, so that it has one owner (HandedUpHeld)."
     match j
-        Job.Whnf(x) -> Result.Ok(heldWhnf(whnfValue(st, x)?, x))
-        Job.Infer(x) -> Result.Ok(heldType(infer(st, x, false)?, x))
-        Job.Eq(x, y) -> Result.Ok(heldEq(isDefEq(st, x, y)?, x, y))
+        Check.State.Job.Whnf(x) -> Result.Ok(heldWhnf(whnfValue(st, x)?, x))
+        Check.State.Job.Infer(x) -> Result.Ok(heldType(infer(st, x, false)?, x))
+        Check.State.Job.Eq(x, y) -> Result.Ok(heldEq(isDefEq(st, x, y)?, x, y))
 
 verify jobDone
-    heldOf(Result.withDefault(jobDone(Job.Whnf(Core.Exprs.natLit(1)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.natLit(1)) => Option.Some(Core.Exprs.natLit(1))
+    heldOf(Result.withDefault(jobDone(Check.State.Job.Whnf(Core.Exprs.natLit(1)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), 0, Core.Exprs.natLit(1)) => Option.Some(Core.Exprs.natLit(1))
 
 decision HandedUpHeld
     date = "2026-11-17"
@@ -2019,20 +2019,20 @@ fn evalKnown(st: St, a: Expr) -> Result<RE, Fail>
                 Option.Some(r) -> Result.Ok(RE(e = r, st = st))
                 Option.None -> match farGet(st, a)
                     Option.Some(r) -> Result.Ok(RE(e = r, st = st))
-                    Option.None -> Result.Err(handedUp(st, Job.Whnf(a)))
+                    Option.None -> Result.Err(handedUp(st, Check.State.Job.Whnf(a)))
 
 verify evalKnown
     resultExpr(evalKnown(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(2))) => Core.Exprs.natLit(2)
 
-fn handedUp(st: St, j: Job) -> Fail
+fn handedUp(st: St, j: Check.State.Job) -> Fail
     ? "j handed up to the outermost level (OneDeepJob); within an attempt the outermost attempt ends here instead, with no answer (ProbeEndsAtDepth, OneAttemptCounter)."
     match st.stop >= 0
         true -> Fail.Stopped(-2, st)
         false -> Fail.Deep(j, st)
 
 verify handedUp
-    handedUp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Job.Whnf(Core.Exprs.fvar(0))) == Fail.Deep(Job.Whnf(Core.Exprs.fvar(0)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => true
-    handedUp(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5), Job.Whnf(Core.Exprs.fvar(0))) == Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5)) => true
+    handedUp(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Check.State.Job.Whnf(Core.Exprs.fvar(0))) == Fail.Deep(Check.State.Job.Whnf(Core.Exprs.fvar(0)), Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)) => true
+    handedUp(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5), Check.State.Job.Whnf(Core.Exprs.fvar(0))) == Fail.Stopped(-2, St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), stop = 5)) => true
 
 decision ProbeEndsAtDepth
     date = "2026-11-19"
@@ -5748,7 +5748,7 @@ fn natOuter(r: Result<RO, Fail>, c: NatCtx, e: Expr) -> Result<RO, Fail>
         Result.Err(Fail.Stopped(n, st)) -> Result.Err(Fail.Stopped(n, st))
 
 verify natOuter
-    resultOpt(natOuter(Result.Err(Fail.Deep(Job.Whnf(Core.Exprs.natLit(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, evaluating = false), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
+    resultOpt(natOuter(Result.Err(Fail.Deep(Check.State.Job.Whnf(Core.Exprs.natLit(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))), NatCtx(kinds = [], kindCounts = {}, kindsOpen = 0, open = 0, opened = Option.None, eager = false, fuel = -1, evaluating = false), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
 
 fn restored(st: St, c: NatCtx, depth: Int) -> St
     ? "st with what was opened or switched on since c was read set back, the depth at depth: the state finishing would have left, with everything found and every variable made kept."
@@ -5778,7 +5778,7 @@ fn natArg(st: St, a: Expr) -> Result<RE, Fail>
         true -> evalKnown(st, a)
 
 verify natArg
-    natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Job.Whnf(Core.Exprs.fvar(0)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
+    natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.fvar(0)) == Result.Err(Fail.Deep(Check.State.Job.Whnf(Core.Exprs.fvar(0)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
     resultExpr(natArg(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.natLit(2))) => Core.Exprs.natLit(2)
 
 fn reduceNatIn(st: St, e: Expr) -> Result<RO, Fail>
@@ -8971,7 +8971,7 @@ fn argEq(st: St, a: Expr, b: Expr) -> Result<RB, Fail>
 verify argEq
     resultBool(argEq(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(1))) => true
     resultBool(argEq(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 3), Core.Exprs.natLit(1), Core.Exprs.natLit(2))) => false
-    argEq(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.fvar(0), Core.Exprs.fvar(1)) == Result.Err(Fail.Deep(Job.Eq(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
+    argEq(St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000), Core.Exprs.fvar(0), Core.Exprs.fvar(1)) == Result.Err(Fail.Deep(Check.State.Job.Eq(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))) => true
 
 fn eqFirst(st: St, c: NatCtx, a: Expr, b: Expr) -> Result<RB, Fail>
     ? "The outermost level, a comparison of arguments, its context c read off st already, so that st has one owner while a and b are compared."
@@ -8993,7 +8993,7 @@ fn eqKnown(st: St, a: Expr, b: Expr) -> Result<RB, Fail>
         true -> Result.Ok(RB(b = true, st = st))
         false -> match heldPair(st, 3, a, b)
             true -> Result.Ok(RB(b = false, st = st))
-            false -> Result.Err(handedUp(st, Job.Eq(a, b)))
+            false -> Result.Err(handedUp(st, Check.State.Job.Eq(a, b)))
 
 verify eqKnown
     resultBool(eqKnown(heldEq(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), Core.Exprs.fvar(1)), Core.Exprs.fvar(1), Core.Exprs.fvar(0))) => true
@@ -9009,7 +9009,7 @@ fn eqOuter(r: Result<RB, Fail>, c: NatCtx, a: Expr, b: Expr) -> Result<RB, Fail>
         Result.Err(Fail.Stopped(n, st)) -> Result.Err(Fail.Stopped(n, st))
 
 verify eqOuter
-    resultBool(eqOuter(Result.Err(Fail.Deep(Job.Eq(Core.Exprs.natLit(1), Core.Exprs.natLit(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(2), Core.Exprs.natLit(2))) => true
+    resultBool(eqOuter(Result.Err(Fail.Deep(Check.State.Job.Eq(Core.Exprs.natLit(1), Core.Exprs.natLit(1)), St.update(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), depth = 9000))), ctxOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.natLit(2), Core.Exprs.natLit(2))) => true
 
 fn heldEq(r: RB, x: Expr, y: Expr) -> St
     ? "The state with the answer for x and y held for the rest of the declaration (HandedUpHeld)."

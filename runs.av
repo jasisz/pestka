@@ -1,0 +1,20 @@
+module Runs
+    kind = capability
+    semantics = effectful
+    depends [Work, Check.Decl]
+    intent =
+        "A run of deferred declarations checked as a job off the turn: the"
+        "task holds the run's jobs with their proof blocks read, the facts the"
+        "worker carries on and the blocks it holds; the answer what it found"
+        "(RunsQueued in Check.Queue). Check.Decl.runTask answers it (aver.toml)."
+    exposes [begin, take]
+
+operation begin(task: Check.Decl.Task) -> Result<Work.Job, String>
+    ? "Starts checking one run."
+    oracle = generativeOutput
+    replay = recorded
+
+operation take(job: Work.Job) -> Result<Option<Check.Decl.Done>, String>
+    ? "What the run found, once it has ended."
+    oracle = generativeOutput
+    replay = recorded

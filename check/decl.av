@@ -11,7 +11,7 @@ module Decl
         "environment at its own place in the file, so that they can be"
         "checked apart; the verdict names the first failure in file order,"
         "as checking strictly in order would."
-    exposes [Run, Job, Admitted, Chunk, Checked, Checking, Part, checkAll, checkPart, skippedAmong, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
+    exposes [Run, Job, Admitted, Chunk, Checked, Checking, Part, Facts, Plan, Pre, Task, Done, planned, planPart, checkingOf, partOf, runTask, preRead, taskOf, blockMissing, tally, laneEnded, noFacts, readSpot, said, failText, checkAll, checkPart, skippedAmong, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
     depends [Bytes, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Cache, Check.Shapes, Check.State, Check.Tc, Check.IndAdd]
     effects [Console.error, Disk.readBytesAt, Time.unixMs]
 
@@ -745,17 +745,190 @@ decision FactsHeldToExit
 fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always: Bool, say: Bool) -> Checking
     ? "checkParallel, with what each worker found handed back beside the result (FactsHeldToExit); the maps carried are bounded as the memory mode says (LowMemoryMode) and shared out among the workers (FrugalWorkers); always groups by namespace whatever the count, for tests (CheckedByNamespace)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    p = planned(decls, workers, memory, placed, always, say)
+    w = Int.max(workers, 1)
+    checkingOf(p, runWorkers(deal(p.runs, w, 0, emptyGroups(w, []))))
+
+verify checkHeld
+    List.len(checkHeld([], 2, Memory.Fast, false, false, false).held) => 2
+
+record Plan
+    admitted: Admitted
+    runs: List<Chunk>
+    unchecked: Int
+
+fn planned(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always: Bool, say: Bool) -> Plan
+    ? "The environment built and the deferred declarations cut into runs, numbered, for checkHeld and for the queue of runs (RunsQueued in Check.Queue)."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs]
     a = admit(decls)
     w = Int.max(workers, 1)
     unit = unitFor(w)
     lits = literalsPlaced(decls, 0, litNames)
     jobs = orderFor(due(a), w, unit, placed, always, lits)
     limits = Limits.update(Check.State.limitsOf(unit, memory), say = say, since = startedAt(say))
-    cs = runWorkers(deal(numbered(runsOf(jobs, a.run.env, limits, w, spreadable(w, placed, lits), lits)), w, 0, emptyGroups(w, [])))
-    Checking(run = combine(a, cs), held = cs)
+    Plan(admitted = a, runs = numbered(runsOf(jobs, a.run.env, limits, w, spreadable(w, placed, lits), lits)), unchecked = 0)
 
-verify checkHeld
-    List.len(checkHeld([], 2, Memory.Fast, false, false, false).held) => 2
+verify planned
+    planned([], 2, Memory.Fast, false, false, false).runs => []
+
+fn planPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory) -> Plan
+    ? "A subset check planned: the environment built and the targets cut into runs, numbered; unchecked counts the deferred declarations admitted without a check (SubsetAdmitsUnchecked)."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    a = admit(decls)
+    w = Int.max(workers, 1)
+    unit = unitFor(w)
+    all = due(a)
+    jobs = onlyTargets(all, targets, [])
+    Plan(admitted = a, runs = numbered(chunks(jobs, a.run.env, Check.State.limitsOf(unit, memory), runSize(costOf(jobs, 0), w), [], 0, [])), unchecked = List.len(all) - List.len(jobs))
+
+verify planPart
+    planPart([axiomNamed("a", false), axiomNamed("b", false)], [1], 1, Memory.Fast).unchecked => 1
+
+fn checkingOf(p: Plan, cs: List<Checked>) -> Checking
+    ? "The verdict of a planned check from what its runs found, with that held (FactsHeldToExit)."
+    Checking(run = combine(p.admitted, cs), held = cs)
+
+verify checkingOf
+    checkingOf(Plan(admitted = emptyAdmitted(), runs = [], unchecked = 0), []).held => []
+
+fn partOf(p: Plan, cs: List<Checked>) -> Part
+    ? "The verdict of a planned subset check from what its runs found."
+    Part(checking = checkingOf(p, cs), unchecked = p.unchecked)
+
+verify partOf
+    partOf(Plan(admitted = emptyAdmitted(), runs = [], unchecked = 3), []).unchecked => 3
+
+type Pre
+    Read(Job)
+    Unread(Job, Fail)
+
+record Task
+    env: Env
+    held: Map<Int, Bytes>
+    jobs: List<Pre>
+    limits: Limits
+    kept: Facts
+    fail: Option<Fail>
+    at: Int
+
+record Done
+    kept: Facts
+    held: Map<Int, Bytes>
+    count: Int
+    fail: Option<Fail>
+    at: Int
+    wants: Option<Spot>
+    left: List<Pre>
+
+fn taskOf(env: Env, held: Map<Int, Bytes>, jobs: List<Pre>, limits: Limits, kept: Facts, fail: Option<Fail>, at: Int) -> Task
+    ? "A run handed to a worker: its jobs with their blocks read, the blocks the worker holds, the facts it carries on and the earliest failure known, past which nothing is checked (RunsQueued in Check.Queue)."
+    Task(env = env, held = held, jobs = jobs, limits = limits, kept = kept, fail = fail, at = at)
+
+verify taskOf
+    taskOf(Check.State.envEmpty(), {}, [], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0).at => 0
+
+fn preRead(jobs: List<Job>, acc: List<Pre>) -> List<Pre>
+    ? "The jobs of a run with their proof blocks read, by the one who hands the run out, since a worker's run reads nothing (BlockReadForItsCheck, RunsQueued in Check.Queue); a block that cannot be read is kept with the job, which it declines."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    match jobs
+        [] -> List.reverse(acc)
+        [j, ..rest] -> preRead(rest, List.prepend(preOf(j, readJob(j)), acc))
+
+verify preRead
+    preRead([], []) => []
+    preRead([job2("a", 0)], []) == [Pre.Read(job2("a", 0))] => true
+
+fn preOf(j: Job, r: Result<Job, Fail>) -> Pre
+    ? "A job read, or with why its block could not be."
+    match r
+        Result.Ok(jr) -> Pre.Read(jr)
+        Result.Err(e) -> Pre.Unread(j, e)
+
+verify preOf
+    preOf(job2("a", 0), Result.Err(Fail.Decline("x"))) == Pre.Unread(job2("a", 0), Fail.Decline("x")) => true
+
+fn posOf(p: Pre) -> Int
+    ? "Where a job's declaration lies in the file."
+    match p
+        Pre.Read(j) -> j.pos
+        Pre.Unread(j, _) -> j.pos
+
+verify posOf
+    posOf(Pre.Read(job2("a", 4))) => 4
+
+fn runTask(t: Task) -> Done
+    ? "One run on a worker, nothing read or written: the jobs in order from the facts handed in, until the run ends or a job wants a proof block the worker does not hold, which the one who handed the run out reads (RunsQueued in Check.Queue). What the worker found comes back to be handed to its next run."
+    taskLoop(t.jobs, Check.State.envWithHeld(t.env, t.held), t.limits, t.kept, 0, t.fail, t.at)
+
+verify runTask
+    runTask(taskOf(Check.State.envEmpty(), {}, [], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0)).count => 0
+    runTask(taskOf(Check.State.envEmpty(), {}, [Pre.Read(job2("a", 0))], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0)).count => 1
+    runTask(taskOf(Check.State.envEmpty(), {}, [Pre.Unread(job2("a", 2), Fail.Decline("gone"))], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.None, 0)).at => 2
+    runTask(taskOf(Check.State.envEmpty(), {}, [Pre.Read(job2("a", 5))], Check.State.limitsOf(65536, Memory.Fast), noFacts(), Option.Some(Fail.Reject("x")), 3)).count => 0
+
+fn taskLoop(jobs: List<Pre>, env: Env, limits: Limits, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Done
+    ? "One job after another; past a failure only those placed before it (chunkLoop)."
+    match jobs
+        [] -> Done(kept = kept, held = Check.State.envHeld(env), count = count, fail = fail, at = at, wants = Option.None, left = [])
+        [p, ..rest] -> match Bool.and(fail != Option.None, posOf(p) > at)
+            true -> taskLoop(rest, env, limits, kept, count, fail, at)
+            false -> taskStep(p, rest, env, limits, kept, count, fail, at)
+
+verify taskLoop
+    taskLoop([], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), noFacts(), 2, Option.None, 0).count => 2
+    taskLoop([Pre.Read(job2("a", 9))], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), noFacts(), 0, Option.Some(Fail.Reject("x")), 4).count => 0
+
+fn taskStep(p: Pre, rest: List<Pre>, env: Env, limits: Limits, kept: Facts, count: Int, fail: Option<Fail>, at: Int) -> Done
+    ? "A job checked with the facts moved into its checker (chunkStep), or declined when its block could not be read."
+    match p
+        Pre.Read(j) -> taskNext(jobChecks(j, St.update(checkerFor(env, j), limits = limits, closed = kept.closed, unfoldCache = kept.unfolds, levelTypes = kept.types, vars = kept.vars, lctx = kept.lctx, next = kept.next, topLevel = kept.topLevel, inferCache = kept.inferCache, checkCache = kept.checkCache, whnfCache = kept.whnfCache, coreCache = kept.coreCache, eqOk = kept.eqOk, eqFail = kept.eqFail, eqNo = kept.eqNo, rules = kept.rules)), p, j, rest, env, limits, count, fail, at)
+        Pre.Unread(j, e) -> taskLoop(rest, env, limits, noFacts(), count, Option.Some(failNamed(e, j.head.name)), j.pos)
+
+verify taskStep
+    taskStep(Pre.Unread(job2("a", 3), Fail.Decline("gone")), [], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), noFacts(), 0, Option.None, 0).fail => Option.Some(Fail.Decline("a.x: gone"))
+
+fn taskNext(r: Result<Facts, Fail>, p: Pre, j: Job, rest: List<Pre>, env: Env, limits: Limits, count: Int, fail: Option<Fail>, at: Int) -> Done
+    ? "On to the next job; a job that wants a block ends the run here, with the facts its stopped check found and the jobs left, itself first (chunkNext)."
+    match r
+        Result.Ok(k) -> taskLoop(rest, env, limits, k, count + 1, fail, at)
+        Result.Err(Fail.Wants(w, st)) -> Done(kept = carried(st), held = Check.State.envHeld(env), count = count, fail = fail, at = at, wants = Option.Some(w), left = List.prepend(p, rest))
+        Result.Err(e) -> taskLoop(rest, env, limits, noFacts(), count, Option.Some(failNamed(e, j.head.name)), j.pos)
+
+verify taskNext
+    taskNext(Result.Err(Fail.Reject("bad")), Pre.Read(job2("a", 6)), job2("a", 6), [], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 0, Option.None, 0).at => 6
+    taskNext(Result.Ok(noFacts()), Pre.Read(job2("a", 6)), job2("a", 6), [], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 1, Option.None, 0).count => 2
+
+fn blockMissing(d: Done, e: Fail) -> Done
+    ? "A run stopped for a block that could not be read: the job that wanted it declined (wanted), the rest left to check from no facts."
+    match d.left
+        [] -> d
+        [p, ..rest] -> Done.update(d, kept = noFacts(), fail = Option.Some(failNamed(e, nameOf(p))), at = posOf(p), wants = Option.None, left = rest)
+
+verify blockMissing
+    blockMissing(Done(kept = noFacts(), held = {}, count = 0, fail = Option.None, at = 0, wants = Option.None, left = [Pre.Read(job2("a", 7))]), Fail.Decline("short")).at => 7
+
+fn nameOf(p: Pre) -> Name
+    ? "A job's declaration's name."
+    match p
+        Pre.Read(j) -> j.head.name
+        Pre.Unread(j, _) -> j.head.name
+
+verify nameOf
+    nameOf(Pre.Read(job2("a", 0))) == job2("a", 0).head.name => true
+
+fn tally(fail: Option<Fail>, at: Int, count: Int) -> Checked
+    ? "What all the runs found together, for combine."
+    Checked(failure = fail, at = at, count = count, kept = noFacts())
+
+verify tally
+    tally(Option.None, 0, 3).count => 3
+
+fn laneEnded(kept: Facts) -> Checked
+    ? "The facts a worker's last run kept, held to the end (FactsHeldToExit)."
+    Checked(failure = Option.None, at = 0, count = 0, kept = kept)
+
+verify laneEnded
+    laneEnded(noFacts()).count => 0
 
 decision SubsetAdmitsUnchecked
     date = "2026-11-13"
@@ -791,13 +964,9 @@ record Part
 fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory) -> Part
     ? "A subset check: the environment built from decls, the declarations before the last target and the targets, then of the deferred declarations only the targets, at the positions targets lists in increasing order, checked on workers; unchecked counts the deferred declarations admitted without a check (SubsetAdmitsUnchecked)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs]
-    a = admit(decls)
+    p = planPart(decls, targets, workers, memory)
     w = Int.max(workers, 1)
-    unit = unitFor(w)
-    all = due(a)
-    jobs = onlyTargets(all, targets, [])
-    cs = runWorkers(deal(chunks(jobs, a.run.env, Check.State.limitsOf(unit, memory), runSize(costOf(jobs, 0), w), [], 0, []), w, 0, emptyGroups(w, [])))
-    Part(checking = Checking(run = combine(a, cs), held = cs), unchecked = List.len(all) - List.len(jobs))
+    partOf(p, runWorkers(deal(p.runs, w, 0, emptyGroups(w, []))))
 
 verify checkPart
     checkPart([axiomNamed("a", false), axiomNamed("b", false)], [1], 1, Memory.Fast).unchecked => 1

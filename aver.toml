@@ -12,3 +12,14 @@ panic = "abort"
 fn = "expr"
 step-limit = 40000000
 reason = "The law sameAsSpec fills a whole chunk of the dense expression table (65536 entries) and one more to cross into the next."
+
+# A run of deferred declarations is checked as a job (RunsQueued in
+# Check.Queue); how many run at once is the number of workers asked for,
+# which main keeps in flight, so the runtime's own limit is left at the
+# host's parallelism.
+[providers]
+schema = 1
+
+[[providers.bindings]]
+capability = "Runs"
+work = "Check.Decl.runTask"

@@ -1,0 +1,244 @@
+module Queue
+    intent =
+        "Checks the runs of deferred declarations on workers taken from a"
+        "queue: main keeps one run in flight per worker, each a job of its"
+        "own (Runs), and as one ends hands the next run, in order, to that"
+        "worker with the facts it found. Main reads the proof blocks a run"
+        "needs before handing it out, and the blocks a stopped job wants,"
+        "and says what progress there is to say; a worker's run is pure."
+        "One worker, or --dealt, checks as Check.Decl does, runs dealt"
+        "before checking."
+    exposes [checkHeld, checkPart]
+    depends [Bytes, Runs, Work, Wait, Core.Names, Core.Decls, Core.Lazy, Check.State, Check.Decl]
+    effects [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
+
+decision RunsQueued
+    date = "2026-11-24"
+    reason =
+        "Runs were dealt to the workers before checking, run i to worker i"
+        "mod the workers, each worker an element of an independent product"
+        "(RunsFinerThanComputation). The estimate the runs are cut by misses"
+        "computation, so the dealt shares end apart: CFSG on 32 workers took"
+        "4:05:37, its last 30 minutes on one worker, a quarter of the"
+        "workers' seconds idle. Now each run is a job (Runs, Work in Aver):"
+        "main keeps one in flight per worker and, as one ends, hands the"
+        "next run in order to the worker that ended, with the facts that"
+        "worker found, so no worker waits while runs are left and the facts"
+        "still go from run to run. A job's body is pure: main reads the"
+        "blocks of the next run while the workers check, and when a job"
+        "stops for a block it does not hold (Wants), main reads it and"
+        "begins the rest of the run with it. The earliest failure known is"
+        "handed to every run begun, which then checks only what lies before"
+        "it; the verdict is still the earliest failure in the file. One"
+        "worker checks as before, and so does the wasm build (--dealt),"
+        "whose jobs would copy the environment to every one."
+    chosen = "RunsQueued"
+    rejected = ["RunsDealtBeforeChecking"]
+    impacts = [checkHeld, checkPart, queued, begun, launched, came]
+
+record Next
+    limits: Limits
+    jobs: List<Check.Decl.Pre>
+
+record Queue
+    env: Env
+    ahead: List<Check.Decl.Chunk>
+    next: Option<Next>
+    pending: Map<Int, Wait.Item>
+    busy: Map<Int, Limits>
+    best: Option<Fail>
+    at: Int
+    count: Int
+    lanes: List<Check.Decl.Checked>
+    say: Bool
+    since: Int
+
+fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always: Bool, say: Bool, dealt: Bool) -> Check.Decl.Checking
+    ? "Check.Decl.checkHeld with the runs taken from a queue when more than one worker checks and --dealt is not given (RunsQueued)."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
+    match Bool.or(workers <= 1, dealt)
+        true -> Check.Decl.checkHeld(decls, workers, memory, placed, always, say)
+        false -> queuedPlan(Check.Decl.planned(decls, workers, memory, placed, always, say), workers)
+
+fn queuedPlan(p: Check.Decl.Plan, w: Int) -> Check.Decl.Checking
+    ? "A planned check on w workers taken from the queue."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
+    Check.Decl.checkingOf(p, queued(p.admitted.run.env, p.runs, w))
+
+fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory, dealt: Bool) -> Check.Decl.Part
+    ? "Check.Decl.checkPart with the runs taken from a queue when more than one worker checks and --dealt is not given (RunsQueued)."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
+    match Bool.or(workers <= 1, dealt)
+        true -> Check.Decl.checkPart(decls, targets, workers, memory)
+        false -> queuedPart(Check.Decl.planPart(decls, targets, workers, memory), workers)
+
+fn queuedPart(p: Check.Decl.Plan, w: Int) -> Check.Decl.Part
+    ? "A planned subset check on w workers taken from the queue."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
+    Check.Decl.partOf(p, queued(p.admitted.run.env, p.runs, w))
+
+fn queued(env: Env, runs: List<Check.Decl.Chunk>, w: Int) -> List<Check.Decl.Checked>
+    ? "The runs on w workers: the first run read, one begun per worker, then each ended run followed by the next on its worker until none is left."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
+    none: Map<Int, Wait.Item> = {}
+    q = prepared(Queue(env = env, ahead = runs, next = Option.None, pending = none, busy = {}, best = Option.None, at = 0, count = 0, lanes = [], say = sayOf(runs), since = sinceOf(runs)))
+    waited(opened(q, 0, w))
+
+fn sayOf(runs: List<Check.Decl.Chunk>) -> Bool
+    ? "Whether progress is asked for, as the runs' limits say."
+    match runs
+        [] -> false
+        [c, .._] -> c.limits.say
+
+verify sayOf
+    sayOf([]) => false
+
+fn sinceOf(runs: List<Check.Decl.Chunk>) -> Int
+    ? "When checking began, as the runs' limits say."
+    match runs
+        [] -> 0
+        [c, .._] -> c.limits.since
+
+verify sinceOf
+    sinceOf([]) => 0
+
+fn opened(q: Queue, s: Int, w: Int) -> Queue
+    ? "A run begun on each worker from s on, while runs are left."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
+    match s >= w
+        true -> q
+        false -> opened(begun(q, s, Check.Decl.noFacts(), {}), s + 1, w)
+
+fn prepared(q: Queue) -> Queue
+    ? "The next run with its proof blocks read, ready to be begun the moment a worker ends."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    match q.ahead
+        [] -> Queue.update(q, next = Option.None)
+        [c, ..rest] -> Queue.update(q, ahead = rest, next = Option.Some(Next(limits = c.limits, jobs = Check.Decl.preRead(c.jobs, []))))
+
+fn begun(q: Queue, s: Int, kept: Check.Decl.Facts, held: Map<Int, Bytes>) -> Queue
+    ? "Worker s gets the next run with the facts and blocks it kept, and the run after it is read; with no run left the worker is done and its facts are held (FactsHeldToExit)."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
+    match q.next
+        Option.None -> laneDone(q, s, kept)
+        Option.Some(n) -> prepared(launched(q, s, Check.Decl.taskOf(q.env, held, n.jobs, Limits.update(n.limits, worker = s + 1), kept, q.best, q.at), Limits.update(n.limits, worker = s + 1)))
+
+fn laneDone(q: Queue, s: Int, kept: Check.Decl.Facts) -> Queue
+    ? "A worker with no run left, said when asked."
+    ! [Console.error, Time.unixMs]
+    told(q, "worker {s + 1} done, {q.count} declarations checked by all workers")
+    Queue.update(q, lanes = List.prepend(Check.Decl.laneEnded(kept), q.lanes))
+
+fn told(q: Queue, what: String) -> Unit
+    ? "One line of progress when asked for (ProgressFromWorkers in Check.Decl)."
+    ! [Console.error, Time.unixMs]
+    Check.Decl.said(Limits.update(Check.State.limitsOf(1, Memory.Fast), say = q.say, since = q.since), what)
+
+fn launched(q: Queue, s: Int, t: Check.Decl.Task, l: Limits) -> Queue
+    ? "The run begun as a job of worker s; a job that cannot begin declines the check."
+    ! [Console.error, Time.unixMs, Runs.begin]
+    Check.Decl.said(l, "run {l.run}/{l.runs} begun by worker {s + 1}")
+    match Runs.begin(t)
+        Result.Ok(job) -> Queue.update(q, pending = Map.set(q.pending, s, Wait.Item.Job(job)), busy = Map.set(q.busy, s, l))
+        Result.Err(e) -> failedAll(q, "cannot begin a run: {e}")
+
+fn failedAll(q: Queue, why: String) -> Queue
+    ? "A failure of the queue itself, before every declaration: the check declines."
+    Queue.update(q, best = Option.Some(Fail.Decline(why)), at = -1)
+
+verify failedAll
+    failedAll(emptyQueue(), "x").at => -1
+
+fn emptyQueue() -> Queue
+    ? "A queue with nothing to do, for examples."
+    none: Map<Int, Wait.Item> = {}
+    Queue(env = Check.State.envEmpty(), ahead = [], next = Option.None, pending = none, busy = {}, best = Option.None, at = 0, count = 0, lanes = [], say = false, since = 0)
+
+verify emptyQueue
+    emptyQueue().count => 0
+
+fn waited(q: Queue) -> List<Check.Decl.Checked>
+    ? "Waits for runs to end and takes them, until no job is in flight; then what all of them found, and each worker's facts."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
+    match Map.len(q.pending) == 0
+        true -> List.prepend(Check.Decl.tally(q.best, q.at, q.count), q.lanes)
+        false -> answered(q, Wait.poll(q.pending, 3600000))
+
+fn answered(q: Queue, r: Result<List<Int>, String>) -> List<Check.Decl.Checked>
+    ? "The workers whose jobs are ready taken; a wait that fails declines the check."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
+    match r
+        Result.Ok(ks) -> waited(takenAll(q, ks))
+        Result.Err(e) -> List.prepend(Check.Decl.tally(Option.Some(Fail.Decline("cannot wait for the workers: {e}")), -1, q.count), q.lanes)
+
+fn takenAll(q: Queue, ks: List<Int>) -> Queue
+    ? "Each ready worker's job taken."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take]
+    match ks
+        [] -> q
+        [k, ..rest] -> takenAll(takenOne(q, k, Map.get(q.pending, k)), rest)
+
+fn takenOne(q: Queue, k: Int, item: Option<Wait.Item>) -> Queue
+    ? "Worker k's job taken, when it has one."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take]
+    match item
+        Option.Some(Wait.Item.Job(job)) -> took(q, k, Runs.take(job))
+        _ -> q
+
+fn took(q: Queue, k: Int, r: Result<Option<Check.Decl.Done>, String>) -> Queue
+    ? "A run that ended goes on; one not ended yet is asked again later; one whose answer is lost declines the check."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
+    match r
+        Result.Ok(Option.None) -> q
+        Result.Ok(Option.Some(d)) -> came(Queue.update(q, pending = Map.remove(q.pending, k)), k, d)
+        Result.Err(e) -> failedAll(Queue.update(q, pending = Map.remove(q.pending, k)), "a run ended without its answer: {e}")
+
+fn came(q: Queue, k: Int, d: Check.Decl.Done) -> Queue
+    ? "What worker k's run found: its failure kept when it is the earliest; a block it wanted read and the rest of the run begun with it; otherwise the next run."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
+    l = Option.withDefault(Map.get(q.busy, k), Check.State.limitsOf(1, Memory.Fast))
+    q2 = counted(earliest(q, l, d.fail, d.at), d.count)
+    match d.wants
+        Option.Some(w) -> wanted(q2, k, l, w, Check.Decl.readSpot(w), d)
+        Option.None -> ranOut(q2, k, l, d)
+
+fn ranOut(q: Queue, k: Int, l: Limits, d: Check.Decl.Done) -> Queue
+    ? "A run done, said when asked, and worker k's next run begun."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
+    Check.Decl.said(l, "run {l.run}/{l.runs} done by worker {k + 1}, {d.count} declarations")
+    begun(Queue.update(q, busy = Map.remove(q.busy, k)), k, d.kept, d.held)
+
+fn wanted(q: Queue, k: Int, l: Limits, w: Spot, r: Result<Bytes, Fail>, d: Check.Decl.Done) -> Queue
+    ? "The rest of the run begun again with the block it wanted held from now on, or, when the block cannot be read, with the job that wanted it declined (BlockReadForItsCheck in Check.Decl)."
+    ! [Console.error, Time.unixMs, Runs.begin]
+    match r
+        Result.Ok(b) -> launched(q, k, Check.Decl.taskOf(q.env, Map.set(d.held, w.decl, b), d.left, l, d.kept, q.best, q.at), l)
+        Result.Err(e) -> resumed(q, k, l, Check.Decl.blockMissing(d, e))
+
+fn resumed(q: Queue, k: Int, l: Limits, d: Check.Decl.Done) -> Queue
+    ? "The rest of a run begun again after its job was declined."
+    ! [Console.error, Time.unixMs, Runs.begin]
+    q2 = earliest(q, l, d.fail, d.at)
+    launched(q2, k, Check.Decl.taskOf(q2.env, d.held, d.left, l, d.kept, q2.best, q2.at), l)
+
+fn counted(q: Queue, n: Int) -> Queue
+    ? "n more declarations checked."
+    Queue.update(q, count = q.count + n)
+
+verify counted
+    counted(emptyQueue(), 3).count => 3
+
+fn earliest(q: Queue, l: Limits, f: Option<Fail>, at: Int) -> Queue
+    ? "The earliest failure in the file found so far, said when it is new."
+    ! [Console.error, Time.unixMs]
+    match f
+        Option.None -> q
+        Option.Some(e) -> match Bool.or(q.best == Option.None, at < q.at)
+            false -> q
+            true -> failedAt(q, l, e, at)
+
+fn failedAt(q: Queue, l: Limits, e: Fail, at: Int) -> Queue
+    ? "A new earliest failure, said when asked (ProgressFromWorkers in Check.Decl)."
+    ! [Console.error, Time.unixMs]
+    Check.Decl.said(l, "failed: {Check.Decl.failText(e)}")
+    Queue.update(q, best = Option.Some(e), at = at)
