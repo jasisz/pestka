@@ -6336,6 +6336,9 @@ fn eqProofIrrel(st: St, tn: Expr, sn: Expr) -> Result<RB, Fail>
         true -> Result.Ok(RB(b = p.i == 1, st = p.st))
         false -> lazyFrom(p.st, tn, sn)
 
+verify eqProofIrrel
+    resultBool(eqProofIrrel(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(1), Core.Exprs.fvar(2))) => false
+
 decision HeadsMetFromBelow
     date = "2026-11-18"
     reason =

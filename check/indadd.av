@@ -173,6 +173,10 @@ fn reservedSeen(e: Expr, seen: Map<Int, List<Expr>>) -> RS
             false -> reservedNew(e, Map.set(seen, h, List.prepend(e, xs)))
         Option.None -> reservedNew(e, Map.set(seen, h, [e]))
 
+verify reservedSeen
+    reservedSeen(Core.Exprs.cnst(Core.Names.str(Core.Names.str(Core.Names.anon(), "_nested"), "X"), []), {}).hit => true
+    reservedSeen(Core.Exprs.fvar(0), {}).hit => false
+
 fn reservedNew(e: Expr, seen: Map<Int, List<Expr>>) -> RS
     ? "One node not walked before."
     match e
@@ -186,11 +190,19 @@ fn reservedNew(e: Expr, seen: Map<Int, List<Expr>>) -> RS
         Expr.Let(_, t, v, b) -> reservedThen(reservedThen(reservedSeen(t, seen), v), b)
         _ -> RS(hit = false, seen = seen)
 
+verify reservedNew
+    reservedNew(Core.Exprs.cnst(Core.Names.str(Core.Names.str(Core.Names.anon(), "_nested"), "X"), []), {}).hit => true
+    reservedNew(Core.Exprs.fvar(0), {}).hit => false
+
 fn reservedThen(r: RS, b: Expr) -> RS
     ? "The next child, unless a hit was found."
     match r.hit
         true -> r
         false -> reservedSeen(b, r.seen)
+
+verify reservedThen
+    reservedThen(RS(hit = true, seen = {}), Core.Exprs.fvar(0)).hit => true
+    reservedThen(RS(hit = false, seen = {}), Core.Exprs.fvar(0)).hit => false
 
 verify reservedIn
     reservedIn(Core.Exprs.cnst(Core.Names.str(Core.Names.str(Core.Names.anon(), "_nested"), "X"), [])) => true
