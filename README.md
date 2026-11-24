@@ -12,6 +12,7 @@
   <a href="#written-in-aver">Aver</a> ·
   <a href="#try-it">Try it</a> ·
   <a href="#what-it-checks">What it checks</a> ·
+  <a href="#large-developments">Large developments</a> ·
   <a href="docs/architecture.md">Inside the kernel</a> ·
   <a href="docs/benchmarks.md">Benchmarks</a>
 </p>
@@ -37,6 +38,9 @@ It checks **all of mathlib**: 702,040 declarations in the recorded export.
 The same Aver source also compiles to **WebAssembly**, where it checks the
 same corpus under V8. On the small Lean Kernel Arena suite, the recorded
 result is **179/179 correct**. [Measurements and setup →](docs/benchmarks.md)
+It has also checked whole exports of CFSG (39.7 million declarations, in
+4 h 6 min on 32 workers and 102 GiB), the Riemann hypothesis claim and FLT.
+[Large developments →](#large-developments)
 
 *Pestka* is Polish for a fruit stone — a kernel. It's also what you call
 something that's a piece of cake.
@@ -124,6 +128,32 @@ Axioms are assumptions: Pestka checks their types, not proofs of them.
 Unsafe and partial declarations are skipped and kept out of the logical
 environment. If an inductive block cannot be checked, the final result is
 `declined`, never `accepted`.
+
+## Large developments
+
+Whole exports checked on AWS. Wall time and peak memory (maximum resident
+set size) are from GNU `time -v`.
+
+| Development | Declarations | Workers | Wall | Peak memory |
+| :--- | ---: | ---: | ---: | ---: |
+| CFSG | 39,656,013 | 32 | 4 h 6 min | 102 GiB |
+| Riemann hypothesis claim | 1,468,418 | 64 | 9 min 41 s | 34 GB |
+| FLT | 1,710,994 | 16 | 6 min 18 s | 27 GB |
+
+All three are accepted. In more detail:
+
+- **CFSG** (`cfsg-5437cdc`), r7a.8xlarge (32 vCPU), 2026-11-24: 4:05:37,
+  101.8 GiB, commit bc6471e on Aver 0.37.0 with PGO. The only axioms used
+  are `propext`, `Classical.choice` and `Quot.sound`. Workers get their
+  chunks in a fixed order, so the last half hour was one heavy chunk still
+  running while the others had finished.
+- **Riemann hypothesis claim**, r7a.48xlarge, 2026-11-21: commit f8f5052
+  on Aver 0.36.1 with PGO.
+- **FLT**, c7a.metal-48xl limited to 16 cores, 2026-11-16, including the
+  conversion to Susz; median of three runs.
+
+For comparison, [Gruszka](https://github.com/jasisz/gruszka), our NbE
+kernel, checks the same CFSG export in about 3 h 10 min, at 169–184 GiB.
 
 ## A few things inside
 
