@@ -34,40 +34,8 @@ decision RunsQueued
         "whose jobs would copy the environment to every one."
     chosen = "RunsQueued"
     rejected = ["RunsDealtBeforeChecking"]
-    impacts = [checkHeld, checkPart, queued, begun, launched, came]
+    impacts = [checkHeld, checkPart, queued, launched, came]
 
-record Next
-    limits: Limits
-    jobs: List<Check.Decl.Pre>
-    cost: Int
-
-record Queue
-    env: Env
-    ahead: List<Check.Decl.Job>
-    left: Int
-    template: Limits
-    share: Int
-    made: Int
-    spent: Int
-    handled: Int
-    work: Int
-    worked: Int
-    began: Map<Int, Int>
-    costs: Map<Int, Int>
-    workers: Int
-    spills: List<Next>
-    spilled: Int
-    wsum: Int
-    csum: Int
-    next: Option<Next>
-    pending: Map<Int, Wait.Item>
-    busy: Map<Int, Limits>
-    best: Option<Fail>
-    at: Int
-    count: Int
-    lanes: List<Check.Decl.Checked>
-    say: Bool
-    since: Int
 
 fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always: Bool, say: Bool, dealt: Bool) -> Check.Decl.Checking
     ? "Check.Decl.checkHeld with the runs taken from a queue when more than one worker checks and --dealt is not given (RunsQueued)."
@@ -93,51 +61,90 @@ fn queuedPart(p: Check.Decl.Plan, w: Int) -> Check.Decl.Part
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     Check.Decl.partOf(p, queued(p.admitted.run.env, p.runs, w))
 
-fn queued(env: Env, runs: List<Check.Decl.Chunk>, w: Int) -> List<Check.Decl.Checked>
-    ? "The runs on w workers: the first run read, one begun per worker, then each ended run followed by the next on its worker until none is left."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
-    none: Map<Int, Wait.Item> = {}
-    jobs = jobsOf(runs, [])
-    q = prepared(Queue(env = env, ahead = jobs, left = Check.Decl.costOf(jobs, 0), template = templateOf(runs), share = portionsPerWorker() * Int.max(w, 1), made = 0, spent = 0, handled = 0, work = 0, worked = 0, began = {}, costs = {}, workers = Int.max(w, 1), spills = [], spilled = 0, wsum = 0, csum = 0, next = Option.None, pending = none, busy = {}, best = Option.None, at = 0, count = 0, lanes = [], say = sayOf(runs), since = sinceOf(runs)))
-    waited(opened(q, 0, w))
 
-decision PortionsGuided
+record Next
+    limits: Limits
+    jobs: List<Check.Decl.Pre>
+
+record Queue
+    env: Env
+    ahead: List<Check.Decl.Job>
+    left: Int
+    template: Limits
+    share: Int
+    made: Int
+    spills: List<Next>
+    pending: Map<Int, Wait.Item>
+    busy: Map<Int, Limits>
+    began: Map<Int, Int>
+    most: Map<Int, Int>
+    idleKept: Map<Int, Check.Decl.Facts>
+    idleHeld: Map<Int, Map<Int, Bytes>>
+    start: Int
+    waits: Int
+    handled: Int
+    workMs: Int
+    wsum: Int
+    csum: Int
+    best: Option<Fail>
+    at: Int
+    count: Int
+    lanes: List<Check.Decl.Checked>
+    say: Bool
+    since: Int
+
+decision QuantaOfWork
     date = "2026-11-24"
     reason =
-        "Runs cut before checking, a fixed number per worker, either leave"
-        "the tail to whichever run holds a costly stretch (CFSG's run349: one"
-        "run of 64 per worker took 327 s alone) or, cut finer, hand out many"
-        "jobs. So main cuts the next portion only when it is read, from the"
-        "declarations left in order: the cost left (jobCost) over"
-        "portionsPerWorker times the workers, guided self-scheduling"
-        "(Polychronopoulos and Kuck, 1987; with 2, factoring's halves), but"
-        "never under a minimum. The minimum is measured, not set: main knows"
-        "how long it spends on each job it takes (taking it, reading the"
-        "next portion's blocks, beginning the next job), spent over handled"
-        "milliseconds a job, and what the workers' jobs cost against how long"
-        "they ran, worked over work units a millisecond; a portion is at"
-        "least 100 times what main spends a job, in units of cost, so that"
-        "main's share of a portion is at most 1% of its checking (the 100 is"
-        "that bound, not a tuned number). Until the first job has come back"
-        "and main has measured both there is no minimum: the first portions"
-        "are the cost left over the share alone, the largest the scheme"
-        "makes. A job's overhead below a millisecond reads as none, and the"
-        "last portions may then be one declaration each. The cost of a declaration is the estimate the"
-        "runs were cut by, so a portion's time is still a guess; what the"
-        "scheme bounds is how late the last portions begin, as the portions"
-        "shrink toward the end. The portions follow the order the runs had,"
-        "ComputationsSpread's dealing included, and the verdict is still the"
-        "earliest failure in the file."
-    chosen = "PortionsGuided"
-    rejected = ["RunsPerWorkerFixed"]
-    impacts = [queued, prepared, portion, minimumCost, handledIn, came]
+        "Runs or portions cut before checking end apart, since the cost"
+        "they are cut by misses computation: the bound of a fixed cut is its"
+        "costliest piece (CFSG's run349, 256 runs a worker: one run of 375"
+        "declarations, 434 s, about the whole check), and guided portions"
+        "(Polychronopoulos and Kuck, 1987), large at first, lost the tail by"
+        "180 to 560 s on run349 and run124. So a job's portion only says"
+        "where it may go; how far it goes is a quantum of work. Work is what"
+        "a check counts anyway, the whnf results it stores (Facts.work). The"
+        "quantum is 100 times what main spends a job, turned into work at"
+        "the rate the workers worked: main's time is the time since checking"
+        "began less the time it waited in Wait.poll, over the jobs it took;"
+        "the rate is the work the jobs did over the milliseconds they ran."
+        "So main's share of a job is at most 1% by construction, and no"
+        "worker runs more than a quantum and one declaration past the"
+        "others while anything is left. The 100 is that bound, not a tuned"
+        "number. Before the rate is known a worker's job may check one"
+        "declaration, then two, four and so on. A job that reaches its"
+        "quantum, or the first declaration whose block main has not read,"
+        "hands the rest of its portion back. Main reads only what a quantum"
+        "needs, at the rate cost came with work, so the blocks held are a"
+        "quantum's, not a portion's. A rest handed back goes to the workers"
+        "that wait, halved while there are more of them, before any new"
+        "portion; a worker with nothing to do waits, its facts kept, while"
+        "any job is in flight, since a job may yet hand work back. New"
+        "portions are guided, the cost left over twice the workers"
+        "(factoring), in the order the runs had. Every job is said with"
+        "--progress: its number, worker, the positions of its first and"
+        "last declarations and its budget, so a schedule can be read back."
+        "Which declarations a job checks depends on the work those before"
+        "it took and on time; the verdict is still the earliest failure in"
+        "the file."
+    chosen = "QuantaOfWork"
+    rejected = ["RunsPerWorkerFixed", "PortionsGuided", "PortionsSpilledToTheSameWorker"]
+    impacts = [queued, dispatched, given, quantumOf, came, idled, waited]
 
-fn portionsPerWorker() -> Int
-    ? "k of guided self-scheduling: each portion is the cost left over k times the workers (PortionsGuided, PortionsSpilled)."
-    2
+fn queued(env: Env, runs: List<Check.Decl.Chunk>, w: Int) -> List<Check.Decl.Checked>
+    ? "The runs on w workers, as jobs of a quantum of work each (QuantaOfWork)."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
+    jobs = jobsOf(runs, [])
+    q = Queue.update(emptyQueue(), env = env, ahead = jobs, left = Check.Decl.costOf(jobs, 0), template = templateOf(runs), share = 2 * Int.max(w, 1), start = Time.unixMs(), say = sayOf(runs), since = sinceOf(runs))
+    waited(opened(q, 0, w))
 
-verify portionsPerWorker
-    portionsPerWorker() > 0 => true
+fn emptyQueue() -> Queue
+    ? "A queue with nothing to do, for examples."
+    none: Map<Int, Wait.Item> = {}
+    Queue(env = Check.State.envEmpty(), ahead = [], left = 0, template = Check.State.limitsOf(1, Memory.Fast), share = 2, made = 0, spills = [], pending = none, busy = {}, began = {}, most = {}, idleKept = {}, idleHeld = {}, start = 0, waits = 0, handled = 0, workMs = 0, wsum = 0, csum = 0, best = Option.None, at = 0, count = 0, lanes = [], say = false, since = 0)
+
+verify emptyQueue
+    emptyQueue().count => 0
 
 fn jobsOf(runs: List<Check.Decl.Chunk>, acc: List<Check.Decl.Job>) -> List<Check.Decl.Job>
     ? "The runs' jobs one run after another, in the order the runs had."
@@ -158,46 +165,13 @@ verify ontoJobs
     ontoJobs([], []) => []
 
 fn templateOf(runs: List<Check.Decl.Chunk>) -> Limits
-    ? "The limits every portion is checked with, as the runs had them."
+    ? "The limits every job is checked with, as the runs had them."
     match runs
         [] -> Check.State.limitsOf(1, Memory.Fast)
         [c, .._] -> c.limits
 
 verify templateOf
     templateOf([]).worker => 0
-
-fn minimumCost(q: Queue) -> Int
-    ? "The least a portion costs: 100 times what main spends a job, in units of cost at the rate the workers checked so far; none until both are known (PortionsGuided)."
-    match Bool.or(Bool.or(q.handled == 0, q.work == 0), q.worked == 0)
-        true -> 0
-        false -> Result.withDefault(Int.div(100 * q.spent * q.worked, q.handled * q.work), 0)
-
-verify minimumCost
-    minimumCost(emptyQueue()) => 0
-    minimumCost(Queue.update(emptyQueue(), spent = 10, handled = 10, work = 1000, worked = 1000000)) => 100000
-
-record Portion
-    jobs: List<Check.Decl.Job>
-    rest: List<Check.Decl.Job>
-    cost: Int
-
-fn portion(jobs: List<Check.Decl.Job>, want: Int, acc: List<Check.Decl.Job>, cost: Int) -> Portion
-    ? "The jobs from the front until their cost reaches want, at least one."
-    match jobs
-        [] -> Portion(jobs = List.reverse(acc), rest = [], cost = cost)
-        [j, ..rest] -> match Bool.and(cost >= want, acc != [])
-            true -> Portion(jobs = List.reverse(acc), rest = jobs, cost = cost)
-            false -> portion(rest, want, List.prepend(j, acc), cost + Check.Decl.jobCost(j))
-
-verify portion
-    portion([], 5, [], 0).cost => 0
-
-fn wanted0(q: Queue) -> Int
-    ? "What the next portion should cost: the cost left over the share, rounded up, never under the minimum (PortionsGuided)."
-    Int.max(minimumCost(q), Result.withDefault(Int.div(q.left + q.share - 1, q.share), q.left))
-
-verify wanted0
-    wanted0(emptyQueue()) => 0
 
 fn sayOf(runs: List<Check.Decl.Chunk>) -> Bool
     ? "Whether progress is asked for, as the runs' limits say."
@@ -218,93 +192,150 @@ verify sinceOf
     sinceOf([]) => 0
 
 fn opened(q: Queue, s: Int, w: Int) -> Queue
-    ? "A run begun on each worker from s on, while runs are left."
+    ? "Each worker from s on waiting, then work handed to every one."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
     match s >= w
-        true -> q
-        false -> opened(begun(q, s, Check.Decl.noFacts(), {}), s + 1, w)
+        true -> dispatched(q)
+        false -> opened(idled(q, s, Check.Decl.noFacts(), {}), s + 1, w)
 
-fn prepared(q: Queue) -> Queue
-    ? "The next run with its proof blocks read, ready to be begun the moment a worker ends."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
-    match q.ahead
-        [] -> Queue.update(q, next = Option.None)
-        _ -> preparedFrom(q, portion(q.ahead, wanted0(q), [], 0))
+fn idled(q: Queue, s: Int, kept: Check.Decl.Facts, held: Map<Int, Bytes>) -> Queue
+    ? "Worker s waits for work with its facts and blocks kept (QuantaOfWork)."
+    Queue.update(q, idleKept = Map.set(q.idleKept, s, kept), idleHeld = Map.set(q.idleHeld, s, held))
 
-fn preparedFrom(q: Queue, p: Portion) -> Queue
-    ? "The portion cut and read, numbered in the order cut."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs]
-    Queue.update(q, ahead = p.rest, left = q.left - p.cost, made = q.made + 1, next = Option.Some(Next(limits = Limits.update(q.template, run = q.made + 1), jobs = Check.Decl.preRead(p.jobs, []), cost = p.cost)))
+verify idled
+    Map.len(idled(emptyQueue(), 1, Check.Decl.noFacts(), {}).idleKept) => 1
 
-fn begun(q: Queue, s: Int, kept: Check.Decl.Facts, held: Map<Int, Bytes>) -> Queue
-    ? "Worker s gets the next run with the facts and blocks it kept, and the run after it is read; with no run left the worker is done and its facts are held (FactsHeldToExit)."
+record Portion
+    jobs: List<Check.Decl.Job>
+    rest: List<Check.Decl.Job>
+    cost: Int
+
+fn portion(jobs: List<Check.Decl.Job>, want: Int, acc: List<Check.Decl.Job>, cost: Int) -> Portion
+    ? "The jobs from the front until their cost reaches want, at least one."
+    match jobs
+        [] -> Portion(jobs = List.reverse(acc), rest = [], cost = cost)
+        [j, ..rest] -> match Bool.and(cost >= want, acc != [])
+            true -> Portion(jobs = List.reverse(acc), rest = jobs, cost = cost)
+            false -> portion(rest, want, List.prepend(j, acc), cost + Check.Decl.jobCost(j))
+
+verify portion
+    portion([], 5, [], 0).cost => 0
+
+fn latered(js: List<Check.Decl.Job>, acc: List<Check.Decl.Pre>) -> List<Check.Decl.Pre>
+    ? "Jobs whose blocks are not read yet."
+    match js
+        [] -> List.reverse(acc)
+        [j, ..rest] -> latered(rest, List.prepend(Check.Decl.Pre.Later(j), acc))
+
+verify latered
+    latered([], []) => []
+
+fn dispatched(q: Queue) -> Queue
+    ? "Work handed to the waiting workers while there is any: a rest handed back first, halved while more than one worker waits, then a new portion, the cost left over twice the workers (QuantaOfWork)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
-    match q.spills
-        [n, ..rest] -> launched(Queue.update(q, spills = rest, spilled = q.spilled - n.cost, began = Map.set(q.began, s, Time.unixMs()), costs = Map.set(q.costs, s, n.cost)), s, Check.Decl.taskOf(q.env, held, n.jobs, Limits.update(n.limits, worker = s + 1), kept, q.best, q.at, budgetOf(q, n.cost)), Limits.update(n.limits, worker = s + 1))
-        [] -> match q.next
-            Option.None -> laneDone(q, s, kept)
-            Option.Some(n) -> prepared(launched(Queue.update(q, began = Map.set(q.began, s, Time.unixMs()), costs = Map.set(q.costs, s, n.cost)), s, Check.Decl.taskOf(q.env, held, n.jobs, Limits.update(n.limits, worker = s + 1), kept, q.best, q.at, budgetOf(q, n.cost)), Limits.update(n.limits, worker = s + 1)))
+    match Map.keys(q.idleKept)
+        [] -> q
+        [s, ..others] -> match q.spills
+            [n, ..rest] -> splitFor(Queue.update(q, spills = rest), s, n, List.len(others))
+            [] -> match q.ahead
+                [] -> q
+                _ -> fresh(q, s, portion(q.ahead, Result.withDefault(Int.div(q.left + q.share - 1, q.share), q.left), [], 0))
 
-decision PortionsSpilled
-    date = "2026-11-24"
-    reason =
-        "Guided portions (PortionsGuided) are large at first, and the cost"
-        "they are cut by misses computation: on CFSG's run349 and run124 a"
-        "first portion holding a costly stretch kept one worker 180 to 560 s"
-        "past the others. So each job also gets a budget of work, its fair"
-        "share of what is left: the cost not yet handed out, this portion's"
-        "included, over the workers, turned into work at the rate the jobs"
-        "that came back did their cost (work over cost, summed). Work is"
-        "what a check counts anyway, the whnf results it stores. A job that"
-        "reaches its budget after at least one declaration ends there and"
-        "hands the rest of its portion back, read already; main begins such"
-        "a rest before any new portion, with a budget of its own. Until a"
-        "job has come back there is no rate and no budget. No number is"
-        "set: the budget follows from the work left and the workers. Which"
-        "declarations a job checks then depends on the work the ones before"
-        "it took, and so on the facts its worker carried; the verdict is"
-        "still the earliest failure in the file."
-    chosen = "PortionsSpilled"
-    rejected = ["PortionsGuidedAlone"]
-    impacts = [begun, budgetOf, ranOut, came]
+fn splitFor(q: Queue, s: Int, n: Next, waiting: Int) -> Queue
+    ? "Worker s gets a rest, or its first half when another worker waits too."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
+    match Bool.and(waiting > 0, List.len(n.jobs) > 1)
+        false -> dispatched(given(q, s, n))
+        true -> dispatched(given(Queue.update(q, spills = List.prepend(Next(limits = n.limits, jobs = List.drop(n.jobs, Int.div(List.len(n.jobs), 2))), q.spills)), s, Next(limits = n.limits, jobs = List.take(n.jobs, Int.div(List.len(n.jobs), 2)))))
 
-fn budgetOf(q: Queue, cost: Int) -> Int
-    ? "A job's budget of work: what is left to hand out, this portion's cost included, over the workers, at the rate work came per unit of cost so far; -1, none, before any job came back (PortionsSpilled)."
-    match Bool.or(q.csum == 0, q.wsum == 0)
+fn fresh(q: Queue, s: Int, p: Portion) -> Queue
+    ? "Worker s gets a new portion."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
+    dispatched(given(Queue.update(q, ahead = p.rest, left = q.left - p.cost), s, Next(limits = q.template, jobs = latered(p.jobs, []))))
+
+fn given(q: Queue, s: Int, n: Next) -> Queue
+    ? "Worker s, waiting, begins a job on n with the facts it kept: within a quantum of work once the rate is known, else within its next count of declarations, the blocks read for that much (QuantaOfWork)."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
+    kept = Option.withDefault(Map.get(q.idleKept, s), Check.Decl.noFacts())
+    held = Option.withDefault(Map.get(q.idleHeld, s), {})
+    quantum = quantumOf(q, Time.unixMs())
+    most = Option.withDefault(Map.get(q.most, s), 1)
+    l = Limits.update(n.limits, worker = s + 1, run = q.made + 1)
+    jobs = readFor(q, n.jobs, quantum, most)
+    q2 = Queue.update(q, idleKept = Map.remove(q.idleKept, s), idleHeld = Map.remove(q.idleHeld, s), made = q.made + 1, began = Map.set(q.began, s, Time.unixMs()), most = Map.set(q.most, s, 2 * most))
+    launched(q2, s, Check.Decl.taskOf(q2.env, held, jobs, l, kept, q2.best, q2.at, quantum, countOf(quantum, most)), l, jobs, quantum)
+
+fn countOf(quantum: Int, most: Int) -> Int
+    ? "How many declarations a job may check: none set once there is a quantum."
+    match quantum >= 0
         true -> -1
-        false -> Result.withDefault(Int.div((q.left + q.spilled + nextCost(q.next) + cost) * q.wsum, q.workers * q.csum), -1)
+        false -> most
 
-verify budgetOf
-    budgetOf(emptyQueue(), 10) => -1
-    budgetOf(Queue.update(emptyQueue(), wsum = 2, csum = 1, workers = 2), 10) => 10
+verify countOf
+    countOf(5, 4) => -1
+    countOf(-1, 4) => 4
 
-fn nextCost(n: Option<Next>) -> Int
-    ? "The cost of the portion read ahead."
-    match n
-        Option.None -> 0
-        Option.Some(x) -> x.cost
+fn readFor(q: Queue, jobs: List<Check.Decl.Pre>, quantum: Int, most: Int) -> List<Check.Decl.Pre>
+    ? "The blocks of the jobs a quantum is expected to reach read, at the rate cost came with work; with no quantum yet, those of the count allowed."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs]
+    match quantum >= 0
+        true -> Check.Decl.readPrefix(jobs, Result.withDefault(Int.div(quantum * q.csum, Int.max(q.wsum, 1)), 0), 1, [])
+        false -> Check.Decl.readPrefix(jobs, 0, most, [])
 
-verify nextCost
-    nextCost(Option.None) => 0
+fn quantumOf(q: Queue, now: Int) -> Int
+    ? "The quantum of work: 100 times main's milliseconds a job, at the work a millisecond the workers did; -1 until both are measured (QuantaOfWork)."
+    match Bool.or(Bool.or(q.handled == 0, q.workMs == 0), q.wsum == 0)
+        true -> -1
+        false -> Result.withDefault(Int.div(100 * mainMs(q, now) * q.wsum, q.handled * q.workMs), -1)
 
-fn laneDone(q: Queue, s: Int, kept: Check.Decl.Facts) -> Queue
-    ? "A worker with no run left, said when asked."
-    ! [Console.error, Time.unixMs]
-    told(q, "worker {s + 1} done, {q.count} declarations checked by all workers")
-    Queue.update(q, lanes = List.prepend(Check.Decl.laneEnded(kept), q.lanes))
+verify quantumOf
+    quantumOf(emptyQueue(), 5) => -1
+    quantumOf(Queue.update(emptyQueue(), handled = 10, workMs = 1000, wsum = 5000), 10) => 500
+
+fn mainMs(q: Queue, now: Int) -> Int
+    ? "What main spent so far, at now: the time since checking began less the time it waited."
+    Int.max(now - q.start - q.waits, 0)
+
+verify mainMs
+    mainMs(emptyQueue(), 7) => 7
 
 fn told(q: Queue, what: String) -> Unit
     ? "One line of progress when asked for (ProgressFromWorkers in Check.Decl)."
     ! [Console.error, Time.unixMs]
     Check.Decl.said(Limits.update(Check.State.limitsOf(1, Memory.Fast), say = q.say, since = q.since), what)
 
-fn launched(q: Queue, s: Int, t: Check.Decl.Task, l: Limits) -> Queue
-    ? "The run begun as a job of worker s; a job that cannot begin declines the check."
+fn launched(q: Queue, s: Int, t: Check.Decl.Task, l: Limits, jobs: List<Check.Decl.Pre>, quantum: Int) -> Queue
+    ? "The job begun on worker s, said with its schedule when asked; a job that cannot begin declines the check."
     ! [Console.error, Time.unixMs, Runs.begin]
-    Check.Decl.said(l, "run {l.run} begun by worker {s + 1}")
+    scheduled(l, jobs, quantum)
     match Runs.begin(t)
         Result.Ok(job) -> Queue.update(q, pending = Map.set(q.pending, s, Wait.Item.Job(job)), busy = Map.set(q.busy, s, l))
         Result.Err(e) -> failedAll(q, "cannot begin a run: {e}")
+
+fn scheduled(l: Limits, jobs: List<Check.Decl.Pre>, quantum: Int) -> Unit
+    ? "The schedule line of a job: its number, worker, the positions of its first and last declarations, how many, and its quantum (QuantaOfWork)."
+    ! [Console.error, Time.unixMs]
+    match l.say
+        false -> Unit
+        true -> Check.Decl.said(l, "job {l.run} begun by worker {l.worker}: positions {firstPos(jobs)}..{lastPos(jobs)}, {List.len(jobs)} declarations, quantum {quantum}")
+
+fn firstPos(jobs: List<Check.Decl.Pre>) -> Int
+    ? "The position of the first job."
+    match jobs
+        [] -> -1
+        [p, .._] -> Check.Decl.posOf(p)
+
+verify firstPos
+    firstPos([]) => -1
+
+fn lastPos(jobs: List<Check.Decl.Pre>) -> Int
+    ? "The position of the last job."
+    match List.reverse(jobs)
+        [] -> -1
+        [p, .._] -> Check.Decl.posOf(p)
+
+verify lastPos
+    lastPos([]) => -1
 
 fn failedAll(q: Queue, why: String) -> Queue
     ? "A failure of the queue itself, before every declaration: the check declines."
@@ -313,26 +344,27 @@ fn failedAll(q: Queue, why: String) -> Queue
 verify failedAll
     failedAll(emptyQueue(), "x").at => -1
 
-fn emptyQueue() -> Queue
-    ? "A queue with nothing to do, for examples."
-    none: Map<Int, Wait.Item> = {}
-    Queue(env = Check.State.envEmpty(), ahead = [], left = 0, template = Check.State.limitsOf(1, Memory.Fast), share = 1, made = 0, spent = 0, handled = 0, work = 0, worked = 0, began = {}, costs = {}, workers = 1, spills = [], spilled = 0, wsum = 0, csum = 0, next = Option.None, pending = none, busy = {}, best = Option.None, at = 0, count = 0, lanes = [], say = false, since = 0)
-
-verify emptyQueue
-    emptyQueue().count => 0
-
 fn waited(q: Queue) -> List<Check.Decl.Checked>
-    ? "Waits for runs to end and takes them, until no job is in flight; then what all of them found, and each worker's facts."
+    ? "Waits for jobs to end and takes them, until none is in flight; then what all of them found, and each worker's facts held (FactsHeldToExit)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match Map.len(q.pending) == 0
-        true -> List.prepend(Check.Decl.tally(q.best, q.at, q.count), q.lanes)
-        false -> answered(q, Wait.poll(q.pending, 3600000))
+        true -> List.prepend(Check.Decl.tally(q.best, q.at, q.count), lanesHeld(Map.values(q.idleKept), q.lanes))
+        false -> answered(q, Time.unixMs(), Wait.poll(q.pending, 3600000))
 
-fn answered(q: Queue, r: Result<List<Int>, String>) -> List<Check.Decl.Checked>
-    ? "The workers whose jobs are ready taken; a wait that fails declines the check."
+fn lanesHeld(ks: List<Check.Decl.Facts>, acc: List<Check.Decl.Checked>) -> List<Check.Decl.Checked>
+    ? "Each waiting worker's facts, held to the end."
+    match ks
+        [] -> acc
+        [k, ..rest] -> lanesHeld(rest, List.prepend(Check.Decl.laneEnded(k), acc))
+
+verify lanesHeld
+    lanesHeld([], []) => []
+
+fn answered(q: Queue, t0: Int, r: Result<List<Int>, String>) -> List<Check.Decl.Checked>
+    ? "The workers whose jobs are ready taken, the wait counted as main's waiting; a wait that fails declines the check."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match r
-        Result.Ok(ks) -> waited(takenAll(q, ks))
+        Result.Ok(ks) -> waited(dispatched(takenAll(Queue.update(q, waits = q.waits + Int.max(Time.unixMs() - t0, 0)), ks)))
         Result.Err(e) -> List.prepend(Check.Decl.tally(Option.Some(Fail.Decline("cannot wait for the workers: {e}")), -1, q.count), q.lanes)
 
 fn takenAll(q: Queue, ks: List<Int>) -> Queue
@@ -350,68 +382,51 @@ fn takenOne(q: Queue, k: Int, item: Option<Wait.Item>) -> Queue
         _ -> q
 
 fn took(q: Queue, k: Int, r: Result<Option<Check.Decl.Done>, String>) -> Queue
-    ? "A run that ended goes on; one not ended yet is asked again later; one whose answer is lost declines the check."
+    ? "A job that ended goes on; one not ended yet is asked again later; one whose answer is lost declines the check."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
     match r
         Result.Ok(Option.None) -> q
-        Result.Ok(Option.Some(d)) -> handledIn(came(Queue.update(q, pending = Map.remove(q.pending, k)), k, d), Time.unixMs())
+        Result.Ok(Option.Some(d)) -> came(Queue.update(q, pending = Map.remove(q.pending, k), handled = q.handled + 1), k, d)
         Result.Err(e) -> failedAll(Queue.update(q, pending = Map.remove(q.pending, k)), "a run ended without its answer: {e}")
 
-fn handledIn(q: Queue, t0: Int) -> Queue
-    ? "What main spent on a job it took, from taking it to the next one begun and the portion after read (PortionsGuided)."
-    ! [Time.unixMs]
-    Queue.update(q, spent = q.spent + Int.max(Time.unixMs() - t0, 0), handled = q.handled + 1)
-
 fn came(q: Queue, k: Int, d: Check.Decl.Done) -> Queue
-    ? "What worker k's run found: its failure kept when it is the earliest; a block it wanted read and the rest of the run begun with it; otherwise the next run."
+    ? "What worker k's job found: its failure kept when it is the earliest; a block it wanted read and the rest begun with it on the same worker; otherwise its rest handed back and the worker waiting for work (QuantaOfWork)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
     l = Option.withDefault(Map.get(q.busy, k), Check.State.limitsOf(1, Memory.Fast))
-    q2 = counted(earliest(q, l, d.fail, d.at), d.count)
+    q2 = Queue.update(earliest(q, l, d.fail, d.at), count = q.count + d.count, busy = Map.remove(q.busy, k), workMs = q.workMs + Int.max(Time.unixMs() - Option.withDefault(Map.get(q.began, k), Time.unixMs()), 0), wsum = q.wsum + d.work, csum = q.csum + d.cost)
     match d.wants
         Option.Some(w) -> wanted(q2, k, l, w, Check.Decl.readSpot(w), d)
         Option.None -> ranOut(q2, k, l, d)
 
 fn ranOut(q: Queue, k: Int, l: Limits, d: Check.Decl.Done) -> Queue
-    ? "A run done, said when asked, and worker k's next run begun."
-    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
-    Check.Decl.said(l, "run {l.run} done by worker {k + 1}, {d.count} declarations, work {d.work}")
-    begun(spilledFrom(ranFor(Queue.update(q, busy = Map.remove(q.busy, k), wsum = q.wsum + d.work, csum = q.csum + d.cost), k, Time.unixMs(), d.cost), l, d.left), k, d.kept, d.held)
+    ? "A job done, said when asked; its rest goes back first, and worker k waits for work."
+    ! [Console.error, Time.unixMs]
+    Check.Decl.said(l, "job {l.run} done by worker {k + 1}: {d.count} declarations, work {d.work}, {List.len(d.left)} handed back")
+    idled(handedBack(q, l, d.left), k, d.kept, d.held)
 
-fn spilledFrom(q: Queue, l: Limits, left: List<Check.Decl.Pre>) -> Queue
-    ? "The rest of a portion handed back put first (PortionsSpilled)."
+fn handedBack(q: Queue, l: Limits, left: List<Check.Decl.Pre>) -> Queue
+    ? "A rest handed back, put first."
     match left
         [] -> q
-        _ -> Queue.update(q, spills = List.prepend(Next(limits = l, jobs = left, cost = Check.Decl.preCost(left, 0)), q.spills), spilled = q.spilled + Check.Decl.preCost(left, 0))
+        _ -> Queue.update(q, spills = List.prepend(Next(limits = l, jobs = left), q.spills))
 
-verify spilledFrom
-    spilledFrom(emptyQueue(), Check.State.limitsOf(1, Memory.Fast), []).spilled => 0
-
-fn ranFor(q: Queue, k: Int, t: Int, cost: Int) -> Queue
-    ? "Worker k's portion done: how long it ran against what it was reckoned to cost (PortionsGuided)."
-    Queue.update(q, work = q.work + Int.max(t - Option.withDefault(Map.get(q.began, k), t), 0), worked = q.worked + cost)
-
-verify ranFor
-    ranFor(emptyQueue(), 0, 5, 0).work => 0
+verify handedBack
+    List.len(handedBack(emptyQueue(), Check.State.limitsOf(1, Memory.Fast), []).spills) => 0
 
 fn wanted(q: Queue, k: Int, l: Limits, w: Spot, r: Result<Bytes, Fail>, d: Check.Decl.Done) -> Queue
-    ? "The rest of the run begun again with the block it wanted held from now on, or, when the block cannot be read, with the job that wanted it declined (BlockReadForItsCheck in Check.Decl)."
-    ! [Console.error, Time.unixMs, Runs.begin]
+    ? "The rest begun again on worker k with the block it wanted held from now on, or, when the block cannot be read, with the job that wanted it declined (BlockReadForItsCheck in Check.Decl)."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
     match r
-        Result.Ok(b) -> launched(q, k, Check.Decl.taskOf(q.env, Map.set(d.held, w.decl, b), d.left, l, d.kept, q.best, q.at, budgetOf(q, Check.Decl.preCost(d.left, 0))), l)
+        Result.Ok(b) -> given(idled(q, k, d.kept, Map.set(d.held, w.decl, b)), k, Next(limits = l, jobs = d.left))
         Result.Err(e) -> resumed(q, k, l, Check.Decl.blockMissing(d, e))
 
 fn resumed(q: Queue, k: Int, l: Limits, d: Check.Decl.Done) -> Queue
-    ? "The rest of a run begun again after its job was declined."
-    ! [Console.error, Time.unixMs, Runs.begin]
+    ? "The rest of a job begun again after its job was declined."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
     q2 = earliest(q, l, d.fail, d.at)
-    launched(q2, k, Check.Decl.taskOf(q2.env, d.held, d.left, l, d.kept, q2.best, q2.at, budgetOf(q2, Check.Decl.preCost(d.left, 0))), l)
-
-fn counted(q: Queue, n: Int) -> Queue
-    ? "n more declarations checked."
-    Queue.update(q, count = q.count + n)
-
-verify counted
-    counted(emptyQueue(), 3).count => 3
+    match d.left
+        [] -> idled(q2, k, d.kept, d.held)
+        _ -> given(idled(q2, k, d.kept, d.held), k, Next(limits = l, jobs = d.left))
 
 fn earliest(q: Queue, l: Limits, f: Option<Fail>, at: Int) -> Queue
     ? "The earliest failure in the file found so far, said when it is new."
