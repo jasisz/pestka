@@ -78,8 +78,7 @@ record Queue
     busy: Map<Int, Limits>
     began: Map<Int, Int>
     most: Map<Int, Int>
-    idleKept: Map<Int, Check.Decl.Facts>
-    idleHeld: Map<Int, Map<Int, Bytes>>
+    idle: List<Idle>
     start: Int
     waits: Int
     handled: Int
@@ -112,7 +111,14 @@ decision QuantaOfWork
         "worker runs more than a quantum and one declaration past the"
         "others while anything is left. The 100 is that bound, not a tuned"
         "number. Before the rate is known a worker's job may check one"
-        "declaration, then two, four and so on. A job that reaches its"
+        "declaration, then two, four and so on, and do as much work as it"
+        "may check declarations: declarations that store no whnf result"
+        "would otherwise grow the count until one job of thousands ran on"
+        "with no bound at all (run349 on 8 workers: a job of 11536"
+        "declarations begun before any work was seen ran 283 s while the"
+        "other workers ended at 60 s). The same number bounds both, so"
+        "every job has a bound, passed by one declaration at most, and no"
+        "number is added. A job that reaches its"
         "quantum, or the first declaration whose block main has not read,"
         "hands the rest of its portion back. Main reads only what a quantum"
         "needs, at the rate cost came with work, so the blocks held are a"
@@ -129,7 +135,7 @@ decision QuantaOfWork
         "the file."
     chosen = "QuantaOfWork"
     rejected = ["RunsPerWorkerFixed", "PortionsGuided", "PortionsSpilledToTheSameWorker"]
-    impacts = [queued, dispatched, given, quantumOf, came, idled, waited]
+    impacts = [queued, dispatched, given, quantumOf, budgetOf, came, idled, waited]
 
 fn queued(env: Env, runs: List<Check.Decl.Chunk>, w: Int) -> List<Check.Decl.Checked>
     ? "The runs on w workers, as jobs of a quantum of work each (QuantaOfWork)."
@@ -141,7 +147,7 @@ fn queued(env: Env, runs: List<Check.Decl.Chunk>, w: Int) -> List<Check.Decl.Che
 fn emptyQueue() -> Queue
     ? "A queue with nothing to do, for examples."
     none: Map<Int, Wait.Item> = {}
-    Queue(env = Check.State.envEmpty(), ahead = [], left = 0, template = Check.State.limitsOf(1, Memory.Fast), share = 2, made = 0, spills = [], pending = none, busy = {}, began = {}, most = {}, idleKept = {}, idleHeld = {}, start = 0, waits = 0, handled = 0, workMs = 0, wsum = 0, csum = 0, best = Option.None, at = 0, count = 0, lanes = [], say = false, since = 0)
+    Queue(env = Check.State.envEmpty(), ahead = [], left = 0, template = Check.State.limitsOf(1, Memory.Fast), share = 2, made = 0, spills = [], pending = none, busy = {}, began = {}, most = {}, idle = [], start = 0, waits = 0, handled = 0, workMs = 0, wsum = 0, csum = 0, best = Option.None, at = 0, count = 0, lanes = [], say = false, since = 0)
 
 verify emptyQueue
     emptyQueue().count => 0
@@ -198,12 +204,85 @@ fn opened(q: Queue, s: Int, w: Int) -> Queue
         true -> dispatched(q)
         false -> opened(idled(q, s, Check.Decl.noFacts(), {}), s + 1, w)
 
+record Idle
+    worker: Int
+    kept: Check.Decl.Facts
+    held: Map<Int, Bytes>
+
+decision IdleWorkersListed
+    date = "2026-11-24"
+    reason =
+        "The workers that wait are a list in the order of their numbers, not"
+        "maps from worker to facts and blocks: the wasm-gc build compiles"
+        "an equality and a hash for every map's values, and Facts holds maps,"
+        "which it has none for, so the build stopped although the wasm build"
+        "never queues (--dealt). A list needs neither; there are as many"
+        "entries as workers."
+    chosen = "IdleWorkersListed"
+    rejected = ["IdleWorkersMapped"]
+    impacts = [idled, idleInto, idleOf, idleWithout]
+
 fn idled(q: Queue, s: Int, kept: Check.Decl.Facts, held: Map<Int, Bytes>) -> Queue
-    ? "Worker s waits for work with its facts and blocks kept (QuantaOfWork)."
-    Queue.update(q, idleKept = Map.set(q.idleKept, s, kept), idleHeld = Map.set(q.idleHeld, s, held))
+    ? "Worker s waits for work with its facts and blocks kept (QuantaOfWork, IdleWorkersListed)."
+    Queue.update(q, idle = idleInto(q.idle, Idle(worker = s, kept = kept, held = held), []))
 
 verify idled
-    Map.len(idled(emptyQueue(), 1, Check.Decl.noFacts(), {}).idleKept) => 1
+    List.len(idled(emptyQueue(), 1, Check.Decl.noFacts(), {}).idle) => 1
+    List.len(idled(idled(emptyQueue(), 1, Check.Decl.noFacts(), {}), 1, Check.Decl.noFacts(), {}).idle) => 1
+
+fn idleInto(xs: List<Idle>, i: Idle, acc: List<Idle>) -> List<Idle>
+    ? "i put among the waiting workers in the order of their numbers, in place of the entry it had."
+    match xs
+        [] -> List.reverse(List.prepend(i, acc))
+        [x, ..rest] -> match x.worker < i.worker
+            true -> idleInto(rest, i, List.prepend(x, acc))
+            false -> match x.worker == i.worker
+                true -> ontoIdle(acc, List.prepend(i, rest))
+                false -> ontoIdle(acc, List.prepend(i, xs))
+
+verify idleInto
+    List.len(idleInto([], Idle(worker = 2, kept = Check.Decl.noFacts(), held = {}), [])) => 1
+    workersOf(idleInto([Idle(worker = 1, kept = Check.Decl.noFacts(), held = {}), Idle(worker = 3, kept = Check.Decl.noFacts(), held = {})], Idle(worker = 2, kept = Check.Decl.noFacts(), held = {}), [])) => [1, 2, 3]
+
+fn ontoIdle(acc: List<Idle>, xs: List<Idle>) -> List<Idle>
+    ? "acc, newest first, put back in front of xs."
+    match acc
+        [] -> xs
+        [a, ..rest] -> ontoIdle(rest, List.prepend(a, xs))
+
+verify ontoIdle
+    List.len(ontoIdle([], [])) => 0
+
+fn workersOf(xs: List<Idle>) -> List<Int>
+    ? "The numbers of the waiting workers."
+    match xs
+        [] -> []
+        [x, ..rest] -> List.prepend(x.worker, workersOf(rest))
+
+verify workersOf
+    workersOf([]) => []
+
+fn idleOf(xs: List<Idle>, s: Int) -> Option<Idle>
+    ? "Worker s's entry among the waiting, when it waits."
+    match xs
+        [] -> Option.None
+        [x, ..rest] -> match x.worker == s
+            true -> Option.Some(x)
+            false -> idleOf(rest, s)
+
+verify idleOf
+    idleOf([], 1) == Option.None => true
+
+fn idleWithout(xs: List<Idle>, s: Int, acc: List<Idle>) -> List<Idle>
+    ? "The waiting workers but s."
+    match xs
+        [] -> List.reverse(acc)
+        [x, ..rest] -> match x.worker == s
+            true -> ontoIdle(acc, rest)
+            false -> idleWithout(rest, s, List.prepend(x, acc))
+
+verify idleWithout
+    workersOf(idleWithout([Idle(worker = 1, kept = Check.Decl.noFacts(), held = {}), Idle(worker = 2, kept = Check.Decl.noFacts(), held = {})], 1, [])) => [2]
 
 record Portion
     jobs: List<Check.Decl.Job>
@@ -233,7 +312,7 @@ verify latered
 fn dispatched(q: Queue) -> Queue
     ? "Work handed to the waiting workers while there is any: a rest handed back first, halved while more than one worker waits, then a new portion, the cost left over twice the workers (QuantaOfWork)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
-    match Map.keys(q.idleKept)
+    match workersOf(q.idle)
         [] -> q
         [s, ..others] -> match q.spills
             [n, ..rest] -> splitFor(Queue.update(q, spills = rest), s, n, List.len(others))
@@ -254,16 +333,17 @@ fn fresh(q: Queue, s: Int, p: Portion) -> Queue
     dispatched(given(Queue.update(q, ahead = p.rest, left = q.left - p.cost), s, Next(limits = q.template, jobs = latered(p.jobs, []))))
 
 fn given(q: Queue, s: Int, n: Next) -> Queue
-    ? "Worker s, waiting, begins a job on n with the facts it kept: within a quantum of work once the rate is known, else within its next count of declarations, the blocks read for that much (QuantaOfWork)."
+    ? "Worker s, waiting, begins a job on n with the facts it kept: within a quantum of work once the rate is known, else within its next count of declarations and as much work, the blocks read for that much (QuantaOfWork)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
-    kept = Option.withDefault(Map.get(q.idleKept, s), Check.Decl.noFacts())
-    held = Option.withDefault(Map.get(q.idleHeld, s), {})
+    i = Option.withDefault(idleOf(q.idle, s), Idle(worker = s, kept = Check.Decl.noFacts(), held = {}))
+    kept = i.kept
+    held = i.held
     quantum = quantumOf(q, Time.unixMs())
     most = Option.withDefault(Map.get(q.most, s), 1)
     l = Limits.update(n.limits, worker = s + 1, run = q.made + 1)
     jobs = readFor(q, n.jobs, quantum, most)
-    q2 = Queue.update(q, idleKept = Map.remove(q.idleKept, s), idleHeld = Map.remove(q.idleHeld, s), made = q.made + 1, began = Map.set(q.began, s, Time.unixMs()), most = Map.set(q.most, s, 2 * most))
-    launched(q2, s, Check.Decl.taskOf(q2.env, held, jobs, l, kept, q2.best, q2.at, quantum, countOf(quantum, most)), l, jobs, quantum)
+    q2 = Queue.update(q, idle = idleWithout(q.idle, s, []), made = q.made + 1, began = Map.set(q.began, s, Time.unixMs()), most = Map.set(q.most, s, 2 * most))
+    launched(q2, s, Check.Decl.taskOf(q2.env, held, jobs, l, kept, q2.best, q2.at, budgetOf(quantum, most), countOf(quantum, most)), l, jobs, quantum)
 
 fn countOf(quantum: Int, most: Int) -> Int
     ? "How many declarations a job may check: none set once there is a quantum."
@@ -274,6 +354,16 @@ fn countOf(quantum: Int, most: Int) -> Int
 verify countOf
     countOf(5, 4) => -1
     countOf(-1, 4) => 4
+
+fn budgetOf(quantum: Int, most: Int) -> Int
+    ? "How much work a job may do: the quantum once there is one, else as much as the declarations it may check, so no job is without a bound (QuantaOfWork)."
+    match quantum >= 0
+        true -> quantum
+        false -> most
+
+verify budgetOf
+    budgetOf(5, 4) => 5
+    budgetOf(-1, 4) => 4
 
 fn readFor(q: Queue, jobs: List<Check.Decl.Pre>, quantum: Int, most: Int) -> List<Check.Decl.Pre>
     ? "The blocks of the jobs a quantum is expected to reach read, at the rate cost came with work; with no quantum yet, those of the count allowed."
@@ -348,14 +438,14 @@ fn waited(q: Queue) -> List<Check.Decl.Checked>
     ? "Waits for jobs to end and takes them, until none is in flight; then what all of them found, and each worker's facts held (FactsHeldToExit)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match Map.len(q.pending) == 0
-        true -> List.prepend(Check.Decl.tally(q.best, q.at, q.count), lanesHeld(Map.values(q.idleKept), q.lanes))
+        true -> List.prepend(Check.Decl.tally(q.best, q.at, q.count), lanesHeld(q.idle, q.lanes))
         false -> answered(q, Time.unixMs(), Wait.poll(q.pending, 3600000))
 
-fn lanesHeld(ks: List<Check.Decl.Facts>, acc: List<Check.Decl.Checked>) -> List<Check.Decl.Checked>
+fn lanesHeld(ks: List<Idle>, acc: List<Check.Decl.Checked>) -> List<Check.Decl.Checked>
     ? "Each waiting worker's facts, held to the end."
     match ks
         [] -> acc
-        [k, ..rest] -> lanesHeld(rest, List.prepend(Check.Decl.laneEnded(k), acc))
+        [k, ..rest] -> lanesHeld(rest, List.prepend(Check.Decl.laneEnded(k.kept), acc))
 
 verify lanesHeld
     lanesHeld([], []) => []
