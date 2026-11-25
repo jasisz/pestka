@@ -114,6 +114,13 @@ Pestka implements Lean's type theory, including:
 - Mutual and nested inductive types, with recursors derived by Pestka and
   compared against the export.
 - Quotients, proof irrelevance, and the Nat and String literal extensions.
+- The renovation's rules that come after Lean 55bd690: complete comparison
+  of universe levels with `imax`, eta for partial applications of
+  constructors and recursors and for unit-like types with fields
+  ([lean4#15372](https://github.com/leanprover/lean4/pull/15372) to
+  [lean4#15374](https://github.com/leanprover/lean4/pull/15374)), and
+  `Quot` in `Sort (max 1 u)` when the export declares it so
+  ([lean4#15023](https://github.com/leanprover/lean4/pull/15023)).
 
 The input is [Susz 1](https://github.com/jasisz/susz/blob/main/docs/spec.md)
 or lean4export ndjson 3.1 or 3.2. Format 3.2 gives every inductive type the
