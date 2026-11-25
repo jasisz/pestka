@@ -2,9 +2,10 @@ module Univ
     intent =
         "Universe level arithmetic as Lean's reference kernel does it: the"
         "simplifying max and imax, parameter instantiation, normalization,"
-        "equivalence and the greater-or-equal test. Equivalence and the"
-        "test are sound but deliberately as incomplete as the reference, so"
-        "Pestka accepts and rejects the same universe constraints it does."
+        "equivalence and the greater-or-equal test. Both are complete, as the"
+        "kernel renovation asks: the reference test where it decides, and"
+        "where it does not and an imax is left, a split by cases on the"
+        "parameters that decide each imax (ImaxByCases)."
     exposes [Offset, toOffset, isExplicit, isZero, isNotZero, normalizesToZero, zeroUnder, zeroUnderTwice, notZeroUnder, mkSucc, mkSuccN, mkMax, mkImax, instantiate, undefParam, normalize, isEquiv, isEquivList, isGeq]
     depends [Core.Names, Core.Levels]
     effects []
@@ -579,18 +580,196 @@ verify mkMaxList
     mkMaxList([Level.Param(Core.Names.anon()), Level.Param(Core.Names.str(Core.Names.anon(), "v"))]) => Level.Max(Level.Param(Core.Names.anon()), Level.Param(Core.Names.str(Core.Names.anon(), "v")))
 
 fn isEquiv(a: Level, b: Level) -> Bool
-    ? "Equal, or equal normal forms. Without imax the normal forms are compared by what they are made of, without building them (EquivByMaxima)."
+    ? "Equal, or equal normal forms. Without imax the normal forms are compared by what they are made of, without building them (EquivByMaxima); with it, normal forms that differ are compared both ways by cases (ImaxByCases)."
     match a == b
         true -> true
         false -> match Bool.or(hasImax(a), hasImax(b))
-            true -> normalize(a) == normalize(b)
+            true -> equivNormal(normalize(a), normalize(b))
             false -> sameMaxima(a, b)
+
+fn equivNormal(na: Level, nb: Level) -> Bool
+    ? "Equal normal forms, or each at least the other for every assignment, the pairs decided on the way shared between the two (ImaxByCases)."
+    match na == nb
+        true -> true
+        false -> bothWays(geqMemo(na, nb, []), na, nb)
+
+verify equivNormal
+    equivNormal(Level.Zero, Level.Zero) => true
+    equivNormal(Level.IMax(sampleParam("u"), sampleParam("v")), Level.Max(sampleParam("u"), sampleParam("v"))) => false
+
+fn bothWays(r: GC, na: Level, nb: Level) -> Bool
+    ? "The other way, once the first holds."
+    match r.b
+        true -> geqMemo(nb, na, r.seen).b
+        false -> false
+
+verify bothWays
+    bothWays(GC(b = false, seen = []), Level.Zero, Level.Zero) => false
+
+decision ImaxByCases
+    date = "2026-11-25"
+    reason =
+        "The kernel renovation (lean4#16595) compares levels completely: two"
+        "levels are equal, or one is at least the other, when that holds for"
+        "every assignment of the parameters; the reference test before it"
+        "missed some, such as imax (imax u v) v against imax u v (the Arena"
+        "beta's renovation tests 103 to 110). Lean's normal form and its"
+        "test decide every pair without imax: max, successors, parameters"
+        "and numerals, which EquivByMaxima reads the same way. Only an imax"
+        "whose right side may be zero keeps a pair open, and whether it is"
+        "turns on the parameters that decide that side: dec(p) = p,"
+        "dec(succ) none, dec(max c d) both sides' unless one is never zero,"
+        "dec(imax c d) = dec(d). Such a parameter p is either zero or the"
+        "successor of something, so the pair is decided in both cases, p :="
+        "0 and p := p + 1 (the same name now standing for one less, which"
+        "ranges over every number again), each substituted with the"
+        "simplifying max and imax. That is sound, as the two cases cover"
+        "every value of p and a case that holds holds for every value of"
+        "the other parameters. It ends by structure, with no bound: after p"
+        "is split it is gone or sits only under a successor, where it"
+        "decides nothing, so each split leaves fewer deciding parameters;"
+        "with none left every imax has become zero or a max, and the test"
+        "is complete. The answer for a pair is the same wherever it is met,"
+        "so the pairs decided in one comparison are kept and not split"
+        "again. The reference test runs first, so every pair it decided is"
+        "decided as before, and the cases cost only where it said no and an"
+        "imax is left."
+    chosen = "ImaxByCases"
+    rejected = ["ReferenceTestOnly", "EvaluateOnSampleAssignments", "SplitDepthCapped"]
+    impacts = [isEquiv, equivNormal, isGeq, geqMemo, imaxParam, deciding]
+
+record LevelPair
+    a: Level
+    b: Level
+    geq: Bool
+
+record GC
+    b: Bool
+    seen: List<LevelPair>
+
+fn geqMemo(a: Level, b: Level, seen: List<LevelPair>) -> GC
+    ? "a >= b for every assignment, with the pairs decided so far: the reference test on the normal forms, else by cases on a deciding parameter of an imax (ImaxByCases)."
+    na = normalize(a)
+    nb = normalize(b)
+    match decidedBefore(seen, na, nb)
+        Option.Some(r) -> GC(b = r, seen = seen)
+        Option.None -> remembered(geqDecide(na, nb, seen), na, nb)
+
+verify geqMemo
+    geqMemo(Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("v")), []).b => true
+    geqMemo(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"), []).b => false
+    geqMemo(sampleParam("u"), sampleParam("v"), []).b => false
+
+fn decidedBefore(seen: List<LevelPair>, a: Level, b: Level) -> Option<Bool>
+    ? "The answer kept for the pair, if any."
+    match seen
+        [] -> Option.None
+        [x, ..rest] -> match Bool.and(x.a == a, x.b == b)
+            true -> Option.Some(x.geq)
+            false -> decidedBefore(rest, a, b)
+
+verify decidedBefore
+    decidedBefore([LevelPair(a = Level.Zero, b = Level.Zero, geq = true)], Level.Zero, Level.Zero) => Option.Some(true)
+    decidedBefore([], Level.Zero, Level.Zero) => Option.None
+
+fn remembered(r: GC, a: Level, b: Level) -> GC
+    ? "Keeps the answer for the pair."
+    GC(b = r.b, seen = List.prepend(LevelPair(a = a, b = b, geq = r.b), r.seen))
+
+verify remembered
+    List.len(remembered(GC(b = true, seen = []), Level.Zero, Level.Zero).seen) => 1
+
+fn geqDecide(na: Level, nb: Level, seen: List<LevelPair>) -> GC
+    ? "The reference test, else a split on a deciding parameter of either side's imaxes; with none left the reference test is complete."
+    match geqCore(na, nb)
+        true -> GC(b = true, seen = seen)
+        false -> match imaxParam(na)
+            Option.Some(p) -> geqSplit(na, nb, p, seen)
+            Option.None -> match imaxParam(nb)
+                Option.Some(p) -> geqSplit(na, nb, p, seen)
+                Option.None -> GC(b = false, seen = seen)
+
+verify geqDecide
+    geqDecide(Level.Zero, Level.Zero, []).b => true
+
+fn geqSplit(a: Level, b: Level, p: Name, seen: List<LevelPair>) -> GC
+    ? "Both cases of p, zero and a successor; the second only when the first holds."
+    z = geqMemo(instantiate(a, [p], [Level.Zero]), instantiate(b, [p], [Level.Zero]), seen)
+    match z.b
+        false -> z
+        true -> geqMemo(instantiate(a, [p], [Level.Succ(Level.Param(p))]), instantiate(b, [p], [Level.Succ(Level.Param(p))]), z.seen)
+
+verify geqSplit
+    geqSplit(sampleParam("u"), sampleParam("v"), Core.Names.str(Core.Names.anon(), "u"), []).b => false
+    geqSplit(Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("v")), Core.Names.str(Core.Names.anon(), "v"), []).b => true
+
+fn imaxParam(l: Level) -> Option<Name>
+    ? "A parameter that decides the right side of some imax in l."
+    match l
+        Level.Succ(a) -> imaxParam(a)
+        Level.Max(a, b) -> orElse(imaxParam(a), b)
+        Level.IMax(a, b) -> match deciding(b)
+            Option.Some(p) -> Option.Some(p)
+            Option.None -> orElse(imaxParam(a), b)
+        _ -> Option.None
+
+verify imaxParam
+    imaxParam(Level.IMax(sampleParam("u"), sampleParam("v"))) => Option.Some(Core.Names.str(Core.Names.anon(), "v"))
+    imaxParam(Level.Max(sampleParam("u"), sampleParam("v"))) => Option.None
+    imaxParam(Level.IMax(sampleParam("u"), Level.Succ(sampleParam("v")))) => Option.None
+
+fn orElse(found: Option<Name>, b: Level) -> Option<Name>
+    ? "found, else one from b."
+    match found
+        Option.Some(p) -> Option.Some(p)
+        Option.None -> imaxParam(b)
+
+verify orElse
+    orElse(Option.None, Level.Zero) => Option.None
+
+fn deciding(l: Level) -> Option<Name>
+    ? "A parameter that decides whether l is zero: dec(p) = p, dec(succ) none, dec(max c d) either side's unless one side is never zero, dec(imax c d) = dec(d)."
+    match l
+        Level.Param(p) -> Option.Some(p)
+        Level.Succ -> Option.None
+        Level.Max(a, b) -> match Bool.or(isNotZero(a), isNotZero(b))
+            true -> Option.None
+            false -> decidingEither(deciding(a), b)
+        Level.IMax(_, b) -> deciding(b)
+        Level.Zero -> Option.None
+
+verify deciding
+    deciding(Level.Max(sampleParam("u"), sampleParam("v"))) => Option.Some(Core.Names.str(Core.Names.anon(), "u"))
+    deciding(Level.Max(Level.Succ(sampleParam("u")), sampleParam("v"))) => Option.None
+    deciding(Level.IMax(sampleParam("u"), sampleParam("v"))) => Option.Some(Core.Names.str(Core.Names.anon(), "v"))
+    deciding(Level.Zero) => Option.None
+
+fn decidingEither(found: Option<Name>, b: Level) -> Option<Name>
+    ? "found, else one from b."
+    match found
+        Option.Some(p) -> Option.Some(p)
+        Option.None -> deciding(b)
+
+verify decidingEither
+    decidingEither(Option.None, sampleParam("u")) => Option.Some(Core.Names.str(Core.Names.anon(), "u"))
 
 verify isEquiv
     isEquiv(Level.Max(Level.Param(Core.Names.anon()), Level.Zero), Level.Param(Core.Names.anon())) => true
     isEquiv(Level.Succ(Level.Zero), Level.Zero) => false
     isEquiv(Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("u"), sampleParam("v"))) => true
     isEquiv(Level.IMax(sampleParam("u"), Level.Succ(sampleParam("v"))), Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))) => true
+    isEquiv(Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("v"))) => true
+    isEquiv(Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.IMax(sampleParam("u"), sampleParam("v")))) => true
+    isEquiv(Level.IMax(Level.IMax(sampleParam("u"), sampleParam("w")), sampleParam("w")), Level.IMax(sampleParam("u"), sampleParam("w"))) => true
+    isEquiv(Level.IMax(sampleParam("u"), Level.IMax(sampleParam("u"), sampleParam("v"))), Level.IMax(sampleParam("u"), sampleParam("v"))) => true
+    isEquiv(Level.IMax(Level.Max(sampleParam("u"), sampleParam("v")), sampleParam("w")), Level.Max(Level.IMax(sampleParam("u"), sampleParam("w")), Level.IMax(sampleParam("v"), sampleParam("w")))) => true
+    isEquiv(Level.IMax(sampleParam("u"), Level.Max(sampleParam("v"), sampleParam("w"))), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("u"), sampleParam("w")))) => true
+    isEquiv(Level.IMax(sampleParam("u"), Level.IMax(sampleParam("v"), sampleParam("w"))), Level.IMax(Level.Max(sampleParam("u"), sampleParam("v")), sampleParam("w"))) => true
+    isEquiv(Level.IMax(sampleParam("u"), sampleParam("v")), Level.Max(sampleParam("u"), sampleParam("v"))) => false
+    isEquiv(Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), sampleParam("u"))) => false
+    isEquiv(Level.IMax(sampleParam("u"), Level.IMax(sampleParam("v"), sampleParam("w"))), Level.IMax(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("w"))) => false
+    isEquiv(Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("v")), Level.Max(sampleParam("u"), sampleParam("v"))) => false
+    isEquiv(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("v")) => false
 
 decision EquivByMaxima
     date = "2026-11-08"
@@ -722,21 +901,36 @@ verify isEquivList
     isEquivList([Level.Zero], []) => false
 
 fn isGeq(a: Level, b: Level) -> Bool
-    ? "a >= b for every assignment of the parameters, as far as the reference test sees."
+    ? "a >= b for every assignment of the parameters: the reference test, and where it says no and an imax is left, by cases (ImaxByCases)."
+    na = normalize(a)
+    nb = normalize(b)
+    match geqCore(na, nb)
+        true -> true
+        false -> match Bool.or(hasImax(na), hasImax(nb))
+            true -> geqMemo(na, nb, []).b
+            false -> false
+
+fn geqRef(a: Level, b: Level) -> Bool
+    ? "The reference test, on the normal forms."
     geqCore(normalize(a), normalize(b))
+
+verify geqRef
+    geqRef(Level.Succ(Level.Param(Core.Names.anon())), Level.Param(Core.Names.anon())) => true
 
 verify isGeq
     isGeq(Level.Succ(Level.Param(Core.Names.anon())), Level.Param(Core.Names.anon())) => true
     isGeq(Level.Param(Core.Names.anon()), Level.Succ(Level.Zero)) => false
     isGeq(Level.Max(Level.Param(Core.Names.anon()), Level.Succ(Level.Zero)), Level.Succ(Level.Zero)) => true
     isGeq(Level.IMax(Level.Zero, Level.Param(Core.Names.anon())), Level.Param(Core.Names.anon())) => true
+    isGeq(Level.Max(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("u"), sampleParam("v"))) => true
+    isGeq(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u")) => false
 
 fn geqCore(a: Level, b: Level) -> Bool
     ? "Equal sides or a zero right side; then max on the right splits."
     match Bool.or(a == b, isZero(b))
         true -> true
         false -> match b
-            Level.Max(c, d) -> Bool.and(isGeq(a, c), isGeq(a, d))
+            Level.Max(c, d) -> Bool.and(geqRef(a, c), geqRef(a, d))
             _ -> geqLeftMax(a, b)
 
 verify geqCore
@@ -745,7 +939,7 @@ verify geqCore
 fn geqLeftMax(a: Level, b: Level) -> Bool
     ? "A max on the left wins if either side does."
     match a
-        Level.Max(c, d) -> match Bool.or(isGeq(c, b), isGeq(d, b))
+        Level.Max(c, d) -> match Bool.or(geqRef(c, b), geqRef(d, b))
             true -> true
             false -> geqImax(a, b)
         _ -> geqImax(a, b)
@@ -756,9 +950,9 @@ verify geqLeftMax
 fn geqImax(a: Level, b: Level) -> Bool
     ? "imax on the right splits; imax on the left is judged by its right side."
     match b
-        Level.IMax(c, d) -> Bool.and(isGeq(a, c), isGeq(a, d))
+        Level.IMax(c, d) -> Bool.and(geqRef(a, c), geqRef(a, d))
         _ -> match a
-            Level.IMax(_, d) -> isGeq(d, b)
+            Level.IMax(_, d) -> geqRef(d, b)
             _ -> geqOffsets(toOffset(a), toOffset(b))
 
 verify geqImax
@@ -769,7 +963,7 @@ fn geqOffsets(oa: Offset, ob: Offset) -> Bool
     match Bool.or(oa.base == ob.base, isZero(ob.base))
         true -> oa.k >= ob.k
         false -> match Bool.and(oa.k == ob.k, oa.k > 0)
-            true -> isGeq(oa.base, ob.base)
+            true -> geqRef(oa.base, ob.base)
             false -> false
 
 verify geqOffsets
