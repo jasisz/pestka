@@ -32,6 +32,15 @@
 # rejected; in malformed/ made from them by hand: isReflexive on one type of
 # a block only, on one block of a file only, and a type with neither flags
 # nor isReflexive.
+# renov_rules_* (wellformed/ and illtyped/) test the renovation's new rules
+# with the same toolchain: Quot in Sort (max 1 u) (lean4#15023), level
+# comparison with imax, eta for partial applications of constructors and
+# recursors (lean4#15373, lean4#15374) and unit-like types (lean4#15372).
+# Most are the Arena beta's renovation tests 100-129; eta_rec_minors* and
+# unitlike_pi17/pi40/wrap20 (and their _bool counterparts, which must be
+# rejected) come from Gruszka's tests/adv, made from 120_unitLikeNested:
+# functions of 17 and 40 arguments into a unit-like type, a unit-like type
+# wrapped 20 times, and a recursor missing its minors and major premise.
 #   unsupported/  2 (declined: format version)
 # and every export tests/soundness.py kept under tests/soundness-findings, each
 # invalid, against 1 (rejected).
