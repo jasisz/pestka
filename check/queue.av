@@ -91,6 +91,12 @@ record Queue
     lanes: List<Check.Decl.Checked>
     say: Bool
     since: Int
+    owns: List<Own>
+
+record Own
+    worker: Int
+    jobs: List<Check.Decl.Pre>
+    keep: Int
 
 decision QuantaOfWork
     date = "2026-11-24"
@@ -103,14 +109,29 @@ decision QuantaOfWork
         "180 to 560 s on run349 and run124. So a job's portion only says"
         "where it may go; how far it goes is a quantum of work. Work is what"
         "a check counts anyway, the whnf results it stores (Facts.work). The"
-        "quantum is 100 times what main spends a job, turned into work at"
-        "the rate the workers worked: main's time is the time since checking"
-        "began less the time it waited in Wait.poll, over the jobs it took;"
-        "the rate is the work the jobs did over the milliseconds they ran."
-        "So main's share of a job is at most 1% by construction, and no"
-        "worker runs more than a quantum and one declaration past the"
-        "others while anything is left. The 100 is that bound, not a tuned"
-        "number. Before the rate is known a worker's job may check one"
+        "quantum is 100 times how long a job waits on main, turned into work"
+        "at the rate the workers worked. A job waits on main as long as main"
+        "spends a job, over the share of its time main is free: main's time"
+        "is the time since checking began less the time it waited in"
+        "Wait.poll, over the jobs it took, and the share free is the time it"
+        "waited over the time since checking began (a queue of one server,"
+        "whose answer takes its service time over one less its load). The"
+        "rate is the work the jobs did over the milliseconds they ran. So a"
+        "job's wait on main is at most 1% of the job by construction, and no"
+        "worker runs more than a quantum and one declaration past the others"
+        "while anything is left. The 100 is that bound, not a tuned number."
+        "With main's time a job alone the bound held only while main was"
+        "seldom busy: as it got busier a job's milliseconds, taken when main"
+        "got to it, grew with main's delay, the rate fell, the quantum with"
+        "it and main got busier still (run349 on AWS: about 15000 on 16"
+        "workers, 0 to 2 on 32, 74 to 78 thousand jobs of one declaration in"
+        "the first 7.5 s, the machine 72% busy). With the share free in it"
+        "the quantum grows as main gets busy, so main is never the bound,"
+        "and while main is mostly free it stays as it was: making it as many"
+        "times larger as there are workers kept main free as well, but made"
+        "jobs twelve times as long on 12 workers whether main was busy or"
+        "not."
+        "Before the rate is known a worker's job may check one"
         "declaration, then two, four and so on, and do as much work as it"
         "may check declarations: declarations that store no whnf result"
         "would otherwise grow the count until one job of thousands ran on"
@@ -118,13 +139,19 @@ decision QuantaOfWork
         "declarations begun before any work was seen ran 283 s while the"
         "other workers ended at 60 s). The same number bounds both, so"
         "every job has a bound, passed by one declaration at most, and no"
-        "number is added. A job that reaches its"
+        "number is added. The count is never more than all jobs have"
+        "checked so far: a worker whose jobs of cheap declarations ended at"
+        "once doubled its count 38 times in the first 0.1 s, and its job"
+        "of 11536 declarations at the start of run349 ran 282 s on 8 workers"
+        "with that as its bound. A job that reaches its"
         "quantum, or the first declaration whose block main has not read,"
         "hands the rest of its portion back. Main reads only what a quantum"
         "needs, at the rate cost came with work, so the blocks held are a"
         "quantum's, not a portion's. A rest handed back goes to the workers"
-        "that wait, halved while there are more of them, before any new"
-        "portion; a worker with nothing to do waits, its facts kept, while"
+        "that wait, split evenly among them, one declaration each when it"
+        "has no more than there are workers waiting, before any new portion"
+        "(halving it left 22 declarations as 11, 6, 3, 1, 1, 1 with 60"
+        "workers waiting, the heavy ones run three or four after another); a worker with nothing to do waits, its facts kept, while"
         "any job is in flight, since a job may yet hand work back. New"
         "portions are guided, the cost left over twice the workers"
         "(factoring), in the order the runs had. Every job is said with"
@@ -135,7 +162,7 @@ decision QuantaOfWork
         "the file."
     chosen = "QuantaOfWork"
     rejected = ["RunsPerWorkerFixed", "PortionsGuided", "PortionsSpilledToTheSameWorker"]
-    impacts = [queued, dispatched, given, quantumOf, budgetOf, came, idled, waited]
+    impacts = [queued, dispatched, splitFor, evenPart, given, mostOf, quantumOf, budgetOf, came, idled, waited]
 
 fn queued(env: Env, runs: List<Check.Decl.Chunk>, w: Int) -> List<Check.Decl.Checked>
     ? "The runs on w workers, as jobs of a quantum of work each (QuantaOfWork)."
@@ -147,7 +174,7 @@ fn queued(env: Env, runs: List<Check.Decl.Chunk>, w: Int) -> List<Check.Decl.Che
 fn emptyQueue() -> Queue
     ? "A queue with nothing to do, for examples."
     none: Map<Int, Wait.Item> = {}
-    Queue(env = Check.State.envEmpty(), ahead = [], left = 0, template = Check.State.limitsOf(1, Memory.Fast), share = 2, made = 0, spills = [], pending = none, busy = {}, began = {}, most = {}, idle = [], start = 0, waits = 0, handled = 0, workMs = 0, wsum = 0, csum = 0, best = Option.None, at = 0, count = 0, lanes = [], say = false, since = 0)
+    Queue(env = Check.State.envEmpty(), ahead = [], left = 0, template = Check.State.limitsOf(1, Memory.Fast), share = 2, made = 0, spills = [], pending = none, busy = {}, began = {}, most = {}, idle = [], start = 0, waits = 0, handled = 0, workMs = 0, wsum = 0, csum = 0, best = Option.None, at = 0, count = 0, lanes = [], say = false, since = 0, owns = [])
 
 verify emptyQueue
     emptyQueue().count => 0
@@ -310,22 +337,155 @@ verify latered
     latered([], []) => []
 
 fn dispatched(q: Queue) -> Queue
-    ? "Work handed to the waiting workers while there is any: a rest handed back first, halved while more than one worker waits, then a new portion, the cost left over twice the workers (QuantaOfWork)."
+    ? "Work handed to the waiting workers while there is any: a rest handed back first, split evenly among the workers that wait, then a new portion, the cost left over twice the workers; with neither, the rest of a job run past its time taken back (QuantaOfWork, RestTakenFromLongJobs)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
     match workersOf(q.idle)
         [] -> q
         [s, ..others] -> match q.spills
             [n, ..rest] -> splitFor(Queue.update(q, spills = rest), s, n, List.len(others))
             [] -> match q.ahead
-                [] -> q
+                [] -> stolen(q, Time.unixMs())
                 _ -> fresh(q, s, portion(q.ahead, Result.withDefault(Int.div(q.left + q.share - 1, q.share), q.left), [], 0))
 
-fn splitFor(q: Queue, s: Int, n: Next, waiting: Int) -> Queue
-    ? "Worker s gets a rest, or its first half when another worker waits too."
+decision RestTakenFromLongJobs
+    date = "2026-11-24"
+    reason =
+        "A job checks its declarations in order, so the ones behind a long"
+        "declaration wait for it: on run349 at 64 workers a lane 27.8 s in"
+        "one declaration held 19 to 53 behind it while some 60 lanes had"
+        "nothing to do, and handed them back only when it ended. A job is"
+        "pure and holds no channel back to main (Work in Aver), so main"
+        "cannot tell it to stop, and generated Rust does not stop a"
+        "cancelled job. But main knows how long jobs run: the milliseconds"
+        "the jobs it took ran, over those jobs. A job past that time has"
+        "most likely done its quantum of work (QuantaOfWork), and then it"
+        "hands back at its next declaration whatever is behind it. The"
+        "quantum's own time, 100 times main's milliseconds a job times the"
+        "workers, was too short a measure: jobs ran about ten times longer"
+        "on run349 at 12 workers, since the rate is an average over work"
+        "that comes at very different speeds, and jobs taken from were"
+        "still going and checked 905 declarations a second time. So when workers wait and"
+        "nothing is left to hand out, main takes back the back half of what"
+        "such a job holds and hands it out as a rest, split evenly among the workers that wait, and again while"
+        "workers wait, down to the declaration the job is likely in. Taking"
+        "all but its first at once moved a heavy family on run349 at 4"
+        "workers one declaration a job from worker to worker, each without"
+        "the facts the one before left (195 s against 171 s, stopped by the"
+        "guard at 12 GB); taking halves leaves both the job and the one that took"
+        "from it a run in file order, and a job over its quantum that hands"
+        "back its rest gets it back itself when it is the only worker that"
+        "waits. A job with nothing to take is"
+        "left alone, and main's wait ends when the next job in flight"
+        "passes its time. When the job ends, what it hands back is cut to"
+        "the declarations it still holds, and a declaration it checked"
+        "after main took it back is counted only once, by the job it went"
+        "to: with no failure every declaration a job got and passed was"
+        "checked, and with a failure the count is not said. A declaration"
+        "checked twice costs time, never the verdict: checking is pure, and"
+        "the earliest failure in the file is kept whichever job found it."
+    chosen = "RestTakenFromLongJobs"
+    rejected = ["RestHandedBackWhenTheJobEnds", "JobsCancelledAndBegunAgain", "OneDeclarationJobsInTheTail"]
+    impacts = [dispatched, stolen, victimOf, targetMs, came, trimmed, twice, waited, timeoutOf]
+
+fn stolen(q: Queue, now: Int) -> Queue
+    ? "With workers waiting and nothing to hand out, the back half of what it holds taken back from the job run past its time with the most declarations, and handed out as a rest (RestTakenFromLongJobs)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
-    match Bool.and(waiting > 0, List.len(n.jobs) > 1)
+    match victimOf(q.owns, q.began, now, targetMs(q, now), Option.None)
+        Option.None -> q
+        Option.Some(o) -> tookBack(q, o, Option.withDefault(Map.get(q.busy, o.worker), q.template))
+
+fn tookBack(q: Queue, o: Own, l: Limits) -> Queue
+    ? "The back half of what o holds handed out as a rest, o left holding the front half, said when asked (RestTakenFromLongJobs)."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
+    front = evenPart(o.keep, 2)
+    Check.Decl.said(l, "job {l.run} on worker {o.worker + 1}: {o.keep - front} declarations taken back")
+    dispatched(Queue.update(q, owns = ownsWith(q.owns, Own.update(o, keep = front), []), spills = List.prepend(Next(limits = l, jobs = List.drop(List.take(o.jobs, o.keep), front)), q.spills)))
+
+fn victimOf(os: List<Own>, began: Map<Int, Int>, now: Int, target: Int, best: Option<Own>) -> Option<Own>
+    ? "The job run past its time that holds the most declarations past its first, when any does (RestTakenFromLongJobs)."
+    match os
+        [] -> best
+        [o, ..rest] -> match Bool.and(Bool.and(target > 0, o.keep > 1), now - Option.withDefault(Map.get(began, o.worker), now) >= target)
+            false -> victimOf(rest, began, now, target, best)
+            true -> victimOf(rest, began, now, target, moreHeld(o, best))
+
+verify victimOf
+    victimOf([], {}, 5, 1, Option.None) == Option.None => true
+    victimOf([Own(worker = 0, jobs = [], keep = 3)], {0 => 0}, 5, 10, Option.None) == Option.None => true
+    victimOf([Own(worker = 0, jobs = [], keep = 3)], {0 => 0}, 15, 10, Option.None) == Option.Some(Own(worker = 0, jobs = [], keep = 3)) => true
+    victimOf([Own(worker = 0, jobs = [], keep = 1)], {0 => 0}, 15, 10, Option.None) == Option.None => true
+
+fn moreHeld(o: Own, best: Option<Own>) -> Option<Own>
+    ? "o, or best when that holds more."
+    match best
+        Option.Some(b) -> match b.keep >= o.keep
+            true -> best
+            false -> Option.Some(o)
+        Option.None -> Option.Some(o)
+
+verify moreHeld
+    moreHeld(Own(worker = 1, jobs = [], keep = 2), Option.Some(Own(worker = 0, jobs = [], keep = 3))) == Option.Some(Own(worker = 0, jobs = [], keep = 3)) => true
+
+fn ownsWith(os: List<Own>, o: Own, acc: List<Own>) -> List<Own>
+    ? "The jobs in flight with o in place of the entry its worker had, or added."
+    match os
+        [] -> List.reverse(List.prepend(o, acc))
+        [x, ..rest] -> match x.worker == o.worker
+            true -> List.reverse(ontoOwns(acc, List.prepend(o, rest)))
+            false -> ownsWith(rest, o, List.prepend(x, acc))
+
+verify ownsWith
+    List.len(ownsWith([Own(worker = 0, jobs = [], keep = 3)], Own(worker = 0, jobs = [], keep = 1), [])) => 1
+    List.len(ownsWith([Own(worker = 0, jobs = [], keep = 3)], Own(worker = 1, jobs = [], keep = 1), [])) => 2
+
+fn ontoOwns(acc: List<Own>, xs: List<Own>) -> List<Own>
+    ? "xs put in front of acc one by one, so reversing the result gives acc's order back followed by xs."
+    match xs
+        [] -> acc
+        [x, ..rest] -> ontoOwns(List.prepend(x, acc), rest)
+
+verify ontoOwns
+    ontoOwns([], []) => []
+
+fn ownOf(os: List<Own>, k: Int) -> Option<Own>
+    ? "Worker k's job in flight, as main handed it out."
+    match os
+        [] -> Option.None
+        [o, ..rest] -> match o.worker == k
+            true -> Option.Some(o)
+            false -> ownOf(rest, k)
+
+verify ownOf
+    ownOf([], 1) == Option.None => true
+
+fn ownsWithout(os: List<Own>, k: Int, acc: List<Own>) -> List<Own>
+    ? "The jobs in flight but worker k's."
+    match os
+        [] -> List.reverse(acc)
+        [o, ..rest] -> match o.worker == k
+            true -> List.reverse(ontoOwns(acc, rest))
+            false -> ownsWithout(rest, k, List.prepend(o, acc))
+
+verify ownsWithout
+    List.len(ownsWithout([Own(worker = 0, jobs = [], keep = 3), Own(worker = 1, jobs = [], keep = 3)], 0, [])) => 1
+
+fn splitFor(q: Queue, s: Int, n: Next, waiting: Int) -> Queue
+    ? "Worker s gets a rest, or its even part among s and the other workers that wait, rounded up, the others' parts put first again (QuantaOfWork)."
+    ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
+    part = evenPart(List.len(n.jobs), waiting + 1)
+    match part < List.len(n.jobs)
         false -> dispatched(given(q, s, n))
-        true -> dispatched(given(Queue.update(q, spills = List.prepend(Next(limits = n.limits, jobs = List.drop(n.jobs, Int.div(List.len(n.jobs), 2))), q.spills)), s, Next(limits = n.limits, jobs = List.take(n.jobs, Int.div(List.len(n.jobs), 2)))))
+        true -> dispatched(given(Queue.update(q, spills = List.prepend(Next(limits = n.limits, jobs = List.drop(n.jobs, part)), q.spills)), s, Next(limits = n.limits, jobs = List.take(n.jobs, part))))
+
+fn evenPart(n: Int, ways: Int) -> Int
+    ? "n split ways ways, rounded up: one each while n is no more than ways."
+    Result.withDefault(Int.div(n + ways - 1, Int.max(ways, 1)), n)
+
+verify evenPart
+    evenPart(22, 60) => 1
+    evenPart(22, 1) => 22
+    evenPart(22, 4) => 6
+    evenPart(0, 3) => 0
 
 fn fresh(q: Queue, s: Int, p: Portion) -> Queue
     ? "Worker s gets a new portion."
@@ -339,11 +499,20 @@ fn given(q: Queue, s: Int, n: Next) -> Queue
     kept = i.kept
     held = i.held
     quantum = quantumOf(q, Time.unixMs())
-    most = Option.withDefault(Map.get(q.most, s), 1)
+    most = mostOf(Option.withDefault(Map.get(q.most, s), 1), q.count)
     l = Limits.update(n.limits, worker = s + 1, run = q.made + 1)
     jobs = readFor(q, n.jobs, quantum, most)
-    q2 = Queue.update(q, idle = idleWithout(q.idle, s, []), made = q.made + 1, began = Map.set(q.began, s, Time.unixMs()), most = Map.set(q.most, s, 2 * most))
+    q2 = Queue.update(q, idle = idleWithout(q.idle, s, []), made = q.made + 1, began = Map.set(q.began, s, Time.unixMs()), most = Map.set(q.most, s, 2 * most), owns = ownsWith(q.owns, Own(worker = s, jobs = jobs, keep = List.len(jobs)), []))
     launched(q2, s, Check.Decl.taskOf(q2.env, held, jobs, l, kept, q2.best, q2.at, budgetOf(quantum, most), countOf(quantum, most)), l, jobs, quantum)
+
+fn mostOf(doubled: Int, checked: Int) -> Int
+    ? "How many declarations a job may check before the rate is known: the worker's count doubled with each of its jobs, but never more than all jobs have checked so far (QuantaOfWork)."
+    Int.min(doubled, Int.max(checked, 1))
+
+verify mostOf
+    mostOf(1, 0) => 1
+    mostOf(1099511627776, 5000) => 5000
+    mostOf(8, 5000) => 8
 
 fn countOf(quantum: Int, most: Int) -> Int
     ? "How many declarations a job may check: none set once there is a quantum."
@@ -373,14 +542,25 @@ fn readFor(q: Queue, jobs: List<Check.Decl.Pre>, quantum: Int, most: Int) -> Lis
         false -> Check.Decl.readPrefix(jobs, 0, most, [])
 
 fn quantumOf(q: Queue, now: Int) -> Int
-    ? "The quantum of work: 100 times main's milliseconds a job, at the work a millisecond the workers did; -1 until both are measured (QuantaOfWork)."
+    ? "The quantum of work: 100 times how long a job waits on main, main's milliseconds a job over the share of the time main waited, at the work a millisecond the workers did; -1 until both are measured (QuantaOfWork)."
     match Bool.or(Bool.or(q.handled == 0, q.workMs == 0), q.wsum == 0)
         true -> -1
-        false -> Result.withDefault(Int.div(100 * mainMs(q, now) * q.wsum, q.handled * q.workMs), -1)
+        false -> Result.withDefault(Int.div(100 * mainMs(q, now) * Int.max(now - q.start, 1) * q.wsum, q.handled * q.workMs * Int.max(q.waits, 1)), -1)
 
 verify quantumOf
     quantumOf(emptyQueue(), 5) => -1
-    quantumOf(Queue.update(emptyQueue(), handled = 10, workMs = 1000, wsum = 5000), 10) => 500
+    quantumOf(Queue.update(emptyQueue(), handled = 10, workMs = 1000, wsum = 5000, waits = 9), 10) => 55
+    quantumOf(Queue.update(emptyQueue(), handled = 10, workMs = 1000, wsum = 5000, waits = 5), 10) => 500
+
+fn targetMs(q: Queue, now: Int) -> Int
+    ? "How long a job runs, in milliseconds: as long as the jobs taken ran on average; -1 before any job ended (RestTakenFromLongJobs)."
+    match q.handled == 0
+        true -> -1
+        false -> Result.withDefault(Int.div(q.workMs, q.handled), -1)
+
+verify targetMs
+    targetMs(emptyQueue(), 5) => -1
+    targetMs(Queue.update(emptyQueue(), handled = 10, workMs = 4000), 10) => 400
 
 fn mainMs(q: Queue, now: Int) -> Int
     ? "What main spent so far, at now: the time since checking began less the time it waited."
@@ -439,7 +619,46 @@ fn waited(q: Queue) -> List<Check.Decl.Checked>
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match Map.len(q.pending) == 0
         true -> List.prepend(Check.Decl.tally(q.best, q.at, q.count), lanesHeld(q.idle, q.lanes))
-        false -> answered(q, Time.unixMs(), Wait.poll(q.pending, 3600000))
+        false -> answered(q, Time.unixMs(), Wait.poll(q.pending, timeoutOf(q, Time.unixMs())))
+
+fn timeoutOf(q: Queue, now: Int) -> Int
+    ? "How long main waits for a job to end: until the next job in flight with declarations to take back passes its time while workers wait with nothing to hand out, else an hour (RestTakenFromLongJobs)."
+    match Bool.and(Bool.and(List.len(q.idle) > 0, nothingSpilt(q.spills)), Bool.and(nothingAhead(q.ahead), targetMs(q, now) > 0))
+        false -> 3600000
+        true -> Int.max(1, Int.min(3600000, nextDue(q.owns, q.began, targetMs(q, now), 3600000 + now) - now))
+
+fn nothingSpilt(xs: List<Next>) -> Bool
+    ? "No rest is waiting to be handed out."
+    match xs
+        [] -> true
+        _ -> false
+
+verify nothingSpilt
+    nothingSpilt([]) => true
+
+fn nothingAhead(xs: List<Check.Decl.Job>) -> Bool
+    ? "No new portion is left."
+    match xs
+        [] -> true
+        _ -> false
+
+verify nothingAhead
+    nothingAhead([]) => true
+
+verify timeoutOf
+    timeoutOf(emptyQueue(), 5) => 3600000
+
+fn nextDue(os: List<Own>, began: Map<Int, Int>, target: Int, best: Int) -> Int
+    ? "When the first job in flight with declarations past its first passes its time."
+    match os
+        [] -> best
+        [o, ..rest] -> match o.keep > 1
+            false -> nextDue(rest, began, target, best)
+            true -> nextDue(rest, began, target, Int.min(best, Option.withDefault(Map.get(began, o.worker), 0) + target))
+
+verify nextDue
+    nextDue([], {}, 10, 99) => 99
+    nextDue([Own(worker = 0, jobs = [], keep = 2)], {0 => 5}, 10, 99) => 15
 
 fn lanesHeld(ks: List<Idle>, acc: List<Check.Decl.Checked>) -> List<Check.Decl.Checked>
     ? "Each waiting worker's facts, held to the end."
@@ -479,14 +698,42 @@ fn took(q: Queue, k: Int, r: Result<Option<Check.Decl.Done>, String>) -> Queue
         Result.Ok(Option.Some(d)) -> came(Queue.update(q, pending = Map.remove(q.pending, k), handled = q.handled + 1), k, d)
         Result.Err(e) -> failedAll(Queue.update(q, pending = Map.remove(q.pending, k)), "a run ended without its answer: {e}")
 
-fn came(q: Queue, k: Int, d: Check.Decl.Done) -> Queue
-    ? "What worker k's job found: its failure kept when it is the earliest; a block it wanted read and the rest begun with it on the same worker; otherwise its rest handed back and the worker waiting for work (QuantaOfWork)."
+fn came(q: Queue, k: Int, d0: Check.Decl.Done) -> Queue
+    ? "What worker k's job found, cut to the declarations it still held (RestTakenFromLongJobs): its failure kept when it is the earliest; a block it wanted read and the rest begun with it on the same worker; otherwise its rest handed back and the worker waiting for work (QuantaOfWork)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
+    d = trimmed(d0, ownOf(q.owns, k))
     l = Option.withDefault(Map.get(q.busy, k), Check.State.limitsOf(1, Memory.Fast))
-    q2 = Queue.update(earliest(q, l, d.fail, d.at), count = q.count + d.count, busy = Map.remove(q.busy, k), workMs = q.workMs + Int.max(Time.unixMs() - Option.withDefault(Map.get(q.began, k), Time.unixMs()), 0), wsum = q.wsum + d.work, csum = q.csum + d.cost)
+    twice(l, k, d0.count - d.count)
+    q2 = Queue.update(earliest(q, l, d.fail, d.at), count = q.count + d.count, busy = Map.remove(q.busy, k), owns = ownsWithout(q.owns, k, []), workMs = q.workMs + Int.max(Time.unixMs() - Option.withDefault(Map.get(q.began, k), Time.unixMs()), 0), wsum = q.wsum + d.work, csum = q.csum + d.cost)
     match d.wants
         Option.Some(w) -> wanted(q2, k, l, w, Check.Decl.readSpot(w), d)
         Option.None -> ranOut(q2, k, l, d)
+
+fn trimmed(d: Check.Decl.Done, o: Option<Own>) -> Check.Decl.Done
+    ? "A job's answer cut to the declarations it still held when main took some back: its rest only up to them, and those it checked past them not counted, as the job they went to counts them; a block wanted past them not wanted (RestTakenFromLongJobs)."
+    match o
+        Option.None -> d
+        Option.Some(own) -> cutAt(d, List.len(own.jobs) - List.len(d.left), own.keep)
+
+verify trimmed
+    trimmed(Check.Decl.Done(kept = Check.Decl.noFacts(), held = {}, count = 4, fail = Option.None, at = 0, wants = Option.None, left = [], work = 0, cost = 0), Option.None).count => 4
+
+fn cutAt(d: Check.Decl.Done, passed: Int, keep: Int) -> Check.Decl.Done
+    ? "d of a job that passed passed declarations and still held its first keep."
+    match passed >= keep
+        true -> Check.Decl.Done.update(d, count = d.count - (passed - keep), left = [], wants = Option.None)
+        false -> Check.Decl.Done.update(d, left = List.take(d.left, keep - passed))
+
+verify cutAt
+    cutAt(Check.Decl.Done(kept = Check.Decl.noFacts(), held = {}, count = 5, fail = Option.None, at = 0, wants = Option.None, left = [], work = 0, cost = 0), 5, 2).count => 2
+    cutAt(Check.Decl.Done(kept = Check.Decl.noFacts(), held = {}, count = 5, fail = Option.None, at = 0, wants = Option.None, left = [], work = 0, cost = 0), 5, 5).count => 5
+
+fn twice(l: Limits, k: Int, n: Int) -> Unit
+    ? "How many declarations a job checked after main took them back, said when asked and there are any (RestTakenFromLongJobs)."
+    ! [Console.error, Time.unixMs]
+    match n > 0
+        false -> Unit
+        true -> Check.Decl.said(l, "job {l.run} on worker {k + 1}: {n} declarations checked again")
 
 fn ranOut(q: Queue, k: Int, l: Limits, d: Check.Decl.Done) -> Queue
     ? "A job done, said when asked; its rest goes back first, and worker k waits for work."
