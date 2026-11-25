@@ -421,8 +421,8 @@ verify sameRules
     sameRules([], []) => true
 
 fn addQuotDecl(env: Env, h: Head, kind: QuotKind) -> Result<Env, Fail>
-    ? "Adds the quotient package if needed, then compares the stated constant with the built one. A name a quotient record already stated is a duplicate declaration: the environment holds the constants the package derives either way, so statedness is tracked beside it."
-    env2 = Check.Quot.addQuot(env)?
+    ? "Adds the quotient package if needed, Quot in Sort (max 1 u) when this record brings it in and states that (QuotSortFromRecord in Check.Quot), then compares the stated constant with the built one. A name a quotient record already stated is a duplicate declaration: the environment holds the constants the package derives either way, so statedness is tracked beside it."
+    env2 = Check.Quot.addQuotIn(env, Bool.and(kind == QuotKind.QType, h.ty == Check.Quot.quotType(env, true)))?
     match Check.State.quotSeen(env2, h.name)
         true -> Result.Err(reject("'{nm(h.name)}' has already been declared"))
         false -> match Check.State.envGet(env2, h.name)
