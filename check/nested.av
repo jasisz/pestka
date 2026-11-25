@@ -318,7 +318,7 @@ fn nestedFound(ns: NS, as: List<Expr>, e: Expr, iv: IndType) -> Result<NO, Fail>
         Option.None -> createGroup(ns, as, iv, Core.Apps.fnOf(e), args)
 
 verify nestedFound
-    nestedFound(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [(Core.Exprs.fvar(0), Core.Names.anon())], types = [], next = 1), [], Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) == Result.Err(Fail.Reject("x")) => false
+    nestedFound(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [(Core.Exprs.fvar(0), Core.Names.anon())], types = [], next = 1), [], Core.Exprs.app(Core.Exprs.fvar(0), Core.Exprs.fvar(1)), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None)) == Result.Err(Fail.Reject("x")) => false
 
 fn auxApp(ns: NS, aux: Name, as: List<Expr>, rest: List<Expr>) -> Expr
     ? "auxI As is."
@@ -348,7 +348,7 @@ fn createGroup(ns: NS, as: List<Expr>, iv: IndType, fn0: Expr, args: List<Expr>)
     Result.Ok(NO(ns = r.ns, o = r.result))
 
 verify createGroup
-    createGroup(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None), Core.Exprs.fvar(0), []) => Result.Ok(NO(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), o = Option.None))
+    createGroup(NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None), Core.Exprs.fvar(0), []) => Result.Ok(NO(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), o = Option.None))
 
 fn groupMembers(gr: GR, as: List<Expr>, iv: IndType, iName: Option<Name>, fn0: Expr, args: List<Expr>, js: List<Name>) -> Result<GR, Fail>
     ? "Creates each member's auxiliary type and constructors."
@@ -357,7 +357,7 @@ fn groupMembers(gr: GR, as: List<Expr>, iv: IndType, iName: Option<Name>, fn0: E
         [j, ..rest] -> groupMembers(oneMember(gr, as, iv, iName, fn0, args, j, uniqueName(gr.ns, concatNames(nestedPrefix(), j), gr.ns.next))?, as, iv, iName, fn0, args, rest)
 
 verify groupMembers
-    groupMembers(GR(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), result = Option.None), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None), Option.None, Core.Exprs.fvar(0), [], []) == Result.Err(Fail.Reject("x")) => false
+    groupMembers(GR(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), result = Option.None), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None), Option.None, Core.Exprs.fvar(0), [], []) == Result.Err(Fail.Reject("x")) => false
 
 record UN
     name: Name
@@ -395,7 +395,7 @@ fn oneMember(gr: GR, as: List<Expr>, iv: IndType, iName: Option<Name>, fn0: Expr
         false -> Result.Ok(GR(ns = ns2, result = gr.result))
 
 verify oneMember
-    oneMember(GR(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), result = Option.None), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None), Option.None, Core.Exprs.fvar(0), [], Core.Names.anon(), UN(name = Core.Names.anon(), next = 2)) => Result.Err(Fail.Reject("invalid nested inductive datatype, ill-formed declaration"))
+    oneMember(GR(ns = NS(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), env = Check.State.envEmpty(), params = [], nparams = 0, lvls = [], aux = [], types = [], next = 1), result = Option.None), [], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None), Option.None, Core.Exprs.fvar(0), [], Core.Names.anon(), UN(name = Core.Names.anon(), next = 2)) => Result.Err(Fail.Reject("invalid nested inductive datatype, ill-formed declaration"))
 
 decision AuxFlagsFromBlockAndMember
     date = "2026-11-24"

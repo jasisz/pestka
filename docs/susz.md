@@ -30,6 +30,17 @@ Flagged inductive blocks (kind 7, with the FLAGS section) are read as the
 spec says. A file with FLAGS must have only flagged blocks: a kind-5 block in
 it is rejected at its record, as Gruszka does.
 
+Flagged blocks without `isReflexive` (kind 8, with the FLAGS and NOREFL
+sections), which current Lean exports pack to, are read as the spec says
+too. Their types have no `isReflexive`: it is not given, which Pestka does
+not read as `false`, and as there is nothing to compare it with, Pestka does
+not compute it either. A file with NOREFL must have only kind-8 blocks, and
+FLAGS; a kind-8 block in a file without them is rejected at its record. Kind
+7 is transitional in the spec and still read. `main pack` writes kind 8 for
+an export whose flagged types leave out `isReflexive`, and refuses one whose
+types carry it in one block and not in another, or carry flags in one and
+not in another, as `susz pack` does.
+
 Nor does it hold PROOFS. A theorem's proof block is read from the file when
 the worker checking the theorem gets to it, and dropped after its check. A
 declaration that unfolds a theorem whose block its worker does not hold

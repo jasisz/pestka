@@ -455,20 +455,46 @@ verify largeElimFits
     largeElimFits(Check.Blk.start([], 0, [TypeIn(name = Core.Names.anon(), ty = Core.Exprs.bvar(0), ctors = [], flags = Option.None)], 0), false) => true
 
 fn declareTypes(bs: BS) -> BS
-    ? "Adds the types with the flags the kernel computes (recursive, reflexive, nested count) and the renovation's flags as checked (FlagsWhereGiven)."
-    BS(blk = bs.blk, st = St.update(bs.st, block = typeConsts(bs.st.block, bs.blk, bs.blk.types, 0, anyRec(bs.blk.types, bs.blk.names), anyReflexive(bs.blk.types, bs.blk.names))))
+    ? "Adds the types with the flags the kernel computes (recursive, reflexive where the export gives it, nested count) and the renovation's flags as checked (FlagsWhereGiven, ReflexiveWhereGiven)."
+    BS(blk = bs.blk, st = St.update(bs.st, block = typeConsts(bs.st.block, bs.blk, bs.blk.types, 0, anyRec(bs.blk.types, bs.blk.names), reflexiveOf(bs.blk))))
 
 verify declareTypes
     Map.len(declareTypes(BS(blk = Check.Blk.start([], 0, [], 0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).st.block) => 0
 
-fn typeConsts(env: Map<Name, Const>, blk: Blk, ts: List<TypeIn>, idx: Int, isRec: Bool, isRefl: Bool) -> Map<Name, Const>
+decision ReflexiveWhereGiven
+    date = "2026-11-25"
+    reason =
+        "isReflexive, whether a constructor takes a function into a type of"
+        "the block, is no input of the kernel: nothing in checking or"
+        "reduction turns on it, and Pestka only computes it to compare it"
+        "with the export's claim, as it does isRec. Lean dropped it from"
+        "InductiveVal with the renovation (lean4#16595, at 55bd690), and its"
+        "exports no longer write it (Susz kind 8). Then there is nothing to"
+        "compare with, and the reference kernel no longer computes it, so"
+        "neither does Pestka: the derived type says None, as the read one"
+        "does, which is not false (Susz 1 spec, section 5.2)."
+    chosen = "ReflexiveWhereGiven"
+    rejected = ["AlwaysComputeReflexive", "MissingMeansFalse"]
+    impacts = [declareTypes, reflexiveOf]
+
+fn reflexiveOf(blk: Blk) -> Option<Bool>
+    ? "isReflexive as the kernel computes it, when the export gives it to compare with (ReflexiveWhereGiven)."
+    match blk.reflexive
+        true -> Option.Some(anyReflexive(blk.types, blk.names))
+        false -> Option.None
+
+verify reflexiveOf
+    reflexiveOf(Check.Blk.start([], 0, [], 0)) => Option.Some(false)
+    reflexiveOf(Blk.update(Check.Blk.start([], 0, [], 0), reflexive = false)) => Option.None
+
+fn typeConsts(env: Map<Name, Const>, blk: Blk, ts: List<TypeIn>, idx: Int, isRec: Bool, isRefl: Option<Bool>) -> Map<Name, Const>
     ? "One constant per type."
     match ts
         [] -> env
         [t, ..rest] -> typeConsts(Map.set(env, t.name, Const.CInduct(IndType(head = Head(name = t.name, params = blk.lparams, ty = t.ty), numParams = blk.nparams, numIndices = Check.Blk.nthInt(blk.nindices, idx), all = blk.names, ctors = ctorNames(t.ctors, []), numNested = blk.nnested, isRec = isRec, isUnsafe = false, isReflexive = isRefl, flags = t.flags))), blk, rest, idx + 1, isRec, isRefl)
 
 verify typeConsts
-    Map.len(typeConsts({}, Check.Blk.start([], 0, [], 0), [], 0, false, false)) => 0
+    Map.len(typeConsts({}, Check.Blk.start([], 0, [], 0), [], 0, false, Option.Some(false))) => 0
 
 fn ctorNames(cs: List<CtorIn>, acc: List<Name>) -> List<Name>
     ? "Constructor names in order."

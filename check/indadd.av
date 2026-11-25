@@ -66,7 +66,7 @@ verify findCtor
 
 fn fromFirst(env: Env, first: IndType, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>, tins: List<TypeIn>) -> Result<Map<Name, Const>, Fail>
     ? "The first type gives the universe parameters and the parameter count."
-    blk = Check.Blk.start(first.head.params, first.numParams, tins, 0)
+    blk = Blk.update(Check.Blk.start(first.head.params, first.numParams, tins, 0), reflexive = first.isReflexive != Option.None)
     match anyReserved(tins)
         true -> Result.Err(reject("invalid declaration, it uses the reserved prefix '_nested'"))
         false -> withParams(Check.Nested.paramsAreBinders(env, blk)?, env, blk, types, ctors, recs, tins)
@@ -81,7 +81,7 @@ verify withParams
     withParams(Unit, Check.State.envEmpty(), Check.Blk.start([], 0, [], 0), [], [], [], []) => Result.Ok({})
 
 verify fromFirst
-    fromFirst(Check.State.envEmpty(), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None), [], [], [], []) => Result.Ok({})
+    fromFirst(Check.State.envEmpty(), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None), [], [], [], []) => Result.Ok({})
 
 fn afterUniform(u: Unit, env: Env, blk: Blk, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> Result<Map<Name, Const>, Fail>
     ? "Runs the kernel's steps, then compares with the export."
@@ -94,7 +94,7 @@ verify afterUniform
 fn nestedPath(u: Unit, env: Env, blk: Blk, types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> Result<Map<Name, Const>, Fail>
     ? "Auxiliary types for the nested occurrences, the enlarged block checked, then restored and compared."
     ns = Check.Nested.eliminate(env, blk)?
-    auxEnv = steps(env, Check.Blk.start(blk.lparams, blk.nparams, ns.types, List.len(ns.aux)))?
+    auxEnv = steps(env, Blk.update(Check.Blk.start(blk.lparams, blk.nparams, ns.types, List.len(ns.aux)), reflexive = blk.reflexive))?
     newEnv = Check.Nested.restoreAll(env, auxEnv, blk, ns)?
     compared(compareAll(newEnv, types, ctors, recs)?, newEnv)
 
@@ -358,7 +358,7 @@ fn sameType(g: Option<Const>, t: IndType) -> Bool
         _ -> false
 
 verify sameType
-    sameType(Option.None, IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) => false
+    sameType(Option.None, IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None)) => false
 
 fn ctorsMatch(env: Map<Name, Const>, ctors: List<Ctor>) -> Bool
     ? "All constructors match."

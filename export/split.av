@@ -700,8 +700,7 @@ fn declBody(b: Bytes, k: Int, c: Cur) -> Cur
         2 -> thmBody(b, cHead(b, c))
         3 -> cList(b, cUnsafe(b, cExpr(b, cHead(b, c))))
         4 -> pastByte(cHead(b, c))
-        5 -> indBody(b, c, false)
-        _ -> indBody(b, c, true)
+        _ -> indBody(b, c, k)
 
 fn pastByte(c: Cur) -> Cur
     ? "Past one byte."
@@ -731,27 +730,28 @@ fn asValue(c: Cur, ps: List<Piece>) -> Cur
 verify asValue
     asValue(cur0(0), [Piece.Ref(3)]).pieces => [Piece.Val(3)]
 
-fn indBody(b: Bytes, c: Cur, flagged: Bool) -> Cur
-    ? "Types, constructors, recursors, each counted; in a flagged block (kind 7) each type ends in five flag bytes."
+fn indBody(b: Bytes, c: Cur, kind: Int) -> Cur
+    ? "Types, constructors, recursors, each counted; in a flagged block (kind 7, and kind 8, whose types have no isReflexive) each type ends in five flag bytes."
     nt = rv(b, c.p)
-    ts = indTypes(b, Cur.update(c, p = nt.at), nt.value, flagged)
+    ts = indTypes(b, Cur.update(c, p = nt.at), nt.value, kind)
     nc = rv(b, ts.p)
     cs = indCtors(b, Cur.update(ts, p = nc.at), nc.value)
     nr = rv(b, cs.p)
     indRecs(b, Cur.update(cs, p = nr.at), nr.value)
 
-fn indTypes(b: Bytes, c: Cur, n: Int, flagged: Bool) -> Cur
-    ? "A type: head, unsafe, numParams, numIndices, all, ctors, numNested, isRec, isReflexive, and the five flags in a flagged block."
+fn indTypes(b: Bytes, c: Cur, n: Int, kind: Int) -> Cur
+    ? "A type: head, unsafe, numParams, numIndices, all, ctors, numNested, isRec, isReflexive but in kind 8, and the five flags in a flagged block."
     match n <= 0
         true -> c
-        false -> indTypes(b, indTypeRest(b, cUnsafe(b, cHead(b, c)), flagged), n - 1, flagged)
+        false -> indTypes(b, indTypeRest(b, cUnsafe(b, cHead(b, c)), kind), n - 1, kind)
 
-fn indTypeRest(b: Bytes, c: Cur, flagged: Bool) -> Cur
+fn indTypeRest(b: Bytes, c: Cur, kind: Int) -> Cur
     ? "The type's fields after unsafe."
     q = skipN(b, skipList(b, skipList(b, skipN(b, c.p, 2))), 1)
-    match flagged
-        false -> Cur.update(c, p = next2(q))
-        true -> Cur.update(c, p = past(q, 7))
+    match kind
+        5 -> Cur.update(c, p = next2(q))
+        7 -> Cur.update(c, p = past(q, 7))
+        _ -> Cur.update(c, p = past(q, 6))
 
 fn indCtors(b: Bytes, c: Cur, n: Int) -> Cur
     ? "A constructor: head, unsafe, induct, cidx, numParams, numFields."
@@ -1245,6 +1245,7 @@ record W
     lastDecl: Int
     indexOn: Bool
     flagged: Bool
+    norefl: Bool
 
 fn zeroes(w: W, name: Bool, level: Bool) -> W
     ? "The anonymous name and the level zero have no records: when a block names them, their frontier entries open the main block, 1 back from names 1 and levels 1."
@@ -1277,7 +1278,7 @@ verify zeroed
 
 fn fresh() -> W
     ? "Nothing written yet; names and levels start at 1, after the implicit 0."
-    W(main = [], mainChunks = [], mainBytes = 0, proofs = Bytes.fromList([]), proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = Ix(value = 0), di = Ix(value = 0), mainNext = Ix(value = 0), lazy = 0, open = Vector.fromList([]), hold = acc0(), held = Ix(value = -1), ids = ids0(0), idx = [], lastDecl = 0, indexOn = false, flagged = false)
+    W(main = [], mainChunks = [], mainBytes = 0, proofs = Bytes.fromList([]), proofChunks = [], proofBytes = 0, fN = 0, fL = 0, fE = 0, nameId = 1, levelId = 1, ei = Ix(value = 0), di = Ix(value = 0), mainNext = Ix(value = 0), lazy = 0, open = Vector.fromList([]), hold = acc0(), held = Ix(value = -1), ids = ids0(0), idx = [], lastDecl = 0, indexOn = false, flagged = false, norefl = false)
 
 verify fresh
     fresh().nameId => 1
@@ -1383,7 +1384,8 @@ decision SectionsAndDirectory
     date = "2026-11-12"
     reason =
         "A canonical file (Susz 1 spec, section 9) is the 16-byte header, then"
-        "FLAGS when a block is flagged (empty, so at the same offset), MAIN,"
+        "FLAGS when a block is flagged (empty, so at the same offset),"
+        "NOREFL when a block's types have no isReflexive (empty too), MAIN,"
         "PROOFS when a theorem has a block, INDEX unless --no-index, and"
         "SOURCE, the meta object of the export's header line byte for byte;"
         "then the trailer: the four counts, a directory entry per section in"
@@ -1404,14 +1406,14 @@ fn laid(meta: Bytes, names: Int, levels: Int, decls: Int, exprs: Int, w: W, know
     index = match ws.indexOn
         true -> [indexBytes(decls, ws.idx, known)?]
         false -> []
-    es = sectionEntries(ws.flagged, ws.mainBytes, ws.lazy > 0, ws.proofBytes, ws.indexOn, Bytes.len(joinAll(index)), Bytes.len(meta))
+    es = sectionEntries(ws.flagged, ws.norefl, ws.mainBytes, ws.lazy > 0, ws.proofBytes, ws.indexOn, Bytes.len(joinAll(index)), Bytes.len(meta))
     tr = trailerBytes(names, levels, ws.mainNext.value, decls, es)?
     total = 16 + ws.mainBytes + ws.proofBytes + Bytes.len(joinAll(index)) + Bytes.len(meta) + Bytes.len(tr)
     Result.Ok(Laid(hd = hd, mains = List.reverse(ws.mainChunks), after = List.concat(proofs, List.concat(index, [meta, tr])), message = "names {names - 1}, levels {levels - 1}, expressions {exprs} ({ws.mainNext.value} in MAIN, {exprs - ws.mainNext.value} in {ws.lazy} proof blocks), declarations {decls}, frontier {ws.fN} names, {ws.fL} levels, {ws.fE} expressions, {total} bytes"))
 
 
-fn sectionEntries(flagged: Bool, mainLen: Int, hasProofs: Bool, proofsLen: Int, hasIndex: Bool, indexLen: Int, sourceLen: Int) -> List<Tuple<Int, Int>>
-    ? "Each section's id and length, in the order of the file: FLAGS, empty, when a block is flagged (kind 7), MAIN, PROOFS, INDEX, SOURCE (SectionsAndDirectory)."
+fn sectionEntries(flagged: Bool, norefl: Bool, mainLen: Int, hasProofs: Bool, proofsLen: Int, hasIndex: Bool, indexLen: Int, sourceLen: Int) -> List<Tuple<Int, Int>>
+    ? "Each section's id and length, in the order of the file: FLAGS, empty, when a block is flagged (kind 7 or 8), NOREFL, empty, when a block's types have no isReflexive (kind 8), MAIN, PROOFS, INDEX, SOURCE (SectionsAndDirectory)."
     p = match hasProofs
         true -> [(2, proofsLen)]
         false -> []
@@ -1421,11 +1423,15 @@ fn sectionEntries(flagged: Bool, mainLen: Int, hasProofs: Bool, proofsLen: Int, 
     f = match flagged
         true -> [(6, 0)]
         false -> []
-    List.concat(f, List.concat(List.prepend((1, mainLen), p), List.concat(x, [(3, sourceLen)])))
+    r = match norefl
+        true -> [(7, 0)]
+        false -> []
+    List.concat(f, List.concat(r, List.concat(List.prepend((1, mainLen), p), List.concat(x, [(3, sourceLen)]))))
 
 verify sectionEntries
-    sectionEntries(false, 10, false, 0, true, 4, 2) => [(1, 10), (5, 4), (3, 2)]
-    sectionEntries(true, 10, false, 0, false, 0, 2) => [(6, 0), (1, 10), (3, 2)]
+    sectionEntries(false, false, 10, false, 0, true, 4, 2) => [(1, 10), (5, 4), (3, 2)]
+    sectionEntries(true, false, 10, false, 0, false, 0, 2) => [(6, 0), (1, 10), (3, 2)]
+    sectionEntries(true, true, 10, false, 0, false, 0, 2) => [(6, 0), (7, 0), (1, 10), (3, 2)]
 
 fn trailerBytes(names: Int, levels: Int, exprs: Int, decls: Int, es: List<Tuple<Int, Int>>) -> Result<Bytes, String>
     ? "The counts, the directory and the trailer's length and ZSUS (SectionsAndDirectory); a count past 2^32 - 1 refuses the file (Susz 1 spec, section 7.1)."
@@ -1457,8 +1463,8 @@ verify directoryOnto
     List.len(directoryOnto([], [(1, 3), (3, 2)], 16)) => 48
 
 fn flagsOf(id: Int) -> Int
-    ? "1, must be understood, for MAIN, PROOFS and FLAGS; 0 for the rest."
-    match Bool.or(id <= 2, id == 6)
+    ? "1, must be understood, for MAIN, PROOFS, FLAGS and NOREFL; 0 for the rest."
+    match Bool.or(id <= 2, Bool.or(id == 6, id == 7))
         true -> 1
         false -> 0
 
@@ -1497,7 +1503,7 @@ fn indexed(w: W, kind: Int, blen: Int) -> W
 
 fn indexedAt(w: W, kind: Int, blen: Int, here: Int) -> W
     ? "The entry for a record at here."
-    e = uv(List.prepend(Bits.and(kind, 7), w.idx), here - w.lastDecl)
+    e = uv(List.prepend(kind, w.idx), here - w.lastDecl)
     match kind == 6
         true -> W.update(w, idx = uv(e, blen), lastDecl = here)
         false -> W.update(w, idx = e, lastDecl = here)
@@ -2072,7 +2078,7 @@ fn declOpen(b: Bytes, end: Pos, w: W, owner: Vector<Vector<Num>>, nameF: Vector<
     ? "A declaration whose block, if any, is in the vector of open blocks; its INDEX entry first (IndexByDeclarations)."
     match blockLength(w.open, w.di.value) > 0
         true -> lazyWritten(b, end, w, owner, nameF, levelF, cs, d, Vector.get(w.open, w.di.value))
-        false -> declMain(b, end, indexed(W.update(w, flagged = Bool.or(w.flagged, d.kind == 7)), d.kind, 0), owner, nameF, levelF, cs, d)
+        false -> declMain(b, end, indexed(W.update(w, flagged = Bool.or(w.flagged, d.kind >= 7), norefl = Bool.or(w.norefl, d.kind == 8)), d.kind, 0), owner, nameF, levelF, cs, d)
 
 verify declOpen
     Result.withDefault(declOpen(Bytes.fromList([]), at(0), W.update(fresh(), indexOn = true), cnew(0, 0), Vector.fromList([]), Vector.fromList([]), cols0(), DeclP(kind = 4, pieces = [], names = [], skip = false, value = -1, end = at(0))), fresh()).idx => [0, 4]
@@ -2141,14 +2147,15 @@ verify thmBody
     thmBody(Bytes.fromList([1, 0]), cur0(4)).value => 3
 
 verify indBody
-    indBody(Bytes.fromList([0, 0, 0]), cur0(0), false).p => at(3)
+    indBody(Bytes.fromList([0, 0, 0]), cur0(0), 5).p => at(3)
 
 verify indTypes
-    indTypes(Bytes.fromList([]), cur0(0), 0, false).p => at(0)
+    indTypes(Bytes.fromList([]), cur0(0), 0, 5).p => at(0)
 
 verify indTypeRest
-    indTypeRest(Bytes.fromList([0, 0, 0, 0, 0, 0, 0]), cur0(0), false).p => at(7)
-    indTypeRest(Bytes.fromList([0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0]), cur0(0), true).p => at(12)
+    indTypeRest(Bytes.fromList([0, 0, 0, 0, 0, 0, 0]), cur0(0), 5).p => at(7)
+    indTypeRest(Bytes.fromList([0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0]), cur0(0), 7).p => at(12)
+    indTypeRest(Bytes.fromList([0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0]), cur0(0), 8).p => at(11)
 
 verify indCtors
     indCtors(Bytes.fromList([]), cur0(0), 0).p => at(0)

@@ -1366,8 +1366,8 @@ fn projectable(iv: IndType) -> Bool
         Option.None -> true
 
 verify projectable
-    projectable(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) => true
-    projectable(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = true)))) => false
+    projectable(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None)) => true
+    projectable(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = true)))) => false
 
 fn projCtor(st: St, idx: Int, x: Expr, ty: Expr, ls: List<Level>, params: List<Expr>, sname: Name, c: Option<Const>, proofRule: Bool) -> Result<RE, Fail>
     ? "Walks the constructor type past the parameters and the earlier fields; out of a proof only proofs when proofRule (ProjectionsByFlag)."
@@ -2176,8 +2176,8 @@ fn reducingRules(declared: List<RecRule>, iv: IndType) -> List<RecRule>
         Option.None -> declared
 
 verify reducingRules
-    reducingRules([RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) => [RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))]
-    reducingRules([RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false)))) => []
+    reducingRules([RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None)) => [RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))]
+    reducingRules([RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.bvar(0))], IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false)))) => []
 
 fn elimsAnywhere(rv: Rec, iv: IndType) -> Bool
     ? "Whether the recursor's motive may land in any sort: the major's type's hasLargeElim, or without flags one more universe parameter on the recursor than on the type (EtaByFlag)."
@@ -2186,8 +2186,8 @@ fn elimsAnywhere(rv: Rec, iv: IndType) -> Bool
         Option.None -> List.len(rv.head.params) > List.len(iv.head.params)
 
 verify elimsAnywhere
-    elimsAnywhere(Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false, declared = []), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) => true
-    elimsAnywhere(Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false, declared = []), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false)))) => false
+    elimsAnywhere(Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false, declared = []), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None)) => true
+    elimsAnywhere(Rec(head = Head(name = Core.Names.anon(), params = [Core.Names.anon()], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false, declared = []), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false)))) => false
 
 fn kMajor(st: St, rv: Rec, major: Expr) -> Result<RE, Fail>
     ? "For a K-like recursor the major premise may be replaced by the nullary constructor."
@@ -2309,15 +2309,15 @@ fn hasEta(iv: IndType) -> Bool
         Option.None -> structureLike(iv)
 
 verify hasEta
-    hasEta(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [Core.Names.anon()], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) => true
-    hasEta(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [Core.Names.anon()], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.Some(IndFlags(impredicative = false, k = false, projections = true, eta = false, largeElim = true)))) => false
+    hasEta(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [Core.Names.anon()], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None)) => true
+    hasEta(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [Core.Names.anon()], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.Some(IndFlags(impredicative = false, k = false, projections = true, eta = false, largeElim = true)))) => false
 
 fn structureLike(iv: IndType) -> Bool
     ? "One constructor, no indices, not recursive."
     Bool.and(List.len(iv.ctors) == 1, Bool.and(iv.numIndices == 0, Bool.not(iv.isRec)))
 
 verify structureLike
-    structureLike(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.None)) => false
+    structureLike(IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None)) => false
 
 fn isCtorApp(st: St, e: Expr) -> Bool
     ? "Headed by a constructor."
@@ -5879,7 +5879,7 @@ fn sampleSt() -> St
     zero = Check.Lits.name2("N", "zero")
     succ = Check.Lits.name2("N", "succ")
     z = Core.Exprs.cnst(zero, [])
-    e1 = Check.State.envSet(Check.State.envEmpty(), n, Const.CInduct(IndType(head = Head(name = n, params = [], ty = Core.Exprs.sort(Level.Succ(Level.Zero))), numParams = 0, numIndices = 0, all = [n], ctors = [zero, succ], numNested = 0, isRec = true, isUnsafe = false, isReflexive = false, flags = Option.None)))
+    e1 = Check.State.envSet(Check.State.envEmpty(), n, Const.CInduct(IndType(head = Head(name = n, params = [], ty = Core.Exprs.sort(Level.Succ(Level.Zero))), numParams = 0, numIndices = 0, all = [n], ctors = [zero, succ], numNested = 0, isRec = true, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None)))
     e2 = Check.State.envSet(e1, zero, Const.CCtor(Ctor(head = Head(name = zero, params = [], ty = Core.Exprs.cnst(n, [])), induct = n, cidx = 0, numParams = 0, numFields = 0, isUnsafe = false)))
     e3 = Check.State.envSet(e2, succ, Const.CCtor(Ctor(head = Head(name = succ, params = [], ty = Core.Exprs.cnst(n, [])), induct = n, cidx = 1, numParams = 0, numFields = 1, isUnsafe = false)))
     e4 = Check.State.envSet(e3, Check.Lits.name2("N", "rec"), Const.CRec(sampleRec()))

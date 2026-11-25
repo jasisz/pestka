@@ -12,7 +12,12 @@
 # written apart, give the same bytes for both, when SUSZ_BIN names the
 # crate's binary; an export with two bad declarations; and files damaged by
 # tests/suszbad.py: each rejected (or declined) with the message the damage
-# calls for, the same on one worker and on four.
+# calls for, the same on one worker and on four. Last, the reference crate's
+# test vectors for inductive blocks with flags and without isReflexive
+# (kinds 7 and 8, FLAGS and NOREFL), copied into tests/susz-vectors from
+# github.com/jasisz/susz (tests/vectors, Susz 0.5.0): each with the outcome
+# its .expect file gives, a rejection at its place, offset and record (the
+# entry's number for the directory), on one worker and on four.
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin="${PESTKA_BIN:-$root/.build/target/release/main}"
 susz="${SUSZ_BIN:-}"
@@ -175,4 +180,22 @@ declinedBy "$small" must "the file needs a section Pestka does not know$" || fai
 # Damage a full check never sees: the verdict is that of the file as packed.
 unchanged "$small" index || fail=1
 unchanged "$small" extra || fail=1
+vector() {
+  # vector SUSZ: the outcome its .expect file names, and for a rejection the
+  # place, offset and record (Susz 1 spec, sections 8 and 11).
+  e=${1%.susz}.expect
+  workersAlike "$1" "" || return 1
+  out=$(tail -1 "$tmp/w1")
+  want=$(awk '$1 == "outcome" { print $2 }' "$e")
+  where=$(awk '$1 == "place" { p = $2 } $1 == "offset" { o = $2 } $1 == "record" { r = $2 } END { if (p != "") { printf "%s @ %s: ", p, o; if (r != 0) printf "(record|entry) %s: ", r } }' "$e")
+  case $want in accepted) st=0 ;; rejected) st=1 ;; *) st=2 ;; esac
+  if [ "$a" -ne "$st" ] || ! printf '%s\n' "$out" | grep -Eq "^$want(: $where|$)"; then
+    echo "FAIL vector $(basename "$1"): status $a, '$out', expected $want ${where% }"
+    return 1
+  fi
+  echo "ok   vector $(basename "$1"): $out"
+}
+for f in "$root"/tests/susz-vectors/*/*.susz; do
+  vector "$f" || fail=1
+done
 exit $fail

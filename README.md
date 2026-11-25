@@ -124,7 +124,12 @@ checks that each flag is allowed for the declaration and then goes by the
 flags for projections, structure eta, K-like reduction and large
 elimination. A block without flags is checked as before the renovation; a
 3.2 export whose types lack them, or a file that mixes flagged blocks with
-others, is rejected. The last output line and exit code give the result:
+others, is rejected. Lean's exports since the renovation's commit 55bd690
+also leave out `isReflexive`, which Lean no longer keeps: a flagged type may
+come without it (Susz kind 8), and then Pestka neither needs it nor computes
+it, as Lean's kernel does not. Where an export gives it, Pestka still
+compares it with its own. The types of a file carry it all or none. The
+last output line and exit code give the result:
 
 | Output | Exit code | Meaning |
 | :--- | :---: | :--- |

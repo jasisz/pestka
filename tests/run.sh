@@ -25,6 +25,13 @@
 # renov_sBTree* come from tests/export/RenovationNested.lean: the auxiliary
 # recursor of a nested block with large elimination, nested through a type
 # without it, does not reduce, as in the reference kernel.
+# renov_norefl_* come from the Arena beta's renovation tests
+# (lean-kernel-arena-beta, Lean pr-release-16595-55bd690), whose types carry
+# the flags but no isReflexive (Susz kind 8): an Acc-like reflexive type, a
+# nested and a mutual block, and an Acc with large elimination that must be
+# rejected; in malformed/ made from them by hand: isReflexive on one type of
+# a block only, on one block of a file only, and a type with neither flags
+# nor isReflexive.
 #   unsupported/  2 (declined: format version)
 # and every export tests/soundness.py kept under tests/soundness-findings, each
 # invalid, against 1 (rejected).

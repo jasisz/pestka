@@ -12,7 +12,9 @@ module Decls
         "without large elimination. An inductive type of lean4export 3.2"
         "also carries the five flags of the kernel renovation"
         "(lean4#16595): those are inputs, which the checker judges allowed"
-        "or not and then uses."
+        "or not and then uses. isReflexive is a claim like isRec where the"
+        "export gives it; Lean's exports since lean4#16595 do not (Susz"
+        "kind 8), and then it is None: not given, which is not false."
     exposes [Head, Hints, Safety, QuotKind, IndFlags, IndType, Ctor, RecRule, Rec, Decl, nameOf, constantCount]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Lazy]
     effects []
@@ -54,7 +56,7 @@ record IndType
     numNested: Int
     isRec: Bool
     isUnsafe: Bool
-    isReflexive: Bool
+    isReflexive: Option<Bool>
     flags: Option<IndFlags>
 
 record Ctor

@@ -5,8 +5,10 @@ module Blk
         "the types established (indices, result universe, elimination level,"
         "K-likeness). A block of lean4export 3.2 carries the renovation's"
         "flags on each type; the block's own (impredicative, large"
-        "elimination) are its first type's. The checker state travels next"
-        "to it."
+        "elimination) are its first type's. Whether the export gives"
+        "isReflexive is noted too: Lean's exports since lean4#16595 do not,"
+        "and then the kernel does not compute it either. The checker state"
+        "travels next to it."
     exposes [CtorIn, TypeIn, Blk, BS, start, firstFlags, hasRules, nthExpr, nthInt, consts, isValidIndApp, validIndex, indicesOf, recName]
     depends [Core.Names, Core.Levels, Core.Exprs, Core.Apps, Core.Decls, Check.State, Check.Telescope]
     effects []
@@ -35,14 +37,15 @@ record Blk
     k: Bool
     nnested: Int
     flags: Option<IndFlags>
+    reflexive: Bool
 
 record BS
     blk: Blk
     st: St
 
 fn start(lparams: List<Name>, nparams: Int, types: List<TypeIn>, nnested: Int) -> Blk
-    ? "A block before any check."
-    Blk(lparams = lparams, levels = paramLevels(lparams, []), nparams = nparams, types = types, names = typeNames(types, []), params = [], nindices = [], result = Level.Zero, notZero = false, elim = Level.Zero, k = false, nnested = nnested, flags = firstFlags(types))
+    ? "A block before any check, whose export gives isReflexive until told otherwise."
+    Blk(lparams = lparams, levels = paramLevels(lparams, []), nparams = nparams, types = types, names = typeNames(types, []), params = [], nindices = [], result = Level.Zero, notZero = false, elim = Level.Zero, k = false, nnested = nnested, flags = firstFlags(types), reflexive = true)
 
 verify start
     start([Core.Names.anon()], 0, [], 0).levels => [Level.Param(Core.Names.anon())]

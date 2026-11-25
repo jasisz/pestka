@@ -3,7 +3,7 @@ module Declarations
         "Lines that declare constants: axioms, definitions, theorems, opaque"
         "constants, the quotient package and inductive blocks. Every name,"
         "level and expression they mention must already be in the tables."
-    exposes [declLine, thmAt, defAt, headOf, flagsOf, flaggedBlock]
+    exposes [declLine, thmAt, defAt, headOf, flagsOf, flaggedBlock, reflexiveBlock]
     depends [Json.Line, Json.Access, Core.Names, Core.Exprs, Core.Decls, Core.Lazy, Export.Tables]
     effects []
 
@@ -16,20 +16,41 @@ verify declLine
     declLine(Export.Tables.empty(), "lemma", []) => Result.Err("unknown declaration kind 'lemma'")
 
 fn blockNoted(t: Tables, d: Decl) -> Result<Tables, String>
-    ? "An inductive block noted as flagged or not; a file holds one kind or the other (FlaggedFilesWhole in Export.Susz)."
+    ? "An inductive block noted as flagged or not, and as giving isReflexive or not; a file holds one kind or the other of each (FlaggedFilesWhole in Export.Susz)."
     match d
-        Decl.Induct([first, .._], _, _) -> match first.flags
-            Option.Some -> match t.plain
-                true -> Result.Err("a flagged inductive block in a file with blocks without flags")
-                false -> Result.Ok(Tables.update(t, flagged = true))
-            Option.None -> match t.flagged
-                true -> Result.Err("an inductive block without flags in a file with flagged blocks")
-                false -> Result.Ok(Tables.update(t, plain = true))
+        Decl.Induct([first, .._], _, _) -> reflexiveNoted(flagNoted(t, first)?, first)
         _ -> Result.Ok(t)
+
+fn flagNoted(t: Tables, first: IndType) -> Result<Tables, String>
+    ? "Flagged or not."
+    match first.flags
+        Option.Some -> match t.plain
+            true -> Result.Err("a flagged inductive block in a file with blocks without flags")
+            false -> Result.Ok(Tables.update(t, flagged = true))
+        Option.None -> match t.flagged
+            true -> Result.Err("an inductive block without flags in a file with flagged blocks")
+            false -> Result.Ok(Tables.update(t, plain = true))
+
+verify flagNoted
+    flagNoted(Export.Tables.empty(), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.None)) => Result.Ok(Tables.update(Export.Tables.empty(), plain = true))
+
+fn reflexiveNoted(t: Tables, first: IndType) -> Result<Tables, String>
+    ? "Giving isReflexive or not: Lean's exports since lean4#16595 leave it out of every type, older ones write it on every one (Susz 1 spec, section 9.2)."
+    match first.isReflexive
+        Option.Some -> match t.norefl
+            true -> Result.Err("an inductive block with isReflexive in a file with blocks without it")
+            false -> Result.Ok(Tables.update(t, refl = true))
+        Option.None -> match t.refl
+            true -> Result.Err("an inductive block without isReflexive in a file with blocks that have it")
+            false -> Result.Ok(Tables.update(t, norefl = true))
+
+verify reflexiveNoted
+    reflexiveNoted(Tables.update(Export.Tables.empty(), refl = true), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.None, flags = Option.None)) => Result.Err("an inductive block without isReflexive in a file with blocks that have it")
+    reflexiveNoted(Tables.update(Export.Tables.empty(), norefl = true), IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(true), flags = Option.None)) => Result.Err("an inductive block with isReflexive in a file with blocks without it")
 
 verify blockNoted
     blockNoted(Export.Tables.empty(), Decl.Induct([], [], [])) => Result.Ok(Export.Tables.empty())
-    blockNoted(Tables.update(Export.Tables.empty(), plain = true), Decl.Induct([IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = false, flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false)))], [], [])) => Result.Err("a flagged inductive block in a file with blocks without flags")
+    blockNoted(Tables.update(Export.Tables.empty(), plain = true), Decl.Induct([IndType(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), numParams = 0, numIndices = 0, all = [], ctors = [], numNested = 0, isRec = false, isUnsafe = false, isReflexive = Option.Some(false), flags = Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false)))], [], [])) => Result.Err("a flagged inductive block in a file with blocks without flags")
 
 fn declOf(t: Tables, kind: String, o: List<Tuple<String, J>>) -> Result<Decl, String>
     ? "Builds the declaration of one kind."
@@ -148,9 +169,9 @@ verify quotKind
     quotKind("x") => Result.Err("unknown quot kind 'x'")
 
 fn inductiveOf(t: Tables, o: List<Tuple<String, J>>) -> Result<Decl, String>
-    ? "A block of inductive types with their constructors and recursors; its types all carry their flags or none does, and all do under format 3.2."
+    ? "A block of inductive types with their constructors and recursors; its types all carry their flags or none does, and all do under format 3.2; and all carry isReflexive or none does, which only flagged ones may leave out."
     _ = flaggedBlock(Json.Access.arr(o, "types")?, t.flagsRequired)?
-    types = indTypes(t, Json.Access.arr(o, "types")?, [])?
+    types = indTypes(t, reflexiveTypes(Json.Access.arr(o, "types")?)?, [])?
     ctors = ctorsOf(t, Json.Access.arr(o, "ctors")?, [])?
     Result.Ok(Decl.Induct(types, ctors, recsOf(t, Json.Access.arr(o, "recs")?, [])?))
 
@@ -207,6 +228,49 @@ verify flaggedAlike
     flaggedAlike([J.JObj([("isK", J.JBool(true))])], false, false) => Result.Err("the types of an inductive block do not agree on carrying their flags")
     flaggedAlike([], true, true) => Result.Ok(true)
 
+fn reflexiveBlock(ts: List<J>) -> Result<Bool, String>
+    ? "Whether a block's types carry isReflexive: all of them or none. A type may leave it out only with its flags, as Lean's exports since lean4#16595 do (Susz 1 spec, section 9.2); one without either is missing a key."
+    match ts
+        [] -> Result.Ok(true)
+        [first, ..rest] -> reflexiveAlike(rest, Json.Access.has(objectOf(first)?, "isReflexive"))
+
+verify reflexiveBlock
+    reflexiveBlock([]) => Result.Ok(true)
+    reflexiveBlock([J.JObj([("isReflexive", J.JBool(false))]), J.JObj([])]) => Result.Err("the types of an inductive block do not agree on carrying isReflexive")
+    reflexiveBlock([J.JObj([])]) => Result.Ok(false)
+
+fn reflexiveTypes(ts: List<J>) -> Result<List<J>, String>
+    ? "The types, once they agree on carrying isReflexive (reflexiveBlock)."
+    _ = reflexiveBlock(ts)?
+    Result.Ok(ts)
+
+verify reflexiveTypes
+    reflexiveTypes([]) => Result.Ok([])
+
+fn reflexiveAlike(ts: List<J>, given: Bool) -> Result<Bool, String>
+    ? "The other types agree with the first."
+    match ts
+        [] -> Result.Ok(given)
+        [x, ..rest] -> match Json.Access.has(objectOf(x)?, "isReflexive") == given
+            true -> reflexiveAlike(rest, given)
+            false -> Result.Err("the types of an inductive block do not agree on carrying isReflexive")
+
+verify reflexiveAlike
+    reflexiveAlike([], false) => Result.Ok(false)
+
+fn reflexiveOf(o: List<Tuple<String, J>>, flags: Option<IndFlags>) -> Result<Option<Bool>, String>
+    ? "isReflexive where the type gives it; a type with its flags may leave it out (not given, which is not false), one without them must give it."
+    match Json.Access.has(o, "isReflexive")
+        true -> Result.Ok(Option.Some(Json.Access.bool(o, "isReflexive")?))
+        false -> match flags
+            Option.Some -> Result.Ok(Option.None)
+            Option.None -> Result.Err("missing key 'isReflexive'")
+
+verify reflexiveOf
+    reflexiveOf([], Option.None) => Result.Err("missing key 'isReflexive'")
+    reflexiveOf([], Option.Some(IndFlags(impredicative = false, k = false, projections = false, eta = false, largeElim = false))) => Result.Ok(Option.None)
+    reflexiveOf([("isReflexive", J.JBool(true))], Option.None) => Result.Ok(Option.Some(true))
+
 fn hasFlags(o: List<Tuple<String, J>>) -> Bool
     ? "A type that carries flags, any of the five."
     keysIn(o, ["isImpredicative", "isK", "hasProjections", "hasEta", "hasLargeElim"], 0) > 0
@@ -239,7 +303,7 @@ fn indType(t: Tables, o: List<Tuple<String, J>>) -> Result<IndType, String>
     ? "One inductive type and the flags the export claims for it."
     h = head(t, o)?
     ctors = Export.Tables.names(t, Json.Access.ints(o, "ctors")?)?
-    Result.Ok(IndType(head = h, numParams = Json.Access.int(o, "numParams")?, numIndices = Json.Access.int(o, "numIndices")?, all = all(t, o)?, ctors = ctors, numNested = Json.Access.int(o, "numNested")?, isRec = Json.Access.bool(o, "isRec")?, isUnsafe = Json.Access.bool(o, "isUnsafe")?, isReflexive = Json.Access.bool(o, "isReflexive")?, flags = flagsOf(o)?))
+    Result.Ok(IndType(head = h, numParams = Json.Access.int(o, "numParams")?, numIndices = Json.Access.int(o, "numIndices")?, all = all(t, o)?, ctors = ctors, numNested = Json.Access.int(o, "numNested")?, isRec = Json.Access.bool(o, "isRec")?, isUnsafe = Json.Access.bool(o, "isUnsafe")?, isReflexive = reflexiveOf(o, flagsOf(o)?)?, flags = flagsOf(o)?))
 
 verify indType
     indType(Export.Tables.empty(), []) => Result.Err("missing key 'name'")
