@@ -9059,12 +9059,118 @@ verify etaExpansion
     resultBool(etaExpansion(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => false
 
 fn etaCore(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
-    ? "t a lambda, s not: compare t with s eta expanded along its pi type."
+    ? "t a lambda, s not: compare t with s eta expanded along its pi type. Otherwise s may be a recursor missing its major premise, expanded and reduced (PartialAppsEta)."
     match t
         Expr.Lam -> match s
-            Expr.Lam -> no(st)
+            Expr.Lam -> etaRecursor(st, t, s)
             _ -> etaWithType(whnfOf(inferType(st, s)?)?, t, s)
+        _ -> etaRecursor(st, t, s)
+
+decision PartialAppsEta
+    date = "2026-11-25"
+    reason =
+        "A constructor or recursor applied to too few arguments is a"
+        "function, equal by function eta to fun x => it applied to x; once"
+        "applied, structure eta, K or iota may decide what the partial"
+        "application could not. lean4#15373 lets structure eta take a"
+        "constructor of a structure missing fields: after the types of the"
+        "two sides are found equal, both are applied to new variables for"
+        "the rest of the constructor's telescope and compared field by"
+        "field. lean4#15374 expands a recursor of a structure with eta, or"
+        "with rule K, that misses its major premise (and the indices"
+        "before it): new variables for the missing arguments along its"
+        "type, the recursor reduced on them by iota, and the other side"
+        "compared with the lambda over them, which binds the domains as"
+        "the reference does. Both are function eta, which the kernel"
+        "already has, followed by the rules it already has, so they decide"
+        "only pairs that are equal; pairs they do not touch are compared as"
+        "before (the Arena beta's renovation tests 121 to 123)."
+    chosen = "PartialAppsEta"
+    rejected = ["FullApplicationsOnly"]
+    impacts = [etaCore, etaRecursor, etaStructCore, etaStructTypes]
+
+fn etaRecursor(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
+    ? "s a recursor missing its major premise, of a structure with eta or with rule K: compare t with s expanded and reduced (PartialAppsEta)."
+    match Core.Apps.fnOf(s)
+        Expr.Const(_, n, _) -> match Check.State.lookup(st, n)
+            Option.Some(Const.CRec(rv)) -> etaRecursorOf(st, t, s, rv, rv.numParams + rv.numMotives + rv.numMinors + rv.numIndices)
+            _ -> no(st)
         _ -> no(st)
+
+verify etaRecursor
+    resultBool(etaRecursor(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => false
+
+fn etaRecursorOf(st: St, t: Expr, s: Expr, rv: Rec, majorIdx: Int) -> Result<RB, Fail>
+    ? "Only when the major premise is missing and the recursor has rule K or eliminates a structure with eta."
+    match Bool.and(Core.Apps.numArgs(s) <= majorIdx, Bool.or(rv.k, isNonRecStructure(st, rv.major)))
+        false -> no(st)
+        true -> etaRecursorOpen(st, t, s, majorIdx + 1 - Core.Apps.numArgs(s))
+
+verify etaRecursorOf
+    resultBool(etaRecursorOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 0, numMinors = 0, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false, declared = []), 0)) => false
+
+fn etaRecursorOpen(st: St, t: Expr, s: Expr, n: Int) -> Result<RB, Fail>
+    ? "New variables for the n missing arguments along s's type, s reduced on them, then closed again however the comparison ends."
+    open = st.kindsOpen
+    w = whnfOf(inferType(st, s)?)?
+    xs = openAlong(w.st, w.e, n, [])?
+    r = etaRecursorReduced(xs.st, t, s, List.reverse(xs.xs), n)?
+    Result.Ok(RB(b = r.b, st = Check.State.closeVars(r.st, r.st.kindsOpen - open)))
+
+verify etaRecursorOpen
+    resultBool(etaRecursorOpen(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.sort(Level.Zero), 1)) => false
+
+record XS2
+    xs: List<Expr>
+    st: St
+
+fn openAlong(st: St, ty: Expr, n: Int, rev: List<Expr>) -> Result<XS2, Fail>
+    ? "Up to n new variables for the domains of the pi type ty, each body whnf'd as the reference does; newest first."
+    match n <= 0
+        true -> Result.Ok(XS2(xs = rev, st = st))
+        false -> match ty
+            Expr.Pi(_, d, b) -> openNext(Check.State.namesAt(st, Core.Names.anon(), d, Option.None, Binder.Default), b, n, rev)
+            _ -> Result.Ok(XS2(xs = rev, st = st))
+
+verify openAlong
+    List.len(Result.withDefault(openAlong(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), 2, []), XS2(xs = [Core.Exprs.fvar(0)], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).xs) => 0
+
+fn openNext(x: RE, b: Expr, n: Int, rev: List<Expr>) -> Result<XS2, Fail>
+    ? "The body under the new variable, whnf'd."
+    w = whnf(x.st, Core.Subst.instantiate(b, [x.e]))?
+    openAlong(w.st, w.e, n - 1, List.prepend(x.e, rev))
+
+verify openNext
+    List.len(Result.withDefault(openNext(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero), 1, []), XS2(xs = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).xs) => 1
+
+fn etaRecursorReduced(st: St, t: Expr, s: Expr, xs: List<Expr>, n: Int) -> Result<RB, Fail>
+    ? "All n variables found, the recursor reduced by iota on them: t against the lambda over them."
+    match List.len(xs) == n
+        false -> no(st)
+        true -> etaRecursorCompared(inductiveReduce(st, Core.Apps.mkApps(s, xs), false, false)?, t, xs)
+
+verify etaRecursorReduced
+    resultBool(etaRecursorReduced(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1), [], 1)) => false
+
+fn etaRecursorCompared(r: RO, t: Expr, xs: List<Expr>) -> Result<RB, Fail>
+    ? "t against fun xs => the reduct."
+    match r.o
+        Option.Some(e) -> isDefEq(r.st, t, Check.State.mkBinding(r.st.lctx, fvarIds(xs, []), e, true, false))
+        Option.None -> no(r.st)
+
+verify etaRecursorCompared
+    resultBool(etaRecursorCompared(RO(o = Option.None, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(0), [])) => false
+
+fn fvarIds(xs: List<Expr>, acc: List<Int>) -> List<Int>
+    ? "The numbers of the free variables, in order."
+    match xs
+        [] -> List.reverse(acc)
+        [x, ..rest] -> match x
+            Expr.FVar(_, id) -> fvarIds(rest, List.prepend(id, acc))
+            _ -> fvarIds(rest, acc)
+
+verify fvarIds
+    fvarIds([Core.Exprs.fvar(2), Core.Exprs.fvar(5)], []) => [2, 5]
 
 verify etaCore
     resultBool(etaCore(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => false
@@ -9089,10 +9195,10 @@ verify etaStruct
     resultBool(etaStruct(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1))) => false
 
 fn etaStructCore(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
-    ? "s must be a full constructor application of a non-recursive structure."
+    ? "s must be a constructor application of a structure with eta, partial or full (PartialAppsEta)."
     match Core.Apps.fnOf(s)
         Expr.Const(_, n, ls) -> match Check.State.lookup(st, n)
-            Option.Some(Const.CCtor(k)) -> match Bool.and(Core.Apps.numArgs(s) == k.numParams + k.numFields, isNonRecStructure(st, k.induct))
+            Option.Some(Const.CCtor(k)) -> match Bool.and(Core.Apps.numArgs(s) <= k.numParams + k.numFields, isNonRecStructure(st, k.induct))
                 true -> etaStructTypes(st, t, s, k, ls)
                 false -> no(st)
             _ -> no(st)
@@ -9127,13 +9233,51 @@ decision EtaProofFieldsSkipped
     impacts = [etaStructTypes, fieldsTyped, projections]
 
 fn etaStructTypes(st: St, t: Expr, s: Expr, k: Ctor, ls: List<Level>) -> Result<RB, Fail>
-    ? "Equal types, then each field against the projection of t, proof fields left out (EtaProofFieldsSkipped)."
+    ? "Equal types, then each field against the projection of t, proof fields left out (EtaProofFieldsSkipped); a partial constructor application and t applied first to new variables for the rest of its telescope (PartialAppsEta)."
     it = inferType(st, t)?
     is = inferType(it.st, s)?
     eq = isDefEq(is.st, it.e, is.e)?
     match eq.b
         false -> no(eq.st)
-        true -> fieldsTyped(eq.st, projections(k.induct, t, 0, k.numFields), List.drop(Core.Apps.argsOf(s), k.numParams), k, ls, k.head.ty, k.numParams, [])
+        true -> match Core.Apps.numArgs(s) == k.numParams + k.numFields
+            true -> etaFieldsOf(eq.st, t, s, k, ls)
+            false -> etaStructPartial(eq.st, t, s, k, ls, is.e)
+
+fn etaFieldsOf(st: St, t: Expr, s: Expr, k: Ctor, ls: List<Level>) -> Result<RB, Fail>
+    ? "Each field of the full application s against the projection of t."
+    fieldsTyped(st, projections(k.induct, t, 0, k.numFields), List.drop(Core.Apps.argsOf(s), k.numParams), k, ls, k.head.ty, k.numParams, [])
+
+verify etaFieldsOf
+    resultBool(etaFieldsOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1), Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), induct = Core.Names.anon(), cidx = 0, numParams = 0, numFields = 0, isUnsafe = false), [])) => true
+
+fn etaStructPartial(st: St, t: Expr, s: Expr, k: Ctor, ls: List<Level>, sType: Expr) -> Result<RB, Fail>
+    ? "New variables along s's type, which a constructor's telescope gives without whnf, as the reference reads it; both sides applied to them, then the fields; the variables closed again however it ends (PartialAppsEta)."
+    open = st.kindsOpen
+    xs = openPlain(st, sType, k.numParams + k.numFields - Core.Apps.numArgs(s), [])?
+    vs = List.reverse(xs.xs)
+    r = etaFieldsOf(xs.st, Core.Apps.mkApps(t, vs), Core.Apps.mkApps(s, vs), k, ls)?
+    Result.Ok(RB(b = r.b, st = Check.State.closeVars(r.st, r.st.kindsOpen - open)))
+
+verify etaStructPartial
+    resultBool(etaStructPartial(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.fvar(0), Core.Exprs.fvar(1), Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), induct = Core.Names.anon(), cidx = 0, numParams = 0, numFields = 0, isUnsafe = false), [], Core.Exprs.sort(Level.Zero))) => true
+
+fn openPlain(st: St, ty: Expr, n: Int, rev: List<Expr>) -> Result<XS2, Fail>
+    ? "Up to n new variables for the domains of the pi telescope ty, not whnf'd; newest first."
+    match n <= 0
+        true -> Result.Ok(XS2(xs = rev, st = st))
+        false -> match ty
+            Expr.Pi(_, d, b) -> openPlainNext(Check.State.namesAt(st, Core.Names.anon(), d, Option.None, Binder.Default), b, n, rev)
+            _ -> Result.Ok(XS2(xs = rev, st = st))
+
+verify openPlain
+    List.len(Result.withDefault(openPlain(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), 2, []), XS2(xs = [Core.Exprs.fvar(0)], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).xs) => 0
+
+fn openPlainNext(x: RE, b: Expr, n: Int, rev: List<Expr>) -> Result<XS2, Fail>
+    ? "The body under the new variable."
+    openPlain(x.st, Core.Subst.instantiate(b, [x.e]), n - 1, List.prepend(x.e, rev))
+
+verify openPlainNext
+    List.len(Result.withDefault(openPlainNext(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero), 1, []), XS2(xs = [], st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).xs) => 1
 
 verify etaStructTypes
     resultBool(etaStructTypes(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Succ(Level.Zero)), Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), induct = Core.Names.anon(), cidx = 0, numParams = 0, numFields = 0, isUnsafe = false), [])) => false
@@ -9191,29 +9335,308 @@ fn stringExpanded(w: RE, s: Expr) -> Result<RI, Fail>
 verify stringExpanded
     resultInt(stringExpanded(RE(e = Core.Exprs.fvar(1), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.fvar(1))) => 1
 
+decision UnitLikeByFields
+    date = "2026-11-25"
+    reason =
+        "Any two values of a unit-like type are equal. Before lean4#15372 a"
+        "type was unit-like when it was a structure with eta whose"
+        "constructor has no fields. lean4#15372 also counts a structure"
+        "with eta whose every field is a proof or of a unit-like type, at"
+        "the type's parameters, and a function type into a unit-like type."
+        "That is sound by the rules the kernel already has: two values of"
+        "such a structure are equal by structure eta once their fields are,"
+        "and proof fields are equal by proof irrelevance, unit-like ones by"
+        "this rule; two functions into a unit-like type are equal by"
+        "function eta once their values at a new variable are. The test"
+        "follows the reference: the type whnf'd, its pis opened, the"
+        "constructor's telescope instantiated at the type's levels and"
+        "parameters, each field's domain a proposition or unit-like, the"
+        "next one whnf'd under a new variable for it; then, as before, the"
+        "two sides' types must be equal. The variables are closed again"
+        "however it ends. It runs last, where defEq would answer no (the"
+        "Arena beta's renovation tests 117 to 120). It ends by structure,"
+        "with no depth bound: a structure with eta is not recursive, and its"
+        "fields mention only constants declared before it and its"
+        "parameters, so each step goes to a structure declared earlier or"
+        "into the arguments the type was given; whnf and isProp spend the"
+        "check's usual budget, which declines, never answers no. The types"
+        "decided in one test are kept, so a type met again (a field type"
+        "repeated, or reached along several fields) is not looked into"
+        "again, which would cost two to the depth. It runs on every"
+        "comparison that would fail, so its cost is kept down without"
+        "changing an answer: the answer for a type is kept, for a closed"
+        "type across declarations, for one with free variables for the"
+        "rest of the declaration; a field's domain is put at the type's"
+        "levels and arguments only when it is reached, as the first field"
+        "that fails ends the test (mathlib's classes have many fields); and"
+        "a domain the constructor's own type shows to be a proposition is"
+        "taken as one without building it. On etale, one worker, plain"
+        "build: 21.107 G instructions before the rule, 21.376 G with it"
+        "as the reference writes it, 21.18 G with the answers kept and the"
+        "fields put in when reached."
+    chosen = "UnitLikeByFields"
+    rejected = ["FieldlessOnly", "DepthCapped"]
+    impacts = [unitLike, unitLikeType, unitFields]
+
+record UnitSeen
+    ty: Expr
+    unit: Bool
+
+record RU
+    b: Bool
+    st: St
+    seen: List<UnitSeen>
+
 fn unitLike(st: St, t: Expr, s: Expr) -> Result<RB, Fail>
-    ? "Values of a structure with one field-less constructor are all equal."
+    ? "Values of a unit-like type are all equal (UnitLikeByFields)."
     tt = inferType(st, t)?
     w = whnf(tt.st, tt.e)?
-    match Core.Apps.fnOf(w.e)
-        Expr.Const(_, n, _) -> match Bool.and(isNonRecStructure(w.st, n), noFields(w.st, firstCtor(w.st, n)))
-            true -> unitTypes(w.st, w.e, s)
-            false -> no(w.st)
-        _ -> no(w.st)
+    u = unitLikeKept(w.st, w.e)?
+    match u.b
+        true -> unitTypes(u.st, w.e, s)
+        false -> no(u.st)
 
 verify unitLike
     resultBool(unitLike(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero))) => false
 
-fn noFields(st: St, k: Option<Name>) -> Bool
-    ? "The constructor has no fields."
+fn unitLikeKept(st: St, ty: Expr) -> Result<RB, Fail>
+    ? "Whether the whnf'd type ty is unit-like, the answer kept: for a type without free variables across declarations, beside the pairs sharedPair keeps, for the same reason (it reads only the environment, which only grows); for one with them for the rest of the declaration, beside the pairs found equal or different, a no not used while reducing eagerly, as knownDifferent does."
+    match Core.Exprs.hasFVar(ty)
+        true -> match Check.State.pairGet(st.eqOk, ty, unitMark())
+            true -> yes(st)
+            false -> match Bool.and(Bool.not(st.eager), Check.State.pairGet(st.eqNo, ty, unitMark()))
+                true -> no(st)
+                false -> unitLikeHere(unitLikeClosed(st, ty, [])?, ty)
+        false -> match Check.State.closedPairGet(st.closed, ty, unitMark())
+            true -> yes(st)
+            false -> match Check.State.closedFailGet(st.closed, ty, unitMark())
+                true -> no(st)
+                false -> unitLikeStored(unitLikeClosed(st, ty, [])?, ty)
+
+verify unitLikeKept
+    resultBool(unitLikeKept(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero))) => false
+
+fn unitLikeHere(r: RU, ty: Expr) -> Result<RB, Fail>
+    ? "Keeps the answer for a type with free variables for the rest of the declaration, beside the pairs found equal or different."
+    match r.b
+        true -> yes(St.update(r.st, eqOk = Check.State.pairPut(r.st.eqOk, ty, unitMark())))
+        false -> no(St.update(r.st, eqNo = Check.State.pairPut(r.st.eqNo, ty, unitMark())))
+
+verify unitLikeHere
+    resultBool(unitLikeHere(RU(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), seen = []), Core.Exprs.fvar(1))) => false
+
+fn unitMark() -> Expr
+    ? "The other side of the pair a unit-like answer is kept under: a sort at a parameter no export can name (a negative number), so no real pair meets it."
+    Core.Exprs.sort(Level.Param(Core.Names.num(Core.Names.anon(), -1)))
+
+verify unitMark
+    unitMark() == Core.Exprs.sort(Level.Zero) => false
+
+fn unitLikeStored(r: RU, ty: Expr) -> Result<RB, Fail>
+    ? "Keeps the answer for the closed type ty."
+    match r.b
+        true -> yes(St.update(r.st, closed = Check.State.closedPairPut(r.st.closed, ty, unitMark())))
+        false -> no(St.update(r.st, closed = Check.State.closedFailPut(r.st.closed, ty, unitMark())))
+
+verify unitLikeStored
+    resultBool(unitLikeStored(RU(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), seen = []), Core.Exprs.sort(Level.Zero))) => true
+
+fn unitAnswer(r: RU) -> Result<RB, Fail>
+    ? "The answer and the state."
+    Result.Ok(RB(b = r.b, st = r.st))
+
+verify unitAnswer
+    resultBool(unitAnswer(RU(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), seen = []))) => true
+
+fn unitLikeClosed(st: St, ty: Expr, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "Whether the whnf'd type ty is unit-like, with the variables opened for it closed again; a type decided before in this test is not looked into again."
+    match seenUnit(seen, ty)
+        Option.Some(b) -> Result.Ok(RU(b = b, st = st, seen = seen))
+        Option.None -> unitLikeFresh(st, ty, seen)
+
+verify unitLikeClosed
+    unitLikeClosed(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [UnitSeen(ty = Core.Exprs.sort(Level.Zero), unit = true)]) == Result.Err(Fail.Reject("x")) => false
+
+fn unitLikeFresh(st: St, ty: Expr, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "Looks into ty, closes its variables and keeps the answer."
+    open = st.kindsOpen
+    r = unitLikeType(st, ty, seen)?
+    Result.Ok(RU(b = r.b, st = Check.State.closeVars(r.st, r.st.kindsOpen - open), seen = List.prepend(UnitSeen(ty = ty, unit = r.b), r.seen)))
+
+verify unitLikeFresh
+    resultUnit(unitLikeFresh(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [])) => false
+
+fn seenUnit(seen: List<UnitSeen>, ty: Expr) -> Option<Bool>
+    ? "The answer kept for ty, if any."
+    match seen
+        [] -> Option.None
+        [x, ..rest] -> match x.ty == ty
+            true -> Option.Some(x.unit)
+            false -> seenUnit(rest, ty)
+
+verify seenUnit
+    seenUnit([UnitSeen(ty = Core.Exprs.fvar(1), unit = true)], Core.Exprs.fvar(1)) => Option.Some(true)
+    seenUnit([], Core.Exprs.fvar(1)) => Option.None
+
+fn resultUnit(r: Result<RU, Fail>) -> Bool
+    ? "Test helper: the answer of a successful unit-like test; false on an error."
+    match r
+        Result.Ok(x) -> x.b
+        Result.Err -> false
+
+verify resultUnit
+    resultUnit(Result.Err(Fail.Reject("x"))) => false
+
+fn unitLikeType(st: St, ty: Expr, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "ty in whnf: a pi into a unit-like type, or a structure with eta whose fields at its parameters are proofs or unit-like."
+    match ty
+        Expr.Pi(_, d, b) -> unitLikeUnder(Check.State.namesAt(st, Core.Names.anon(), d, Option.None, Binder.Default), b, seen)
+        _ -> match Core.Apps.fnOf(ty)
+            Expr.Const(_, n, ls) -> match isNonRecStructure(st, n)
+                true -> unitStructure(st, Core.Apps.argsOf(ty), ls, ctorOf(st, firstCtor(st, n)), seen)
+                false -> Result.Ok(RU(b = false, st = st, seen = seen))
+            _ -> Result.Ok(RU(b = false, st = st, seen = seen))
+
+verify unitLikeType
+    resultUnit(unitLikeType(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [])) => false
+
+fn unitLikeUnder(x: RE, b: Expr, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "The codomain under a new variable, whnf'd."
+    w = whnf(x.st, Core.Subst.instantiate(b, [x.e]))?
+    unitLikeType(w.st, w.e, seen)
+
+verify unitLikeUnder
+    resultUnit(unitLikeUnder(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero), [])) => false
+
+fn ctorOf(st: St, k: Option<Name>) -> Option<Ctor>
+    ? "The constructor named k."
     match k
         Option.Some(c) -> match Check.State.lookup(st, c)
-            Option.Some(Const.CCtor(kv)) -> kv.numFields == 0
-            _ -> false
-        Option.None -> false
+            Option.Some(Const.CCtor(kv)) -> Option.Some(kv)
+            _ -> Option.None
+        Option.None -> Option.None
 
-verify noFields
-    noFields(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.None) => false
+verify ctorOf
+    ctorOf(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Option.None) => Option.None
+
+fn unitStructure(st: St, args: List<Expr>, ls: List<Level>, k: Option<Ctor>, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "The constructor's telescope at the type's levels and parameters, its fields each a proof or unit-like."
+    match k
+        Option.Some(kv) -> match List.len(args) == kv.numParams
+            true -> unitFieldsLazy(st, dropPis(kv.head.ty, kv.numParams), List.reverse(args), kv.head, ls, paramDomains(kv.head.ty, kv.numParams, []), seen)
+            false -> Result.Ok(RU(b = false, st = st, seen = seen))
+        Option.None -> Result.Ok(RU(b = false, st = st, seen = seen))
+
+verify unitStructure
+    resultUnit(unitStructure(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [], [], Option.None, [])) => false
+
+fn unitFieldsLazy(st: St, tele: Expr, rev: List<Expr>, h: Head, ls: List<Level>, ctx: List<Expr>, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "The constructor's fields as unitFields takes them, each domain put at the type's levels and arguments only when it is looked at: the first field that fails ends the test, and mathlib's classes have many fields. A domain the constructor's own type shows to be a proposition (isProposition, as proof arguments are skipped) is one at every instance and is not built. A rest that is not a pi as written is put in whole and whnf'd, as the reference does."
+    match tele
+        Expr.Pi(_, d, b) -> match isProposition(st, h, ls, d, ctx)
+            true -> lazyNext(Check.State.namesAt(st, Core.Names.anon(), Core.Subst.instantiate(Core.Subst.instLevelParams(d, h.params, ls), rev), Option.None, Binder.Default), d, b, rev, h, ls, ctx, seen)
+            false -> lazyField(st, Core.Subst.instantiate(Core.Subst.instLevelParams(d, h.params, ls), rev), d, b, rev, h, ls, ctx, seen)
+        _ -> unitFieldsRest(whnf(st, Core.Subst.instantiate(Core.Subst.instLevelParams(tele, h.params, ls), rev))?, seen)
+
+verify unitFieldsLazy
+    resultUnit(unitFieldsLazy(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [], Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], [], [])) => true
+
+fn paramDomains(ty: Expr, n: Int, ctx: List<Expr>) -> List<Expr>
+    ? "The domains of the first n pis of ty, the nearest first, as isProposition reads them."
+    match n <= 0
+        true -> ctx
+        false -> match ty
+            Expr.Pi(_, d, b) -> paramDomains(b, n - 1, List.prepend(d, ctx))
+            _ -> ctx
+
+verify paramDomains
+    paramDomains(Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 1, []) => [Core.Exprs.sort(Level.Zero)]
+
+fn unitFieldsRest(w: RE, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "The rest whnf'd: more fields, or none."
+    unitFields(w.st, w.e, seen)
+
+verify unitFieldsRest
+    resultUnit(unitFieldsRest(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [])) => true
+
+fn lazyField(st: St, d: Expr, raw: Expr, b: Expr, rev: List<Expr>, h: Head, ls: List<Level>, ctx: List<Expr>, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "A field whose domain d (raw as the constructor writes it) is a proposition or unit-like; then the rest under a new variable for it."
+    p = isProp(st, d)?
+    match p.b
+        true -> lazyNext(Check.State.namesAt(p.st, Core.Names.anon(), d, Option.None, Binder.Default), raw, b, rev, h, ls, ctx, seen)
+        false -> lazyTyped(unitLikeOf(whnf(p.st, d)?, seen)?, d, raw, b, rev, h, ls, ctx)
+
+verify lazyField
+    resultUnit(lazyField(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), [], Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], [], [])) => false
+
+fn lazyTyped(u: RU, d: Expr, raw: Expr, b: Expr, rev: List<Expr>, h: Head, ls: List<Level>, ctx: List<Expr>) -> Result<RU, Fail>
+    ? "After the field's domain was tried as unit-like."
+    match u.b
+        true -> lazyNext(Check.State.namesAt(u.st, Core.Names.anon(), d, Option.None, Binder.Default), raw, b, rev, h, ls, ctx, u.seen)
+        false -> Result.Ok(u)
+
+verify lazyTyped
+    resultUnit(lazyTyped(RU(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), seen = []), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), [], Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], [])) => false
+
+fn lazyNext(x: RE, raw: Expr, b: Expr, rev: List<Expr>, h: Head, ls: List<Level>, ctx: List<Expr>, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "The rest of the telescope with the new variable for the field."
+    unitFieldsLazy(x.st, b, List.prepend(x.e, rev), h, ls, List.prepend(raw, ctx), seen)
+
+verify lazyNext
+    resultUnit(lazyNext(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), [], Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), [], [], [])) => true
+
+fn dropPis(e: Expr, n: Int) -> Expr
+    ? "The body under n pis, their variables left loose."
+    match n <= 0
+        true -> e
+        false -> match e
+            Expr.Pi(_, _, b) -> dropPis(b, n - 1)
+            _ -> e
+
+verify dropPis
+    dropPis(Core.Exprs.pi(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), 1) => Core.Exprs.bvar(0)
+
+fn unitFields(st: St, ct: Expr, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "Each field's domain a proposition or unit-like; the next under a new variable for it, whnf'd."
+    match ct
+        Expr.Pi(_, d, b) -> unitFieldNext(isProp(st, d)?, d, b, seen)
+        _ -> Result.Ok(RU(b = true, st = st, seen = seen))
+
+verify unitFields
+    resultUnit(unitFields(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.sort(Level.Zero), [])) => true
+
+fn unitFieldNext(p: RB, d: Expr, b: Expr, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "A proof field passes; another must be unit-like."
+    match p.b
+        true -> unitFieldsAfter(Check.State.namesAt(p.st, Core.Names.anon(), d, Option.None, Binder.Default), b, seen)
+        false -> unitFieldTyped(unitLikeOf(whnf(p.st, d)?, seen)?, d, b)
+
+verify unitFieldNext
+    resultUnit(unitFieldNext(RB(b = true, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero), [])) => true
+
+fn unitLikeOf(w: RE, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "Whether the whnf'd type is unit-like."
+    unitLikeClosed(w.st, w.e, seen)
+
+verify unitLikeOf
+    resultUnit(unitLikeOf(RE(e = Core.Exprs.sort(Level.Zero), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), [])) => false
+
+fn unitFieldTyped(u: RU, d: Expr, b: Expr) -> Result<RU, Fail>
+    ? "After the field's domain was tried as unit-like."
+    match u.b
+        true -> unitFieldsAfter(Check.State.namesAt(u.st, Core.Names.anon(), d, Option.None, Binder.Default), b, u.seen)
+        false -> Result.Ok(u)
+
+verify unitFieldTyped
+    resultUnit(unitFieldTyped(RU(b = false, st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), seen = []), Core.Exprs.sort(Level.Zero), Core.Exprs.sort(Level.Zero))) => false
+
+fn unitFieldsAfter(x: RE, b: Expr, seen: List<UnitSeen>) -> Result<RU, Fail>
+    ? "The rest of the telescope under the new variable, whnf'd."
+    w = whnf(x.st, Core.Subst.instantiate(b, [x.e]))?
+    unitFields(w.st, w.e, seen)
+
+verify unitFieldsAfter
+    resultUnit(unitFieldsAfter(RE(e = Core.Exprs.fvar(0), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe)), Core.Exprs.sort(Level.Zero), [])) => true
 
 fn unitTypes(st: St, tType: Expr, s: Expr) -> Result<RB, Fail>
     ? "Equal when s has the same type."
