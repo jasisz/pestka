@@ -40,7 +40,7 @@ same corpus under V8. On the [Lean Kernel Arena](https://arena.lean-lang.org/che
 it answers **all 240 tests with a prescribed outcome correctly** (92 soundness,
 148 completeness). [Measurements and setup →](docs/benchmarks.md)
 It has also checked whole exports of CFSG (39.7 million declarations, in
-4 h 6 min on 32 workers and 102 GiB), the Riemann hypothesis claim and FLT.
+2 h 1 min on 64 workers and 128 GiB), the Riemann hypothesis claim and FLT.
 [Large developments →](#large-developments)
 
 *Pestka* is Polish for a fruit stone — a kernel. It's also what you call
@@ -144,24 +144,28 @@ set size) are from GNU `time -v`.
 
 | Development | Declarations | Workers | Wall | Peak memory |
 | :--- | ---: | ---: | ---: | ---: |
-| CFSG | 39,656,013 | 32 | 4 h 6 min | 102 GiB |
+| CFSG | 39,656,013 | 64 | 2 h 1 min | 128 GiB |
 | Riemann hypothesis claim | 1,468,418 | 64 | 9 min 41 s | 34 GB |
 | FLT | 1,710,994 | 16 | 6 min 18 s | 27 GB |
 
 All three are accepted. In more detail:
 
-- **CFSG** (`cfsg-5437cdc`), r7a.8xlarge (32 vCPU), 2026-11-24: 4:05:37,
-  101.8 GiB, commit bc6471e on Aver 0.37.0 with PGO. The only axioms used
-  are `propext`, `Classical.choice` and `Quot.sound`. Workers get their
-  chunks in a fixed order, so the last half hour was one heavy chunk still
-  running while the others had finished.
+- **CFSG** (`cfsg-5437cdc`), r7a.16xlarge (64 vCPU), 2026-11-25: 2:01:19,
+  128.4 GiB, v0.2.0 (b58afd2) on Aver 0.38.0 with PGO, CPU time (user + sys)
+  400,827 s. The only axioms used are `propext`, `Classical.choice` and
+  `Quot.sound`. Workers take their jobs from a queue, so they stayed busy to
+  the end. v0.1.0 (bc6471e, Aver 0.37.0) on r7a.8xlarge (32 vCPU) took
+  4:05:37 at 101.8 GiB: its workers got their chunks in a fixed order, and the
+  last half hour was one heavy chunk still running while the others had
+  finished.
 - **Riemann hypothesis claim**, r7a.48xlarge, 2026-11-21: commit f8f5052
   on Aver 0.36.1 with PGO.
 - **FLT**, c7a.metal-48xl limited to 16 cores, 2026-11-16, including the
   conversion to Susz; median of three runs.
 
 For comparison, [Gruszka](https://github.com/jasisz/gruszka), our NbE
-kernel, checks the same CFSG export in about 3 h 10 min, at 169–184 GiB.
+kernel, checks the same CFSG export on the same r7a.16xlarge with 64 workers
+in 1:25:28, at 275.8 GiB (Gruszka 0.2.0).
 
 ## A few things inside
 
