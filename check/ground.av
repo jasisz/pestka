@@ -620,7 +620,7 @@ fn retStep(st: St, m: GM, x: Int, v: Cell, f: Frame) -> MC
             Cell.VLit(b) -> natDone(m, Check.Lits.natOp(op, a, b))
             _ -> stop(m, "Nat operand not a literal")
         Frame.FSucc -> match v
-            Cell.VLit(n) -> retNew(alloc(m, Cell.VLit(n + 1)))
+            Cell.VLit(n) -> natDone(m, Check.Lits.succOf(n))
             _ -> stop(m, "succ of a non-literal")
         Frame.FKeep(e) -> MC(m = kept(m, e, litOf(Option.Some(v))), c = Ctl.Ret(x))
 
