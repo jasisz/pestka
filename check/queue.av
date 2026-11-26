@@ -42,24 +42,24 @@ fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, alwa
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match Bool.or(workers <= 1, dealt)
         true -> Check.Decl.checkHeld(decls, workers, memory, placed, always, say)
-        false -> queuedPlan(Check.Decl.planned(decls, workers, memory, placed, always, say), workers)
+        false -> queuedPlan(Check.Decl.planned(decls, workers, memory, placed, always, say), workers, placed)
 
-fn queuedPlan(p: Check.Decl.Plan, w: Int) -> Check.Decl.Checking
+fn queuedPlan(p: Check.Decl.Plan, w: Int, placed: Bool) -> Check.Decl.Checking
     ? "A planned check on w workers taken from the queue."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
-    Check.Decl.checkingOf(p, queued(p.admitted.run.env, p.runs, w))
+    Check.Decl.checkingOf(p, queued(p.admitted.run.env, p.runs, w, placed))
 
-fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory, dealt: Bool, say: Bool) -> Check.Decl.Part
+fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory, dealt: Bool, say: Bool, placed: Bool) -> Check.Decl.Part
     ? "Check.Decl.checkPart with the runs taken from a queue when more than one worker checks and --dealt is not given (RunsQueued)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     match Bool.or(workers <= 1, dealt)
         true -> Check.Decl.checkPart(decls, targets, workers, memory, say)
-        false -> queuedPart(Check.Decl.planPart(decls, targets, workers, memory, say), workers)
+        false -> queuedPart(Check.Decl.planPart(decls, targets, workers, memory, say), workers, placed)
 
-fn queuedPart(p: Check.Decl.Plan, w: Int) -> Check.Decl.Part
+fn queuedPart(p: Check.Decl.Plan, w: Int, placed: Bool) -> Check.Decl.Part
     ? "A planned subset check on w workers taken from the queue."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
-    Check.Decl.partOf(p, queued(p.admitted.run.env, p.runs, w))
+    Check.Decl.partOf(p, queued(p.admitted.run.env, p.runs, w, placed))
 
 
 record Next
@@ -92,6 +92,8 @@ record Queue
     say: Bool
     since: Int
     owns: List<Own>
+    placed: Bool
+    reach: Map<Int, Int>
 
 record Own
     worker: Int
@@ -165,17 +167,17 @@ decision QuantaOfWork
     rejected = ["RunsPerWorkerFixed", "PortionsGuided", "PortionsSpilledToTheSameWorker"]
     impacts = [queued, dispatched, splitFor, evenPart, given, mostOf, quantumOf, budgetOf, came, idled, waited]
 
-fn queued(env: Env, runs: List<Check.Decl.Chunk>, w: Int) -> List<Check.Decl.Checked>
-    ? "The runs on w workers, as jobs of a quantum of work each (QuantaOfWork)."
+fn queued(env: Env, runs: List<Check.Decl.Chunk>, w: Int, placed: Bool) -> List<Check.Decl.Checked>
+    ? "The runs on w workers, as jobs of a quantum of work each (QuantaOfWork); placed says whether every declaration names only constants placed before it, so that facts may go back in the file (FactsOnlyForward)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     jobs = jobsOf(runs, [])
-    q = Queue.update(emptyQueue(), env = env, ahead = jobs, left = Check.Decl.costOf(jobs, 0), template = templateOf(runs), share = 2 * Int.max(w, 1), start = Time.unixMs(), say = sayOf(runs), since = sinceOf(runs))
+    q = Queue.update(emptyQueue(), env = env, ahead = jobs, left = Check.Decl.costOf(jobs, 0), template = templateOf(runs), share = 2 * Int.max(w, 1), start = Time.unixMs(), say = sayOf(runs), since = sinceOf(runs), placed = placed)
     waited(opened(q, 0, w))
 
 fn emptyQueue() -> Queue
     ? "A queue with nothing to do, for examples."
     none: Map<Int, Wait.Item> = {}
-    Queue(env = Check.State.envEmpty(), ahead = [], left = 0, template = Check.State.limitsOf(1, Memory.Fast), share = 2, made = 0, spills = [], pending = none, busy = {}, began = {}, most = {}, idle = [], start = 0, waits = 0, handled = 0, workMs = 0, wsum = 0, csum = 0, best = Option.None, at = 0, count = 0, lanes = [], say = false, since = 0, owns = [])
+    Queue(env = Check.State.envEmpty(), ahead = [], left = 0, template = Check.State.limitsOf(1, Memory.Fast), share = 2, made = 0, spills = [], pending = none, busy = {}, began = {}, most = {}, idle = [], start = 0, waits = 0, handled = 0, workMs = 0, wsum = 0, csum = 0, best = Option.None, at = 0, count = 0, lanes = [], say = false, since = 0, owns = [], placed = false, reach = {})
 
 verify emptyQueue
     emptyQueue().count => 0
@@ -490,17 +492,90 @@ fn fresh(q: Queue, s: Int, p: Portion) -> Queue
     dispatched(given(Queue.update(q, ahead = p.rest, left = q.left - p.cost), s, Next(limits = q.template, jobs = latered(p.jobs, []))))
 
 fn given(q: Queue, s: Int, n: Next) -> Queue
-    ? "Worker s, waiting, begins a job on n with the facts it kept: within a quantum of work once the rate is known, else within its next count of declarations and as much work, the blocks read for that much (QuantaOfWork)."
+    ? "Worker s, waiting, begins a job on n with the facts it kept, when they may go to where n begins (FactsOnlyForward): within a quantum of work once the rate is known, else within its next count of declarations and as much work, the blocks read for that much (QuantaOfWork)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
     i = Option.withDefault(idleOf(q.idle, s), Idle(worker = s, kept = Check.Decl.noFacts(), held = {}))
-    kept = i.kept
+    keeps = keepsFacts(q.placed, Option.withDefault(Map.get(q.reach, s), -1), firstPos(n.jobs))
+    kept = match keeps
+        true -> i.kept
+        false -> Check.Decl.noFacts()
     held = i.held
     quantum = quantumOf(q, Time.unixMs())
     most = mostOf(Option.withDefault(Map.get(q.most, s), 1), q.count)
     l = Limits.update(n.limits, worker = s + 1, run = q.made + 1)
     jobs = readFor(q, n.jobs, quantum, most)
-    q2 = Queue.update(q, idle = idleWithout(q.idle, s, []), made = q.made + 1, began = Map.set(q.began, s, Time.unixMs()), most = Map.set(q.most, s, 2 * most), owns = ownsWith(q.owns, Own(worker = s, jobs = jobs, keep = List.len(jobs), from = readTo(jobs, 0)), []))
+    q2 = Queue.update(q, idle = idleWithout(q.idle, s, []), made = q.made + 1, began = Map.set(q.began, s, Time.unixMs()), most = Map.set(q.most, s, 2 * most), owns = ownsWith(q.owns, Own(worker = s, jobs = jobs, keep = List.len(jobs), from = readTo(jobs, 0)), []), reach = Map.set(q.reach, s, reachKept(keeps, Option.withDefault(Map.get(q.reach, s), -1))))
     launched(q2, s, Check.Decl.taskOf(q2.env, held, jobs, l, kept, q2.best, q2.at, budgetOf(quantum, most), countOf(quantum, most)), l, jobs, quantum)
+
+decision FactsOnlyForward
+    date = "2026-11-26"
+    reason =
+        "A fact a worker keeps (Check.Decl.Facts: types inferred, pairs"
+        "found equal, whnf results) was found in the environment of the"
+        "declaration that found it, the constants placed before it, and"
+        "holds in every environment holding those constants. In file order"
+        "the environments only grow, so a fact found at position p holds at"
+        "every position q >= p; out of file order it may not: a declaration"
+        "naming a constant placed after it could find a fact about that"
+        "constant instead of the unknown constant (CheckedByNamespace in"
+        "Check.Decl). Checking leaves file order only when the reader found"
+        "every name placed (NamesPlacedWhereRead), but the queue hands out"
+        "rests and portions taken back to whichever worker waits, and that"
+        "worker had often checked later positions: a file whose theorem at"
+        "position 4 names one placed at 5, which a later theorem at 6 also"
+        "names, was accepted as a proof of False on 2 to 8 workers (the"
+        "hunt of 2026-11-26, tests/soundness-findings/queue-forward-*)."
+        "So the queue keeps, for each worker, the last position of the jobs"
+        "it was handed, and when the names are not all placed hands a job"
+        "the worker's facts only when that position is no later than the"
+        "job's first: within a job the positions grow (the runs are in"
+        "file order when the names are not placed, orderFor), so every fact"
+        "used at position q was found at a position p <= q, whose"
+        "environment q's holds. Otherwise the job begins with no facts, as"
+        "a worker begins. The work is still handed out as before, so no"
+        "worker waits; only facts are lost, and only on files with a name"
+        "not placed, which lean4export does not write: Init, mathlib and"
+        "the Arena's files are placed and keep every fact. Keeping file"
+        "order in the queue when not placed would leave workers idle;"
+        "checking each fact's constants against the position would cost"
+        "every lookup of every fact."
+    chosen = "FactsOnlyForward"
+    rejected = ["FactsCarriedAnywhere", "FileOrderQueueWhenNotPlaced", "FactsCheckedByPosition"]
+    impacts = [queued, given, came, keepsFacts, reachKept, reachAfter]
+
+fn keepsFacts(placed: Bool, reach: Int, first: Int) -> Bool
+    ? "Whether a worker begins a job with the facts it kept: when every name is placed, or when the last position they were found at is no later than the job's first (FactsOnlyForward)."
+    Bool.or(placed, Bool.and(reach <= first, first >= 0))
+
+verify keepsFacts
+    keepsFacts(false, 9, 3) => false
+    keepsFacts(false, 3, 9) => true
+    keepsFacts(false, 3, 3) => true
+    keepsFacts(false, -1, 0) => true
+    keepsFacts(false, -1, -1) => false
+    keepsFacts(true, 9, 3) => true
+
+fn reachKept(keeps: Bool, reach: Int) -> Int
+    ? "The last position the facts a job begins with were found at: the worker's, when it keeps them, else none (FactsOnlyForward)."
+    match keeps
+        true -> reach
+        false -> -1
+
+verify reachKept
+    reachKept(true, 5) => 5
+    reachKept(false, 5) => -1
+
+fn reachAfter(reach: Int, last: Int, unchecked: Int) -> Int
+    ? "The last position the facts a job ends with may have been found at, with last the position of the job's last declaration and unchecked that of the first it left unchecked (-1 for none): just before that, else last, at least where its facts began (FactsOnlyForward). What main took back from the job counts, as the job may have checked it."
+    match unchecked >= 0
+        false -> Int.max(reach, last)
+        true -> Int.max(reach, unchecked - 1)
+
+verify reachAfter
+    reachAfter(-1, -1, -1) => -1
+    reachAfter(3, 7, -1) => 7
+    reachAfter(3, 7, 7) => 6
+    reachAfter(3, 7, 4) => 3
 
 fn mostOf(doubled: Int, checked: Int) -> Int
     ? "How many declarations a job may check before the rate is known: the worker's count doubled with each of its jobs, but never more than all jobs have checked so far (QuantaOfWork)."
@@ -709,13 +784,24 @@ fn took(q: Queue, k: Int, r: Result<Option<Check.Decl.Done>, String>) -> Queue
 fn came(q: Queue, k: Int, d0: Check.Decl.Done) -> Queue
     ? "What worker k's job found, cut to the declarations it still held (RestTakenFromLongJobs): its failure kept when it is the earliest; a block it wanted read and the rest begun with it on the same worker; otherwise its rest handed back and the worker waiting for work (QuantaOfWork)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
-    d = trimmed(d0, ownOf(q.owns, k))
+    own = ownOf(q.owns, k)
+    d = trimmed(d0, own)
     l = Option.withDefault(Map.get(q.busy, k), Check.State.limitsOf(1, Memory.Fast))
     twice(l, k, d0.count - d.count)
-    q2 = Queue.update(earliest(q, l, d.fail, d.at), count = q.count + d.count, busy = Map.remove(q.busy, k), owns = ownsWithout(q.owns, k, []), workMs = q.workMs + Int.max(Time.unixMs() - Option.withDefault(Map.get(q.began, k), Time.unixMs()), 0), wsum = q.wsum + d.work, csum = q.csum + d.cost)
+    reach = reachAfter(Option.withDefault(Map.get(q.reach, k), -1), lastPos(ownJobs(own)), firstPos(d0.left))
+    q2 = Queue.update(earliest(q, l, d.fail, d.at), reach = Map.set(q.reach, k, reach), count = q.count + d.count, busy = Map.remove(q.busy, k), owns = ownsWithout(q.owns, k, []), workMs = q.workMs + Int.max(Time.unixMs() - Option.withDefault(Map.get(q.began, k), Time.unixMs()), 0), wsum = q.wsum + d.work, csum = q.csum + d.cost)
     match d.wants
         Option.Some(w) -> wanted(q2, k, l, w, Check.Decl.readSpot(w), d)
         Option.None -> ranOut(q2, k, l, d)
+
+fn ownJobs(o: Option<Own>) -> List<Check.Decl.Pre>
+    ? "The jobs main handed out with a job in flight, none without one."
+    match o
+        Option.Some(x) -> x.jobs
+        Option.None -> []
+
+verify ownJobs
+    ownJobs(Option.None) => []
 
 fn trimmed(d: Check.Decl.Done, o: Option<Own>) -> Check.Decl.Done
     ? "A job's answer cut to the declarations it still held when main took some back: its rest only up to them, and those it checked past them not counted, as the job they went to counts them; a block wanted past them not wanted (RestTakenFromLongJobs)."
