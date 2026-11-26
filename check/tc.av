@@ -4012,9 +4012,17 @@ decision CasesOnDirect
         "214.2 G to 203.9 G instructions, magma-list-pair-n21 60.2 G to"
         "56.5 G, reachability 70.1 G to 65.8 G, all 30 perf tests 360.3 G to"
         "343.0 G; etale and Init as they were."
+        "The wrapper's shape is exact: lambdas over the fields and as many"
+        "induction hypotheses as the rule hands the minor premise, no more"
+        "and no fewer. It asked only for at least the fields, so the value"
+        "fun n => s n for Nat.succ, whose rule hands s the field and the"
+        "hypothesis, passed, and the shortcut gave s n where unfolding gives"
+        "s n (rec n): Gruszka accepted a proof of 0 = 1 so, and Pestka"
+        "rejected a valid decide over such a casesOn (hunt 2026-11-26,"
+        "c-defeq-gruszka-rules I2-pos_c, casesOn-shape-keeps-ih-*)."
     chosen = "CasesOnDirect"
     rejected = ["CasesOnUnfolded"]
-    impacts = [casesGo, casesOf, casesOnGo]
+    impacts = [casesGo, casesOf, casesOnGo, minorFits, ruleHyps]
 
 fn casesNamed(n: Name) -> Bool
     ? "A name a casesOn or a sparse casesOn has: only such constants have their shape looked up, and the name alone decides nothing."
@@ -4417,7 +4425,7 @@ fn minorsFit(ws: List<Expr>, rules: List<RecRule>, top: Int, count: Int, p: Int,
         true -> true
         false -> match ws
             [w, ..wrest] -> match rules
-                [r, ..rrest] -> Bool.and(Bool.and(minorFits(w, r.nfields, top), ruleSelects(r, p, count + j, j)), minorsFit(wrest, rrest, top - 1, count - 1, p, j + 1))
+                [r, ..rrest] -> Bool.and(Bool.and(minorFits(w, r.nfields, ruleHyps(r, p, count + j), top), ruleSelects(r, p, count + j, j)), minorsFit(wrest, rrest, top - 1, count - 1, p, j + 1))
                 [] -> false
             [] -> false
 
@@ -4433,16 +4441,25 @@ verify ruleSelects
     ruleSelects(RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Binder.Default)), 0, 1, 0) => true
     ruleSelects(RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(1), Binder.Default), Binder.Default)), 0, 1, 0) => false
 
-fn minorFits(w: Expr, nf: Int, minor: Int) -> Bool
-    ? "Whether w is lambdas over the constructor's nf fields and its induction hypotheses whose body is the bound variable minor applied to the fields, in order: the minor premise taking the fields and dropping the hypotheses."
+fn minorFits(w: Expr, nf: Int, hyps: Int, minor: Int) -> Bool
+    ? "Whether w is lambdas over exactly the constructor's nf fields and its hyps induction hypotheses whose body is the bound variable minor applied to the fields, in order: the minor premise taking the fields and dropping the hypotheses (CasesOnDirect). With fewer lambdas a hypothesis the rule hands it would go to the minor premise, with more the wrapper would be a function still."
     k = lamsUpTo(w, 1099511627776, 0)
     body = peelLams(w, k)
-    Bool.and(Bool.and(k >= nf, Core.Apps.fnOf(body) == Core.Exprs.bvar(minor + k)), Bool.and(Core.Apps.numArgs(body) == nf, varsFrom(Core.Apps.argsOf(body), k - 1, nf)))
+    Bool.and(Bool.and(k == nf + hyps, Core.Apps.fnOf(body) == Core.Exprs.bvar(minor + k)), Bool.and(Core.Apps.numArgs(body) == nf, varsFrom(Core.Apps.argsOf(body), k - 1, nf)))
 
 verify minorFits
-    minorFits(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(1)), Binder.Default), Binder.Default), 1, 0) => true
-    minorFits(Core.Exprs.bvar(1), 0, 1) => true
-    minorFits(Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(0)), 0, 1) => false
+    minorFits(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(1)), Binder.Default), Binder.Default), 1, 1, 0) => true
+    minorFits(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.bvar(1)), Binder.Default), Binder.Default), 1, 0, 0) => false
+    minorFits(Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(0)), Binder.Default), 1, 1, 0) => false
+    minorFits(Core.Exprs.bvar(1), 0, 0, 1) => true
+    minorFits(Core.Exprs.app(Core.Exprs.bvar(1), Core.Exprs.bvar(0)), 0, 0, 1) => false
+
+fn ruleHyps(r: RecRule, p: Int, nm: Int) -> Int
+    ? "How many induction hypotheses the rule hands its minor premise, for a recursor of p parameters, one motive and nm minor premises: the arguments of its right-hand side's body past the fields, as hypsOf counts them."
+    Core.Apps.numArgs(peelLams(r.rhs, p + 1 + nm + r.nfields)) - r.nfields
+
+verify ruleHyps
+    ruleHyps(RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Binder.Default)), 0, 1) => 0
 
 
 fn peeledBody(st: St, f: Expr, h: Head, v: Expr, k: Int, ls: List<Level>) -> RE
