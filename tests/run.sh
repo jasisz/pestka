@@ -44,6 +44,15 @@
 # hunt_* (wellformed/ and illtyped/) are the valid or invalid exports of the
 # conformance hunt of 2026-11-26 against Lean 55bd690, whose invalid ones
 # that proved False are in soundness-findings/ under their own names.
+# Of them, from the audit of shortcuts of 2026-11-26: hunt_natAdd* (a
+# constructor or an axiom named Nat.add, which the reference computes on
+# literals by its name), hunt_litRecMutualNat* (a Nat in a mutual block,
+# its Nat.rec on a literal not computed as values), hunt_closedFailThenEager
+# (a closed pair found different without eagerReduce, equal with it),
+# hunt_natInPropLiteral (a Nat declared in Prop: its literals are proofs),
+# hunt_groundNatAdd* (Nat.add at a level, also run with --ground, which
+# must unfold it), hunt_prefix* (a literal before a constant it stands for:
+# rejected on any number of workers, see below).
 #   unsupported/  2 (declined: format version)
 # and every export tests/soundness.py kept under tests/soundness-findings, each
 # invalid, against 1 (rejected), and the conformance hunt's proofs of False:
@@ -91,6 +100,52 @@ for f in "$root"/tests/soundness-findings/queue-forward-*.ndjson; do
     done
   done
   [ $bad -eq 1 ] || echo "ok   soundness-findings/$(basename "$f") on 2 and 8 workers, 5 runs each"
+done
+# The audit's exports also on one worker, where one worker's facts meet
+# every declaration (hunt_closedFailThenEager was rejected only there), and
+# hunt_groundNatAdd* with --ground, whose machine computed Nat.add at a
+# level by its name (natOpAt in Check.Ground).
+for dir in export/wellformed:0 export/illtyped:1; do
+  name=${dir%%:*}
+  want=${dir##*:}
+  for f in "$root"/tests/"$name"/hunt_*.ndjson; do
+    "$root/bin/capped" 2000 20 "$bin" $PESTKA_ARGS "$f" 1 >/dev/null 2>&1
+    got=$?
+    if [ "$got" -eq "$want" ]; then
+      echo "ok   ${name#export/}/$(basename "$f") [1 worker]"
+    else
+      echo "FAIL ${name#export/}/$(basename "$f") [1 worker]: status $got, expected $want"
+      fail=1
+    fi
+  done
+  for f in "$root"/tests/"$name"/hunt_ground*.ndjson; do
+    "$root/bin/capped" 2000 20 "$bin" $PESTKA_ARGS --ground "$f" 1 >/dev/null 2>&1
+    got=$?
+    if [ "$got" -eq "$want" ]; then
+      echo "ok   ${name#export/}/$(basename "$f") [--ground]"
+    else
+      echo "FAIL ${name#export/}/$(basename "$f") [--ground]: status $got, expected $want"
+      fail=1
+    fi
+  done
+done
+# A literal before a constant it stands for (String.ofList, Char.ofNat or
+# List.cons placed after it), with later declarations finding the same facts
+# where the constant is placed: rejected on any number of workers. A
+# computation past the literal prefix dealt to the end of a prefix run
+# (ComputationsSpread), a rest of the prefix handed to a worker that checked
+# past it (FactsOnlyForward), or List.cons not counted among the constants
+# (LiteralPrefix) let 2 to 8 workers accept them, 3 to 16 times in 16.
+for f in "$root"/tests/export/illtyped/hunt_prefix*.ndjson; do
+  bad=0
+  for w in 2 4 8; do
+    for i in 1 2 3 4; do
+      "$root/bin/capped" 2000 20 "$bin" $PESTKA_ARGS "$f" $w >/dev/null 2>&1
+      got=$?
+      [ "$got" -eq 1 ] || { echo "FAIL illtyped/$(basename "$f") on $w workers, run $i: status $got, expected 1"; bad=1; fail=1; }
+    done
+  done
+  [ $bad -eq 1 ] || echo "ok   illtyped/$(basename "$f") on 2, 4 and 8 workers, 4 runs each"
 done
 # A theorem over 16382 binders, its innermost variable one past the 16383 a
 # node's stored loose range saturates at: generated, as the export is 2.4 MB.

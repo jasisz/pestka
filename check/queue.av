@@ -47,7 +47,7 @@ fn checkHeld(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, alwa
 fn queuedPlan(p: Check.Decl.Plan, w: Int, placed: Bool) -> Check.Decl.Checking
     ? "A planned check on w workers taken from the queue."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
-    Check.Decl.checkingOf(p, queued(p.admitted.run.env, p.runs, w, placed))
+    Check.Decl.checkingOf(p, queued(p.admitted.run.env, p.runs, w, placed, p.lits))
 
 fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory, dealt: Bool, say: Bool, placed: Bool) -> Check.Decl.Part
     ? "Check.Decl.checkPart with the runs taken from a queue when more than one worker checks and --dealt is not given (RunsQueued)."
@@ -59,7 +59,7 @@ fn checkPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory
 fn queuedPart(p: Check.Decl.Plan, w: Int, placed: Bool) -> Check.Decl.Part
     ? "A planned subset check on w workers taken from the queue."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
-    Check.Decl.partOf(p, queued(p.admitted.run.env, p.runs, w, placed))
+    Check.Decl.partOf(p, queued(p.admitted.run.env, p.runs, w, placed, p.lits))
 
 
 record Next
@@ -93,6 +93,7 @@ record Queue
     since: Int
     owns: List<Own>
     placed: Bool
+    lits: Int
     reach: Map<Int, Int>
 
 record Own
@@ -167,17 +168,17 @@ decision QuantaOfWork
     rejected = ["RunsPerWorkerFixed", "PortionsGuided", "PortionsSpilledToTheSameWorker"]
     impacts = [queued, dispatched, splitFor, evenPart, given, mostOf, quantumOf, budgetOf, came, idled, waited]
 
-fn queued(env: Env, runs: List<Check.Decl.Chunk>, w: Int, placed: Bool) -> List<Check.Decl.Checked>
-    ? "The runs on w workers, as jobs of a quantum of work each (QuantaOfWork); placed says whether every declaration names only constants placed before it, so that facts may go back in the file (FactsOnlyForward)."
+fn queued(env: Env, runs: List<Check.Decl.Chunk>, w: Int, placed: Bool, lits: Int) -> List<Check.Decl.Checked>
+    ? "The runs on w workers, as jobs of a quantum of work each (QuantaOfWork); placed says whether every declaration names only constants placed before it, so that facts may go back in the file past the literal prefix, which ends at lits (FactsOnlyForward, LiteralPrefix in Check.Decl)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin, Runs.take, Wait.poll]
     jobs = jobsOf(runs, [])
-    q = Queue.update(emptyQueue(), env = env, ahead = jobs, left = Check.Decl.costOf(jobs, 0), template = templateOf(runs), share = 2 * Int.max(w, 1), start = Time.unixMs(), say = sayOf(runs), since = sinceOf(runs), placed = placed)
+    q = Queue.update(emptyQueue(), env = env, ahead = jobs, left = Check.Decl.costOf(jobs, 0), template = templateOf(runs), share = 2 * Int.max(w, 1), start = Time.unixMs(), say = sayOf(runs), since = sinceOf(runs), placed = placed, lits = lits)
     waited(opened(q, 0, w))
 
 fn emptyQueue() -> Queue
     ? "A queue with nothing to do, for examples."
     none: Map<Int, Wait.Item> = {}
-    Queue(env = Check.State.envEmpty(), ahead = [], left = 0, template = Check.State.limitsOf(1, Memory.Fast), share = 2, made = 0, spills = [], pending = none, busy = {}, began = {}, most = {}, idle = [], start = 0, waits = 0, handled = 0, workMs = 0, wsum = 0, csum = 0, best = Option.None, at = 0, count = 0, lanes = [], say = false, since = 0, owns = [], placed = false, reach = {})
+    Queue(env = Check.State.envEmpty(), ahead = [], left = 0, template = Check.State.limitsOf(1, Memory.Fast), share = 2, made = 0, spills = [], pending = none, busy = {}, began = {}, most = {}, idle = [], start = 0, waits = 0, handled = 0, workMs = 0, wsum = 0, csum = 0, best = Option.None, at = 0, count = 0, lanes = [], say = false, since = 0, owns = [], placed = false, lits = -1, reach = {})
 
 verify emptyQueue
     emptyQueue().count => 0
@@ -495,7 +496,7 @@ fn given(q: Queue, s: Int, n: Next) -> Queue
     ? "Worker s, waiting, begins a job on n with the facts it kept, when they may go to where n begins (FactsOnlyForward): within a quantum of work once the rate is known, else within its next count of declarations and as much work, the blocks read for that much (QuantaOfWork)."
     ! [Console.error, Disk.readBytesAt, Time.unixMs, Runs.begin]
     i = Option.withDefault(idleOf(q.idle, s), Idle(worker = s, kept = Check.Decl.noFacts(), held = {}))
-    keeps = keepsFacts(q.placed, Option.withDefault(Map.get(q.reach, s), -1), firstPos(n.jobs))
+    keeps = keepsFacts(q.placed, q.lits, Option.withDefault(Map.get(q.reach, s), -1), firstPos(n.jobs))
     kept = match keeps
         true -> i.kept
         false -> Check.Decl.noFacts()
@@ -538,22 +539,37 @@ decision FactsOnlyForward
         "the Arena's files are placed and keep every fact. Keeping file"
         "order in the queue when not placed would leave workers idle;"
         "checking each fact's constants against the position would cost"
-        "every lookup of every fact."
+        "every lookup of every fact. Placed names are not enough: up to the"
+        "end of the literal prefix (LiteralPrefix in Check.Decl) a literal"
+        "stands for constants placed later, so a fact found past it about a"
+        "literal holds there but not before. A job that begins in the prefix"
+        "gets the worker's facts only when they were found no later than its"
+        "first position, as when the names are not placed, and when one of"
+        "the constants literals stand for is never placed (lits -1) the"
+        "prefix never ends. The last position is the latest the job held,"
+        "not the position of its last job: past the prefix jobs need not be"
+        "in file order. Four workers accepted declarations one rejects when"
+        "a rest of the prefix went to a worker that had checked past it"
+        "(audit 2026-11-26, lp-spread, bad-plain)."
     chosen = "FactsOnlyForward"
     rejected = ["FactsCarriedAnywhere", "FileOrderQueueWhenNotPlaced", "FactsCheckedByPosition"]
-    impacts = [queued, given, came, keepsFacts, reachKept, reachAfter]
+    impacts = [queued, given, came, keepsFacts, reachKept, reachAfter, latestBefore]
 
-fn keepsFacts(placed: Bool, reach: Int, first: Int) -> Bool
-    ? "Whether a worker begins a job with the facts it kept: when every name is placed, or when the last position they were found at is no later than the job's first (FactsOnlyForward)."
-    Bool.or(placed, Bool.and(reach <= first, first >= 0))
+fn keepsFacts(placed: Bool, lits: Int, reach: Int, first: Int) -> Bool
+    ? "Whether a worker begins a job with the facts it kept: when every name is placed and the job begins past the literal prefix, which ends at lits (LiteralPrefix in Check.Decl: before it a literal may stand for a constant placed later; with lits -1 one of those constants is never placed and the prefix never ends), or when the last position they were found at is no later than the job's first (FactsOnlyForward)."
+    Bool.or(Bool.and(placed, Bool.and(lits >= 0, first > lits)), Bool.and(reach <= first, first >= 0))
 
 verify keepsFacts
-    keepsFacts(false, 9, 3) => false
-    keepsFacts(false, 3, 9) => true
-    keepsFacts(false, 3, 3) => true
-    keepsFacts(false, -1, 0) => true
-    keepsFacts(false, -1, -1) => false
-    keepsFacts(true, 9, 3) => true
+    keepsFacts(false, -1, 9, 3) => false
+    keepsFacts(false, -1, 3, 9) => true
+    keepsFacts(false, -1, 3, 3) => true
+    keepsFacts(false, -1, -1, 0) => true
+    keepsFacts(false, -1, -1, -1) => false
+    keepsFacts(true, -1, 9, 3) => false
+    keepsFacts(true, -1, 2, 3) => true
+    keepsFacts(true, 5, 9, 3) => false
+    keepsFacts(true, 5, 2, 3) => true
+    keepsFacts(true, 5, 9, 6) => true
 
 fn reachKept(keeps: Bool, reach: Int) -> Int
     ? "The last position the facts a job begins with were found at: the worker's, when it keeps them, else none (FactsOnlyForward)."
@@ -565,17 +581,27 @@ verify reachKept
     reachKept(true, 5) => 5
     reachKept(false, 5) => -1
 
-fn reachAfter(reach: Int, last: Int, unchecked: Int) -> Int
-    ? "The last position the facts a job ends with may have been found at, with last the position of the job's last declaration and unchecked that of the first it left unchecked (-1 for none): just before that, else last, at least where its facts began (FactsOnlyForward). What main took back from the job counts, as the job may have checked it."
-    match unchecked >= 0
-        false -> Int.max(reach, last)
-        true -> Int.max(reach, unchecked - 1)
+fn reachAfter(reach: Int, jobs: List<Check.Decl.Pre>, unchecked: Int) -> Int
+    ? "The last position the facts a job ends with may have been found at, the job's declarations jobs and unchecked the position of the first it left unchecked (-1 for none): the latest position among those before it, else among all, at least where its facts began (FactsOnlyForward). The latest, not the last: past the literal prefix the jobs need not be in file order (CheckedByNamespace in Check.Decl). What main took back from the job counts, as the job may have checked it."
+    Int.max(reach, latestBefore(jobs, unchecked, -1))
 
 verify reachAfter
-    reachAfter(-1, -1, -1) => -1
-    reachAfter(3, 7, -1) => 7
-    reachAfter(3, 7, 7) => 6
-    reachAfter(3, 7, 4) => 3
+    reachAfter(-1, [], -1) => -1
+    reachAfter(3, [Check.Decl.Pre.Later(Check.Decl.job2("a", 5)), Check.Decl.Pre.Later(Check.Decl.job2("a", 7))], -1) => 7
+    reachAfter(3, [Check.Decl.Pre.Later(Check.Decl.job2("a", 5)), Check.Decl.Pre.Later(Check.Decl.job2("a", 7))], 7) => 5
+    reachAfter(3, [Check.Decl.Pre.Later(Check.Decl.job2("a", 9)), Check.Decl.Pre.Later(Check.Decl.job2("a", 4))], 4) => 9
+    reachAfter(3, [Check.Decl.Pre.Later(Check.Decl.job2("a", 2))], 2) => 3
+
+fn latestBefore(jobs: List<Check.Decl.Pre>, unchecked: Int, acc: Int) -> Int
+    ? "The latest position among the jobs before the one at unchecked, or among all when it is not among them."
+    match jobs
+        [] -> acc
+        [p, ..rest] -> match Check.Decl.posOf(p) == unchecked
+            true -> acc
+            false -> latestBefore(rest, unchecked, Int.max(acc, Check.Decl.posOf(p)))
+
+verify latestBefore
+    latestBefore([], 3, -1) => -1
 
 fn mostOf(doubled: Int, checked: Int) -> Int
     ? "How many declarations a job may check before the rate is known: the worker's count doubled with each of its jobs, but never more than all jobs have checked so far (QuantaOfWork)."
@@ -788,7 +814,7 @@ fn came(q: Queue, k: Int, d0: Check.Decl.Done) -> Queue
     d = trimmed(d0, own)
     l = Option.withDefault(Map.get(q.busy, k), Check.State.limitsOf(1, Memory.Fast))
     twice(l, k, d0.count - d.count)
-    reach = reachAfter(Option.withDefault(Map.get(q.reach, k), -1), lastPos(ownJobs(own)), firstPos(d0.left))
+    reach = reachAfter(Option.withDefault(Map.get(q.reach, k), -1), ownJobs(own), firstPos(d0.left))
     q2 = Queue.update(earliest(q, l, d.fail, d.at), reach = Map.set(q.reach, k, reach), count = q.count + d.count, busy = Map.remove(q.busy, k), owns = ownsWithout(q.owns, k, []), workMs = q.workMs + Int.max(Time.unixMs() - Option.withDefault(Map.get(q.began, k), Time.unixMs()), 0), wsum = q.wsum + d.work, csum = q.csum + d.cost)
     match d.wants
         Option.Some(w) -> wanted(q2, k, l, w, Check.Decl.readSpot(w), d)

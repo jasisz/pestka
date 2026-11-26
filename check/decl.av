@@ -11,7 +11,7 @@ module Decl
         "environment at its own place in the file, so that they can be"
         "checked apart; the verdict names the first failure in file order,"
         "as checking strictly in order would."
-    exposes [jobCost, perDecl, costOf, preCost, readPrefix, posOf, Run, Job, Admitted, Chunk, Checked, Checking, Part, Facts, Plan, Pre, Task, Done, planned, planPart, checkingOf, partOf, runTask, preRead, taskOf, blockMissing, tally, laneEnded, noFacts, readSpot, said, failText, checkAll, checkPart, skippedAmong, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
+    exposes [job2, jobCost, perDecl, costOf, preCost, readPrefix, posOf, Run, Job, Admitted, Chunk, Checked, Checking, Part, Facts, Plan, Pre, Task, Done, planned, planPart, checkingOf, partOf, runTask, preRead, taskOf, blockMissing, tally, laneEnded, noFacts, readSpot, said, failText, checkAll, checkPart, skippedAmong, checkParallel, checkHeld, admit, due, chunks, checkChunk, combine, jobChecks]
     depends [Bytes, Core.Names, Core.Levels, Core.Exprs, Core.Decls, Core.Lazy, Core.Cache, Check.Shapes, Check.State, Check.Tc, Check.IndAdd]
     effects [Console.error, Disk.readBytesAt, Time.unixMs]
 
@@ -802,6 +802,7 @@ record Plan
     admitted: Admitted
     runs: List<Chunk>
     unchecked: Int
+    lits: Int
 
 fn planned(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always: Bool, say: Bool) -> Plan
     ? "The environment built and the deferred declarations cut into runs, numbered, for checkHeld and for the queue of runs (RunsQueued in Check.Queue)."
@@ -812,7 +813,7 @@ fn planned(decls: List<Decl>, workers: Int, memory: Memory, placed: Bool, always
     lits = literalsPlaced(decls, 0, litNames)
     jobs = orderFor(due(a), w, unit, placed, always, lits)
     limits = Limits.update(Check.State.limitsOf(unit, memory), say = say, since = startedAt(say))
-    Plan(admitted = a, runs = numbered(runsOf(jobs, a.run.env, limits, w, spreadable(w, placed, lits), lits)), unchecked = 0)
+    Plan(admitted = a, runs = numbered(runsOf(jobs, a.run.env, limits, w, spreadable(w, placed, lits), lits)), unchecked = 0, lits = lits)
 
 verify planned
     planned([], 2, Memory.Fast, false, false, false).runs => []
@@ -825,7 +826,7 @@ fn planPart(decls: List<Decl>, targets: List<Int>, workers: Int, memory: Memory,
     unit = unitFor(w)
     all = due(a)
     jobs = onlyTargets(all, targets, [])
-    Plan(admitted = a, runs = numbered(chunks(jobs, a.run.env, Limits.update(Check.State.limitsOf(unit, memory), say = say, since = startedAt(say)), runSize(costOf(jobs, 0), w), [], 0, [])), unchecked = List.len(all) - List.len(jobs))
+    Plan(admitted = a, runs = numbered(chunks(jobs, a.run.env, Limits.update(Check.State.limitsOf(unit, memory), say = say, since = startedAt(say)), runSize(costOf(jobs, 0), w), [], 0, [])), unchecked = List.len(all) - List.len(jobs), lits = literalsPlaced(decls, 0, litNames))
 
 verify planPart
     planPart([axiomNamed("a", false), axiomNamed("b", false)], [1], 1, Memory.Fast, false).unchecked => 1
@@ -835,14 +836,14 @@ fn checkingOf(p: Plan, cs: List<Checked>) -> Checking
     Checking(run = combine(p.admitted, cs), held = cs)
 
 verify checkingOf
-    checkingOf(Plan(admitted = emptyAdmitted(), runs = [], unchecked = 0), []).held => []
+    checkingOf(Plan(admitted = emptyAdmitted(), runs = [], unchecked = 0, lits = -1), []).held => []
 
 fn partOf(p: Plan, cs: List<Checked>) -> Part
     ? "The verdict of a planned subset check from what its runs found."
     Part(checking = checkingOf(p, cs), unchecked = p.unchecked)
 
 verify partOf
-    partOf(Plan(admitted = emptyAdmitted(), runs = [], unchecked = 3), []).unchecked => 3
+    partOf(Plan(admitted = emptyAdmitted(), runs = [], unchecked = 3, lits = -1), []).unchecked => 3
 
 type Pre
     Read(Job)
