@@ -105,6 +105,22 @@ else
   echo "FAIL generated/deep-binder-16382: status $got, expected 0"
   fail=1
 fi
+# (fun w => fun x1..x16383 => x1) c, the body bound variable 16382 under a
+# saturated range: equal to fun xs => x1 (good), not to fun xs => c (bad),
+# which the machine's instantiation took it for (SaturatedRangeWalked).
+# Generated, as each is 2 to 4 MB.
+for kind in good bad; do
+  python3 "$root/tests/gen_deep_beta_export.py" 16383 16382 $kind "$deep"
+  "$root/bin/capped" 2000 20 "$bin" $PESTKA_ARGS "$deep" >/dev/null 2>&1
+  got=$?
+  want=0; [ $kind = bad ] && want=1
+  if [ "$got" -eq "$want" ]; then
+    echo "ok   generated/deep-beta-16383-$kind"
+  else
+    echo "FAIL generated/deep-beta-16383-$kind: status $got, expected $want"
+    fail=1
+  fi
+done
 # Two lists of 200000 cells, equal only cell by cell, each tail one
 # comparison deeper (DeepArgumentsResumed): equal, and with the last cell
 # changed, unequal; before, a stack overflow. Generated, as each is 17 MB.
