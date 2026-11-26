@@ -5896,9 +5896,9 @@ verify reduceNatIn
     resultOpt(reduceNatIn(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "succ"), []), Core.Exprs.natLit(4)))) => Option.Some(Core.Exprs.natLit(5))
 
 fn natSucc(a: RE) -> Result<RO, Fail>
-    ? "succ of a literal."
+    ? "succ of a literal, refused past the size bound as the reference refuses it (NatSizeAsReference in Check.Lits)."
     match Check.Lits.natValue(a.e)
-        Option.Some(n) -> Result.Ok(RO(o = Option.Some(Core.Exprs.natLit(n + 1)), st = a.st))
+        Option.Some(n) -> Result.Ok(RO(o = Option.Some(Check.Lits.succOf(n)?), st = a.st))
         Option.None -> Result.Ok(RO(o = Option.None, st = a.st))
 
 verify natSucc

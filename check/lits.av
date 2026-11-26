@@ -3,7 +3,7 @@ module Lits
         "Names the kernel knows by heart, the expansion of Nat and String"
         "literals into constructor applications, and the Nat operations the"
         "reference kernel computes on literals instead of unfolding."
-    exposes [nat, string, natZero, natSucc, boolTrue, boolFalse, stringOfList, quot, quotMk, eagerReduce, dontcare, name1, name2, natLitToCtor, strToCtor, natValue, natOp, isNatOp, boolExpr, natTooBig]
+    exposes [nat, string, natZero, natSucc, boolTrue, boolFalse, stringOfList, quot, quotMk, eagerReduce, dontcare, name1, name2, natLitToCtor, strToCtor, natValue, natOp, isNatOp, boolExpr, natTooBig, succOf]
     depends [Core.Names, Core.Levels, Core.Exprs, Check.State]
     effects []
 
@@ -216,9 +216,18 @@ decision NatSizeAsReference
         "may part within a word of it. A count Bits.shiftLeft refuses"
         "still declines. A result of 256 MiB (1 <<< 2^31) is refused at"
         "once; before, 2 ^ 2^31 was computed (1.5 GB) and accepted."
+        "Two places parted from the reference by more (hunt 2026-11-26,"
+        "literals-limits): Nat.succ of a literal was not bounded at all, so"
+        "succ of a literal at the bound was accepted; and pow estimated the"
+        "result from the base's bits times the exponent, where the reference"
+        "takes the base's whole 64-bit words, 8 bytes each, against 128 MiB"
+        "over the exponent rounded down, so 2 ^ (2^24 + 1) to 2 ^ 2^29 and"
+        "(2^64) ^ (2^23 + 1) were computed and accepted where it refuses."
+        "Nat.succ is now bounded as add is, on the machine and the ground"
+        "machine alike, and pow refuses by the reference's own estimate."
     chosen = "NatSizeAsReference"
     rejected = ["ShiftCountBound"]
-    impacts = ["natOp", "shiftLeft", "pow", "sized"]
+    impacts = ["natOp", "shiftLeft", "pow", "sized", "succOf"]
 
 natMaxBits: Int = 1073741824
 
@@ -269,12 +278,12 @@ verify shiftLeft
     shiftLeft(0, 18446744073709551616) => Result.Ok(Core.Exprs.natLit(0))
 
 fn pow(a: Int, b: Int) -> Result<Expr, Fail>
-    ? "The reference refuses an exponent beyond 32 bits, and, for a base above 1, a result past natMaxBits before computing it: a ^ b has at most bits(a) * b bits."
+    ? "The reference refuses an exponent beyond 32 bits, and, for a base above 1, a result it estimates past the bound before computing it: the base's size in whole 64-bit words, 8 bytes each, times the exponent, compared as size > 128 MiB / b with the division rounded down (NatSizeAsReference)."
     match b > 4294967295
         true -> Result.Err(Fail.Reject("Nat.pow exponent does not fit in 32 bits"))
         false -> match Bool.or(a <= 1, b == 0)
             true -> Result.Ok(Core.Exprs.natLit(powLoop(a, b, 1)))
-            false -> match fitsBits(a, Result.withDefault(Int.div(natMaxBits, b), 0))
+            false -> match fitsBits(a, 64 * Int.div(Result.withDefault(Int.div(134217728, b), 0), 8))
                 true -> Result.Ok(Core.Exprs.natLit(powLoop(a, b, 1)))
                 false -> Result.Err(Fail.Reject("Nat.pow result exceeds the 128 MiB size limit"))
 
@@ -284,6 +293,17 @@ verify pow
     pow(0, 4294967295) => Result.Ok(Core.Exprs.natLit(0))
     pow(2, 4294967295) => Result.Err(Fail.Reject("Nat.pow result exceeds the 128 MiB size limit"))
     pow(2, 4294967296) => Result.Err(Fail.Reject("Nat.pow exponent does not fit in 32 bits"))
+    pow(2, 16777217) => Result.Err(Fail.Reject("Nat.pow result exceeds the 128 MiB size limit"))
+    pow(3, 16777217) => Result.Err(Fail.Reject("Nat.pow result exceeds the 128 MiB size limit"))
+    pow(18446744073709551616, 8388609) => Result.Err(Fail.Reject("Nat.pow result exceeds the 128 MiB size limit"))
+    pow(2, 10) => Result.Ok(Core.Exprs.natLit(1024))
+
+fn succOf(n: Int) -> Result<Expr, Fail>
+    ? "Nat.succ of the literal n: n + 1, refused past natMaxBits as the reference refuses it (NatSizeAsReference)."
+    sized(n + 1)
+
+verify succOf
+    succOf(4) => Result.Ok(Core.Exprs.natLit(5))
 
 fn powLoop(base: Int, e: Int, acc: Int) -> Int
     ? "Square and multiply. The base is not squared past the last bit, where the square would be the largest number of the loop and unused."
