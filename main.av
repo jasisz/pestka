@@ -166,7 +166,7 @@ fn partSummary(p: Parsed, names: List<String>, workers: Int, memory: Memory, dea
     Console.print("subset: {List.len(p.targets)} declarations asked for; the first {List.len(p.decls)} declarations of the file read")
     match Check.Decl.skippedAmong(p.decls, p.targets, 0, [])
         [n, .._] -> Verdict(code = declined("{Core.Names.render(n)} is unsafe or partial, which Pestka does not check"), held = Option.None)
-        [] -> partChecked(Check.Queue.checkPart(p.decls, p.targets, workers, memory, dealt, say), names, List.len(p.targets))
+        [] -> partChecked(Check.Queue.checkPart(p.decls, p.targets, workers, memory, dealt, say, p.allPlaced), names, List.len(p.targets))
 
 fn partChecked(c: Check.Decl.Part, names: List<String>, n: Int) -> Verdict
     ? "The subset verdict, with what checking found held to the end (FactsHeldToExit)."

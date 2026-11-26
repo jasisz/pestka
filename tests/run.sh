@@ -69,6 +69,23 @@ for mode in "" --reorder-always; do
     done
   done
 done
+# A declaration naming a constant placed after it, where a worker that checked
+# a later user of that constant could carry a fact about it back: rejected
+# on any number of workers, whichever worker gets which part of the queue
+# (FactsOnlyForward in Check.Queue). Accepted as proofs of False 3 to 20 times
+# in 20 on 2, 4 and 8 workers before; five runs on 2 and on 8 workers each,
+# as which worker gets what depends on time.
+for f in "$root"/tests/soundness-findings/queue-forward-*.ndjson; do
+  bad=0
+  for w in 2 8; do
+    for i in 1 2 3 4 5; do
+      "$root/bin/capped" 2000 20 "$bin" $PESTKA_ARGS "$f" $w >/dev/null 2>&1
+      got=$?
+      [ "$got" -eq 1 ] || { echo "FAIL soundness-findings/$(basename "$f") on $w workers, run $i: status $got, expected 1"; bad=1; fail=1; }
+    done
+  done
+  [ $bad -eq 1 ] || echo "ok   soundness-findings/$(basename "$f") on 2 and 8 workers, 5 runs each"
+done
 # A theorem over 16382 binders, its innermost variable one past the 16383 a
 # node's stored loose range saturates at: generated, as the export is 2.4 MB.
 deep=$(mktemp) || exit 1
