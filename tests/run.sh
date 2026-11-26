@@ -41,9 +41,15 @@
 # rejected) come from Gruszka's tests/adv, made from 120_unitLikeNested:
 # functions of 17 and 40 arguments into a unit-like type, a unit-like type
 # wrapped 20 times, and a recursor missing its minors and major premise.
+# hunt_* (wellformed/ and illtyped/) are the valid or invalid exports of the
+# conformance hunt of 2026-11-26 against Lean 55bd690, whose invalid ones
+# that proved False are in soundness-findings/ under their own names.
 #   unsupported/  2 (declined: format version)
 # and every export tests/soundness.py kept under tests/soundness-findings, each
-# invalid, against 1 (rejected).
+# invalid, against 1 (rejected), and the conformance hunt's proofs of False:
+# queue-forward-* (a constant named before its place, carried as a fact by
+# a queued worker), nat-without-succ-* (a type named Nat whose second
+# constructor is not Nat.succ, its casesOn on a literal).
 # Every file runs twice: as given, and with --reorder-always, which checks out
 # of file order wherever the reader allows it, as mathlib is; these files are
 # too small to pass the limits' unit that turns it on otherwise. The status
