@@ -2827,9 +2827,9 @@ verify whnfRun
     resultExpr(whnfRun(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.app(Core.Exprs.app(Core.Exprs.cnst(Check.Lits.name2("Nat", "mul"), []), Core.Exprs.natLit(2)), Core.Exprs.natLit(3)))) => Core.Exprs.natLit(6)
 
 fn deltaRigid(st: St, f: Expr) -> Bool
-    ? "A head under which whnf can do nothing: a constructor other than Nat.succ, an inductive type, an axiom, an opaque constant, a free variable without a let value, a sort, a pi or a literal."
+    ? "A head under which whnf can do nothing: a constructor, an inductive type, an axiom or an opaque constant whose name the reference does not compute by (natNamed), a free variable without a let value, a sort, a pi or a literal."
     match f
-        Expr.Const(_, n, _) -> match Core.Apps.isConst(f, Check.Lits.natSucc)
+        Expr.Const(_, n, _) -> match natNamed(f)
             true -> false
             false -> match Check.State.lookup(st, n)
                 Option.Some(Const.CInduct) -> true
@@ -2957,6 +2957,10 @@ decision RigidHeadsStuck
         "decide meets a constructor at the head at every value it builds,"
         "eight hundred thousand times on reachability. Such a head is now"
         "stuck at once; Nat.succ still goes to the arithmetic on literals."
+        "So does any such head named Nat.succ or a binary Nat operation at"
+        "no levels: the reference computes those on literals by name, before"
+        "it asks what the constant is, so an axiom Nat.add of 0 and 0 is 0"
+        "(hunt 2026-11-26 audit, rigid-heads-stuck; natNamed)."
         "One worker on Aver 06639a5e: reachability 55.0 G to 54.2 G"
         "instructions, the rest as it was."
     chosen = "RigidHeadsStuck"
@@ -2964,7 +2968,7 @@ decision RigidHeadsStuck
     impacts = [lconst]
 
 fn lconst(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<MR, Fail>
-    ? "A constant head: a recursor's rule, a quotient rule, or, with delta, Nat arithmetic and unfolding. A constructor other than Nat.succ, an inductive type and an axiom have nothing to unfold and are stuck at once (RigidHeadsStuck). Where the machine goes is worked out by constGo, and it takes one step there (UnfoldPicked)."
+    ? "A constant head: a recursor's rule, a quotient rule, or, with delta, Nat arithmetic and unfolding. A constructor, an inductive type and an axiom have nothing to unfold and are stuck at once, unless named as Nat arithmetic (RigidHeadsStuck). Where the machine goes is worked out by constGo, and it takes one step there (UnfoldPicked)."
     g = constGo(st, f, ls, c, stack, ms, delta, cheapRec, cheapProj)?
     match g.run
         true -> lcore(g.st, g.t, g.env, g.rest, g.ms, delta, cheapRec, cheapProj)
@@ -2978,15 +2982,35 @@ fn constGo(st: St, f: Expr, ls: List<Level>, c: Option<Const>, stack: List<Clo>,
     match c
         Option.Some(Const.CRec(rv)) -> recGo(st, f, ls, rv, stack, ms, cheapRec, cheapProj)
         Option.Some(Const.CQuot) -> quotGo(st, f, matStack(stack, ms, []))
-        Option.Some(Const.CCtor) -> match Core.Apps.isConst(f, Check.Lits.natSucc)
-            true -> natGo(st, f, c, stack, ms, delta, cheapRec, cheapProj)
-            false -> Result.Ok(stuckGo(st, f, stack, ms))
-        Option.Some(Const.CInduct) -> Result.Ok(stuckGo(st, f, stack, ms))
-        Option.Some(Const.CAxiom) -> Result.Ok(stuckGo(st, f, stack, ms))
+        Option.Some(Const.CCtor) -> rigidGo(st, f, c, stack, ms, delta, cheapRec, cheapProj)
+        Option.Some(Const.CInduct) -> rigidGo(st, f, c, stack, ms, delta, cheapRec, cheapProj)
+        Option.Some(Const.CAxiom) -> rigidGo(st, f, c, stack, ms, delta, cheapRec, cheapProj)
         _ -> natGo(st, f, c, stack, ms, delta, cheapRec, cheapProj)
 
 verify constGo
     Result.withDefault(constGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), [], Option.None, [], MS(next = 0, forced = {}), true, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+
+fn rigidGo(st: St, f: Expr, c: Option<Const>, stack: List<Clo>, ms: MS, delta: Bool, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
+    ? "A constructor, an inductive type or an axiom at the head: stuck at once, unless the reference computes on literals by its name (natNamed), whatever kind of constant it is (RigidHeadsStuck)."
+    match natNamed(f)
+        true -> natGo(st, f, c, stack, ms, delta, cheapRec, cheapProj)
+        false -> Result.Ok(stuckGo(st, f, stack, ms))
+
+verify rigidGo
+    Result.withDefault(rigidGo(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.cnst(Check.Lits.name1("c"), []), Option.None, [], MS(next = 0, forced = {}), true, false, false), Go(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ms = MS(next = 0, forced = {}), run = true, t = Core.Exprs.cnst(Check.Lits.name1("c"), []), env = [], rest = [])).run => false
+
+fn natNamed(f: Expr) -> Bool
+    ? "A head the reference kernel computes on literals by its name alone, before it looks at what the constant is: Nat.succ or a binary Nat operation (isNatOp), at no levels, as reduce_nat compares the whole constant. Such a head is no rigid constructor, type or axiom (CtorMajorAsIs, RigidHeadsStuck)."
+    match f
+        Expr.Const(_, Name.Str(Name.Str(Name.Anon, "Nat", _), op, _), []) -> Bool.or(op == "succ", Check.Lits.isNatOp(op))
+        _ -> false
+
+verify natNamed
+    natNamed(Core.Exprs.cnst(Check.Lits.natSucc, [])) => true
+    natNamed(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), [])) => true
+    natNamed(Core.Exprs.cnst(Check.Lits.name2("Nat", "add"), [Level.Zero])) => false
+    natNamed(Core.Exprs.cnst(Check.Lits.name2("Nat", "log2"), [])) => false
+    natNamed(Core.Exprs.cnst(Check.Lits.natZero, [])) => false
 
 fn recGo(st: St, f: Expr, ls: List<Level>, rv: Rec, stack: List<Clo>, ms: MS, cheapRec: Bool, cheapProj: Bool) -> Result<Go, Fail>
     ? "A recursor reduces only with its major premise present; the major premise is built and brought to constructor form, the other arguments stay closures."
