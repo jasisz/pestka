@@ -1850,7 +1850,7 @@ fn prepared(env: Env, d: Decl) -> Result<Addition, Fail>
             false -> deferred(env, h, Option.Some(Proof.Built(v)), false, Const.COpaque(h, v, unsafe))
         Decl.Quot(h, kind) -> Result.Ok(Addition.Derived(Check.IndAdd.addQuotDecl(env, h, kind)?))
         Decl.Induct(types, ctors, recs) -> match anyUnsafe(types)
-            true -> Result.Ok(Addition.Skipped)
+            true -> unsafeBlock(types, ctors, recs)
             false -> inductive(env, Check.IndAdd.addInductive(env, types, ctors, recs), types, ctors, recs)
 
 verify prepared
@@ -1924,6 +1924,64 @@ fn mergeConsts(env: Env, cs: List<Tuple<Name, Const>>) -> Env
 
 verify mergeConsts
     Check.State.envHas(mergeConsts(Check.State.envEmpty(), [(Core.Names.anon(), Const.CAxiom(Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), false))]), Core.Names.anon()) => true
+
+decision UnsafeBlocksWhole
+    date = "2026-11-26"
+    reason =
+        "Pestka skips an unsafe inductive block, as it skips every unsafe"
+        "declaration: none of its names enters the environment, so no safe"
+        "declaration can use them. It took the block for unsafe when one of"
+        "its types was, whatever its other types, constructors and recursors"
+        "said, and so accepted a block whose type was unsafe and whose"
+        "constructor, safe, had a type that is no constructor's at all."
+        "Lean's inductive declaration is unsafe or not as a whole; the"
+        "official replay skips unsafe constants one by one and so finds a"
+        "safe constructor of a type it skipped missing, and rejects (hunt"
+        "2026-11-26, c-order-workers pestka-unsafe-type-safe-ctors-skipped,"
+        "c-recursor-rules type-unsafe-only-ctor-garbage). So a block with an"
+        "unsafe type is skipped only when every type, constructor and"
+        "recursor of it is unsafe; one that mixes is rejected. A safe block"
+        "has every flag compared with the one the kernel derives already."
+    chosen = "UnsafeBlocksWhole"
+    rejected = ["UnsafeByAnyType", "SafePartsChecked"]
+    impacts = [prepared, unsafeBlock, allUnsafe]
+
+fn unsafeBlock(types: List<IndType>, ctors: List<Ctor>, recs: List<Rec>) -> Result<Addition, Fail>
+    ? "An unsafe block skipped, when every type, constructor and recursor of it says so; otherwise rejected (UnsafeBlocksWhole)."
+    match Bool.and(allUnsafe(types), Bool.and(ctorsUnsafe(ctors), recsUnsafe(recs)))
+        true -> Result.Ok(Addition.Skipped)
+        false -> Result.Err(Fail.Reject("an inductive block marked unsafe in some of its types, constructors or recursors but not all"))
+
+verify unsafeBlock
+    unsafeBlock([], [], []) => Result.Ok(Addition.Skipped)
+
+fn allUnsafe(types: List<IndType>) -> Bool
+    ? "Every type of the block is unsafe."
+    match types
+        [] -> true
+        [t, ..rest] -> Bool.and(t.isUnsafe, allUnsafe(rest))
+
+verify allUnsafe
+    allUnsafe([]) => true
+
+fn ctorsUnsafe(cs: List<Ctor>) -> Bool
+    ? "Every constructor of the block is unsafe."
+    match cs
+        [] -> true
+        [c, ..rest] -> Bool.and(c.isUnsafe, ctorsUnsafe(rest))
+
+verify ctorsUnsafe
+    ctorsUnsafe([]) => true
+    ctorsUnsafe([Ctor(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.sort(Level.Zero)), induct = Core.Names.anon(), cidx = 0, numParams = 0, numFields = 0, isUnsafe = false)]) => false
+
+fn recsUnsafe(rs: List<Rec>) -> Bool
+    ? "Every recursor of the block is unsafe."
+    match rs
+        [] -> true
+        [r, ..rest] -> Bool.and(r.isUnsafe, recsUnsafe(rest))
+
+verify recsUnsafe
+    recsUnsafe([]) => true
 
 fn anyUnsafe(types: List<IndType>) -> Bool
     ? "An unsafe inductive block."
