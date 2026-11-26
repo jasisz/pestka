@@ -435,9 +435,13 @@ verify job2
 decision LiteralPrefix
     date = "2026-11-12"
     reason =
-        "Checking a literal unfolds it to constants it does not name: Nat"
-        "for a number, and String, String.ofList, List, Char and Char.ofNat"
-        "for a string. A file may hold a literal before those are declared,"
+        "Checking a literal unfolds it to constants it does not name: Nat,"
+        "Nat.zero and Nat.succ for a number, and String, String.ofList,"
+        "List, List.nil, List.cons, Char and Char.ofNat for a string"
+        "(Check.Lits: natLitToCtor, strToCtor). Placing the type does not"
+        "place its constructors: a List whose cons is a definition placed"
+        "later let four workers accept what one rejects (audit 2026-11-26,"
+        "bad-litcons-w4). A file may hold a literal before those are declared,"
         "in MAIN or in a proof block, and Susz 1 says nothing of it (Susz 1"
         "spec, Appendix A, R6): which constants a literal stands for is the kernel's"
         "knowledge. So the declarations up to the one placing the last of"
@@ -465,7 +469,7 @@ verify prefixThenOrdered
     prefixThenOrdered([job2("b", 0), job2("a", 1)], 0, []) == [job2("b", 0), job2("a", 1)] => true
     prefixThenOrdered([], 0, []) => []
 
-litNames: List<Name> = [Core.Names.str(Core.Names.anon(), "Nat"), Core.Names.str(Core.Names.anon(), "String"), Core.Names.str(Core.Names.str(Core.Names.anon(), "String"), "ofList"), Core.Names.str(Core.Names.anon(), "List"), Core.Names.str(Core.Names.anon(), "Char"), Core.Names.str(Core.Names.str(Core.Names.anon(), "Char"), "ofNat")]
+litNames: List<Name> = [Core.Names.str(Core.Names.anon(), "Nat"), Core.Names.str(Core.Names.str(Core.Names.anon(), "Nat"), "zero"), Core.Names.str(Core.Names.str(Core.Names.anon(), "Nat"), "succ"), Core.Names.str(Core.Names.anon(), "String"), Core.Names.str(Core.Names.str(Core.Names.anon(), "String"), "ofList"), Core.Names.str(Core.Names.anon(), "List"), Core.Names.str(Core.Names.str(Core.Names.anon(), "List"), "nil"), Core.Names.str(Core.Names.str(Core.Names.anon(), "List"), "cons"), Core.Names.str(Core.Names.anon(), "Char"), Core.Names.str(Core.Names.str(Core.Names.anon(), "Char"), "ofNat")]
 
 fn literalsPlaced(decls: List<Decl>, i: Int, left: List<Name>) -> Int
     ? "The index of the declaration that places the last of the constants literals stand for, by a declaration Pestka does not skip; -1 when one is never placed (LiteralPrefix)."
