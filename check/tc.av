@@ -1793,11 +1793,11 @@ decision CtorMajorAsIs
     impacts = [majorToCtor, majorSlow]
 
 fn majorToCtor(st: St, rv: Rec, major: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<RE, Fail>
-    ? "K first; a literal is its constructor and a constructor application other than Nat.succ is already what every later step would leave it (CtorMajorAsIs); otherwise structure eta before any reduction of the major, so that a major with no weak head normal form does not stop the recursor (lean4#15351); then whnf, and literal or structure expansion."
+    ? "K first; a literal is its constructor and a constructor application whose head the reference does not compute by name (natNamed) is already what every later step would leave it (CtorMajorAsIs); otherwise structure eta before any reduction of the major, so that a major with no weak head normal form does not stop the recursor (lean4#15351); then whnf, and literal or structure expansion."
     m1 = kMajor(st, rv, major)?
     match m1.e
         Expr.NatLit(_, n) -> Result.Ok(RE(e = Check.Lits.natLitToCtor(n), st = m1.st))
-        _ -> match Bool.and(ruleHeaded(rv.rules, Core.Apps.fnOf(m1.e)), Bool.not(Core.Apps.isConst(Core.Apps.fnOf(m1.e), Check.Lits.natSucc)))
+        _ -> match Bool.and(ruleHeaded(rv.rules, Core.Apps.fnOf(m1.e)), Bool.not(natNamed(Core.Apps.fnOf(m1.e))))
             true -> Result.Ok(m1)
             false -> majorSlow(m1, rv, cheapRec, cheapProj)
 
