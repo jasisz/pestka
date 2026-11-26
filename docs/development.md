@@ -41,7 +41,8 @@ every combination of the values its `given` lines list, and the claim
   denotes for an assignment of its parameters: `isGeq law sound` (a
   level accepted as at least another is so for every assignment),
   `isEquiv law sound`, `normalize`, `mkMax` and `mkImax law keepsValue`,
-  and `instantiate law sameAsSubstitutedValues`. `aver proof` proves the
+  `gterms law keepsValue` (a level read as a max of guarded terms denotes
+  what the level does), and `instantiate law sameAsSubstitutedValues`. `aver proof` proves the
   helpers below them for all inputs (`toOffset`, `mkSucc`, `mkSuccN`,
   `biggerExplicit law keepsValue`, `isNotZero law atLeastOne`,
   `normalizesToZero law alwaysZero`, `isExplicit law valueIsDepth`, values

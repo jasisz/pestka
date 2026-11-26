@@ -4,8 +4,8 @@ module Univ
         "simplifying max and imax, parameter instantiation, normalization,"
         "equivalence and the greater-or-equal test. Both are complete, as the"
         "kernel renovation asks: the reference test where it decides, and"
-        "where it does not and an imax is left, a split by cases on the"
-        "parameters that decide each imax (ImaxByCases)."
+        "where it does not and an imax is left, each term of one side against"
+        "the other, by cases on that term's guard only (ImaxByTerms)."
     exposes [Offset, toOffset, isExplicit, isZero, isNotZero, normalizesToZero, zeroUnder, zeroUnderTwice, notZeroUnder, mkSucc, mkSuccN, mkMax, mkImax, instantiate, undefParam, normalize, isEquiv, isEquivList, isGeq]
     depends [Core.Names, Core.Levels]
     effects []
@@ -580,7 +580,7 @@ verify mkMaxList
     mkMaxList([Level.Param(Core.Names.anon()), Level.Param(Core.Names.str(Core.Names.anon(), "v"))]) => Level.Max(Level.Param(Core.Names.anon()), Level.Param(Core.Names.str(Core.Names.anon(), "v")))
 
 fn isEquiv(a: Level, b: Level) -> Bool
-    ? "Equal, or equal normal forms. Without imax the normal forms are compared by what they are made of, without building them (EquivByMaxima); with it, normal forms that differ are compared both ways by cases (ImaxByCases)."
+    ? "Equal, or equal normal forms. Without imax the normal forms are compared by what they are made of, without building them (EquivByMaxima); with it, normal forms that differ are compared both ways by guarded terms (ImaxByTerms)."
     match a == b
         true -> true
         false -> match Bool.or(hasImax(a), hasImax(b))
@@ -588,170 +588,389 @@ fn isEquiv(a: Level, b: Level) -> Bool
             false -> sameMaxima(a, b)
 
 fn equivNormal(na: Level, nb: Level) -> Bool
-    ? "Equal normal forms, or each at least the other for every assignment, the pairs decided on the way shared between the two (ImaxByCases)."
+    ? "Equal normal forms, or each at least the other for every assignment (ImaxByTerms)."
     match na == nb
         true -> true
-        false -> bothWays(geqMemo(na, nb, []), na, nb)
+        false -> match geqAll(na, nb)
+            true -> geqAll(nb, na)
+            false -> false
 
 verify equivNormal
     equivNormal(Level.Zero, Level.Zero) => true
     equivNormal(Level.IMax(sampleParam("u"), sampleParam("v")), Level.Max(sampleParam("u"), sampleParam("v"))) => false
 
-fn bothWays(r: GC, na: Level, nb: Level) -> Bool
-    ? "The other way, once the first holds."
-    match r.b
-        true -> geqMemo(nb, na, r.seen).b
-        false -> false
-
-verify bothWays
-    bothWays(GC(b = false, seen = []), Level.Zero, Level.Zero) => false
-
-decision ImaxByCases
-    date = "2026-11-25"
+decision ImaxByTerms
+    date = "2026-11-26"
     reason =
         "The kernel renovation (lean4#16595) compares levels completely: two"
         "levels are equal, or one is at least the other, when that holds for"
-        "every assignment of the parameters; the reference test before it"
-        "missed some, such as imax (imax u v) v against imax u v (the Arena"
-        "beta's renovation tests 103 to 110). Lean's normal form and its"
-        "test decide every pair without imax: max, successors, parameters"
-        "and numerals, which EquivByMaxima reads the same way. Only an imax"
-        "whose right side may be zero keeps a pair open, and whether it is"
-        "turns on the parameters that decide that side: dec(p) = p,"
-        "dec(succ) none, dec(max c d) both sides' unless one is never zero,"
-        "dec(imax c d) = dec(d). Such a parameter p is either zero or the"
-        "successor of something, so the pair is decided in both cases, p :="
-        "0 and p := p + 1 (the same name now standing for one less, which"
-        "ranges over every number again), each substituted with the"
-        "simplifying max and imax. That is sound, as the two cases cover"
-        "every value of p and a case that holds holds for every value of"
-        "the other parameters. It ends by structure, with no bound: after p"
-        "is split it is gone or sits only under a successor, where it"
-        "decides nothing, so each split leaves fewer deciding parameters;"
-        "with none left every imax has become zero or a max, and the test"
-        "is complete. The answer for a pair is the same wherever it is met,"
-        "so the pairs decided in one comparison are kept and not split"
-        "again. The reference test runs first, so every pair it decided is"
-        "decided as before, and the cases cost only where it said no and an"
-        "imax is left."
-    chosen = "ImaxByCases"
-    rejected = ["ReferenceTestOnly", "EvaluateOnSampleAssignments", "SplitDepthCapped"]
-    impacts = [isEquiv, equivNormal, isGeq, geqMemo, imaxParam, deciding]
+        "every assignment of the parameters. Lean's normal form and its test"
+        "decide every pair without imax; with an imax left, the pair was split"
+        "by cases on a deciding parameter of either side, p := 0 and p := p + 1"
+        "(ImaxByCases), which multiplies the cases of imaxes that have nothing"
+        "to do with each other: n independent triples under one max took 2^n"
+        "(conformance hunt 2026-11-26, F2, past 20 s). Now a level is read as a"
+        "max of guarded terms (gterms): base + k, counted when each clause of"
+        "its guard holds, a clause holding when one of its parameters is not"
+        "zero, else 0. p is the term p; succ l is 1 and every term of l one"
+        "higher; max joins; imax c d is d's terms and c's with the clause"
+        "dec(d), since imax c d is 0 when d is and max c d otherwise, and d is"
+        "0 exactly when every parameter of dec(d) is (dec(p) = p, succ never,"
+        "max both sides', imax its right side's). a >= b for every assignment"
+        "exactly when a is at least each term t of b, and that is decided by"
+        "cases on the parameters of t's guard and base only (covers): once"
+        "t's guard holds and its base is known zero or not, t has one value,"
+        "and a, which only grows with any parameter, is least with every"
+        "other parameter 0 and the non-zero ones 1, where a is read off its"
+        "terms: a term alive there on t's base at least as high, or for a"
+        "constant k one at least k (a non-zero base counting 1). The cases"
+        "cover every assignment, so it is sound and complete; they cost per"
+        "term of b, a sum over independent imaxes, not a product. The"
+        "question is coNP-hard in general (a guard can hold a monotone CNF),"
+        "so the cases stay exponential in the clauses of one term's guard."
+        "The reference test runs first, so every pair it decided is decided"
+        "as before."
+    chosen = "ImaxByTerms"
+    rejected = ["ReferenceTestOnly", "EvaluateOnSampleAssignments", "SplitDepthCapped", "ImaxByCases"]
+    impacts = [isEquiv, equivNormal, isGeq, geqAll, gterms, covers, decSet]
 
-record LevelPair
-    a: Level
-    b: Level
-    geq: Bool
+record GTerm
+    guard: List<List<Name>>
+    base: Option<Name>
+    k: Int
 
-record GC
-    b: Bool
-    seen: List<LevelPair>
+type Opening
+    Dead
+    Open(Name)
+    Holds
 
-fn geqMemo(a: Level, b: Level, seen: List<LevelPair>) -> GC
-    ? "a >= b for every assignment, with the pairs decided so far: the reference test on the normal forms, else by cases on a deciding parameter of an imax (ImaxByCases)."
-    na = normalize(a)
-    nb = normalize(b)
-    match decidedBefore(seen, na, nb)
-        Option.Some(r) -> GC(b = r, seen = seen)
-        Option.None -> remembered(geqDecide(na, nb, seen), na, nb)
+fn geqAll(a: Level, b: Level) -> Bool
+    ? "a >= b for every assignment: the reference test, else a at least every guarded term of b (ImaxByTerms)."
+    match geqCore(a, b)
+        true -> true
+        false -> coversAll(gterms(a), gterms(b))
 
-verify geqMemo
-    geqMemo(Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("v")), []).b => true
-    geqMemo(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"), []).b => false
-    geqMemo(sampleParam("u"), sampleParam("v"), []).b => false
+verify geqAll
+    geqAll(Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("v"))) => true
+    geqAll(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u")) => false
+    geqAll(sampleParam("u"), sampleParam("v")) => false
+    geqAll(Level.IMax(sampleParam("u"), Level.IMax(sampleParam("v"), sampleParam("w"))), Level.IMax(Level.Max(sampleParam("u"), sampleParam("v")), sampleParam("w"))) => true
 
-fn decidedBefore(seen: List<LevelPair>, a: Level, b: Level) -> Option<Bool>
-    ? "The answer kept for the pair, if any."
-    match seen
-        [] -> Option.None
-        [x, ..rest] -> match Bool.and(x.a == a, x.b == b)
-            true -> Option.Some(x.geq)
-            false -> decidedBefore(rest, a, b)
+fn coversAll(a: List<GTerm>, ts: List<GTerm>) -> Bool
+    ? "The terms a are at least each of ts for every assignment."
+    match ts
+        [] -> true
+        [t, ..rest] -> match covers(a, t, [], [])
+            true -> coversAll(a, rest)
+            false -> false
 
-verify decidedBefore
-    decidedBefore([LevelPair(a = Level.Zero, b = Level.Zero, geq = true)], Level.Zero, Level.Zero) => Option.Some(true)
-    decidedBefore([], Level.Zero, Level.Zero) => Option.None
+verify coversAll
+    coversAll([], []) => true
+    coversAll([], gterms(sampleParam("u"))) => false
 
-fn remembered(r: GC, a: Level, b: Level) -> GC
-    ? "Keeps the answer for the pair."
-    GC(b = r.b, seen = List.prepend(LevelPair(a = a, b = b, geq = r.b), r.seen))
-
-verify remembered
-    List.len(remembered(GC(b = true, seen = []), Level.Zero, Level.Zero).seen) => 1
-
-fn geqDecide(na: Level, nb: Level, seen: List<LevelPair>) -> GC
-    ? "The reference test, else a split on a deciding parameter of either side's imaxes; with none left the reference test is complete."
-    match geqCore(na, nb)
-        true -> GC(b = true, seen = seen)
-        false -> match imaxParam(na)
-            Option.Some(p) -> geqSplit(na, nb, p, seen)
-            Option.None -> match imaxParam(nb)
-                Option.Some(p) -> geqSplit(na, nb, p, seen)
-                Option.None -> GC(b = false, seen = seen)
-
-verify geqDecide
-    geqDecide(Level.Zero, Level.Zero, []).b => true
-
-fn geqSplit(a: Level, b: Level, p: Name, seen: List<LevelPair>) -> GC
-    ? "Both cases of p, zero and a successor; the second only when the first holds."
-    z = geqMemo(instantiate(a, [p], [Level.Zero]), instantiate(b, [p], [Level.Zero]), seen)
-    match z.b
-        false -> z
-        true -> geqMemo(instantiate(a, [p], [Level.Succ(Level.Param(p))]), instantiate(b, [p], [Level.Succ(Level.Param(p))]), z.seen)
-
-verify geqSplit
-    geqSplit(sampleParam("u"), sampleParam("v"), Core.Names.str(Core.Names.anon(), "u"), []).b => false
-    geqSplit(Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("v")), Core.Names.str(Core.Names.anon(), "v"), []).b => true
-
-fn imaxParam(l: Level) -> Option<Name>
-    ? "A parameter that decides the right side of some imax in l."
+fn decSet(l: Level) -> Option<List<Name>>
+    ? "The parameters that decide whether l is zero: none when it never is, else a list D with l zero exactly when every parameter of D is (empty: always zero)."
     match l
-        Level.Succ(a) -> imaxParam(a)
-        Level.Max(a, b) -> orElse(imaxParam(a), b)
-        Level.IMax(a, b) -> match deciding(b)
-            Option.Some(p) -> Option.Some(p)
-            Option.None -> orElse(imaxParam(a), b)
-        _ -> Option.None
-
-verify imaxParam
-    imaxParam(Level.IMax(sampleParam("u"), sampleParam("v"))) => Option.Some(Core.Names.str(Core.Names.anon(), "v"))
-    imaxParam(Level.Max(sampleParam("u"), sampleParam("v"))) => Option.None
-    imaxParam(Level.IMax(sampleParam("u"), Level.Succ(sampleParam("v")))) => Option.None
-
-fn orElse(found: Option<Name>, b: Level) -> Option<Name>
-    ? "found, else one from b."
-    match found
-        Option.Some(p) -> Option.Some(p)
-        Option.None -> imaxParam(b)
-
-verify orElse
-    orElse(Option.None, Level.Zero) => Option.None
-
-fn deciding(l: Level) -> Option<Name>
-    ? "A parameter that decides whether l is zero: dec(p) = p, dec(succ) none, dec(max c d) either side's unless one side is never zero, dec(imax c d) = dec(d)."
-    match l
-        Level.Param(p) -> Option.Some(p)
+        Level.Zero -> Option.Some([])
+        Level.Param(p) -> Option.Some([p])
         Level.Succ -> Option.None
-        Level.Max(a, b) -> match Bool.or(isNotZero(a), isNotZero(b))
-            true -> Option.None
-            false -> decidingEither(deciding(a), b)
-        Level.IMax(_, b) -> deciding(b)
-        Level.Zero -> Option.None
+        Level.Max(a, b) -> decUnion(decSet(a), decSet(b))
+        Level.IMax(_, b) -> decSet(b)
 
-verify deciding
-    deciding(Level.Max(sampleParam("u"), sampleParam("v"))) => Option.Some(Core.Names.str(Core.Names.anon(), "u"))
-    deciding(Level.Max(Level.Succ(sampleParam("u")), sampleParam("v"))) => Option.None
-    deciding(Level.IMax(sampleParam("u"), sampleParam("v"))) => Option.Some(Core.Names.str(Core.Names.anon(), "v"))
-    deciding(Level.Zero) => Option.None
+verify decSet
+    decSet(Level.Max(sampleParam("u"), sampleParam("v"))) => Option.Some([Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")])
+    decSet(Level.Max(Level.Succ(sampleParam("u")), sampleParam("v"))) => Option.None
+    decSet(Level.IMax(sampleParam("u"), sampleParam("v"))) => Option.Some([Core.Names.str(Core.Names.anon(), "v")])
+    decSet(Level.Zero) => Option.Some([])
 
-fn decidingEither(found: Option<Name>, b: Level) -> Option<Name>
-    ? "found, else one from b."
-    match found
-        Option.Some(p) -> Option.Some(p)
-        Option.None -> deciding(b)
+fn decUnion(x: Option<List<Name>>, y: Option<List<Name>>) -> Option<List<Name>>
+    ? "Both sides' deciding parameters; none when a side is never zero."
+    match x
+        Option.None -> Option.None
+        Option.Some(xs) -> match y
+            Option.None -> Option.None
+            Option.Some(ys) -> Option.Some(List.concat(xs, ys))
 
-verify decidingEither
-    decidingEither(Option.None, sampleParam("u")) => Option.Some(Core.Names.str(Core.Names.anon(), "u"))
+verify decUnion
+    decUnion(Option.None, Option.Some([])) => Option.None
+    decUnion(Option.Some([Core.Names.str(Core.Names.anon(), "u")]), Option.Some([Core.Names.str(Core.Names.anon(), "v")])) => Option.Some([Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")])
+
+fn gterms(l: Level) -> List<GTerm>
+    ? "l as a max of guarded terms, none at most another (ImaxByTerms)."
+    match l
+        Level.Zero -> []
+        Level.Param(p) -> [GTerm(guard = [], base = Option.Some(p), k = 0)]
+        Level.Succ(a) -> addTerms(succTerms(gterms(a)), [GTerm(guard = [], base = Option.None, k = 1)])
+        Level.Max(a, b) -> addTerms(gterms(a), gterms(b))
+        Level.IMax(a, b) -> imaxTerms(decSet(b), gterms(a), gterms(b))
+
+verify gterms
+    gterms(Level.Zero) => []
+    gterms(Level.Succ(Level.Zero)) => [GTerm(guard = [], base = Option.None, k = 1)]
+    gterms(Level.IMax(sampleParam("u"), sampleParam("v"))) => [GTerm(guard = [[Core.Names.str(Core.Names.anon(), "v")]], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 0), GTerm(guard = [], base = Option.Some(Core.Names.str(Core.Names.anon(), "v")), k = 0)]
+    gterms(Level.IMax(sampleParam("u"), Level.Zero)) => []
+
+fn imaxTerms(d: Option<List<Name>>, ta: List<GTerm>, tb: List<GTerm>) -> List<GTerm>
+    ? "imax c d from the terms of c and d: c's guarded by dec(d); zero when d always is."
+    match d
+        Option.None -> addTerms(ta, tb)
+        Option.Some(ds) -> match ds
+            [] -> []
+            _ -> addTerms(guarded(ta, ds), tb)
+
+verify imaxTerms
+    imaxTerms(Option.Some([]), gterms(sampleParam("u")), []) => []
+    imaxTerms(Option.None, gterms(sampleParam("u")), []) => gterms(sampleParam("u"))
+
+fn guarded(ts: List<GTerm>, c: List<Name>) -> List<GTerm>
+    ? "Each term with the clause c added to its guard."
+    match ts
+        [] -> []
+        [t, ..rest] -> List.prepend(GTerm(guard = addClause(c, t.guard), base = t.base, k = t.k), guarded(rest, c))
+
+verify guarded
+    guarded([GTerm(guard = [], base = Option.None, k = 1)], [Core.Names.str(Core.Names.anon(), "u")]) => [GTerm(guard = [[Core.Names.str(Core.Names.anon(), "u")]], base = Option.None, k = 1)]
+
+fn addClause(c: List<Name>, g: List<List<Name>>) -> List<List<Name>>
+    ? "A guard with the clause c too: unchanged when it already implies c; the clauses c implies are dropped."
+    match implied(g, c)
+        true -> g
+        false -> List.prepend(c, notImpliedBy(c, g))
+
+verify addClause
+    addClause([Core.Names.str(Core.Names.anon(), "u")], [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]) => [[Core.Names.str(Core.Names.anon(), "u")]]
+    addClause([Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")], [[Core.Names.str(Core.Names.anon(), "u")]]) => [[Core.Names.str(Core.Names.anon(), "u")]]
+
+fn notImpliedBy(c: List<Name>, g: List<List<Name>>) -> List<List<Name>>
+    ? "The clauses of g that c does not imply."
+    match g
+        [] -> []
+        [x, ..rest] -> match within(c, x)
+            true -> notImpliedBy(c, rest)
+            false -> List.prepend(x, notImpliedBy(c, rest))
+
+verify notImpliedBy
+    notImpliedBy([Core.Names.str(Core.Names.anon(), "u")], [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")], [Core.Names.str(Core.Names.anon(), "v")]]) => [[Core.Names.str(Core.Names.anon(), "v")]]
+
+fn implied(g: List<List<Name>>, c: List<Name>) -> Bool
+    ? "Clause c follows from guard g: it contains one of g's clauses."
+    match g
+        [] -> false
+        [x, ..rest] -> match within(x, c)
+            true -> true
+            false -> implied(rest, c)
+
+verify implied
+    implied([[Core.Names.str(Core.Names.anon(), "u")]], [Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]) => true
+    implied([[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]], [Core.Names.str(Core.Names.anon(), "u")]) => false
+
+fn within(xs: List<Name>, ys: List<Name>) -> Bool
+    ? "Every parameter of xs is in ys."
+    match xs
+        [] -> true
+        [x, ..rest] -> match List.contains(ys, x)
+            true -> within(rest, ys)
+            false -> false
+
+verify within
+    within([], []) => true
+    within([Core.Names.str(Core.Names.anon(), "u")], [Core.Names.str(Core.Names.anon(), "v")]) => false
+
+fn allImplied(g: List<List<Name>>, h: List<List<Name>>) -> Bool
+    ? "Guard h implies every clause of g."
+    match g
+        [] -> true
+        [c, ..rest] -> match implied(h, c)
+            true -> allImplied(rest, h)
+            false -> false
+
+verify allImplied
+    allImplied([], []) => true
+    allImplied([[Core.Names.str(Core.Names.anon(), "u")]], []) => false
+
+fn succTerms(ts: List<GTerm>) -> List<GTerm>
+    ? "Each term one higher."
+    match ts
+        [] -> []
+        [t, ..rest] -> List.prepend(GTerm(guard = t.guard, base = t.base, k = t.k + 1), succTerms(rest))
+
+verify succTerms
+    succTerms(gterms(sampleParam("u"))) => [GTerm(guard = [], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 1)]
+
+fn addTerms(xs: List<GTerm>, acc: List<GTerm>) -> List<GTerm>
+    ? "The terms of xs added to acc, one by one (addTerm)."
+    match xs
+        [] -> acc
+        [t, ..rest] -> addTerms(rest, addTerm(t, acc))
+
+verify addTerms
+    addTerms([], []) => []
+
+fn addTerm(t: GTerm, acc: List<GTerm>) -> List<GTerm>
+    ? "acc with t, unless a term of acc is at least t everywhere; the terms t is at least are dropped."
+    match anyAtLeast(acc, t)
+        true -> acc
+        false -> List.prepend(t, notAtMost(acc, t))
+
+verify addTerm
+    addTerm(GTerm(guard = [], base = Option.None, k = 1), gterms(Level.Succ(sampleParam("u")))) => gterms(Level.Succ(sampleParam("u")))
+    addTerm(GTerm(guard = [], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 2), [GTerm(guard = [[Core.Names.str(Core.Names.anon(), "v")]], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 1)]) => [GTerm(guard = [], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 2)]
+
+fn anyAtLeast(ts: List<GTerm>, t: GTerm) -> Bool
+    ? "Some term of ts is at least t everywhere."
+    match ts
+        [] -> false
+        [s, ..rest] -> match atLeast(s, t)
+            true -> true
+            false -> anyAtLeast(rest, t)
+
+verify anyAtLeast
+    anyAtLeast([], GTerm(guard = [], base = Option.None, k = 1)) => false
+
+fn notAtMost(ts: List<GTerm>, t: GTerm) -> List<GTerm>
+    ? "The terms of ts that t is not at least everywhere."
+    match ts
+        [] -> []
+        [s, ..rest] -> match atLeast(t, s)
+            true -> notAtMost(rest, t)
+            false -> List.prepend(s, notAtMost(rest, t))
+
+verify notAtMost
+    notAtMost([GTerm(guard = [], base = Option.None, k = 1)], GTerm(guard = [], base = Option.None, k = 2)) => []
+
+fn atLeast(s: GTerm, t: GTerm) -> Bool
+    ? "s is at least t everywhere: t's guard implies s's, and s is as high on the same base (or t is a constant)."
+    match Bool.and(s.k >= t.k, Bool.or(t.base == Option.None, s.base == t.base))
+        true -> allImplied(s.guard, t.guard)
+        false -> false
+
+verify atLeast
+    atLeast(GTerm(guard = [], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 0), GTerm(guard = [[Core.Names.str(Core.Names.anon(), "v")]], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 0)) => true
+    atLeast(GTerm(guard = [[Core.Names.str(Core.Names.anon(), "v")]], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 0), GTerm(guard = [], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 0)) => false
+
+fn covers(a: List<GTerm>, t: GTerm, nz: List<Name>, z: List<Name>) -> Bool
+    ? "The terms a are at least t for every assignment where the parameters nz are not zero and z are zero: by cases on a parameter of an open clause of t's guard, then on t's base; then t has one value and a is least with every other parameter zero and the non-zero ones 1 (ImaxByTerms)."
+    match opening(t.guard, nz, z)
+        Opening.Dead -> true
+        Opening.Open(x) -> bothCases(a, t, x, nz, z)
+        Opening.Holds -> match t.base
+            Option.Some(p) -> match Bool.or(List.contains(nz, p), List.contains(z, p))
+                true -> coversAt(a, t, nz)
+                false -> bothCases(a, t, p, nz, z)
+            Option.None -> coversAt(a, t, nz)
+
+verify covers
+    covers(gterms(Level.Max(sampleParam("u"), sampleParam("v"))), GTerm(guard = [[Core.Names.str(Core.Names.anon(), "v")]], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 0), [], []) => true
+    covers(gterms(sampleParam("v")), GTerm(guard = [[Core.Names.str(Core.Names.anon(), "v")]], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 0), [], []) => false
+    covers(gterms(sampleParam("v")), GTerm(guard = [[Core.Names.str(Core.Names.anon(), "v")]], base = Option.None, k = 1), [], []) => true
+
+fn bothCases(a: List<GTerm>, t: GTerm, x: Name, nz: List<Name>, z: List<Name>) -> Bool
+    ? "covers with x not zero, then with x zero."
+    match covers(a, t, List.prepend(x, nz), z)
+        true -> covers(a, t, nz, List.prepend(x, z))
+        false -> false
+
+verify bothCases
+    bothCases(gterms(sampleParam("u")), GTerm(guard = [], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 0), Core.Names.str(Core.Names.anon(), "u"), [], []) => true
+
+fn opening(g: List<List<Name>>, nz: List<Name>, z: List<Name>) -> Opening
+    ? "The first clause of g not yet holding: Dead when all its parameters are zero, else one of its open parameters; Holds when every clause does."
+    match g
+        [] -> Opening.Holds
+        [c, ..rest] -> match meets(c, nz)
+            true -> opening(rest, nz, z)
+            false -> match firstFree(c, z)
+                Option.None -> Opening.Dead
+                Option.Some(x) -> Opening.Open(x)
+
+verify opening
+    opening([], [], []) => Opening.Holds
+    opening([[Core.Names.str(Core.Names.anon(), "u")]], [], [Core.Names.str(Core.Names.anon(), "u")]) => Opening.Dead
+    opening([[Core.Names.str(Core.Names.anon(), "u")]], [], []) => Opening.Open(Core.Names.str(Core.Names.anon(), "u"))
+
+fn meets(c: List<Name>, nz: List<Name>) -> Bool
+    ? "Some parameter of c is not zero."
+    match c
+        [] -> false
+        [x, ..rest] -> match List.contains(nz, x)
+            true -> true
+            false -> meets(rest, nz)
+
+verify meets
+    meets([Core.Names.str(Core.Names.anon(), "u")], [Core.Names.str(Core.Names.anon(), "u")]) => true
+    meets([], [Core.Names.str(Core.Names.anon(), "u")]) => false
+
+fn firstFree(c: List<Name>, z: List<Name>) -> Option<Name>
+    ? "A parameter of c not known to be zero."
+    match c
+        [] -> Option.None
+        [x, ..rest] -> match List.contains(z, x)
+            true -> firstFree(rest, z)
+            false -> Option.Some(x)
+
+verify firstFree
+    firstFree([Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")], [Core.Names.str(Core.Names.anon(), "u")]) => Option.Some(Core.Names.str(Core.Names.anon(), "v"))
+    firstFree([Core.Names.str(Core.Names.anon(), "u")], [Core.Names.str(Core.Names.anon(), "u")]) => Option.None
+
+fn coversAt(a: List<GTerm>, t: GTerm, nz: List<Name>) -> Bool
+    ? "t's guard holds and its base is decided: a term of a alive with only nz not zero is on t's non-zero base at least as high, or at least t's constant there."
+    match t.base
+        Option.Some(p) -> match List.contains(nz, p)
+            true -> anyOnBase(a, p, t.k, nz)
+            false -> anyAtLeastConst(a, t.k, nz)
+        Option.None -> anyAtLeastConst(a, t.k, nz)
+
+verify coversAt
+    coversAt(gterms(sampleParam("u")), GTerm(guard = [], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 0), [Core.Names.str(Core.Names.anon(), "u")]) => true
+    coversAt(gterms(sampleParam("u")), GTerm(guard = [], base = Option.Some(Core.Names.str(Core.Names.anon(), "u")), k = 1), [Core.Names.str(Core.Names.anon(), "u")]) => false
+
+fn alive(g: List<List<Name>>, nz: List<Name>) -> Bool
+    ? "Every clause of g meets nz."
+    match g
+        [] -> true
+        [c, ..rest] -> match meets(c, nz)
+            true -> alive(rest, nz)
+            false -> false
+
+verify alive
+    alive([[Core.Names.str(Core.Names.anon(), "u")]], []) => false
+    alive([], []) => true
+
+fn anyOnBase(a: List<GTerm>, p: Name, k: Int, nz: List<Name>) -> Bool
+    ? "A term of a alive with nz, on base p, at least k above it."
+    match a
+        [] -> false
+        [s, ..rest] -> match Bool.and(Bool.and(s.base == Option.Some(p), s.k >= k), alive(s.guard, nz))
+            true -> true
+            false -> anyOnBase(rest, p, k, nz)
+
+verify anyOnBase
+    anyOnBase([], Core.Names.str(Core.Names.anon(), "u"), 0, []) => false
+
+fn anyAtLeastConst(a: List<GTerm>, k: Int, nz: List<Name>) -> Bool
+    ? "k is zero, or a term of a alive with nz is at least k when its non-zero base is 1 and every other parameter 0."
+    match k > 0
+        false -> true
+        true -> match a
+            [] -> false
+            [s, ..rest] -> match Bool.and(alive(s.guard, nz), Bool.or(s.k >= k, Bool.and(s.k + 1 >= k, baseIn(s.base, nz))))
+                true -> true
+                false -> anyAtLeastConst(rest, k, nz)
+
+verify anyAtLeastConst
+    anyAtLeastConst([], 0, []) => true
+    anyAtLeastConst(gterms(sampleParam("u")), 1, [Core.Names.str(Core.Names.anon(), "u")]) => true
+    anyAtLeastConst(gterms(sampleParam("u")), 1, []) => false
+
+fn baseIn(b: Option<Name>, nz: List<Name>) -> Bool
+    ? "A base parameter that is not zero."
+    match b
+        Option.Some(p) -> List.contains(nz, p)
+        Option.None -> false
+
+verify baseIn
+    baseIn(Option.None, []) => false
+    baseIn(Option.Some(Core.Names.str(Core.Names.anon(), "u")), [Core.Names.str(Core.Names.anon(), "u")]) => true
 
 verify isEquiv
     isEquiv(Level.Max(Level.Param(Core.Names.anon()), Level.Zero), Level.Param(Core.Names.anon())) => true
@@ -901,13 +1120,13 @@ verify isEquivList
     isEquivList([Level.Zero], []) => false
 
 fn isGeq(a: Level, b: Level) -> Bool
-    ? "a >= b for every assignment of the parameters: the reference test, and where it says no and an imax is left, by cases (ImaxByCases)."
+    ? "a >= b for every assignment of the parameters: the reference test, and where it says no and an imax is left, by guarded terms (ImaxByTerms)."
     na = normalize(a)
     nb = normalize(b)
     match geqCore(na, nb)
         true -> true
         false -> match Bool.or(hasImax(na), hasImax(nb))
-            true -> geqMemo(na, nb, []).b
+            true -> coversAll(gterms(na), gterms(nb))
             false -> false
 
 fn geqRef(a: Level, b: Level) -> Bool
@@ -1157,3 +1376,55 @@ verify instantiate law sameAsSubstitutedValues
     when List.len(ps) == List.len(us)
     using [mkMax.keepsValue, mkImax.keepsValue]
     levelValue(instantiate(l, ps, us), qs, ws) => levelValue(l, List.concat(ps, qs), List.concat(levelValues(us, qs, ws), ws))
+
+fn termsValue(ts: List<GTerm>, ps: List<Name>, vs: List<Int>) -> Int
+    ? "What a max of guarded terms denotes when parameter ps[i] stands for vs[i]."
+    match ts
+        [] -> 0
+        [t, ..rest] -> Int.max(termValue(t, ps, vs), termsValue(rest, ps, vs))
+
+verify termsValue
+    termsValue([], [], []) => 0
+    termsValue(gterms(Level.Succ(sampleParam("u"))), [Core.Names.str(Core.Names.anon(), "u")], [2]) => 3
+
+fn termValue(t: GTerm, ps: List<Name>, vs: List<Int>) -> Int
+    ? "base + k when every clause of the guard has a parameter above zero, else 0."
+    match guardHolds(t.guard, ps, vs)
+        false -> 0
+        true -> match t.base
+            Option.Some(p) -> paramValue(p, ps, vs) + t.k
+            Option.None -> t.k
+
+verify termValue
+    termValue(GTerm(guard = [[Core.Names.str(Core.Names.anon(), "u")]], base = Option.None, k = 1), [], []) => 0
+    termValue(GTerm(guard = [], base = Option.None, k = 1), [], []) => 1
+
+fn guardHolds(g: List<List<Name>>, ps: List<Name>, vs: List<Int>) -> Bool
+    ? "Every clause has a parameter above zero."
+    match g
+        [] -> true
+        [c, ..rest] -> match clauseHolds(c, ps, vs)
+            true -> guardHolds(rest, ps, vs)
+            false -> false
+
+verify guardHolds
+    guardHolds([], [], []) => true
+    guardHolds([[]], [], []) => false
+
+fn clauseHolds(c: List<Name>, ps: List<Name>, vs: List<Int>) -> Bool
+    ? "Some parameter of c is above zero."
+    match c
+        [] -> false
+        [x, ..rest] -> match paramValue(x, ps, vs) > 0
+            true -> true
+            false -> clauseHolds(rest, ps, vs)
+
+verify clauseHolds
+    clauseHolds([Core.Names.str(Core.Names.anon(), "u")], [Core.Names.str(Core.Names.anon(), "u")], [1]) => true
+    clauseHolds([Core.Names.str(Core.Names.anon(), "u")], [], []) => false
+
+verify gterms law keepsValue
+    given l: Level = [Level.Zero, Level.Succ(Level.Zero), Level.Succ(Level.Succ(Level.Zero)), sampleParam("u"), sampleParam("v"), Level.Succ(sampleParam("u")), Level.Max(sampleParam("u"), sampleParam("v")), Level.Max(Level.Succ(Level.Zero), sampleParam("u")), Level.IMax(sampleParam("u"), sampleParam("v")), Level.IMax(sampleParam("v"), Level.Zero), Level.Succ(Level.Max(sampleParam("u"), Level.Succ(sampleParam("v")))), Level.IMax(Level.Succ(sampleParam("u")), Level.Max(sampleParam("v"), Level.Zero)), Level.Max(Level.IMax(sampleParam("u"), sampleParam("v")), sampleParam("u"))]
+    given ps: List<Name> = [[Core.Names.str(Core.Names.anon(), "u"), Core.Names.str(Core.Names.anon(), "v")]]
+    given vs: List<Int> = [[0, 0], [1, 0], [0, 2], [3, -1]]
+    termsValue(gterms(l), ps, vs) => levelValue(l, ps, vs)

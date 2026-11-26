@@ -53,6 +53,11 @@
 # hunt_groundNatAdd* (Nat.add at a level, also run with --ground, which
 # must unfold it), hunt_prefix* (a literal before a constant it stands for:
 # rejected on any number of workers, see below).
+# hunt_imaxTriples* are made for the hunt's F2 (by hand, like the Arena beta's
+# 109_levelImaxNested twenty times under one max): imaxes deciding on twenty
+# independent triples of parameters, true for every assignment (Nested,
+# Distrib), or false through the last triple (LastNotAssoc, LastNotDistrib);
+# split by cases on both sides together they ran past the 20 s cap.
 #   unsupported/  2 (declined: format version)
 # and every export tests/soundness.py kept under tests/soundness-findings, each
 # invalid, against 1 (rejected), and the conformance hunt's proofs of False:
