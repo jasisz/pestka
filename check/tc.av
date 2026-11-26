@@ -6369,6 +6369,12 @@ decision LiteralRecursionsComputed
         "octswap at 80 G. Corpora within 0.1%: Init 59.09 G to 59.03 G, std"
         "100.03 G to 99.91 G, con-leche 91.39 G to 91.36 G, etale, contdiff,"
         "taylor, colim, reachability unchanged; wall and peak within noise."
+        "The values stand for the recursion only when the rule of Nat.succ"
+        "is s n (rec ps m z s n), which stepTakesHyp reads from the rule"
+        "itself: a Nat in a mutual block, whose Nat.succ takes another"
+        "type's value, hands the step that type's recursor, and a field"
+        "U -> Nat a function; counting one hypothesis took both for the"
+        "value at n (audit 2026-11-26, mut-nat-bad, c-refl-nat-lit-rec)."
     chosen = "LiteralRecursionsComputed"
     rejected = ["RecursorArgsFirst", "ValuesAfterArguments", "FieldsBroughtToData", "RecursionsReducedLazily", "ValuesWithoutStop", "OneStopForAllLevels"]
     impacts = [eqCoreReduced, recLitFirst, recValuesFirst, recValuesThen, recNoValue, litRecValue, litRecArgs, litRecFrom, dataWithin, dataValue, ctorApplied, sameRecApp]
@@ -6448,13 +6454,36 @@ verify litRecArgs
     Result.withDefault(litRecArgs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), sampleRec(), [Core.Exprs.fvar(0)]), RO(o = Option.Some(Core.Exprs.fvar(1)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).o => Option.None
 
 fn stepTakesHyp(rv: Rec) -> Bool
-    ? "Whether the second rule hands its minor premise one induction hypothesis, as Nat.succ's field is a Nat: the step is then applied to n and the value at n (litRecFrom)."
+    ? "Whether the second rule is s n (rec ps m z s n): one motive, no indices, and its right-hand side the second minor premise applied to the field and to the recursor itself, at the same parameters, motive and minor premises, applied to the field. Only then is the value at n what the rule hands the step, so that the step may be applied to n and the value at n (litRecFrom). Counting one hypothesis is not enough: in a mutual block the hypothesis is another type's recursor, and for a field U -> Nat it is fun u => rec (n u)."
     match rv.rules
-        [_, b] -> hypsOf(b, rv) == 1
+        [_, b] -> Bool.and(Bool.and(rv.numMotives == 1, rv.numIndices == 0), succRhs(peelLams(b.rhs, rv.numParams + rv.numMotives + rv.numMinors + 1), rv))
         _ -> false
 
 verify stepTakesHyp
     stepTakesHyp(sampleRec()) => true
+    stepTakesHyp(Rec.update(sampleRec(), numMotives = 2)) => false
+
+fn succRhs(body: Expr, rv: Rec) -> Bool
+    ? "body, under the binders of the parameters, motive, minor premises and the one field, is s n (rec ps m z s n): s the last minor premise (bound variable 1), n the field (0)."
+    k = rv.numParams + rv.numMotives + rv.numMinors + 1
+    match Bool.and(Core.Apps.fnOf(body) == Core.Exprs.bvar(1), Core.Apps.numArgs(body) == 2)
+        false -> false
+        true -> match Core.Apps.argsOf(body)
+            [n, h] -> Bool.and(n == Core.Exprs.bvar(0), Bool.and(Core.Apps.isConst(Core.Apps.fnOf(h), rv.head.name), Core.Apps.argsOf(h) == boundDown(k - 1, [])))
+            _ -> false
+
+verify succRhs
+    succRhs(Core.Exprs.bvar(1), sampleRec()) => false
+
+fn boundDown(i: Int, acc: List<Expr>) -> List<Expr>
+    ? "The bound variables i down to 0, in that order."
+    match i < 0
+        true -> List.reverse(acc)
+        false -> boundDown(i - 1, List.prepend(Core.Exprs.bvar(i), acc))
+
+verify boundDown
+    boundDown(2, []) => [Core.Exprs.bvar(2), Core.Exprs.bvar(1), Core.Exprs.bvar(0)]
+    boundDown(-1, []) => []
 
 fn natRules(rules: List<RecRule>) -> Bool
     ? "The rules of Nat.zero, with no fields, and Nat.succ, with one, in that order: the minor premises come in the same order, and a literal n+1 is Nat.succ of the literal n, its one field."
