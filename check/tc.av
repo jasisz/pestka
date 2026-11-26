@@ -4157,10 +4157,10 @@ verify minorOn
     minorOn(Core.Exprs.natLit(8), RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.sort(Level.Zero), Core.Exprs.bvar(0), Binder.Default), Binder.Default)), Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [], k = false, isUnsafe = false, major = Core.Names.anon(), majorIsStruct = false, elimAnySort = false, declared = []), 0) => Option.Some(MinorOn(nf = 0, hyps = 0, body = Core.Exprs.natLit(8)))
 
 fn sparsePick(st: St, sp: SparseOn, e: Expr, env0: List<Clo>, cheapRec: Bool, cheapProj: Bool) -> Result<RPick, Fail>
-    ? "The minor premise for the major premise e and the environment it runs in; a literal of Nat goes to its rule at once (LiteralCases)."
+    ? "The minor premise for the major premise e and the environment it runs in; a literal of Nat goes to its rule at once when that rule is there with the literal's fields, else it is its constructor as any other major (LiteralCases)."
     match e
-        Expr.NatLit(_, n) -> match Bool.and(sp.rv.major == Check.Lits.nat, List.len(sp.rv.rules) == 2)
-            true -> Result.Ok(sparseFields(st, nthMinor(sp.minors, ruleNumber(sp.rv.rules, litCtor(n), 0)), litArgs(n), env0))
+        Expr.NatLit(_, n) -> match Bool.and(sp.rv.major == Check.Lits.nat, Bool.and(List.len(sp.rv.rules) == 2, ruleWith(sp.rv.rules, litCtor(n), List.len(litArgs(n)), 0) >= 0))
+            true -> Result.Ok(sparseFields(st, nthMinor(sp.minors, ruleWith(sp.rv.rules, litCtor(n), List.len(litArgs(n)), 0)), litArgs(n), env0))
             false -> Result.Ok(sparseBuilt(sp, majorToCtor(st, sp.rv, e, cheapRec, cheapProj)?, env0))
         _ -> Result.Ok(sparseBuilt(sp, majorToCtor(st, sp.rv, e, cheapRec, cheapProj)?, env0))
 
@@ -4265,15 +4265,26 @@ decision LiteralCases
         "to 88.3 G instructions, magma-string-pair-n9 27.9 G to 27.0 G,"
         "perf total 195.5 G to 189.0 G; Init, std, con-leche and etale as"
         "they were."
+        "The shortcut stands for that rule only where the rule is there: a"
+        "type named Nat whose second constructor is Nat.next, not Nat.succ,"
+        "has no rule for the literal n+1, which the reference leaves stuck,"
+        "but its place was taken as the list's length and the next argument"
+        "after the casesOn's own ran as its minor premise, a closed proof of"
+        "False (hunt 2026-11-26, tests/soundness-findings/nat-without-succ-*)."
+        "So a literal goes to the rule of Nat.zero with no fields or of"
+        "Nat.succ with one, when the rules have it; otherwise it is its"
+        "constructor as any other major premise, which no rule reduces. The"
+        "Nat.rec on a literal computed as data (LiteralRecursionsComputed)"
+        "asks the same, and that the succ rule hands one hypothesis."
     chosen = "LiteralCases"
     rejected = ["LiteralBuiltAsSucc", "LiteralCasesAsMachineSteps"]
-    impacts = [casesOnGo, casesPick, litPick]
+    impacts = [casesOnGo, casesPick, litPick, litOrRuled, litRule, ruleWith, sparsePick, natRules, stepTakesHyp]
 
 fn casesPick(st: St, cs: CasesOn, e: Expr, cheapRec: Bool, cheapProj: Bool) -> Result<Pick, Fail>
     ? "The minor premise for the major premise e, by its place among the rules, with the fields it takes."
     match e
         Expr.NatLit(_, n) -> match Bool.and(cs.rv.major == Check.Lits.nat, List.len(cs.rv.rules) == 2)
-            true -> Result.Ok(litPick(st, cs.rv.rules, n))
+            true -> litOrRuled(st, cs, e, litPick(st, cs.rv.rules, n), cheapRec, cheapProj)
             false -> Result.Ok(ruledPick(cs.rv.rules, majorToCtor(st, cs.rv, e, cheapRec, cheapProj)?))
         _ -> Result.Ok(ruledPick(cs.rv.rules, majorToCtor(st, cs.rv, e, cheapRec, cheapProj)?))
 
@@ -4281,14 +4292,53 @@ verify casesPick
     Result.withDefault(casesPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 2, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "succ"), nfields = 1, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Check.Lits.nat, majorIsStruct = false, elimAnySort = false, declared = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "succ"), nfields = 1, rhs = Core.Exprs.bvar(0))]), total = 2, majorAt = 0, minorsAt = 0), Core.Exprs.natLit(3), false, false), Pick(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = false, at = 9, fields = [], nf = 9)).at => 1
     Result.withDefault(casesPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 1, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Check.Lits.nat, majorIsStruct = false, elimAnySort = false, declared = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0))]), total = 1, majorAt = 0, minorsAt = 0), Core.Exprs.natLit(0), false, false), Pick(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = false, at = 9, fields = [], nf = 9)).ok => true
 
+fn litOrRuled(st: St, cs: CasesOn, e: Expr, p: Pick, cheapRec: Bool, cheapProj: Bool) -> Result<Pick, Fail>
+    ? "The literal's pick when the rule it goes to is there, else the major premise e turned into a constructor as any other (LiteralCases)."
+    match p.ok
+        true -> Result.Ok(p)
+        false -> Result.Ok(ruledPick(cs.rv.rules, majorToCtor(st, cs.rv, e, cheapRec, cheapProj)?))
+
+verify litOrRuled
+    Result.withDefault(litOrRuled(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 2, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "next"), nfields = 1, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Check.Lits.nat, majorIsStruct = false, elimAnySort = false, declared = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "next"), nfields = 1, rhs = Core.Exprs.bvar(0))]), total = 2, majorAt = 0, minorsAt = 0), Core.Exprs.natLit(3), Pick(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, at = 1, fields = [], nf = 0), false, false), Pick(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = false, at = 9, fields = [], nf = 9)).at => 1
+    Result.withDefault(litOrRuled(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), CasesOn(rv = Rec(head = Head(name = Core.Names.anon(), params = [], ty = Core.Exprs.bvar(0)), all = [], numParams = 0, numIndices = 0, numMotives = 1, numMinors = 2, rules = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "next"), nfields = 1, rhs = Core.Exprs.bvar(0))], k = false, isUnsafe = false, major = Check.Lits.nat, majorIsStruct = false, elimAnySort = false, declared = [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "next"), nfields = 1, rhs = Core.Exprs.bvar(0))]), total = 2, majorAt = 0, minorsAt = 0), Core.Exprs.natLit(3), Pick(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = false, at = 0, fields = [], nf = 0), false, false), Pick(st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), ok = true, at = 9, fields = [], nf = 9)).ok => false
+
 fn litPick(st: St, rules: List<RecRule>, n: Int) -> Pick
-    ? "A literal of Nat: 0 the zero rule, n+1 the succ rule with the literal n as its field."
+    ? "A literal of Nat: 0 the rule of Nat.zero, with no fields, n+1 that of Nat.succ, with one, the literal n as its field; not ok when the rule with that constructor and that many fields is not among the rules, as the literal is then that constructor, which no rule reduces (LiteralCases)."
     match n == 0
-        true -> Pick(st = st, ok = true, at = ruleNumber(rules, Check.Lits.natZero, 0), fields = [], nf = 0)
-        false -> Pick(st = st, ok = true, at = ruleNumber(rules, Check.Lits.natSucc, 0), fields = [Clo.Clo(-1, Core.Exprs.natLit(n - 1), [])], nf = 1)
+        true -> litRule(st, ruleWith(rules, Check.Lits.natZero, 0, 0), [])
+        false -> litRule(st, ruleWith(rules, Check.Lits.natSucc, 1, 0), [Clo.Clo(-1, Core.Exprs.natLit(n - 1), [])])
 
 verify litPick
     litPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "succ"), nfields = 1, rhs = Core.Exprs.bvar(0))], 4).fields => [Clo.Clo(-1, Core.Exprs.natLit(3), [])]
+    litPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "succ"), nfields = 1, rhs = Core.Exprs.bvar(0))], 4).at => 1
+    litPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "next"), nfields = 1, rhs = Core.Exprs.bvar(0))], 4).ok => false
+    litPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "next"), nfields = 1, rhs = Core.Exprs.bvar(0))], 0).ok => true
+    litPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [RecRule(ctor = Check.Lits.name2("Nat", "a"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "succ"), nfields = 1, rhs = Core.Exprs.bvar(0))], 0).ok => false
+    litPick(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), [RecRule(ctor = Check.Lits.name2("Nat", "zero"), nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "succ"), nfields = 2, rhs = Core.Exprs.bvar(0))], 4).ok => false
+
+fn litRule(st: St, at: Int, fields: List<Clo>) -> Pick
+    ? "The pick of the rule at at with the literal's fields, not ok when at is -1."
+    match at >= 0
+        true -> Pick(st = st, ok = true, at = at, fields = fields, nf = List.len(fields))
+        false -> Pick(st = st, ok = false, at = 0, fields = [], nf = 0)
+
+verify litRule
+    litRule(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), -1, []).ok => false
+
+fn ruleWith(rules: List<RecRule>, ctor: Name, nf: Int, i: Int) -> Int
+    ? "The place, from i, of ctor's rule among the rules when it takes nf fields; -1 when there is none."
+    match rules
+        [] -> -1
+        [r, ..rest] -> match r.ctor == ctor
+            true -> match r.nfields == nf
+                true -> i
+                false -> -1
+            false -> ruleWith(rest, ctor, nf, i + 1)
+
+verify ruleWith
+    ruleWith([], Core.Names.anon(), 0, 0) => -1
+    ruleWith([RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1))], Core.Names.anon(), 0, 0) => 0
+    ruleWith([RecRule(ctor = Core.Names.anon(), nfields = 0, rhs = Core.Exprs.natLit(1))], Core.Names.anon(), 1, 0) => -1
 
 fn ruledPick(rules: List<RecRule>, m: RE) -> Pick
     ? "The rule of the constructor at m's head, when there is one and m gives it all its fields."
@@ -6310,7 +6360,7 @@ verify litRecValue
 fn litRecArgs(st: St, rv: Rec, args: List<Expr>) -> Result<RO, Fail>
     ? "The recursor of Nat, its zero and successor rules in that order, applied up to its major premise and no further, the major a literal: the minor premises z and s and the literal."
     k = rv.numParams + rv.numMotives
-    match Bool.and(Bool.and(rv.major == Check.Lits.nat, List.len(args) == k + rv.numMinors + rv.numIndices + 1), natRules(rv.rules))
+    match Bool.and(Bool.and(rv.major == Check.Lits.nat, List.len(args) == k + rv.numMinors + rv.numIndices + 1), Bool.and(natRules(rv.rules), stepTakesHyp(rv)))
         false -> Result.Ok(RO(o = Option.None, st = st))
         true -> match List.drop(args, k)
             [z, sc, Expr.NatLit(_, n)] -> litRecFrom(dataWithin(st, z)?, sc, 0, n)
@@ -6319,15 +6369,26 @@ fn litRecArgs(st: St, rv: Rec, args: List<Expr>) -> Result<RO, Fail>
 verify litRecArgs
     Result.withDefault(litRecArgs(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), sampleRec(), [Core.Exprs.fvar(0)]), RO(o = Option.Some(Core.Exprs.fvar(1)), st = Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe))).o => Option.None
 
+fn stepTakesHyp(rv: Rec) -> Bool
+    ? "Whether the second rule hands its minor premise one induction hypothesis, as Nat.succ's field is a Nat: the step is then applied to n and the value at n (litRecFrom)."
+    match rv.rules
+        [_, b] -> hypsOf(b, rv) == 1
+        _ -> false
+
+verify stepTakesHyp
+    stepTakesHyp(sampleRec()) => true
+
 fn natRules(rules: List<RecRule>) -> Bool
-    ? "The rules of Nat.zero and Nat.succ, in that order: the minor premises come in the same order."
+    ? "The rules of Nat.zero, with no fields, and Nat.succ, with one, in that order: the minor premises come in the same order, and a literal n+1 is Nat.succ of the literal n, its one field."
     match rules
-        [a, b] -> Bool.and(a.ctor == Check.Lits.natZero, b.ctor == Check.Lits.natSucc)
+        [a, b] -> Bool.and(Bool.and(a.ctor == Check.Lits.natZero, a.nfields == 0), Bool.and(b.ctor == Check.Lits.natSucc, b.nfields == 1))
         _ -> false
 
 verify natRules
     natRules([]) => false
     natRules([RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.natSucc, nfields = 1, rhs = Core.Exprs.bvar(0))]) => true
+    natRules([RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.natSucc, nfields = 2, rhs = Core.Exprs.bvar(0))]) => false
+    natRules([RecRule(ctor = Check.Lits.natZero, nfields = 0, rhs = Core.Exprs.bvar(0)), RecRule(ctor = Check.Lits.name2("Nat", "next"), nfields = 1, rhs = Core.Exprs.bvar(0))]) => false
 
 fn litRecFrom(r: RO, sc: Expr, j: Int, n: Int) -> Result<RO, Fail>
     ? "r the value at j: done at n; otherwise the step sc applied to j and that value, as the rule of Nat.succ fires it, brought to data. A value that is not data ends it without one."
