@@ -7820,12 +7820,12 @@ decision NoProofReadFromTypes
     impacts = [notProofByHead, typeSays, projSays]
 
 fn notProofByHead(st: St, t: Expr) -> Bool
-    ? "Whether t is surely no proof by its shape and the declarations of its head alone. A sort and a pi are types, whose type is a sort, and a literal is a number or a string, whose type is an inductive type in Type: none is a proof. Let t be a constant c at levels applied to exactly as many arguments as c's type has syntactic pis. If the type then ends in a sort, t is a type; if it ends in a constant D applied to as many arguments as D's type has syntactic pis, ending in Sort v, then t's type has sort v at the levels as written in c's type and then at t's levels. Inference finds t's type and its sort just so, peeling those pis without normalizing, and t is a proof exactly when that sort is zero; the arguments of t never enter. Anything else is left to inference."
+    ? "Whether t is surely no proof by its shape and the declarations of its head alone. A sort and a pi are types, whose type is a sort: neither is a proof. A literal's type is the constant Nat or String, whatever the file declared under that name: the literal is no proof when that constant's type is a sort that is not zero (a Nat declared in Prop makes its literals proofs). Let t be a constant c at levels applied to exactly as many arguments as c's type has syntactic pis. If the type then ends in a sort, t is a type; if it ends in a constant D applied to as many arguments as D's type has syntactic pis, ending in Sort v, then t's type has sort v at the levels as written in c's type and then at t's levels. Inference finds t's type and its sort just so, peeling those pis without normalizing, and t is a proof exactly when that sort is zero; the arguments of t never enter. Anything else is left to inference."
     match t
         Expr.Sort -> true
         Expr.Pi -> true
-        Expr.NatLit -> true
-        Expr.StrLit -> true
+        Expr.NatLit -> sortSays([], [], [], Check.State.lookup(st, Check.Lits.nat), 0)
+        Expr.StrLit -> sortSays([], [], [], Check.State.lookup(st, Check.Lits.string), 0)
         _ -> match Core.Apps.fnOf(t)
             Expr.Const(_, n, ls) -> headSays(st, Check.State.lookup(st, n), ls, Core.Apps.numArgs(t))
             Expr.FVar(_, id) -> localSays(st, id, Core.Apps.numArgs(t))
@@ -7840,7 +7840,9 @@ verify notProofByHead
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.fvar(0)) => false
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.sort(Level.Zero)) => true
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.pi(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("P"), []), Core.Exprs.cnst(Check.Lits.name1("P"), []), Binder.Default)) => true
-    notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.natLit(3)) => true
+    notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.natLit(3)) => false
+    notProofByHead(Check.State.fresh(Check.State.envSet(probeEnv(), Check.Lits.nat, Const.CAxiom(Head(name = Check.Lits.nat, params = [], ty = Core.Exprs.sort(Level.Succ(Level.Zero))), false)), [], Safety.Safe), Core.Exprs.natLit(3)) => true
+    notProofByHead(Check.State.fresh(Check.State.envSet(probeEnv(), Check.Lits.nat, Const.CAxiom(Head(name = Check.Lits.nat, params = [], ty = Core.Exprs.sort(Level.Zero)), false)), [], Safety.Safe), Core.Exprs.natLit(3)) => false
     notProofByHead(Check.State.fresh(probeEnv(), [], Safety.Safe), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.cnst(Check.Lits.name1("P"), []), Core.Exprs.bvar(0), Binder.Default)) => false
 
 fn probeEnv() -> Env
