@@ -7672,10 +7672,12 @@ verify known
     known(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
 
 fn knownDifferent(st: St, t: Expr, s: Expr) -> Bool
-    ? "Closed terms an earlier declaration found different, or terms this declaration found different. Not while reducing eagerly: that finds more equalities, so a failure without it does not hold with it."
-    match sharedPair(t, s)
-        true -> Check.State.closedFailGet(st.closed, t, s)
-        false -> Bool.and(Bool.not(st.eager), Check.State.pairGet(st.eqNo, t, s))
+    ? "Closed terms an earlier declaration found different, or terms this declaration found different. Neither while reducing eagerly: that finds more equalities, so a failure without it does not hold with it, and a closed pair's failure is kept whatever the mode it was found in (a closed pair may still meet free variables under its binders, where eagerness changes the path)."
+    match Bool.not(st.eager)
+        false -> false
+        true -> match sharedPair(t, s)
+            true -> Check.State.closedFailGet(st.closed, t, s)
+            false -> Check.State.pairGet(st.eqNo, t, s)
 
 verify knownDifferent
     knownDifferent(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), Core.Exprs.natLit(1), Core.Exprs.natLit(2)) => false
