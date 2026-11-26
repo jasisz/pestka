@@ -214,10 +214,16 @@ decision ComputationsSpread
         "at 982 s, all four workers within 13 s, but took con-leche to"
         "104.76 G (+1.1%): its 151 left their namespaces. A cost for such a proof was rejected: any number"
         "put on it is a guess that the next certificate makes wrong;"
-        "spreading needs none."
+        "spreading needs none. The computations go only to runs that hold"
+        "nothing of the literal prefix: dealt to the end of a prefix run, one"
+        "was checked before the prefix's later runs on the same worker, and"
+        "a fact it found about a literal stood in for a constant the literal"
+        "needs that is placed after the declaration that used the fact; on"
+        "four workers files were accepted that one worker rejects (audit"
+        "2026-11-26: lp-spread, bad-plain, bad-prefix-after-spread)."
     chosen = "ComputationsSpread"
     rejected = ["ComputationCostGuessed", "EveryComputationDealt", "WorkQueue"]
-    impacts = [checkHeld, runsOf, spreadable, shareOf, countComputed, evened, trimRuns, trimNext, trimJobs, computedPast, isComputation, proofLen, compBuckets, withBuckets]
+    impacts = [checkHeld, runsOf, spreadable, shareOf, countComputed, evened, evenedPast, prefixRuns, holdsPrefix, trimRuns, trimNext, trimJobs, computedPast, isComputation, proofLen, compBuckets, withBuckets]
 
 fn spreadable(w: Int, placed: Bool, lits: Int) -> Bool
     ? "Theorems proved by computation may leave file order: more than one worker, and checking out of file order allowed, every name placed and the literal constants placed (ComputationsSpread, CheckedByNamespace, LiteralPrefix)."
@@ -230,11 +236,11 @@ verify spreadable
     spreadable(4, true, -1) => false
 
 fn runsOf(jobs: List<Job>, env: Env, limits: Limits, w: Int, spread: Bool, lits: Int) -> List<Chunk>
-    ? "The runs cut by cost (RunsByProofSize); when spread, no run keeps more theorems proved by computation past the literal prefix than its even share, and those over it are dealt to the runs in turn (ComputationsSpread)."
+    ? "The runs cut by cost (RunsByProofSize); when spread, no run keeps more theorems proved by computation past the literal prefix than its even share, and those over it are dealt in turn to the runs past the prefix (ComputationsSpread, LiteralPrefix)."
     cs = chunks(jobs, env, limits, runSize(costOf(jobs, 0), w), [], 0, [])
     match spread
         false -> cs
-        true -> evened(cs, lits, shareOf(countComputed(jobs, lits, 0), List.len(cs)))
+        true -> evened(cs, lits, countComputed(jobs, lits, 0))
 
 verify runsOf
     List.len(runsOf([job2("a", 0), job2("a", 1)], Check.State.envEmpty(), Check.State.limitsOf(65536, Memory.Fast), 1, false, 0)) => 1
@@ -266,13 +272,48 @@ record Trimmed
     runs: List<Chunk>
     over: List<Job>
 
-fn evened(cs: List<Chunk>, lits: Int, q: Int) -> List<Chunk>
-    ? "Each run keeps its first q computations; the rest go to the runs in turn, at their ends."
-    t = trimRuns(cs, lits, q, [], [])
-    withBuckets(t.runs, compBuckets(t.over, List.len(t.runs), 0, {}), 0, [])
+fn evened(cs: List<Chunk>, lits: Int, n: Int) -> List<Chunk>
+    ? "The n computations past the literal prefix shared out over the runs that hold nothing of the prefix: each run keeps its first share of them, and the rest go to those runs in turn, at their ends. A run holding a declaration of the prefix gets none: a worker checks the prefix's runs in file order before any run past it (LiteralPrefix), and a computation dealt to the end of one of them would be checked before the prefix's later runs, its facts then found where the constants literals stand for are not all placed. The prefix's runs come first, as the jobs do (prefixThenOrdered). With no run past the prefix the runs stay as they are."
+    f = prefixRuns(cs, lits, 0)
+    past = List.len(cs) - f
+    match past > 0
+        false -> cs
+        true -> evenedPast(trimRuns(cs, lits, shareOf(n, past), [], []), f, past)
 
 verify evened
     evened([], 0, 1) => []
+    List.len(evened([Chunk(env = Check.State.envEmpty(), jobs = [job2("a", 0), closedThm(1, 2), closedThm(2, 2)], limits = Check.State.limitsOf(65536, Memory.Fast))], 0, 2)) => 1
+
+fn evenedPast(t: Trimmed, f: Int, past: Int) -> List<Chunk>
+    ? "The trimmed runs, what they gave up dealt to the past runs only: the first f runs hold the prefix, bucket 0 goes to run f."
+    withBuckets(t.runs, compBuckets(t.over, past, 0, {}), 0 - f, [])
+
+verify evenedPast
+    evenedPast(Trimmed(runs = [], over = []), 0, 1) => []
+
+fn prefixRuns(cs: List<Chunk>, lits: Int, acc: Int) -> Int
+    ? "How many runs from the first hold a declaration of the literal prefix, at a position up to lits."
+    match cs
+        [] -> acc
+        [c, ..rest] -> match holdsPrefix(c.jobs, lits)
+            true -> prefixRuns(rest, lits, acc + 1)
+            false -> acc
+
+verify prefixRuns
+    prefixRuns([Chunk(env = Check.State.envEmpty(), jobs = [job2("a", 0)], limits = Check.State.limitsOf(65536, Memory.Fast)), Chunk(env = Check.State.envEmpty(), jobs = [job2("a", 5)], limits = Check.State.limitsOf(65536, Memory.Fast))], 3, 0) => 1
+    prefixRuns([], 3, 0) => 0
+
+fn holdsPrefix(jobs: List<Job>, lits: Int) -> Bool
+    ? "Whether one of the jobs lies at a position up to lits."
+    match jobs
+        [] -> false
+        [j, ..rest] -> match j.pos <= lits
+            true -> true
+            false -> holdsPrefix(rest, lits)
+
+verify holdsPrefix
+    holdsPrefix([job2("a", 4), job2("a", 2)], 3) => true
+    holdsPrefix([job2("a", 4)], 3) => false
 
 fn trimRuns(cs: List<Chunk>, lits: Int, q: Int, acc: List<Chunk>, over: List<Job>) -> Trimmed
     ? "The runs with what each keeps, and what all of them gave up, in order (over newest first while built)."
