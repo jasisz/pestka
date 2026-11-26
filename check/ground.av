@@ -484,12 +484,22 @@ verify natOpOf
     natOpOf(Check.Lits.name2("Nat", "log2")) => Option.None
 
 fn constStep(st: St, m: GM, n: Name, lv: List<Level>) -> MC
-    ? "A constant at the head: Nat arithmetic with both operands waiting goes to them first, as the reference kernel does, and with fewer waits for them; otherwise what the constant is decides."
-    match natOpOf(n)
+    ? "A constant at the head: Nat arithmetic, named at no levels as the reference kernel compares the whole constant, with both operands waiting goes to them first, as the reference kernel does, and with fewer waits for them; otherwise, as for Nat.add at a level, what the constant is decides."
+    match natOpAt(n, lv)
         Option.Some(op) -> match m.stack
             [Frame.FArg(a), Frame.FArg(b), ..rest] -> forceCell(GM.update(m, stack = List.prepend(Frame.FNat(op, b), rest)), a)
             _ -> partial(m, Core.Exprs.cnst(n, lv))
         Option.None -> constFound(st, m, n, lv, Check.State.lookup(st, n))
+
+fn natOpAt(n: Name, lv: List<Level>) -> Option<String>
+    ? "natOpOf for the constant n at the levels lv: only at no levels, as natArity in Check.Tc."
+    match lv
+        [] -> natOpOf(n)
+        _ -> Option.None
+
+verify natOpAt
+    natOpAt(Check.Lits.name2("Nat", "add"), []) => Option.Some("add")
+    natOpAt(Check.Lits.name2("Nat", "add"), [Level.Zero]) => Option.None
 
 verify constStep
     constStep(Check.State.fresh(Check.State.envEmpty(), [], Safety.Safe), fresh(), Check.Lits.name1("c"), []).c => Ctl.Stop("unknown constant")
@@ -554,10 +564,10 @@ verify pushRev
     pushRev([], []) => []
 
 fn ctorStep(m: GM, n: Name, lv: List<Level>, k: Ctor) -> MC
-    ? "Nat.zero is the literal 0 and Nat.succ of a literal the next one; another constructor with all its arguments is a value of them, with fewer a partial application."
-    match n == Check.Lits.natZero
+    ? "Nat.zero is the literal 0 and Nat.succ of a literal the next one, both at no levels as the reference kernel compares them; another constructor with all its arguments is a value of them, with fewer a partial application."
+    match Bool.and(n == Check.Lits.natZero, List.len(lv) == 0)
         true -> retNew(alloc(m, Cell.VLit(0)))
-        false -> match n == Check.Lits.natSucc
+        false -> match Bool.and(n == Check.Lits.natSucc, List.len(lv) == 0)
             true -> succStep(m, n, lv)
             false -> ctorArgs(m, n, lv, k, popArgs(m.stack, k.numParams + k.numFields, [], 0))
 
