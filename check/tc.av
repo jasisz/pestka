@@ -1066,14 +1066,18 @@ verify fitsNode
     fitsNode(Core.Exprs.natLit(1), Core.Exprs.natLit(1), [], 0) => false
 
 fn fitsVar(t: Expr, i: Int, subst: List<Expr>, off: Int) -> Bool
-    ? "A bound variable of d past off: an argument, closed, so it needs no lifting; past the arguments it drops by their number."
-    match i - off < List.len(subst)
-        true -> sameTerm(t, nth(subst, i - off))
-        false -> t == Core.Exprs.bvar(i - List.len(subst))
+    ? "A bound variable of d: one of the off binders passed stays itself (a saturated range, SaturatedRangeWalked, lets such a variable through within); past off an argument, closed, so it needs no lifting; past the arguments it drops by their number."
+    match i < off
+        true -> t == Core.Exprs.bvar(i)
+        false -> match i - off < List.len(subst)
+            true -> sameTerm(t, nth(subst, i - off))
+            false -> t == Core.Exprs.bvar(i - List.len(subst))
 
 verify fitsVar
     fitsVar(Core.Exprs.natLit(4), 0, [Core.Exprs.natLit(4)], 0) => true
     fitsVar(Core.Exprs.bvar(1), 2, [Core.Exprs.natLit(4)], 0) => true
+    fitsVar(Core.Exprs.natLit(4), 16382, [Core.Exprs.natLit(4)], 16383) => false
+    fitsVar(Core.Exprs.bvar(16382), 16382, [Core.Exprs.natLit(4)], 16383) => true
 
 fn argsAfterWhnf(p: RE, args: List<Expr>) -> Result<RE, Fail>
     ? "Goes on with the normalized pi; every argument before is in it."
@@ -4971,6 +4975,32 @@ fn fromLS(r: LS) -> MX
 verify fromLS
     fromLS(LS(e = Core.Exprs.natLit(1), ms = MS(next = 0, forced = {}), memo = Memo(map = {}, met = 0))).e => Core.Exprs.natLit(1)
 
+decision SaturatedRangeWalked
+    date = "2026-11-26"
+    reason =
+        "A node stores its loose range in 14 bits, saturated at 16383: an"
+        "upper bound only, as a variable 16382 binders deep closed by them"
+        "all keeps it (LeavesCarryWords in Core.Exprs). Core.Exprs.within is"
+        "false on a saturated range at any depth a term reaches, so a walk"
+        "goes in, which is right, but a walk that took 'not within' for 'has"
+        "a variable past off' was wrong at the variable itself: the"
+        "machine's instantiation (lvisit) dropped index - off closures from"
+        "its environment, -1 for variable 16382 under 16383 binders, and"
+        "took the first, so (fun w => fun x1..x16383 => x1) c was taken"
+        "equal to fun xs => c (hunt 2026-11-26, c-binders h15_*: a wrong"
+        "accept and a valid file rejected). A saturated range means"
+        "unknown, walk exactly: every walk that goes in on 'not within'"
+        "tells at a bound variable whether its index is below the binders"
+        "passed, as Core.Subst does (indexBelow): lvisit leaves such a"
+        "variable as it is, fitsVar (the domain comparison of argsInto)"
+        "compares it with itself, and looseIndices does not count it. The"
+        "readers that answer from the range alone use it only as a bound:"
+        "looseRange > 0 and not isClosed send a term the long way, and"
+        "infer walks a saturated one exactly (hasLoose) before refusing it."
+    chosen = "SaturatedRangeWalked"
+    rejected = ["SaturatedRangeAsLoose"]
+    impacts = [lgo, lvisit, fitsVar, looseIndices]
+
 fn lgo(e: Expr, off: Int, depth: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
     ? "As Core.Subst.go for instantiation: what has no loose bound variable at or above off is left alone."
     match Core.Exprs.within(e, off)
@@ -4981,11 +5011,13 @@ verify lgo
     lgo(Core.Exprs.natLit(1), 0, 0, [], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.natLit(1)
 
 fn lvisit(e: Expr, off: Int, depth: Int, env: List<Clo>, ms: MS, memo: Memo) -> LS
-    ? "A variable takes its closure's value; a large compound node is counted, and goes through the memo once the walk has met four of them (MemoAfterAPrefix)."
+    ? "A variable past the off binders walked takes its closure's value, one bound by them stays (a saturated range, SaturatedRangeWalked, lets such a variable through lgo); a large compound node is counted, and goes through the memo once the walk has met four of them (MemoAfterAPrefix)."
     match e
-        Expr.BVar(_, i) -> match List.drop(env, Core.Exprs.indexValue(i) - off)
-            [c, .._] -> lvalue(matCloAt(c, ms, depth), memo)
-            [] -> LS(e = Core.Exprs.bvar(Core.Exprs.indexValue(i) - List.len(env)), ms = ms, memo = memo)
+        Expr.BVar(_, i) -> match Core.Exprs.indexValue(i) < off
+            true -> LS(e = e, ms = ms, memo = memo)
+            false -> match List.drop(env, Core.Exprs.indexValue(i) - off)
+                [c, .._] -> lvalue(matCloAt(c, ms, depth), memo)
+                [] -> LS(e = Core.Exprs.bvar(Core.Exprs.indexValue(i) - List.len(env)), ms = ms, memo = memo)
         _ -> match Core.Exprs.isSmall(e)
             true -> lbuild(e, off, depth, env, ms, memo)
             false -> match memo.met < 4
@@ -4995,6 +5027,8 @@ fn lvisit(e: Expr, off: Int, depth: Int, env: List<Clo>, ms: MS, memo: Memo) -> 
 verify lvisit
     lvisit(Core.Exprs.bvar(0), 0, 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.natLit(2)
     lvisit(Core.Exprs.bvar(3), 0, 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.bvar(2)
+    lvisit(Core.Exprs.bvar(16382), 16383, 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.bvar(16382)
+    lvisit(Core.Exprs.bvar(16383), 16383, 0, [Clo.Clo(-1, Core.Exprs.natLit(2), [])], MS(next = 0, forced = {}), Memo(map = {}, met = 0)).e => Core.Exprs.natLit(2)
 
 fn lvalue(x: MX, memo: Memo) -> LS
     ? "A built value with the walk's memo."
@@ -5186,11 +5220,13 @@ verify needsOnto
     needsOnto([0, 5], [Clo.Clo(-1, Core.Exprs.natLit(1), [])], []) == [(Clo.Clo(-1, Core.Exprs.natLit(1), []), false)] => true
 
 fn looseIndices(e: Expr, off: Int, acc: List<Int>) -> List<Int>
-    ? "The loose bound variables of e below off binders, as indices into the environment, onto acc; a part with none is not walked."
+    ? "The loose bound variables of e below off binders, as indices into the environment, onto acc; a part with none is not walked, and a variable bound by the off binders is none (SaturatedRangeWalked)."
     match Core.Exprs.within(e, off)
         true -> acc
         false -> match e
-            Expr.BVar(_, i) -> List.prepend(Core.Exprs.indexValue(i) - off, acc)
+            Expr.BVar(_, i) -> match Core.Exprs.indexValue(i) < off
+                true -> acc
+                false -> List.prepend(Core.Exprs.indexValue(i) - off, acc)
             Expr.App(_, f, a) -> looseIndices(a, off, looseIndices(f, off, acc))
             Expr.Lam(_, t, b) -> looseIndices(b, off + 1, looseIndices(t, off, acc))
             Expr.Pi(_, t, b) -> looseIndices(b, off + 1, looseIndices(t, off, acc))
@@ -5201,6 +5237,7 @@ fn looseIndices(e: Expr, off: Int, acc: List<Int>) -> List<Int>
 verify looseIndices
     looseIndices(Core.Exprs.app(Core.Exprs.bvar(2), Core.Exprs.lam(Core.Names.anon(), Core.Exprs.bvar(0), Core.Exprs.bvar(1), Binder.Default)), 0, []) => [0, 0, 2]
     looseIndices(Core.Exprs.natLit(1), 0, []) => []
+    looseIndices(Core.Exprs.bvar(16382), 16383, []) => []
 
 verify matClo
     matClo(Clo.Clo(-1, Core.Exprs.natLit(1), []), MS(next = 0, forced = {})).e => Core.Exprs.natLit(1)
