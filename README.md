@@ -46,6 +46,8 @@ It has also checked whole exports of CFSG (39.7 million declarations, in
 *Pestka* is Polish for a fruit stone — a kernel. It's also what you call
 something that's a piece of cake.
 
+Mathlib? Dla Pestki to pestka. Tylko nie od razu.
+
 ## Written in Aver
 
 [Aver](https://github.com/jasisz/aver) is a statically typed, pure functional

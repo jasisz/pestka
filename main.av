@@ -1,3 +1,4 @@
+// you can read all of this. that's the feature.
 module Main
     intent =
         "Pestka's command line: read one lean4export file and give a verdict."
